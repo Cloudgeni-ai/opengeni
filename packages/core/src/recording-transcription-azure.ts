@@ -65,6 +65,9 @@ function milliseconds(value: unknown): number | null {
 /** Characters that attach to the word before them rather than starting a new one. */
 const ATTACHED_PUNCTUATION = /^[.,!?;:…%)\]}»"'’”。、，！？]+$/u;
 
+/** Locales Azure Speech reports for audio in no language it recognized. */
+const UNKNOWN_LOCALES = new Set(["unk", "und"]);
+
 /** Turn Azure Speech phrases and their words into our words. */
 export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptionResult {
   if (!body || typeof body !== "object") {
@@ -79,10 +82,12 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
   const words: RecordingTranscribedWord[] = [];
   const languages = new Set<string>();
   for (const phrase of phrases) {
-    if (typeof phrase?.locale === "string" && phrase.locale) {
-      languages.add(canonicalLanguageTag(phrase.locale));
-    }
     const items = Array.isArray(phrase?.words) ? (phrase.words as AzureSpeechWord[]) : [];
+    // Azure labels audio it heard no language in as "unk"; that is no language.
+    const locale = typeof phrase?.locale === "string" ? phrase.locale.trim() : "";
+    if (items.length > 0 && locale && !UNKNOWN_LOCALES.has(locale.toLowerCase())) {
+      languages.add(canonicalLanguageTag(locale));
+    }
     for (const item of items) {
       const text = typeof item.text === "string" ? item.text.trim() : "";
       const start = milliseconds(item.offsetMilliseconds);
