@@ -552,6 +552,18 @@ describe("reaping a real cluster", () => {
     const state = await mkdtemp(join(tmpdir(), "og-reap-harness-"));
     const stateDir = async () =>
       join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-"))!);
+    let reaperPid: number | null = null;
+    const reaperExited = async (timeoutMs: number) => {
+      const deadline = Date.now() + timeoutMs;
+      while (reaperPid !== null && Date.now() < deadline) {
+        try {
+          process.kill(reaperPid, 0);
+        } catch {
+          return; // the reaper finished
+        }
+        await Bun.sleep(250);
+      }
+    };
     try {
       const env = {
         ...process.env,
@@ -613,20 +625,15 @@ describe("reaping a real cluster", () => {
       const marker = JSON.parse(await readFile(join(await stateDir(), "reaper.json"), "utf8")) as {
         pid: number;
       };
-      const deadline = Date.now() + 60_000;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(marker.pid, 0);
-        } catch {
-          break; // the reaper finished
-        }
-        await Bun.sleep(250);
-      }
+      reaperPid = marker.pid;
+      await reaperExited(60_000);
       expect(await exists(orphan)).toBe(false);
       // Proof it was this harness's reaper, not another one on the server.
       const log = await readFile(join(await stateDir(), "reaper.log"), "utf8");
       expect(log).toContain(orphan);
     } finally {
+      // A reaper still running would recreate its state directory.
+      await reaperExited(30_000);
       await rm(state, { recursive: true, force: true });
     }
   }, 240_000);
