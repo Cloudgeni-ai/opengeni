@@ -1741,7 +1741,6 @@ type DatabaseRow = {
   oid: string;
   datname: string;
   datistemplate: boolean;
-  invalid: boolean;
   comment: string | null;
   connections: number;
   /** Client sessions ever opened (autovacuum workers do not count). */
@@ -1782,7 +1781,6 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     });
     const rows = (await sql`
       SELECT d.oid::text AS oid, d.datname, d.datistemplate,
-             d.datconnlimit = -2 AS invalid,
              shobj_description(d.oid, 'pg_database') AS comment,
              (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datid = d.oid) AS connections,
              coalesce(s.sessions, 0)::text AS sessions
@@ -1807,11 +1805,8 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         result.kept += 1;
         continue;
       }
-      if (row.invalid) {
-        // A half-dropped database nobody can connect to.
-        candidates.push(row);
-        continue;
-      }
+      // A half-dropped ("invalid") database is usually its owner's drop in
+      // progress, so it takes the same owner and idle rules as any other.
       const owner = parseDatabaseOwnerComment(row.comment);
       if (!owner && row.comment && !unmarkedTemplate) {
         // Someone annotated it, for example retainTestDatabase(): keep it.
