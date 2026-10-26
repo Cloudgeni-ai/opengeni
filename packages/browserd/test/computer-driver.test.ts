@@ -345,6 +345,53 @@ describe("ComputerDriver", () => {
     }
   });
 
+  test("keeps a still captured beside an observation the newest frame", async () => {
+    // The runtime captures a still while it observes, and hands the still's
+    // frame on. A native helper lets only the newest frame keep authority.
+    const transport = new NewestFrameTransport();
+    transport.observeDelayMs = 30;
+    transport.stillDelayMs = 5;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      // The helper has no frame (an action cleared it); the still lands while
+      // the observation is still being read.
+      const still = driver.capture("window-1");
+      const observed = await driver.observe("window-1");
+      const frame = await still;
+      expect(observed.frameId).toBe(frame.frameId);
+      expect(transport.frames.at(-1)).toBe(frame.frameId);
+      expect(transport.primers).toBe(0);
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("lands a still requested during a frame primer after the primer", async () => {
+    const transport = new NewestFrameTransport();
+    transport.primerDelayMs = 30;
+    transport.stillDelayMs = 1;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const observing = driver.observe("window-1");
+      await Bun.sleep(5);
+      const frame = await driver.capture("window-1");
+      const observed = await observing;
+      expect(transport.primers).toBe(1);
+      expect(observed.frameId).not.toBe(frame.frameId);
+      expect(transport.frames.at(-1)).toBe(frame.frameId);
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("preserves a typed native diagnosis when dispatch outcome is unknown", async () => {
     const transport = new FixtureNativeTransport();
     transport.dispatchError = new ComputerBackendError(
@@ -1010,5 +1057,38 @@ class EchoingFieldTransport extends FixtureNativeTransport {
     if (nativeCommand.action.type === "keyboard" && nativeCommand.action.action === "type")
       this.typed = nativeCommand.action.value;
     return this.field("observation-2");
+  }
+}
+
+/** Numbers frames when a capture lands, like the native helpers, whose newest
+ * frame of a target alone keeps its authority. Starts with no frame, as after
+ * an action. */
+class NewestFrameTransport extends FixtureNativeTransport {
+  frames: string[] = [];
+  primers = 0;
+  observeDelayMs = 0;
+  primerDelayMs = 0;
+  stillDelayMs = 0;
+
+  override async observe() {
+    const latest = this.frames.at(-1) ?? null;
+    await Bun.sleep(this.observeDelayMs);
+    return { ...observation("observation-1"), frameId: latest };
+  }
+
+  override async capture(targetId: string, options?: ComputerBackendCaptureOptions) {
+    this.primers += 1;
+    return await this.land(this.primerDelayMs, targetId, options);
+  }
+
+  override async captureStill(targetId: string, options: ComputerBackendCaptureOptions) {
+    return await this.land(this.stillDelayMs, targetId, options);
+  }
+
+  private async land(delayMs: number, targetId: string, options?: ComputerBackendCaptureOptions) {
+    await Bun.sleep(delayMs);
+    const frameId = `frame-${this.frames.length + 1}`;
+    this.frames.push(frameId);
+    return { ...(await super.capture(targetId, options)), frameId };
   }
 }
