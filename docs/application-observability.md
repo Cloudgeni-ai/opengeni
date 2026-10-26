@@ -72,7 +72,11 @@ that spends it exports `opengeni.child_spans_dropped` instead of more spans.
   messages are never recorded (`packages/db/src/database-spans.ts`).
 - Outbound HTTP: the standalone API process wraps its global `fetch`; each call
   is an `HTTP <METHOD>` CLIENT span with the method and response status only,
-  never the URL, host, headers or body.
+  never the URL, host, headers or body. The wrapper is transparent (same
+  arguments, same response, called synchronously), and code that admits only a
+  specific fetch, such as the administered usage reads' native-fetch check
+  (`packages/db/src/usage-read-transport.ts`), must compare
+  `tracedFetchTarget(fetchImpl)`, never the wrapper itself.
 - Clients: the API's object storage and workflow clients are wrapped with
   `traceClientCalls`, so each call is a `<client> <method>` CLIENT span
   (`object_storage getFileBytes`, `temporal wakeSessionWorkflow`) with work
