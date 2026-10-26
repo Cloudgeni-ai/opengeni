@@ -4,7 +4,7 @@
  * progress elsewhere or transcribing say so and update on their own.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
@@ -35,6 +35,7 @@ import { StatusBadge } from "../ui/status-badge";
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { RecorderPanel, useOnline } from "./recorder-panel";
 import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 function useDebounced<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -61,7 +62,7 @@ function useNarrow(): boolean {
   return narrow;
 }
 
-export function MeetingsListPage({
+function MeetingsListPageContent({
   workspaceId,
   liveTranscriptDefault = false,
   liveTranscript = true,
@@ -372,5 +373,13 @@ export function MeetingsListPage({
         onDeleted={() => void list.refresh()}
       />
     </>
+  );
+}
+
+export function MeetingsListPage(props: ComponentProps<typeof MeetingsListPageContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingsListPageContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

@@ -6,7 +6,15 @@
  * this device, uploading, or waiting for the connection).
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import {
   CircleIcon,
   InfoIcon,
@@ -30,6 +38,7 @@ import { formatClock } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 const defaultText = createOpenGeniText();
 
@@ -523,7 +532,7 @@ export function RecordingBar({
   );
 }
 
-export function RecorderPanel({
+function RecorderPanelContent({
   recorder,
   onStopped,
   onOpenNotes,
@@ -812,4 +821,12 @@ function recorderHint(
         : systemAudioSupported
           ? msg("meetings.recorderPanel.recordsYourMicrophoneForA")
           : msg("meetings.recorderPanel.recordsYourMicrophoneTellEveryone");
+}
+
+export function RecorderPanel(props: ComponentProps<typeof RecorderPanelContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <RecorderPanelContent {...props} />
+    </MeetingsOverlayScope>
+  );
 }

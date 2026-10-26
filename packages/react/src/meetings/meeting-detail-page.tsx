@@ -10,7 +10,15 @@
  * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -105,6 +113,7 @@ import {
 import { LiveTranscript, liveStatus } from "./live-transcript";
 import { MeetingNotes } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 const defaultText = createOpenGeniText();
 
@@ -568,7 +577,7 @@ function RerunNotice({
 /** One of the host's own lines about a meeting, such as its project. */
 export type MeetingDetail = { id: string; label: string; content: ReactNode };
 
-export function MeetingDetailPage({
+function MeetingDetailPageContent({
   workspaceId,
   recordingId,
   viewerSubjectId,
@@ -1394,5 +1403,13 @@ export function MeetingDetailPage({
         onDeleted={onBack}
       />
     </DetailPage>
+  );
+}
+
+export function MeetingDetailPage(props: ComponentProps<typeof MeetingDetailPageContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingDetailPageContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

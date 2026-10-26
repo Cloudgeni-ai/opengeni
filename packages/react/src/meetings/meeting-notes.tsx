@@ -7,7 +7,7 @@
  * the notes do. Notes an agent wrote say so and link to its chat.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
 import { BotIcon, LoaderCircleIcon, PencilIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { RecordingNote } from "@opengeni/contracts";
@@ -20,6 +20,7 @@ import { TextArea } from "../ui/field";
 import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { Skeleton } from "../ui/skeleton";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 /** How long typing pauses before the notepad saves. */
 export const NOTEPAD_SAVE_DELAY_MS = 800;
@@ -36,7 +37,7 @@ function errorText(error: unknown): string | undefined {
   return error instanceof Error ? error.message : undefined;
 }
 
-export function MeetingNotes({
+function MeetingNotesContent({
   recordingId,
   recording: override,
   capturing,
@@ -370,5 +371,13 @@ function Notepad({
         </button>
       ) : null}
     </div>
+  );
+}
+
+export function MeetingNotes(props: ComponentProps<typeof MeetingNotesContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingNotesContent {...props} />
+    </MeetingsOverlayScope>
   );
 }
