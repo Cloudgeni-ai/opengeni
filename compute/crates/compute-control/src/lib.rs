@@ -193,6 +193,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             "the public API",
         )),
         tokio::spawn(prune(Arc::clone(&service))),
+        tokio::spawn(collect_images(Arc::clone(&service))),
         tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
     ];
     let metrics = serve_metrics(config.metrics, metrics, &view, &mut tasks).await?;
@@ -264,6 +265,23 @@ async fn prune<S: Store>(service: Arc<Service<S>>) {
             Ok(0) => {}
             Ok(pruned) => tracing::info!(pruned, "forgot hosts given up on"),
             Err(error) => tracing::warn!(%error, "forgetting hosts given up on failed"),
+        }
+    }
+}
+
+/// Forgets the captured images nothing uses any more (ADR 22), every
+/// [`service::COLLECT_EVERY`]. Every replica looks: marking an image as
+/// being collected is one write, and one a replica left half collected is
+/// finished by the next look.
+async fn collect_images<S: Store>(service: Arc<Service<S>>) {
+    let mut every = tokio::time::interval(service::COLLECT_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        match service.collect_images().await {
+            Ok(0) => {}
+            Ok(forgotten) => tracing::info!(forgotten, "forgot captured images nothing uses"),
+            Err(error) => tracing::warn!(%error, "forgetting captured images failed"),
         }
     }
 }

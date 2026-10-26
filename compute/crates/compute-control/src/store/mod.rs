@@ -13,6 +13,7 @@
 
 mod memory;
 mod postgres;
+mod templates;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -27,6 +28,7 @@ use crate::e2b::lifecycle::Record;
 
 pub use memory::MemoryStore;
 pub use postgres::{PostgresLead, PostgresStore};
+pub use templates::{Inserted, TemplateRow, valid_template_name};
 
 /// What can go wrong reading or writing the store.
 #[derive(Debug, thiserror::Error)]
@@ -456,6 +458,50 @@ pub trait Store: Send + Sync + 'static {
 
     /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Inserts template `row`, recording its image as captured and in
+    /// use, unless its team has a template of its name or the image is
+    /// being collected. Ordered with [`Store::collect_image`] by the
+    /// image's record, so an image is never collected under a template.
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send;
+
+    /// A team's template with the id `key`, or else the name `key`.
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send;
+
+    /// A team's templates, oldest first.
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send;
+
+    /// Deletes a team's template `id`; whether it was there. Its image
+    /// stays until it has been unused for a while.
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Notes at `now_ms` which captured images are unused (no template,
+    /// sandbox or built image names them) and which are used again, and
+    /// answers those to collect: being collected, or unused since before
+    /// `before_ms`.
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send;
+
+    /// Marks captured image `image` as being collected if it is, or if it
+    /// is still unused and has been since before `before_ms`; whether it
+    /// is being collected now. Nothing inserts a template of it from then
+    /// on.
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes the record of captured image `image`, being collected,
+    /// once object storage has forgotten it.
+    fn collected(&self, image: ImageId) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.

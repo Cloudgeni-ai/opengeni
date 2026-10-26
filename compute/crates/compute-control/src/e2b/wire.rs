@@ -157,6 +157,38 @@ pub struct Pause {
     pub memory: Option<bool>,
 }
 
+/// `POST /sandboxes/{id}/snapshots`.
+#[derive(Debug, Default, Deserialize)]
+pub struct NewSnapshot {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `false` asks for a filesystem snapshot, the only kind offered;
+    /// omitted, the SDK asks for one with memory.
+    #[serde(default)]
+    pub memory: Option<bool>,
+}
+
+/// A snapshot, as a create or a list answers it.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Snapshot {
+    #[serde(rename = "snapshotID")]
+    pub snapshot_id: String,
+    pub names: Vec<String>,
+}
+
+/// `GET /snapshots`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListSnapshots {
+    #[serde(default, rename = "sandboxID")]
+    pub sandbox_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default, rename = "nextToken")]
+    pub next_token: Option<String>,
+}
+
 /// The answer to a create or connect.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sandbox {

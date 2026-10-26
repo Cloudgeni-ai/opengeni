@@ -14,6 +14,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_3,
     MIGRATION_4,
     MIGRATION_5,
+    MIGRATION_6,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -132,6 +133,36 @@ create index if not exists compute_image_names_by_use on compute_image_names (na
 const MIGRATION_5: &str = "
 alter table compute_hosts add column if not exists drained boolean not null default false;
 update compute_hosts set drained = true where state = 'draining';
+";
+
+/// Version 6: templates saved from sandboxes (`Store::insert_template`),
+/// and every image captured for one, with since when nothing uses it and
+/// whether it is being collected; sandboxes are found by the image their
+/// config names, which tells whether one is used.
+const MIGRATION_6: &str = "
+create table if not exists compute_templates (
+    team text not null,
+    id text not null,
+    name text,
+    image text not null,
+    source text not null,
+    vcpus integer not null,
+    memory_mib bigint not null,
+    disk_mib bigint not null,
+    created_ms bigint not null,
+    primary key (team, id)
+);
+create unique index if not exists compute_templates_name on compute_templates (team, name)
+    where name is not null;
+create index if not exists compute_templates_image on compute_templates (image);
+create table if not exists compute_captured_images (
+    image text primary key,
+    unused_ms bigint,
+    collecting boolean not null default false
+);
+create index if not exists compute_sandboxes_image on compute_sandboxes
+    ((spec -> 'config' ->> 'image'));
+create index if not exists compute_images_image on compute_images (image);
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

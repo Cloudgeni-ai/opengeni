@@ -6,7 +6,7 @@ mod cache;
 mod prepare;
 
 pub(crate) use cache::{Cache, Missing};
-pub(crate) use prepare::Preparer;
+pub(crate) use prepare::{Keeps, Preparer};
 pub use prepare::{PrepareConfig, PrepareError, Prepared, Progress};
 
 use std::path::PathBuf;

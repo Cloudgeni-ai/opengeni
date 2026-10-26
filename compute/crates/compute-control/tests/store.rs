@@ -10,8 +10,8 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, LifecycleRow, Linked, MemoryStore, PostgresStore, RequestRow, SandboxRow,
-    Spec, Store, Write, replace_lifecycle,
+    Admission, AgentRef, Inserted, LifecycleRow, Linked, MemoryStore, PostgresStore, RequestRow,
+    SandboxRow, Spec, Store, TemplateRow, Write, replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
@@ -1198,7 +1198,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
@@ -1358,4 +1358,209 @@ async fn migrating_remembers_the_hosts_draining_then_as_drained() {
         .batch_execute(&format!("drop schema {schema} cascade"))
         .await
         .unwrap();
+}
+
+/// A template of team `team`'s, of image `image`.
+fn template(team: &str, image: ImageId, name: Option<&str>, created_ms: u64) -> TemplateRow {
+    TemplateRow {
+        team: team.to_owned(),
+        id: Id(SandboxId(u128::from(random()) << 64 | u128::from(random()))).to_string(),
+        name: name.map(str::to_owned),
+        image,
+        source: Id(SandboxId(u128::from(random()) << 64 | u128::from(random()))),
+        vcpus: 2,
+        memory_mib: 1024,
+        disk_mib: 8192,
+        created_ms,
+    }
+}
+
+async fn templates<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let other = format!("team-{:x}", random());
+    let named = template(&team, image_id(), Some("warm"), 2);
+    let plain = template(&team, image_id(), None, 1);
+    for row in [&named, &plain] {
+        assert_eq!(store.insert_template(row).await.unwrap(), Inserted::Done);
+    }
+    assert_eq!(
+        store.template(&team, &named.id).await.unwrap().as_ref(),
+        Some(&named),
+        "by its id"
+    );
+    assert_eq!(
+        store.template(&team, "warm").await.unwrap().as_ref(),
+        Some(&named),
+        "by its name"
+    );
+    assert_eq!(store.template(&other, "warm").await.unwrap(), None);
+    assert_eq!(store.template(&other, &named.id).await.unwrap(), None);
+
+    // A name is its team's only: taken there, free in another team.
+    let again = template(&team, image_id(), Some("warm"), 3);
+    assert_eq!(
+        store.insert_template(&again).await.unwrap(),
+        Inserted::NameTaken
+    );
+    assert_eq!(store.template(&team, &again.id).await.unwrap(), None);
+    let elsewhere = template(&other, again.image, Some("warm"), 3);
+    assert_eq!(
+        store.insert_template(&elsewhere).await.unwrap(),
+        Inserted::Done
+    );
+
+    assert_eq!(
+        store.templates(&team).await.unwrap(),
+        vec![plain.clone(), named.clone()],
+        "oldest first"
+    );
+    assert_eq!(
+        store.templates(&other).await.unwrap(),
+        vec![elsewhere.clone()]
+    );
+
+    assert!(
+        !store.delete_template(&other, &named.id).await.unwrap(),
+        "another team's"
+    );
+    assert!(store.delete_template(&team, &named.id).await.unwrap());
+    assert!(!store.delete_template(&team, &named.id).await.unwrap());
+    assert_eq!(store.template(&team, "warm").await.unwrap(), None);
+    let reused = template(&team, image_id(), Some("warm"), 4);
+    assert_eq!(
+        store.insert_template(&reused).await.unwrap(),
+        Inserted::Done,
+        "a deleted template's name is free again"
+    );
+
+    for (team, id) in [
+        (&team, &plain.id),
+        (&team, &reused.id),
+        (&other, &elsewhere.id),
+    ] {
+        assert!(store.delete_template(team, id).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn templates_are_found_by_id_or_by_a_name_unique_in_their_team() {
+    each(templates, templates).await;
+}
+
+/// Of the images `unused_images` answers, the ones in `mine`: other checks
+/// sharing the database capture images of their own.
+async fn unused<S: Store>(
+    store: &S,
+    now_ms: u64,
+    before_ms: u64,
+    mine: &[ImageId],
+) -> Vec<ImageId> {
+    let mut found: Vec<ImageId> = store
+        .unused_images(now_ms, before_ms)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|image| mine.contains(image))
+        .collect();
+    found.sort();
+    found
+}
+
+async fn collecting<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let kept = template(&team, image_id(), None, 1);
+    let dropped = template(&team, image_id(), None, 1);
+    let booted = template(&team, image_id(), None, 1);
+    let built = template(&team, image_id(), None, 1);
+    for row in [&kept, &dropped, &booted, &built] {
+        assert_eq!(store.insert_template(row).await.unwrap(), Inserted::Done);
+    }
+    // A sandbox started from a template keeps its image once the template
+    // is gone; so does an image a host built, which a capture of an
+    // unchanged disk can be.
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let mut started = sandbox(host);
+    started.team = team.clone();
+    started.spec.config.image = Some(booted.image);
+    assert_eq!(store.insert(&started).await.unwrap(), Write::Done);
+    let source = format!("registry.example/sandbox@sha256:{:064x}", random());
+    store
+        .record_built(&source, &format!("image-{:016x}", random()), built.image, 1)
+        .await
+        .unwrap();
+    for row in [&dropped, &booted, &built] {
+        assert!(store.delete_template(&team, &row.id).await.unwrap());
+    }
+    let mine = [kept.image, dropped.image, booted.image, built.image];
+
+    let at = now_ms();
+    assert_eq!(
+        unused(&store, at, at, &mine).await,
+        Vec::new(),
+        "nothing is collected as it is first found unused"
+    );
+    assert_eq!(
+        unused(&store, at + 10, at, &mine).await,
+        Vec::new(),
+        "a later look keeps the time it was first found unused"
+    );
+    assert_eq!(
+        unused(&store, at + 20, at + 1, &mine).await,
+        vec![dropped.image]
+    );
+
+    assert!(
+        !store.collect_image(dropped.image, at).await.unwrap(),
+        "not unused for long enough"
+    );
+    for used in [kept.image, booted.image, built.image] {
+        assert!(!store.collect_image(used, at + 1).await.unwrap());
+    }
+    assert!(!store.collect_image(image_id(), at + 1).await.unwrap());
+    assert!(store.collect_image(dropped.image, at + 1).await.unwrap());
+    assert!(
+        store.collect_image(dropped.image, 0).await.unwrap(),
+        "being collected, it is finished whatever the time"
+    );
+    assert_eq!(unused(&store, at + 30, 0, &mine).await, vec![dropped.image]);
+
+    let late = template(&team, dropped.image, None, 2);
+    assert_eq!(
+        store.insert_template(&late).await.unwrap(),
+        Inserted::Collecting,
+        "no template is recorded over an image being collected"
+    );
+    assert_eq!(store.template(&team, &late.id).await.unwrap(), None);
+    store.collected(dropped.image).await.unwrap();
+    assert_eq!(unused(&store, at + 40, at + 41, &mine).await, Vec::new());
+    assert_eq!(
+        store.insert_template(&late).await.unwrap(),
+        Inserted::Done,
+        "once forgotten, it can be captured again"
+    );
+
+    // Unused once its sandbox is gone; then a sandbox started from it
+    // before the next look keeps it, though that look is not yet taken.
+    assert!(store.delete(started.id, started.version).await.unwrap());
+    assert_eq!(unused(&store, at + 50, at + 50, &mine).await, Vec::new());
+    assert_eq!(
+        unused(&store, at + 60, at + 51, &mine).await,
+        vec![booted.image]
+    );
+    let mut again = sandbox(host);
+    again.team = team.clone();
+    again.spec.config.image = Some(booted.image);
+    assert_eq!(store.insert(&again).await.unwrap(), Write::Done);
+    assert!(!store.collect_image(booted.image, at + 51).await.unwrap());
+    assert_eq!(unused(&store, at + 70, at + 61, &mine).await, Vec::new());
+
+    assert!(store.delete(again.id, again.version).await.unwrap());
+    for row in [&kept, &late] {
+        assert!(store.delete_template(&team, &row.id).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn captured_images_are_collected_only_once_nothing_has_used_them_for_a_while() {
+    each(collecting, collecting).await;
 }

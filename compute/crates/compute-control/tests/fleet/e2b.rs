@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{
-    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, host_status, sandbox_status, until,
+    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, captured_from, host_status, sandbox_status,
+    until,
 };
 
 /// What the fake guest saw.
@@ -1196,4 +1197,96 @@ async fn the_front_door_serves_https_for_the_api_and_sandbox_host_names() {
             .await
             .is_err()
     );
+}
+
+/// E2B's snapshots are templates saved from sandboxes: only of their
+/// filesystem, a running sandbox paused for one and resumed after, listed
+/// a page at a time, and started from by id or name.
+#[tokio::test]
+async fn a_filesystem_snapshot_is_a_template_creates_start_from() {
+    let (_fleet, host, _levels, _seen, door) = fleet_with_guest().await;
+    let sandbox = door
+        .create(json!({"templateID": "base", "timeout": 120}))
+        .await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let snapshots = format!("/sandboxes/{id}/snapshots");
+
+    let (status, refused) = door.post(&snapshots, json!({})).await;
+    assert_eq!(status, 400, "one with memory, as the SDK asks: {refused}");
+    let (status, first) = door
+        .post(&snapshots, json!({"name": "warm", "memory": false}))
+        .await;
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["names"], json!(["warm"]));
+    let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
+    assert_eq!(detail["state"], "running", "resumed after");
+    let (status, second) = door.post(&snapshots, json!({"memory": false})).await;
+    assert_eq!(status, 201, "{second}");
+    assert_eq!(second["names"], json!([]));
+
+    let mut ids = [
+        first["snapshotID"].as_str().unwrap(),
+        second["snapshotID"].as_str().unwrap(),
+    ];
+    ids.sort_unstable();
+    let page = |after: Option<&str>| {
+        let path = after.map_or_else(
+            || "/snapshots?limit=1".to_owned(),
+            |after| format!("/snapshots?limit=1&nextToken={after}"),
+        );
+        door.http
+            .get(format!("http://{}{path}", door.address))
+            .header("x-api-key", KEY)
+            .send()
+    };
+    let answered = page(None).await.unwrap();
+    let next = answered.headers()["x-next-token"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let listed: Value = answered.json().await.unwrap();
+    assert_eq!(listed[0]["snapshotID"], ids[0]);
+    assert_eq!(next, ids[0]);
+    let answered = page(Some(&next)).await.unwrap();
+    assert!(
+        answered.headers().get("x-next-token").is_none(),
+        "the last page"
+    );
+    let listed: Value = answered.json().await.unwrap();
+    assert_eq!(listed[0]["snapshotID"], ids[1]);
+    let (_, listed) = door
+        .get(&format!("/snapshots?sandboxID={id}&name=warm"))
+        .await;
+    assert_eq!(listed, json!([first.clone()]));
+    let (_, listed) = door.get("/snapshots?name=cold").await;
+    assert_eq!(listed, json!([]));
+
+    let created = door
+        .create(json!({"templateID": "warm", "timeout": 120}))
+        .await;
+    let from: Id = created["sandboxID"].as_str().unwrap().parse().unwrap();
+    let config = host
+        .seen()
+        .into_iter()
+        .find_map(|seen| match seen.envelope.request {
+            Request::Create { id, config, .. } if id == from => Some(config),
+            _ => None,
+        })
+        .expect("the host was asked to create it");
+    assert_eq!(config.image, Some(captured_from(id.parse().unwrap())));
+
+    let unnamed = second["snapshotID"].as_str().unwrap();
+    for (key, status) in [("warm", 204), ("warm", 404), (unnamed, 204), ("base", 400)] {
+        let (deleted, _) = door
+            .call(
+                reqwest::Method::DELETE,
+                &format!("/templates/{key}"),
+                KEY,
+                None,
+            )
+            .await;
+        assert_eq!(deleted, status, "deleting {key}");
+    }
+    let (_, listed) = door.get("/snapshots").await;
+    assert_eq!(listed, json!([]));
 }

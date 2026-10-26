@@ -31,6 +31,25 @@ async fn pointers_are_replaced_read_and_deleted() {
     );
 }
 
+/// A forgotten pointer leaves no tombstone: its name is stored again as
+/// if it had never been.
+#[tokio::test]
+async fn a_forgotten_pointer_can_be_stored_again() {
+    let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    let first = store.begin_test("rootfs-a").await.unwrap();
+    store.publish(first, b"image".to_vec()).await.unwrap();
+    store.forget_pointer("rootfs-a").await.unwrap();
+    store.forget_pointer("rootfs-a").await.unwrap();
+    assert_eq!(store.get_pointer("rootfs-a").await.unwrap(), None);
+    let again = store.begin_test("rootfs-a").await.unwrap();
+    store.publish(again, b"image".to_vec()).await.unwrap();
+    assert_eq!(
+        store.get_pointer("rootfs-a").await.unwrap(),
+        Some(b"image".to_vec())
+    );
+    assert!(store.forget_pointer("../escape").await.is_err());
+}
+
 /// A change that read an older version never lands, and a delete
 /// where deletes carry no condition leaves the empty pointer.
 #[tokio::test]

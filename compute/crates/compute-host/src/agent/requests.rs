@@ -139,6 +139,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     .and_then(|()| self.request_sleep(id, level));
                 let _ = reply.send(result);
             }
+            Command::Capture {
+                id,
+                generation,
+                into,
+                reply,
+            } => {
+                let _ = reply.send(self.capture(id, generation, &into));
+            }
             command @ (Command::Hold { .. }
             | Command::Unhold { .. }
             | Command::Acquire { .. }

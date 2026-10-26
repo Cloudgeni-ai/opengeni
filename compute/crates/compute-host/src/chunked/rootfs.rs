@@ -34,7 +34,7 @@ const IMAGE_STAMP: Stamp = Stamp {
 /// The pointer that keeps the image `image`.
 #[must_use]
 pub fn rootfs_pointer(image: ImageId) -> String {
-    format!("rootfs-{image}")
+    image.pointer()
 }
 
 /// The id of the file at `path`: the BLAKE3 digest of its bytes.

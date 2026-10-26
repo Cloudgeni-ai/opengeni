@@ -238,6 +238,16 @@ pub const DEFAULT_CPU_REQUEST_MILLIS_PER_VCPU: u32 = 100;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImageId(pub [u8; 32]);
 
+impl ImageId {
+    /// The name of the pointer that keeps this image in a fleet's object
+    /// storage, which hosts store it under and the control service
+    /// forgets once nothing uses it (ADR 22).
+    #[must_use]
+    pub fn pointer(self) -> String {
+        format!("rootfs-{self}")
+    }
+}
+
 impl fmt::Display for ImageId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
@@ -649,6 +659,34 @@ pub enum Request {
         /// optionally with its tag before the digest.
         image: String,
     },
+    /// Store a copy of a sandbox's disk as a sandbox image, from which
+    /// creates may start
+    /// ([ADR 22](../../docs/adr/0022-templates-saved-from-sandboxes.md)).
+    /// The sandbox must be saved here already, Saved or Archived, with no
+    /// step under way: its guest wrote its disks out before it was saved,
+    /// so the disk is whole without its memory. The host copies the disk
+    /// at once, sharing its blocks, so a wake right after changes nothing
+    /// in the copy, and stores the copy in the background. Answered at
+    /// once: with [`Reply::Capturing`] while the copy is stored (ask again
+    /// with the same `key` to learn how it went), with [`Reply::Captured`]
+    /// once it is, which later asks with that key get too, and with the
+    /// error of a store that failed, after which asking again copies
+    /// again. Refused with [`ErrorCode::Busy`] while the sandbox is awake,
+    /// waking, holds or is not saved here, with [`ErrorCode::Unavailable`]
+    /// by a host with no store or whose files cannot share blocks (a copy
+    /// would then hold up every other sandbox while it is made), and by a
+    /// host from before this request with [`ErrorCode::Invalid`].
+    Capture {
+        /// The sandbox.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// Names this capture: a later ask with the same key learns how it
+        /// stands rather than copying again. At most 64 letters, digits,
+        /// `-` and `_`.
+        key: String,
+    },
 }
 
 /// One reply.
@@ -691,6 +729,15 @@ pub enum Reply {
         /// The digest of the image manifest built, for an index the one
         /// for this host's platform.
         digest: String,
+    },
+    /// The copy [`Request::Capture`] made is being stored: ask again.
+    Capturing,
+    /// The stored sandbox image [`Request::Capture`] made.
+    Captured {
+        /// Its id, which creates name it by.
+        image: ImageId,
+        /// Its length in bytes: the disk's when it was copied.
+        length: u64,
     },
     /// The request failed.
     Error {
@@ -1053,6 +1100,16 @@ pub fn step_name(step: Step) -> &'static str {
     }
 }
 
+/// Whether `key` may name a [`Request::Capture`]: 1 to 64 ASCII letters,
+/// digits, `-` and `_`, so it can also name the host's copy on disk.
+#[must_use]
+pub fn valid_capture_key(key: &str) -> bool {
+    (1..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,5 +1247,46 @@ mod tests {
         let parsed: SleepConfig = serde_json::from_str(r#"{"pause_after_ms":5}"#).unwrap();
         assert_eq!(parsed.rules().pause_after, Some(Duration::from_millis(5)));
         assert!(serde_json::from_str::<SleepConfig>(r#"{"pause":5}"#).is_err());
+    }
+
+    #[test]
+    fn captures_round_trip_and_name_their_copy_by_a_short_key() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"capture","id":"0193f3c27a1b7cde8f00112233445566","key":"t-1"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &request,
+            Request::Capture {
+                generation: None,
+                key,
+                ..
+            } if key == "t-1"
+        ));
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"op":"capture","id":"0193f3c27a1b7cde8f00112233445566","key":"t-1"}"#
+        );
+        let image = ImageId([7; 32]);
+        let reply = Reply::Captured {
+            image,
+            length: 4096,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(r#"{{"result":"captured","image":"{image}","length":4096}}"#)
+        );
+        assert_eq!(serde_json::from_str::<Reply>(&json).unwrap(), reply);
+        assert_eq!(
+            serde_json::to_string(&Reply::Capturing).unwrap(),
+            r#"{"result":"capturing"}"#
+        );
+
+        assert!(valid_capture_key("0193f3c27a1b7cde8f00112233445566"));
+        assert!(valid_capture_key("a_B-9"));
+        for bad in ["", "../x", "a b", "a/b", "é", &"x".repeat(65)] {
+            assert!(!valid_capture_key(bad), "{bad:?}");
+        }
     }
 }

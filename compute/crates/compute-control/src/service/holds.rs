@@ -53,7 +53,7 @@ impl Depth {
 impl<S: Store> Service<S> {
     /// The owner of a team's sandbox and where to reach it; `None` when no
     /// host owns it.
-    fn owner(&self, row: &SandboxRow) -> Result<Option<Target>, Failure> {
+    pub(super) fn owner(&self, row: &SandboxRow) -> Result<Option<Target>, Failure> {
         let Some(host) = row.ownership.owner else {
             return Ok(None);
         };

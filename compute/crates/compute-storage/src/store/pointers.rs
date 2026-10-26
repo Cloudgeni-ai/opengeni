@@ -581,6 +581,20 @@ impl ChunkStore {
         Err(Error::Superseded)
     }
 
+    /// Deletes pointer `name` outright, leaving no tombstone, so a later
+    /// store may take the name again. Only for pointers no owner fences,
+    /// such as a sandbox image's, whose name is its content: a sandbox's
+    /// copy is deleted with [`Self::delete_pointer`]. What the pointer
+    /// named stays until a sweep finds nothing names it. Nothing to delete
+    /// is fine.
+    pub async fn forget_pointer(&self, name: &str) -> Result<()> {
+        let path = self.pointer_path(name)?;
+        match self.backend.delete(&path).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The name of the pointer a listing of [`Area::Pointers`] shows as
     /// `key`.
     #[must_use]

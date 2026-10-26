@@ -6,6 +6,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use super::{log, sys};
+use crate::agent::STATE_DIR;
 use crate::cmdline::Network;
 use crate::identity::{self, MACHINE_ID_FILE, OWNER_FILE, SANDBOX_FILE};
 
@@ -149,11 +150,16 @@ pub fn replace(path: &str, text: &str, mode: u32) -> io::Result<()> {
 
 /// The guest booted for `sandbox`: it records the id, takes its host name
 /// and, if the disk's machine identity was made for another sandbox (a
-/// template's, or none), makes a fresh one.
+/// template's, or none), makes a fresh one. The agent's own state goes
+/// with that identity: it is the other sandbox's (its instance lock,
+/// command spool and browser controller state, ADR 22), and this boot
+/// starts the agent only after it is gone. The owner goes last, so a
+/// failure part way is done again by the next boot.
 pub fn boot_identity(sandbox: &str) {
     let owner = fs::read_to_string(OWNER_FILE).ok();
     let result = (|| {
         if !identity::owned_by(owner.as_deref(), sandbox) {
+            remove_tree(Path::new(STATE_DIR))?;
             let mut bytes = [0_u8; 16];
             io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
             replace(
@@ -172,6 +178,14 @@ pub fn boot_identity(sandbox: &str) {
         log(&format!("host name: {error}"));
     }
     name_self(identity::host_name(sandbox));
+}
+
+/// Removes the directory `path` and everything under it, if it is there.
+fn remove_tree(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// Makes the guest's own host name `name` resolve locally (see
@@ -240,5 +254,21 @@ pub fn reseed(seed: &[u8]) -> bool {
             log(&format!("reseed: {error}"));
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_earlier_sandboxs_agent_state_is_removed_whole_and_none_is_no_error() {
+        let dir = std::env::temp_dir().join(format!("guest-state-{}", std::process::id()));
+        fs::create_dir_all(dir.join("spool/commands")).unwrap();
+        fs::write(dir.join("instance.lock"), "another sandbox").unwrap();
+        fs::write(dir.join("spool/commands/1.json"), "{}").unwrap();
+        remove_tree(&dir).unwrap();
+        assert!(!dir.exists());
+        remove_tree(&dir).unwrap();
     }
 }

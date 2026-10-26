@@ -71,6 +71,7 @@ impl Command {
             | Self::Remove { id, .. }
             | Self::Touch { id, .. }
             | Self::Sleep { id, .. }
+            | Self::Capture { id, .. }
             | Self::Hold { id, .. }
             | Self::Unhold { id, .. }
             | Self::Acquire { id, .. }
@@ -106,6 +107,9 @@ impl Command {
                 }
             }
             Self::Hold { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Capture { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::Acquire { reply, .. } => {
@@ -252,7 +256,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Whether a create, adopt or change of owner of sandbox `id` is under
     /// way, or an adopt waits to start.
-    fn settling(&self, id: Id) -> bool {
+    pub(super) fn settling(&self, id: Id) -> bool {
         self.preparing.contains(&id.0)
             || self.owning.contains_key(&id.0)
             || self.then_adopt.contains_key(&id.0)

@@ -23,6 +23,7 @@ pub(crate) fn kind(request: &Request) -> RequestKind {
         Request::Adopt { .. } => RequestKind::Adopt,
         Request::HandOff { .. } => RequestKind::HandOff,
         Request::Prepare { .. } => RequestKind::Prepare,
+        Request::Capture { .. } => RequestKind::Capture,
     }
 }
 
@@ -38,7 +39,8 @@ fn about(request: &Request) -> (Option<Id>, Option<u64>) {
         | Request::Connect { id, generation, .. }
         | Request::Sleep { id, generation, .. }
         | Request::Hold { id, generation, .. }
-        | Request::Release { id, generation, .. } => (Some(*id), *generation),
+        | Request::Release { id, generation, .. }
+        | Request::Capture { id, generation, .. } => (Some(*id), *generation),
         Request::Status | Request::Prepare { .. } => (None, None),
     }
 }

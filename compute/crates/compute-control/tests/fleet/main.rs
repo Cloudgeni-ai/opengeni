@@ -12,3 +12,4 @@ mod metrics;
 mod moves;
 mod native;
 mod support;
+mod templates;

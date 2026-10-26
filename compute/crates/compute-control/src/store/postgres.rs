@@ -16,13 +16,14 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
-    Spec, Store, StoreError, Write, admits, rule,
+    Admission, Admits, AgentRef, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result,
+    SandboxRow, Spec, Store, StoreError, TemplateRow, Write, admits, rule,
 };
 use crate::e2b::lifecycle::Record;
 
 mod images;
 mod schema;
+mod templates;
 
 /// The advisory lock the leader holds for as long as its connection lives.
 const LEADER_LOCK: i64 = 7_231_402;
@@ -1081,6 +1082,34 @@ impl Store for PostgresStore {
 
     async fn latest_built(&self, name: &str) -> Result<Option<ImageId>> {
         self.latest_built_now(name).await
+    }
+
+    async fn insert_template(&self, row: &TemplateRow) -> Result<Inserted> {
+        self.insert_template_now(row).await
+    }
+
+    async fn template(&self, team: &str, key: &str) -> Result<Option<TemplateRow>> {
+        self.template_now(team, key).await
+    }
+
+    async fn templates(&self, team: &str) -> Result<Vec<TemplateRow>> {
+        self.templates_now(team).await
+    }
+
+    async fn delete_template(&self, team: &str, id: &str) -> Result<bool> {
+        self.delete_template_now(team, id).await
+    }
+
+    async fn unused_images(&self, now_ms: u64, before_ms: u64) -> Result<Vec<ImageId>> {
+        self.unused_images_now(now_ms, before_ms).await
+    }
+
+    async fn collect_image(&self, image: ImageId, before_ms: u64) -> Result<bool> {
+        self.collect_image_now(image, before_ms).await
+    }
+
+    async fn collected(&self, image: ImageId) -> Result<()> {
+        self.collected_now(image).await
     }
 }
 

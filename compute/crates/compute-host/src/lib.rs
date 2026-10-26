@@ -11,6 +11,7 @@
 //! terminals, file access and previews are all that one primitive.
 
 mod agent;
+mod capture;
 mod chunked;
 pub mod client;
 pub mod cpu_share;
@@ -43,6 +44,7 @@ mod working_set;
 pub use agent::{
     BusyRule, DiskGauge, GuestChecks, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig,
 };
+pub use capture::CaptureProgress;
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use compute_protocol::host as protocol;
 pub use guest_ports::{GuestPort, Route};

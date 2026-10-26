@@ -11,9 +11,11 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
-    admits, rule,
+    Admission, Admits, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
+    Store, TemplateRow, Write, admits, rule,
 };
+
+mod templates;
 
 #[derive(Debug)]
 struct Host {
@@ -40,6 +42,10 @@ struct Inner {
     built: HashMap<String, ImageId>,
     /// Which OCI image each name used, the latest last.
     image_uses: Vec<(String, String)>,
+    /// Templates by team, then id.
+    templates: BTreeMap<(String, String), TemplateRow>,
+    /// Every image captured for a template.
+    captured: HashMap<ImageId, templates::Captured>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -707,5 +713,46 @@ impl Store for MemoryStore {
             .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
             .flatten();
         ready(Ok(latest))
+    }
+
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send {
+        ready(Ok(self.lock().insert_template(row)))
+    }
+
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send {
+        ready(Ok(self.lock().template(team, key)))
+    }
+
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send {
+        ready(Ok(self.lock().templates(team)))
+    }
+
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().delete_template(team, id)))
+    }
+
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send {
+        ready(Ok(self.lock().unused_images(now_ms, before_ms)))
+    }
+
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collect_image(image, before_ms)))
+    }
+
+    fn collected(&self, image: ImageId) -> impl Future<Output = Result<()>> + Send {
+        self.lock().collected(image);
+        ready(Ok(()))
     }
 }

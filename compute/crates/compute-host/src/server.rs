@@ -235,8 +235,22 @@ async fn respond(
                 },
             },
         },
+        Request::Capture {
+            id,
+            generation,
+            key,
+        } => capture_reply(handle.capture(id, generation, &key).await),
         Request::Connect { .. } => unreachable!("connections are relayed before this"),
     })
+}
+
+/// The answer to a [`Request::Capture`] that went as `progress` says.
+fn capture_reply(progress: Result<crate::CaptureProgress, HostError>) -> Reply {
+    match progress {
+        Ok(crate::CaptureProgress::Capturing) => Reply::Capturing,
+        Ok(crate::CaptureProgress::Captured { image, length }) => Reply::Captured { image, length },
+        Err(error) => error_reply(&error),
+    }
 }
 
 /// How a stream wakes its sandbox again.
@@ -587,7 +601,7 @@ fn error_reply(error: &HostError) -> Reply {
             HostError::Unreachable { .. } => ErrorCode::Unreachable,
             HostError::HostFull { .. } => ErrorCode::HostFull,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
-            HostError::LeaseLapsed => ErrorCode::Unavailable,
+            HostError::LeaseLapsed | HostError::CannotCapture(_) => ErrorCode::Unavailable,
             HostError::NotAdmitted => ErrorCode::Expired,
         },
     }

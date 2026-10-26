@@ -60,6 +60,16 @@ impl Images {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(name.to_owned(), Some(image));
     }
+
+    /// Whether some name names `image`.
+    #[must_use]
+    pub fn names(&self, image: ImageId) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|named| *named == Some(image))
+    }
 }
 
 /// One source still without its image.

@@ -12,6 +12,9 @@
 //! - `POST /v1/sandboxes/{id}/wake`, `/sleep` and `/move`.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
+//! - `POST /v1/sandboxes/{id}/templates`, `GET /v1/templates` and `GET` and
+//!   `DELETE /v1/templates/{id or name}`: templates saved from sandboxes
+//!   ([`templates`]).
 //! - `GET /v1/link/keys` lists the keys agent-link tokens are signed with
 //!   ([`docs/agent-link.md`](../../../docs/agent-link.md)).
 //! - `GET /v1/hosts`, `POST /v1/hosts/{name}/drain` and `/undrain`, for the
@@ -39,8 +42,10 @@ use crate::keys::Keys;
 pub use crate::keys::key_digest;
 use crate::link::LinkKeys;
 use crate::metrics::{Metrics, Outcome, track};
-use crate::service::{Drained, Failure, Service, request_digest};
+use crate::service::{Drained, Failure, Service, TEMPLATE_PREFIX, request_digest};
 use crate::store::{AgentRef, SandboxRow, Spec, Store};
+
+pub mod templates;
 
 /// The protocol name a connect upgrades to.
 pub const STREAM_PROTOCOL: &str = "compute-stream";
@@ -69,6 +74,7 @@ impl From<Failure> for ApiError {
             Failure::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Failure::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
             Failure::Busy(_) => (StatusCode::CONFLICT, "busy"),
+            Failure::Exists(_) => (StatusCode::CONFLICT, "exists"),
             Failure::Mismatch(_) => (StatusCode::CONFLICT, "request_mismatch"),
             Failure::Gone(_) => (StatusCode::GONE, "request_gone"),
             Failure::NoCapacity => (StatusCode::SERVICE_UNAVAILABLE, "no_capacity"),
@@ -206,9 +212,14 @@ pub struct CreateBody {
     /// body answers the same sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// The image to start from; the fleet's default when omitted.
+    /// The image to start from; the fleet's default when omitted and no
+    /// `template` is named.
     #[serde(default)]
     pub image: Option<String>,
+    /// The team's template to start from, by id or name, instead of an
+    /// image ([`templates`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     pub vcpus: u8,
     pub memory_mib: u32,
     #[serde(default)]
@@ -398,9 +409,18 @@ async fn create<S: Store>(
             agent: agent.agent_id.clone(),
         });
     let spec = Spec {
-        image: body
-            .image
-            .unwrap_or_else(|| service.settings().image.clone()),
+        image: match (body.image, body.template) {
+            (Some(_), Some(_)) => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid",
+                    "a create names an image or a template, not both",
+                ));
+            }
+            (Some(image), None) => image,
+            (None, Some(template)) => format!("{TEMPLATE_PREFIX}{template}"),
+            (None, None) => service.settings().image.clone(),
+        },
         config,
         agent,
     };
@@ -699,6 +719,15 @@ pub fn router<S: Store>(
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))
         .route("/v1/sandboxes/{id}/move", post(move_to::<S>))
         .route("/v1/sandboxes/{id}/connect/{port}", get(connect::<S>))
+        .route(
+            "/v1/sandboxes/{id}/templates",
+            post(templates::capture::<S>),
+        )
+        .route("/v1/templates", get(templates::list::<S>))
+        .route(
+            "/v1/templates/{key}",
+            get(templates::one::<S>).delete(templates::delete::<S>),
+        )
         .route("/v1/hosts", get(hosts::<S>))
         .route("/v1/hosts/{name}/drain", post(drain::<S>))
         .route("/v1/hosts/{name}/undrain", post(undrain::<S>))

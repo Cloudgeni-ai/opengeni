@@ -37,6 +37,7 @@ impl Handle {
         lease: Option<LeaseGate>,
         observer: Observer,
         preparer: Option<Arc<crate::rootfs::Preparer>>,
+        captures: Option<Arc<crate::capture::Captures>>,
     ) -> Self {
         Self {
             commands,
@@ -47,10 +48,11 @@ impl Handle {
             observer,
             trace: None,
             preparer,
+            captures,
         }
     }
 
-    async fn ask<T>(
+    pub(super) async fn ask<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
