@@ -314,8 +314,10 @@ installs three units:
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
   when the host's lease runs out, and the watchdog resets the machine if
-  the guard itself ends. An upgrade hands it over to the new release's
-  guard (below);
+  the guard itself ends or stalls. It runs at real-time priority and locks
+  its memory in, so a host short of processors or memory (guests holding
+  more than it has, the swap file busy) cannot stall it into that reset.
+  An upgrade hands it over to the new release's guard (below);
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs

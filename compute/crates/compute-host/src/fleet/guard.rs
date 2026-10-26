@@ -247,6 +247,29 @@ fn held(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Locks every page the guard process maps, now and later, into memory.
+///
+/// The guard must feed the watchdog within its timeout (3 s) however
+/// loaded the host is, or the watchdog resets the machine and every
+/// sandbox on it loses its programs. A host whose guests hold more memory
+/// than it has swaps and reclaims, and a guard whose code or data the
+/// kernel took back then waits on that same busy disk to get them again,
+/// for longer than the watchdog allows. Locked, its pages stay, including
+/// those of steps it has not taken yet, such as stopping the VMs. Its unit
+/// also gives it real-time priority (`compute-guard.service`), which puts
+/// its turn first and lets its few allocations draw on the kernel's
+/// reserve. The binary's own guard command calls this before it guards;
+/// tests running the guard in their own process do not.
+///
+/// # Errors
+///
+/// When the kernel refuses, as without the right to lock memory: the
+/// guard still guards, but a host short of memory may stall it.
+pub fn keep_resident() -> io::Result<()> {
+    rustix::mm::mlockall(rustix::mm::MlockAllFlags::CURRENT | rustix::mm::MlockAllFlags::FUTURE)
+        .map_err(io::Error::from)
+}
+
 /// Runs the guard until `stop` is set and it may stop, at a step that fed
 /// the watchdog (the lease was valid or the VMs had stopped), or until it
 /// fails to feed the watchdog, which then reboots the machine; that is the
@@ -1117,5 +1140,30 @@ mod tests {
         let mut keeping = Keeping::new(false, Arc::new(|_| Ok(true)));
         assert!(!keeping.kept(device.as_fd(), None));
         assert!(keeping.told);
+    }
+
+    /// A host whose guests hold more memory than it has must not stall
+    /// its guard into the watchdog's reset: the installed unit gives the
+    /// guard the processor first, and it is never restarted.
+    #[test]
+    fn the_installed_guard_runs_first_and_is_never_restarted() {
+        let unit = include_str!("../../../../deploy/host/compute-guard.service");
+        let set: Vec<&str> = unit
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        for directive in [
+            "CPUSchedulingPolicy=fifo",
+            "CPUSchedulingPriority=1",
+            "OOMScoreAdjust=-1000",
+            "Restart=no",
+            "ExecStart=/opt/compute/current/compute-host guard",
+        ] {
+            assert!(
+                set.contains(&directive),
+                "compute-guard.service lacks {directive}"
+            );
+        }
     }
 }

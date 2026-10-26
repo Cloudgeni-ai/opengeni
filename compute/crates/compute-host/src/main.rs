@@ -606,6 +606,12 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Guard(args) => {
             let config = args.config();
+            if let Err(error) = compute_host::fleet::keep_resident() {
+                tracing::error!(
+                    %error,
+                    "the guard could not lock itself in memory: a host short of memory may stall it until the watchdog resets the machine"
+                );
+            }
             // Asked to stop, the guard stops at its first step that may
             // feed the watchdog (see `run_guard`), not where the signal
             // finds it.
