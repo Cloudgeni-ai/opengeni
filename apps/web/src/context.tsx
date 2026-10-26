@@ -172,6 +172,7 @@ export function RootRouteComponent() {
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
