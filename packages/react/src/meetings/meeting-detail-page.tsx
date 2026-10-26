@@ -44,6 +44,7 @@ import {
   languageName,
   meetingHereStatus,
   meetingPhase,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -429,6 +430,15 @@ function VisibilityMenu({
   );
 }
 
+/** A transcript version's model and the provider it runs on, by name. */
+type ModelAbout = {
+  modelName: string;
+  providerName: string;
+  funding: string;
+  /** The deployment offers no other model. */
+  pinned: boolean;
+};
+
 const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
 );
@@ -438,6 +448,7 @@ function PhaseNotice({
   recorder,
   here,
   recordingElsewhere,
+  modelOf,
   onRetry,
 }: {
   recording: Recording;
@@ -446,6 +457,8 @@ function PhaseNotice({
   here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
+  /** The version's model and its provider, when the workspace's list has it. */
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -499,7 +512,11 @@ function PhaseNotice({
           </Button>
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null, msg)}
+        {transcriptErrorText(
+          phase.version?.errorCode ?? null,
+          msg,
+          phase.version ? modelOf(phase.version) : null,
+        )}
       </Notice>
     );
   }
@@ -532,11 +549,13 @@ function RerunNotice({
   versions,
   shownVersionNumber,
   modelName,
+  modelOf,
   onRetry,
 }: {
   versions: readonly RecordingTranscriptVersion[];
   shownVersionNumber: number;
   modelName: (version: RecordingTranscriptVersion) => string;
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -566,7 +585,7 @@ function RerunNotice({
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode, msg),
+          transcriptErrorText: transcriptErrorText(newest.errorCode, msg, modelOf(newest)),
         })}
       </Notice>
     );
@@ -660,6 +679,22 @@ function MeetingDetailPageContent({
         (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
       )?.name ?? entry.model,
     [models.models],
+  );
+  const modelOf = useCallback(
+    (entry: RecordingTranscriptVersion): ModelAbout | null => {
+      const found = models.models.find(
+        (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
+      );
+      return found
+        ? {
+            modelName: found.name,
+            providerName: found.providerName,
+            funding: found.funding,
+            pinned: models.pinned,
+          }
+        : null;
+    },
+    [models.models, models.pinned],
   );
 
   const createPerson = people.create;
@@ -853,6 +888,10 @@ function MeetingDetailPageContent({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The person recording, as the transcript will name their microphone.
+  const ownerName =
+    peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
+    (owner ? (viewerName ?? null) : null);
   const phase = meetingPhase(recording);
   // Only while the server still waits for audio: this device may know more.
   const here =
@@ -1152,6 +1191,7 @@ function MeetingDetailPageContent({
           recorder={recorder}
           here={here}
           recordingElsewhere={previewing && !recordingHere}
+          modelOf={modelOf}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -1159,6 +1199,7 @@ function MeetingDetailPageContent({
             versions={meeting.versions}
             shownVersionNumber={phase.version.versionNumber}
             modelName={modelName}
+            modelOf={modelOf}
             onRetry={() => setRerunning(true)}
           />
         ) : null}
@@ -1247,7 +1288,9 @@ function MeetingDetailPageContent({
                     trackNumber: track.trackNumber,
                     text: track.partial,
                   }))}
-                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+                  speakerName={(trackNumber) =>
+                    liveSpeakerName(recorder, trackNumber, msg, ownerName)
+                  }
                   status={liveStatus(recorder.live, msg)}
                   empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
                 />
@@ -1255,9 +1298,17 @@ function MeetingDetailPageContent({
                 <LiveTranscript
                   heading={false}
                   lines={savedLive.segments}
-                  speakerName={(trackNumber) =>
-                    defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
-                  }
+                  speakerName={(trackNumber) => {
+                    const source = defaultSpeakerName(
+                      `track-${trackNumber}`,
+                      recording.tracks,
+                      msg,
+                    );
+                    return (
+                      ownerLiveLaneName(recording.tracks, trackNumber, ownerName ?? source, msg) ??
+                      source
+                    );
+                  }}
                   status={
                     savedLive.error
                       ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }

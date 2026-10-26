@@ -187,8 +187,8 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (apps)
 
-This gate applies to apps. A simple page is done when its saved link is in
-the reply (see "Simple page" in SKILL.md).
+This gate applies to apps. A single-file Site is done when its saved link is in
+the reply (see "Single-file Site" in SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published

@@ -52,6 +52,10 @@ type HeaderBox = {
   chipText: string | null;
   chipName: string | null;
   crumbCenter: number | null;
+  /** The visible parent link's width; a crowded row must never squeeze it to nothing. */
+  crumbWidth: number | null;
+  /** Whether the menu of earlier sessions is showing. */
+  earlierShown: boolean;
 };
 
 async function measure(page: Page): Promise<HeaderBox[]> {
@@ -68,6 +72,9 @@ async function measure(page: Page): Promise<HeaderBox[]> {
       const visibleCrumb = [
         ...header.querySelectorAll('nav[aria-label="Session ancestry"] a'),
       ].find((link) => link.getBoundingClientRect().height > 0);
+      const earlier = header.querySelector<HTMLElement>(
+        'nav[aria-label="Session ancestry"] button[aria-label$="earlier sessions"]',
+      );
       return {
         state: section.getAttribute("data-header-state")!,
         height: header.getBoundingClientRect().height,
@@ -77,6 +84,8 @@ async function measure(page: Page): Promise<HeaderBox[]> {
         chipText: chip?.innerText.trim() ?? null,
         chipName: chip?.getAttribute("aria-label") ?? null,
         crumbCenter: center(visibleCrumb ?? crumb),
+        crumbWidth: visibleCrumb ? visibleCrumb.getBoundingClientRect().width : null,
+        earlierShown: Boolean(earlier && earlier.getBoundingClientRect().width > 0),
       };
     }),
   );
@@ -103,6 +112,9 @@ try {
     await expect(page.getByText("Watch the release checks")).toBeVisible();
     if (output) {
       await page.screenshot({ path: path.join(output, `header-${name}.png`), fullPage: true });
+      await page
+        .locator('section[data-header-state="Deep child, paused by its manager"]')
+        .screenshot({ path: path.join(output, `header-deep-${name}.png`) });
     }
     const boxes = await measure(page);
     const heights = new Set(boxes.map((box) => Math.round(box.height)));
@@ -129,6 +141,16 @@ try {
       }
     }
     const mail = boxes.find((box) => box.state === "Waiting for new mail")!;
+    // A deeply nested chat on a crowded row (a paused workstream, long titles)
+    // keeps its way back to the parent: the parent's name with the earlier
+    // sessions' menu where there is room, else the arrow, never nothing.
+    const deep = boxes.find((box) => box.state === "Deep child, paused by its manager")!;
+    expect(deep.crumbWidth, `${name} deep parent link`).not.toBeNull();
+    expect(deep.crumbWidth!, `${name} deep parent link width`).toBeGreaterThanOrEqual(24);
+    if (name === "desktop") {
+      expect(deep.earlierShown, "desktop shows the earlier sessions' menu").toBe(true);
+      expect(deep.crumbWidth!, "desktop shows the parent's name").toBeGreaterThanOrEqual(40);
+    }
     expect(mail.chipName).toBe(
       "Waiting for message.received from Gmail (ada@acme.dev). Open this chat's automations.",
     );

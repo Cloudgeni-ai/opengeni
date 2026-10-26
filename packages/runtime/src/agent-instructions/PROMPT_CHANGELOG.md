@@ -17,6 +17,20 @@ chat. The tool approval confirmation names the tools and the approval, for
 example "Let send_message run without asking in this workspace?". The legacy
 prompt is unchanged.
 
+When the agent mentions another session to the user in chat, it now links it
+as `[its title](session:<sessionId>)`, and is told these links work only in
+the chat, never in email, Slack, GitHub or other messages sent elsewhere.
+Before, agents either named a session by its raw id or pasted a full console
+URL, which only works on one deployment and, in the desktop app, opened a
+separate browser tab. Each app now opens a `session:` link its own way: the web
+console navigates to the chat in place (⌘/Ctrl-click opens a new tab), the
+desktop app opens it in the app (⌘-click opens the external browser), and the
+phone app opens its chat screen. The one sentence follows the session-management
+paragraph in Session coordination and renders only for the Opengeni renderer;
+the plain-Markdown renderer module adds `session:` to the links it forbids. Both
+compositions change identically; legacy prompt digests are refreshed for this
+reviewed change.
+
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
 example Gmail and Outlook Mail) that serve the same need, the first
