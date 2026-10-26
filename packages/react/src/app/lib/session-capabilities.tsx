@@ -101,7 +101,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("knowledge_") ||
       tool.startsWith("instruction_policy_") ||
       tool.startsWith("remember") ||
-      tool.startsWith("company_profile_"),
+      tool.startsWith("company_profile_") ||
+      tool.startsWith("agent_profile_"),
   },
   {
     id: "agents",
