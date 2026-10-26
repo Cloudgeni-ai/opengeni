@@ -782,8 +782,10 @@ roles and FORCE-RLS checks; it never starts or stops that external server.
 The harness also reaps databases that killed or crashed test runs left behind:
 a detached background pass, at most every five minutes, drops per-test
 `og_<label>_<12 hex>` databases whose recorded owner process is gone (or, for
-unowned ones, that stayed idle with no connections for 15 minutes) and templates
-unused for 7 days, never with FORCE and never failing a test. Notes go to
+unowned ones, that stayed idle with no connections for 15 minutes) and migrated
+templates idle for 6 hours beyond the 10 most recently used (or for 7 days),
+never with FORCE and never failing a test. Template names depend only on the
+schema contract's contents, so worktrees with the same schema share one. Notes go to
 `reaper.log` beside the harness lock state; set `OPENGENI_TEST_PG_REAP=0` to
 turn it off. See the header of `packages/testing/src/shared-pg.ts`.
 

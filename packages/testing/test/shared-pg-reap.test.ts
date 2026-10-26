@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import postgres from "postgres";
 import {
   acquireBlankTestDatabase,
   type BlankTestDatabase,
+  checkoutTemplateDbName,
   currentDatabaseOwner,
   currentProcessIdentity,
   type DatabaseOwner,
@@ -105,6 +106,39 @@ describe("naming scheme", () => {
     expect(parseTemplateStamp(null)).toBeNull();
     expect(parseTemplateStamp('opengeni-test-template:v1 {"lastUsedAt":"x"}')).toBeNull();
   });
+});
+
+test("checkouts at different paths with the same schema contract share a template", async () => {
+  const packages = join(root, "packages");
+  const directory = await mkdtemp(join(tmpdir(), "og-template-name-"));
+  try {
+    const copy = async (name: string) => {
+      const target = join(directory, name, "nested", "packages");
+      await cp(join(packages, "db/drizzle"), join(target, "db/drizzle"), { recursive: true });
+      await mkdir(join(target, "db/src"), { recursive: true });
+      for (const file of [
+        "migrate.ts",
+        "migration-postgres-compatibility.ts",
+        "knowledge-migration.ts",
+        "provision-roles.ts",
+        "runtime-posture.ts",
+      ]) {
+        await cp(join(packages, "db/src", file), join(target, "db/src", file));
+      }
+      return target;
+    };
+    const first = await copy("worktree-a");
+    const second = await copy("somewhere-else");
+    const name = await checkoutTemplateDbName(packages);
+    expect(name).toMatch(/^og_test_template_[0-9a-f]{12}$/u);
+    expect(await checkoutTemplateDbName(first)).toBe(name);
+    expect(await checkoutTemplateDbName(second)).toBe(name);
+    // Any change to a template input still yields a different template.
+    await appendFile(join(second, "db/src/provision-roles.ts"), "\n");
+    expect(await checkoutTemplateDbName(second)).not.toBe(name);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("reaping errors are reported, never thrown", async () => {
@@ -344,6 +378,35 @@ describe("reaping a real cluster", () => {
       SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
        WHERE datname = ${unstamped}`;
       expect(parseTemplateStamp(row!.comment as string)?.lastUsedAt).toBeGreaterThanOrEqual(now);
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "keeps the most recently used templates and prunes other idle ones",
+    async () => {
+      if (!admin) return;
+      const { templatePrefix, reap } = subScope("c");
+      const now = Date.now();
+      const hour = 60 * 60_000;
+      const make = async (idleMs: number) => {
+        const name = await createDatabase(
+          `${templatePrefix}${hex12()}`,
+          templateStampComment(now - idleMs),
+        );
+        await admin!`UPDATE pg_database SET datistemplate = true WHERE datname = ${name}`;
+        return name;
+      };
+      const newest = await make(hour);
+      const settling = await make(5 * hour);
+      const idle = await make(10 * hour);
+      const older = await make(2 * DAY);
+      const result = await reap({ templateKeep: 1, templateMinIdleMs: 6 * hour });
+      expect(result.errors).toEqual([]);
+      expect(result.templatesDropped.sort()).toEqual([idle, older].sort());
+      // The most recent one, and one outside the cap but not yet idle long enough.
+      expect(await exists(newest)).toBe(true);
+      expect(await exists(settling)).toBe(true);
     },
     DB_TEST_TIMEOUT_MS,
   );

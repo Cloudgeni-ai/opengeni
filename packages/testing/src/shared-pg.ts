@@ -67,7 +67,8 @@ const execFileAsync = promisify(execFile);
 //     provably died on this machine;
 //   - unowned ones (older checkouts) idle with no connections and no
 //     transactions across a 15-minute window of reaper passes;
-//   - templates unused for 7 days, except this checkout's own (a clone whose
+//   - templates idle for 6 hours beyond the 10 most recently used, and any
+//     template idle for 7 days, except this checkout's own (a clone whose
 //     template vanished rebuilds it under the lock).
 // Reaping is best effort: it never blocks or fails a test, and its notes go to
 // `reaper.log` in the state directory. OPENGENI_TEST_PG_REAP=0 turns it off.
@@ -118,16 +119,21 @@ function databaseUrl(database: string, role?: string, password?: string): string
 // is shared by every worktree on the machine — so a bare name would freeze the
 // schema/ACLs at whichever checkout first built it. Baking every template input
 // into the name gives each exact contract its own immutable template.
+// Only contents and repo-relative names count, never the checkout's location:
+// worktrees with identical inputs share one template.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
+/** This checkout's `packages/` directory. */
+const PACKAGES_DIR = fileURLToPath(new URL("../../", import.meta.url));
 /** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
-const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+const MIGRATIONS_DIR = join(PACKAGES_DIR, "db/drizzle");
+/** Template inputs besides the migrations, relative to `packages/`. */
 const TEMPLATE_CONTRACT_FILES = [
-  fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/migration-postgres-compatibility.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/knowledge-migration.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
+  "db/src/migrate.ts",
+  "db/src/migration-postgres-compatibility.ts",
+  "db/src/knowledge-migration.ts",
+  "db/src/provision-roles.ts",
+  "db/src/runtime-posture.ts",
 ] as const;
 
 let templateDbNameMemo: string | undefined;
@@ -156,25 +162,33 @@ async function templateDbName(withheld: readonly string[] = []): Promise<string>
 }
 
 async function baseTemplateDbName(): Promise<string> {
-  if (templateDbNameMemo) {
-    return templateDbNameMemo;
-  }
-  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => file.endsWith(".sql")).sort();
+  templateDbNameMemo ??= await checkoutTemplateDbName(PACKAGES_DIR);
+  return templateDbNameMemo;
+}
+
+/**
+ * The base template name for the checkout whose `packages/` directory is
+ * given. It depends only on file names relative to `packages/` and their
+ * contents, never on where the checkout lives, so every worktree with the
+ * same schema contract shares one template instead of building its own.
+ */
+export async function checkoutTemplateDbName(packagesDir: string): Promise<string> {
+  const migrationsDir = join(packagesDir, "db/drizzle");
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const hasher = new Bun.CryptoHasher("sha256");
   for (const file of files) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
+    hasher.update(await readFile(join(migrationsDir, file)));
     hasher.update("\0");
   }
   for (const file of TEMPLATE_CONTRACT_FILES) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(file));
+    hasher.update(await readFile(join(packagesDir, file)));
     hasher.update("\0");
   }
-  templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
-  return templateDbNameMemo;
+  return `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
 }
 
 const STATE_DIR = join(
@@ -961,6 +975,9 @@ export async function reapSharedTestDatabases(
   ) {
     await reaperNote(
       `reaped ${result.dropped.length} database(s) and ${result.templatesDropped.length} template(s), kept ${result.kept}` +
+        (result.dropped.length + result.templatesDropped.length > 0
+          ? ` [${[...result.dropped, ...result.templatesDropped].slice(0, 20).join(" ")}]`
+          : "") +
         (result.errors.length > 0
           ? `; ${result.errors.length} note(s): ${result.errors.slice(0, 5).join("; ")}`
           : ""),
@@ -1357,8 +1374,9 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   templates, `postgres` and every other database are never per-test
 //   candidates.
 // - Templates carry a last-used stamp written on each acquisition. A
-//   template whose stamp is older than `templateRetentionMs` is pruned, except
-//   the templates this checkout uses. A clone whose template vanished rebuilds
+//   template idle for `templateMinIdleMs` outside the `templateKeep` most
+//   recently used, or idle for `templateRetentionMs`, is pruned, except the
+//   templates this checkout uses. A clone whose template vanished rebuilds
 //   it (cloneFromTemplate), and the template build is lock-guarded.
 // Every failure is reported in the result and never thrown.
 // ---------------------------------------------------------------------------
@@ -1580,6 +1598,10 @@ export type ReapOptions = {
   dryRun?: boolean;
   idleWindowMs?: number;
   templateRetentionMs?: number;
+  /** How many most recently used templates may idle up to the retention. */
+  templateKeep?: number;
+  /** Idle time after which a template outside the most recent `templateKeep` goes. */
+  templateMinIdleMs?: number;
   maxDrops?: number;
   deadlineMs?: number;
   now?: () => number;
@@ -1597,6 +1619,8 @@ export type ReapResult = {
 
 export const DEFAULT_IDLE_WINDOW_MS = 15 * 60_000;
 export const DEFAULT_TEMPLATE_RETENTION_MS = 7 * 24 * 60 * 60_000;
+export const DEFAULT_TEMPLATE_KEEP = 10;
+export const DEFAULT_TEMPLATE_MIN_IDLE_MS = 6 * 60 * 60_000;
 
 type DatabaseRow = {
   oid: string;
@@ -1727,6 +1751,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         templatePrefix,
         protectedTemplates: new Set(options.protectedTemplates ?? []),
         retentionMs: options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        keep: options.templateKeep ?? DEFAULT_TEMPLATE_KEEP,
+        minIdleMs: Math.min(
+          options.templateMinIdleMs ?? DEFAULT_TEMPLATE_MIN_IDLE_MS,
+          options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        ),
         withLock: options.withTemplateLock ?? ((fn) => fn()),
         now,
         deadline,
@@ -1748,6 +1777,8 @@ async function pruneStaleTemplates(
     templatePrefix: string;
     protectedTemplates: Set<string>;
     retentionMs: number;
+    keep: number;
+    minIdleMs: number;
     withLock: <T>(fn: () => Promise<T>) => Promise<T>;
     now: () => number;
     deadline: number;
@@ -1755,14 +1786,26 @@ async function pruneStaleTemplates(
   },
 ): Promise<void> {
   const { result } = context;
-  for (const row of rows) {
-    if (
-      !row.datistemplate ||
-      !isTemplateDatabaseName(row.datname, context.templatePrefix) ||
-      context.protectedTemplates.has(row.datname)
-    ) {
-      continue;
-    }
+  const templates = rows.filter(
+    (row) => row.datistemplate && isTemplateDatabaseName(row.datname, context.templatePrefix),
+  );
+  // The `keep` most recently used templates stay unless unused for the full
+  // retention; any other template goes once idle for `minIdleMs`.
+  const recent = new Set(
+    templates
+      .map((row) => ({
+        name: row.datname,
+        lastUsedAt: parseTemplateStamp(row.comment)?.lastUsedAt,
+      }))
+      .filter(
+        (entry): entry is { name: string; lastUsedAt: number } => entry.lastUsedAt !== undefined,
+      )
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+      .slice(0, context.keep)
+      .map((entry) => entry.name),
+  );
+  for (const row of templates) {
+    if (context.protectedTemplates.has(row.datname)) continue;
     const stamp = parseTemplateStamp(row.comment);
     if (!stamp) {
       // Built by a checkout that predates stamping: start its clock now.
@@ -1775,14 +1818,14 @@ async function pruneStaleTemplates(
       }
       continue;
     }
-    if (
-      context.now() - stamp.lastUsedAt < context.retentionMs ||
-      context.now() > context.deadline
-    ) {
-      continue;
-    }
+    const idle = context.now() - stamp.lastUsedAt;
+    const prunable =
+      idle >= context.retentionMs || (!recent.has(row.datname) && idle >= context.minIdleMs);
+    if (!prunable || context.now() > context.deadline) continue;
     try {
-      const dropped = await context.withLock(() => dropTemplate(sql, row, context));
+      const dropped = await context.withLock(() =>
+        dropTemplate(sql, row, stamp.lastUsedAt, context),
+      );
       if (dropped) result.templatesDropped.push(row.datname);
     } catch (error) {
       result.errors.push(`${row.datname}: ${short(error)}`);
@@ -1793,13 +1836,14 @@ async function pruneStaleTemplates(
 /**
  * Drop one stale template. Called under the container lock, so no harness
  * process is building templates meanwhile. Every step is pinned to the oid
- * observed earlier, and a template that was used again (fresh stamp), has a
- * connection or a clone in progress is kept.
+ * observed earlier, and a template that was used again (its stamp changed),
+ * has a connection or a clone in progress is kept.
  */
 async function dropTemplate(
   sql: postgres.Sql,
   row: DatabaseRow,
-  context: { retentionMs: number; now: () => number; result: ReapResult },
+  observedLastUsedAt: number,
+  context: { minIdleMs: number; now: () => number; result: ReapResult },
 ): Promise<boolean> {
   const [current] = await sql`
     SELECT shobj_description(d.oid, 'pg_database') AS comment,
@@ -1811,7 +1855,12 @@ async function dropTemplate(
      WHERE d.oid = ${row.oid}::oid AND d.datname = ${row.datname} AND d.datistemplate`;
   if (!current) return false;
   const stamp = parseTemplateStamp(current.comment as string | null);
-  if (!stamp || context.now() - stamp.lastUsedAt < context.retentionMs || current.busy > 0) {
+  if (
+    !stamp ||
+    stamp.lastUsedAt !== observedLastUsedAt ||
+    context.now() - stamp.lastUsedAt < context.minIdleMs ||
+    current.busy > 0
+  ) {
     return false;
   }
   // PostgreSQL refuses to drop a template; unmark it first, and restore the
