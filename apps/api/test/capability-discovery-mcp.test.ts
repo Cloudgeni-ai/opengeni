@@ -795,14 +795,30 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       }),
     });
     const conversation = ["workspace:read", "sessions:create", "sessions:read", "sessions:control"];
-    const request = async (permissions: string[]) => {
-      // The human this agent acts for: a member with exactly these permissions.
+    const request = async (
+      permissions: string[] | null,
+      // What the person's sign-in could do when they sent this turn's message,
+      // frozen with the turn (an embed's token narrows it).
+      sent?: string[],
+    ) => {
+      // The human this agent acts for: a member with exactly these
+      // permissions, or (null) someone in their own workspace with no
+      // membership row.
       const person = `user:${crypto.randomUUID()}`;
-      await shared!.admin`
-        INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-        VALUES (${workspace.accountId}, ${workspace.workspaceId}, ${person}, 'member',
-          ${shared!.admin.json(permissions)}::jsonb)`;
+      if (permissions) {
+        await shared!.admin`
+          INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+          VALUES (${workspace.accountId}, ${workspace.workspaceId}, ${person}, 'member',
+            ${shared!.admin.json(permissions)}::jsonb)`;
+      }
       const attempt = await seedAttempt(false, undefined, person);
+      if (sent) {
+        await shared!.admin`
+          INSERT INTO session_turn_app_action_grants
+            (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+          VALUES (${attempt.turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+            'none', ${sent}::text[])`;
+      }
       const server = buildOpenGeniMcpServer(
         { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
         {
@@ -852,10 +868,26 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
     });
     // With it, the existing Connect card message is unchanged.
+    const connectCard =
+      "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.";
+    const cannotConnect =
+      "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.";
     expect(await request([...conversation, "connections:personal"])).toMatchObject({
       status: "authorization_requested",
-      message:
-        "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.",
+      message: connectCard,
+    });
+    // The person's chat decides from what their sign-in could do when they
+    // sent the message, as the card does: an embed's token that leaves out
+    // personal setup narrows a membership that has it.
+    expect(await request([...conversation, "connections:personal"], conversation)).toMatchObject({
+      status: "authorization_requested",
+      message: cannotConnect,
+    });
+    // Someone in their own workspace has no membership row; their sign-in's
+    // access still decides, either way.
+    expect(await request(null, conversation)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"])).toMatchObject({
+      message: connectCard,
     });
   }, 60_000);
   test("posts the Connected Machine card without a token, and keeps it useful once machines exist", async () => {

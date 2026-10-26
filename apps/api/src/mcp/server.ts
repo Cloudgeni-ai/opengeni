@@ -167,6 +167,7 @@ import {
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
   getWorkspaceGrant,
+  readTurnSenderAccess,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -1079,6 +1080,46 @@ export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
   // Notifications carry no id and get no response. The stateless transport
   // holds no in-flight request a cancellation could reach.
   return method.startsWith("notifications/") && !("id" in message);
+}
+
+/**
+ * The grant of the person an in-chat setup card is for, as their chat sees it.
+ * For an agent, that is the person who sent its turn's message, with what their
+ * sign-in could do when it was accepted (frozen with the turn: an embed's token
+ * narrows it, and their own workspace counts without a membership); a turn
+ * accepted before that was recorded falls back to their membership. Any other
+ * caller is the person, with this request's own (already effective) grant.
+ */
+async function connectingPersonGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<{
+  permissions: readonly string[];
+  permissionMode?: "legacy" | "explicit" | undefined;
+} | null> {
+  const claims = exactAgentAttemptClaims(grant);
+  if (!claims) {
+    return {
+      permissions: grant.permissions,
+      ...(grant.permissionMode ? { permissionMode: grant.permissionMode } : {}),
+    };
+  }
+  const { initiatingHumanSubjectId } = await requireLiveAgentAttemptAuthorization(
+    db,
+    grant,
+    sessionId,
+  );
+  if (!initiatingHumanSubjectId) return null;
+  const sent = await readTurnSenderAccess(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    turnId: claims.turnId,
+  });
+  if (sent && sent.subjectId === initiatingHumanSubjectId) {
+    return { permissions: sent.permissions, permissionMode: "explicit" };
+  }
+  return await getWorkspaceGrant(db, initiatingHumanSubjectId, grant.workspaceId);
 }
 
 export function buildOpenGeniMcpServer(
@@ -7194,15 +7235,12 @@ function registerCapabilityDiscoveryTools(
       }
       // The card offers only what the person's own grant can finish, by the
       // same rule. When it says they can't connect here, the agent must not
-      // send them to it. The person is the human this agent acts for; without
-      // a workspace membership there is nothing to say beyond the card.
-      const personSubjectId = exactAgentAttemptClaims(grant)
-        ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
-            .initiatingHumanSubjectId
-        : grant.subjectId;
-      const person = personSubjectId
-        ? await getWorkspaceGrant(deps.db, personSubjectId, grant.workspaceId)
-        : null;
+      // send them to it. The person is the human this agent acts for, with
+      // the access their chat has: what their sign-in could do when they sent
+      // this turn's message (an embed's token narrows it, and their own
+      // workspace counts without a membership), else their membership.
+      // Without either there is nothing to say beyond the card.
+      const person = await connectingPersonGrant(deps.db, grant, sessionId);
       const personCannotConnect =
         person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {

@@ -510,6 +510,46 @@ export async function recordTurnAppActionGrant(
 }
 
 /**
+ * Who sent this turn's message and what their sign-in could do in this
+ * workspace when it was accepted (the frozen grant above, whatever the
+ * organization allows through app actions): the same effective access their
+ * chat shows, narrowed by an embed's token and including their own workspace.
+ * `null` for a turn no signed-in person started.
+ */
+export async function readTurnSenderAccess(
+  db: Database,
+  input: { accountId: string; workspaceId: string; turnId: string },
+): Promise<{ subjectId: string; permissions: Permission[] } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [frozen] = await scopedDb
+        .select({
+          subjectId: schema.sessionTurnAppActionGrants.subjectId,
+          permissions: schema.sessionTurnAppActionGrants.permissions,
+        })
+        .from(schema.sessionTurnAppActionGrants)
+        .where(
+          and(
+            eq(schema.sessionTurnAppActionGrants.turnId, input.turnId),
+            eq(schema.sessionTurnAppActionGrants.workspaceId, input.workspaceId),
+          ),
+        )
+        .limit(1);
+      if (!frozen) return null;
+      return {
+        subjectId: frozen.subjectId,
+        permissions: frozen.permissions.flatMap((value) => {
+          const parsed = Permission.safeParse(value);
+          return parsed.success ? [parsed.data] : [];
+        }),
+      };
+    },
+  );
+}
+
+/**
  * As whom an app action in this turn runs, checked live on every call:
  *
  * - `full_access`: the session has full access; the person who gave it, with

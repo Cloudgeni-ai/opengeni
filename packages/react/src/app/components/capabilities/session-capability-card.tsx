@@ -31,7 +31,8 @@ import {
 } from "../../lib/capabilities";
 import { userErrorText } from "../../../ui/api-error";
 import { hasWorkspacePermission } from "../../lib/permissions";
-import { personalIntegrationSetupAccess } from "@opengeni/contracts/personal-integration-setup";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { AuthNeededRow } from "../../../components/message-timeline";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
@@ -139,6 +140,16 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
+  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
+  const grant = context.accessContext?.workspaceGrants.find(
+    (entry) => entry.workspaceId === props.workspaceId,
+  );
+  // The same rule the agent's setup tool and the embedded chat card use, so
+  // this card never offers a connection the agent was told isn't possible.
+  // Until the grant has loaded, offer the card; the API still enforces access.
+  const setup =
+    capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
+  if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
   if (capability && integrationDefinitionIdFromCapabilityId(capability.id)) {
     return (
       <SessionIntegrationCapabilityCard
@@ -153,17 +164,11 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
-  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
-    const grant = context.accessContext?.workspaceGrants.find(
-      (entry) => entry.workspaceId === props.workspaceId,
-    );
     return (
       <SessionMcpCapabilityCard
         // Members without integration admin rights connect their own account.
-        personalOnly={
-          grant !== undefined && personalIntegrationSetupAccess(grant, resolved) === "personal"
-        }
+        personalOnly={setup?.kind === "card" && setup.personalOnly}
         client={context.client}
         workspaceId={props.workspaceId}
         sessionId={props.sessionId}

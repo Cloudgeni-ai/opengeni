@@ -178,4 +178,7 @@ test("a sign-in popup ends on the closing page, never on a copy of the host page
   const html = await page.text();
   expect(html).toContain("<script>window.close();</script>");
   expect(html).toContain("You can close this window");
+  // It follows the person's light or dark appearance.
+  expect(html).toContain('<meta name="color-scheme" content="light dark">');
+  expect(html).toContain("@media (prefers-color-scheme:dark)");
 }, 60_000);
