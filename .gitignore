@@ -14,6 +14,7 @@ node_modules/
 .turbo/
 .vite/
 coverage/
+/test-results/
 tmp/
 *.tsbuildinfo
 bun.lockb

@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import { nestedPostgresSqlState } from "./persistence-errors";
+import { ClassifiedDatabaseRefusal, nestedPostgresSqlState } from "./persistence-errors";
 
 export type UserResourceAuthorityGrant = {
   grantId: string;
@@ -38,10 +38,10 @@ export type AcceptedTurnPersonalResourceAttachment = {
   replay: boolean;
 };
 
-export class PersonalResourceAttachmentAcceptanceError extends Error {
+export class PersonalResourceAttachmentAcceptanceError extends ClassifiedDatabaseRefusal {
   readonly name = "PersonalResourceAttachmentAcceptanceError";
   constructor(
-    readonly kind: "invalid" | "forbidden" | "conflict",
+    readonly kind: "invalid" | "forbidden" | "conflict" | "stale",
     options?: ErrorOptions,
   ) {
     super(
@@ -49,7 +49,9 @@ export class PersonalResourceAttachmentAcceptanceError extends Error {
         ? "The personal-resource attachment request is invalid"
         : kind === "forbidden"
           ? "The personal-resource attachment is not authorized"
-          : "The personal-resource attachment conflicts with accepted work",
+          : kind === "stale"
+            ? "This chat's access changed just before the message was sent. Check the attached resources and send it again."
+            : "The personal-resource attachment conflicts with accepted work",
       options,
     );
   }
@@ -74,6 +76,24 @@ export async function acceptTurnPersonalResourceAttachmentInTransaction(
   },
 ): Promise<AcceptedTurnPersonalResourceAttachment> {
   await setSubjectRlsContext(db, input.subjectId);
+  // The caller already holds this session's row lock, so this plain read is
+  // the epoch the database function will compare. Answering a stale epoch
+  // here gives the client a retryable conflict instead of the function's
+  // generic refusal, which it shares with a wrong initiator. The function
+  // stays the authority for every other check.
+  const [current] = await rawRows<{ authorityEpoch: number }>(
+    db,
+    sql`
+      select authority_epoch::int as "authorityEpoch"
+      from sessions
+      where id = ${input.sessionId}::uuid
+        and account_id = ${input.accountId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid
+    `,
+  );
+  if (current && current.authorityEpoch !== input.intent.expectedAuthorityEpoch) {
+    throw new PersonalResourceAttachmentAcceptanceError("stale");
+  }
   let row:
     | {
         grantMode: "once" | "session" | "always";

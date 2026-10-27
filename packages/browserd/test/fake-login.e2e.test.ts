@@ -10,6 +10,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { AgentBrowserDriver, ManagedBrowserRunner, BrowserPasskeyManager } from "../src";
+import type { BrowserCdpConnection } from "../src/cdp-driver";
 import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
@@ -148,6 +149,136 @@ e2e(
     evidence.passkey = { username, signCounts };
   },
   180_000,
+);
+
+e2e(
+  "a fresh browser holding another browser's passkey only through sync starts signed out, autofill never signs it in, and signing out sticks",
+  async () => {
+    const username = `pk-autofill-${randomUUID().slice(0, 8)}`;
+    const password = "Passkey-Autofill-Password-1!";
+    const itemId = randomUUID();
+    let stored: BrowserPasskeyCredential;
+    // ---- browser 1: sign up and register a passkey, as another identity did --------
+    const first = await launch("pk-autofill-1");
+    try {
+      let page = await first.driver.start(`${site.url}/signup`);
+      page = await act(page, fillByRef(page, "textbox", "Username", username));
+      page = await act(page, fillByRef(page, "textbox", "Password", password));
+      page = await act(page, fillByRef(page, "textbox", "Confirm password", password));
+      page = await act(page, clickByRef(page, "button", "Create account"));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/register` });
+      page = await act(page, clickByRef(page, "button", "Create a passkey"));
+      page = await until(first.driver, page.target.id, (o) =>
+        hasName(o, `Passkey saved for ${username}`),
+      );
+      const event = only((await first.sync(null)).events, "registered");
+      stored = { ...event.credential, itemId };
+      await first.sync([stored], [event.eventId]);
+    } finally {
+      await first.close();
+    }
+    const passkeySignIns = () =>
+      site
+        .state()
+        .attempts.filter((attempt) => attempt.flow === "passkey" && attempt.username === username);
+
+    // ---- browser 2: a fresh, empty profile that holds the passkey only via sync ----
+    const second = await launch("pk-autofill-2");
+    try {
+      await second.sync([stored], []);
+      // Nothing of the other browser's sign-in is here.
+      let page = await second.driver.start(`${site.url}/welcome`);
+      expect(hasName(page, "Not signed in")).toBe(true);
+      expect(await cookieNames(second)).toEqual([]);
+      // The identifier page asks for a passkey through autofill on load. Nobody
+      // picked one, so it must not sign in: it shows its username field.
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/autofill` });
+      page = await until(second.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("Passkey autofill")),
+      );
+      await Bun.sleep(1_500);
+      page = await second.driver.observe(page.target.id);
+      expect(hasName(page, `Logged in as ${username}`)).toBe(false);
+      expect(nodes(page).some((node) => node.role === "textbox" && node.name === "Username")).toBe(
+        true,
+      );
+      expect(passkeySignIns()).toEqual([]);
+      expect(await cookieNames(second)).toEqual([]);
+      await shot(second.driver, page.target.id, "passkey-autofill-not-answered");
+
+      // Asked for in the open, the same passkey still signs in.
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/login` });
+      page = await act(page, clickByRef(page, "button", "Sign in with a passkey"));
+      page = await until(second.driver, page.target.id, (o) =>
+        hasName(o, `Logged in as ${username}`),
+      );
+      expect(passkeySignIns().filter((attempt) => attempt.ok)).toHaveLength(1);
+      expect(await cookieNames(second)).toEqual(["fl_session"]);
+
+      // Signing out sticks: the autofill page does not sign the passkey back in.
+      page = await act(page, { type: "navigate", url: `${site.url}/logout` });
+      expect(hasName(page, "Not signed in")).toBe(true);
+      page = await act(page, { type: "navigate", url: `${site.url}/passkey/autofill` });
+      page = await until(second.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("Passkey autofill")),
+      );
+      await Bun.sleep(1_500);
+      page = await act(page, { type: "navigate", url: `${site.url}/welcome` });
+      expect(hasName(page, "Not signed in")).toBe(true);
+      expect(passkeySignIns().filter((attempt) => attempt.ok)).toHaveLength(1);
+      expect(await cookieNames(second)).toEqual([]);
+    } finally {
+      await second.close();
+    }
+  },
+  120_000,
+);
+
+e2e(
+  "a cross-origin frame, which shares its tab's authenticator, is offered no passkey autofill either",
+  async () => {
+    // The frame asks for a passkey through autofill and reports to its page.
+    // A request the authenticator answers settles at once (here with no
+    // credential: NotAllowedError); a withdrawn one stays pending.
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        const url = new URL(request.url);
+        const body =
+          url.pathname === "/frame"
+            ? `<script>(async () => {
+  const report = (text) => parent.postMessage(text, "*");
+  report("autofill " + (await PublicKeyCredential.isConditionalMediationAvailable() ? "offered" : "not available"));
+  navigator.credentials.get({ mediation: "conditional", publicKey: { challenge: new Uint8Array(32), rpId: location.hostname, allowCredentials: [] } })
+    .then(() => report("request answered"), (error) => report("request answered: " + error.name));
+  setTimeout(() => report("request still pending"), 1000);
+})();</script>`
+            : `<ul id="frame-log" aria-label="Frame log"></ul>
+<script>addEventListener("message", (event) => { const item = document.createElement("li"); item.textContent = "frame: " + event.data; document.getElementById("frame-log").append(item); });</script>
+<iframe title="Embedded sign-in" allow="publickey-credentials-get *" src="http://embedded.localhost:${url.port}/frame"></iframe>`;
+        return new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
+      },
+    });
+    const browser = await launch("pk-autofill-frame");
+    try {
+      let page = await browser.driver.start(`http://localhost:${server.port}/`);
+      page = await until(browser.driver, page.target.id, (o) =>
+        names(o).some((name) => name.startsWith("frame: request")),
+      );
+      await Bun.sleep(1_200);
+      page = await browser.driver.observe(page.target.id);
+      const log = names(page).filter((name) => name.startsWith("frame: "));
+      expect(log).toEqual(["frame: autofill not available", "frame: request still pending"]);
+    } finally {
+      await browser.close();
+      await server.stop(true);
+    }
+  },
+  60_000,
 );
 
 e2e(
@@ -393,6 +524,18 @@ async function assertedSignCount(browser: Browser, itemId: string): Promise<numb
     await Bun.sleep(100);
   }
   throw new Error("no passkey assertion event");
+}
+
+/** Every cookie the browser holds, by name. */
+async function cookieNames(browser: Browser): Promise<string[]> {
+  const connection = (browser.driver as unknown as { connection: BrowserCdpConnection | null })
+    .connection;
+  if (!connection) throw new Error("the browser is not running");
+  const { cookies } = await connection.send<{ cookies: Array<{ name: string }> }>(
+    "Storage.getCookies",
+    {},
+  );
+  return cookies.map((cookie) => cookie.name).sort();
 }
 
 async function serverSignCount(username: string): Promise<number> {

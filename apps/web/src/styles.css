@@ -110,6 +110,13 @@ html[data-desktop="windows"] main [data-slot="content-page"]:not([data-slot="con
   padding-top: var(--og-caption-row-height);
 }
 
+/* The image viewer's close and download buttons sit in the top-right corner,
+   where Windows draws its caption buttons over the page. They move left of
+   them, so the viewer's own close is never under the window's close. */
+html[data-desktop="windows"] [data-lightbox-controls] {
+  right: max(1.5rem, calc(var(--og-caption-buttons-width) + 0.75rem));
+}
+
 html[data-desktop="macos"],
 html[data-desktop="macos"] body {
   background-color: transparent;
@@ -139,6 +146,24 @@ html[data-desktop="macos"] [data-rail-collapsed="true"] [data-titlebar] {
   padding-left: 32px;
 }
 
+/* The Site view has no title bar of its own: the Site's toolbar is its top
+   row, so beside a collapsed rail it starts after the window controls too.
+   While the window is being shared or recorded, macOS swaps the controls for
+   a wider purple sharing badge (about 80px in); 32px past the rail clears
+   both. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] dialog:not([data-artifact-fullscreen]) > [data-artifact-toolbar] {
+  padding-left: 32px;
+}
+
+/* The publish form takes the Site's place, so its header is then the top row.
+   It is already 32px in, until a narrow column (chat dragged wide) halves its
+   padding; keep the 32px that clears the controls and the sharing badge, for
+   the body and buttons too so the form keeps one left edge. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > :is(header, [data-slot="form-body"]),
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > footer > div {
+  padding-left: 32px;
+}
+
 /* A full-window workspace panel (maximized, or the overlay in a narrow
    window) puts its tab row under the traffic lights. */
 html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
@@ -158,5 +183,84 @@ html[data-desktop="macos"] [data-artifact-fullscreen] > [data-window-drag] {
 
 html[data-desktop="windows"] [data-artifact-fullscreen] > [data-window-drag] {
   min-height: var(--og-caption-row-height);
+  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
+}
+
+/* The update notice (apps/web/src/api.ts) is plain DOM, so it can show before
+   React renders. `:where` keeps these defaults below the desktop rules. */
+:where(#opengeni-api-update-notice) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--og-color-border);
+  background: var(--og-color-surface-1);
+  color: var(--og-color-fg);
+  font: 500 14px/1.4 Inter, system-ui, sans-serif;
+  padding: 10px 14px;
+}
+
+:where(#opengeni-api-update-notice) button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--og-color-border-strong);
+  border-radius: 6px;
+  background: var(--og-color-surface-2);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+:where(#opengeni-api-update-notice) button:hover {
+  background: var(--og-color-surface-3);
+}
+
+/* Notices across the top of the app sit in the window's top row, where the
+   desktop app draws its window controls: the macOS traffic lights (or the
+   wider purple badge macOS swaps in while the window is shared), and the
+   Windows caption buttons. They keep clear of them.
+
+   Above every page (the update notice, sign-in and connection notices): they
+   start after the macOS controls and end before the Windows buttons. The
+   update bar is as tall as the title row, so its text lines up with the
+   controls. */
+html[data-desktop="macos"] [data-app-notice] {
+  padding-left: 84px;
+}
+
+html[data-desktop="windows"] [data-app-notice] {
+  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
+}
+
+/* The sign-in notice is a centred box (48rem with 1rem inset): it moves only
+   as far as it must to clear the controls, so wide windows keep it centred. */
+html[data-desktop="macos"] [data-app-notice="centered"] {
+  padding-left: clamp(0px, calc(904px - 100%), 68px);
+}
+
+html[data-desktop="windows"] [data-app-notice="centered"] {
+  padding-right: clamp(
+    0px,
+    calc(2 * var(--og-caption-buttons-width) + 752px - 100%),
+    calc(var(--og-caption-buttons-width) - 0.5rem)
+  );
+}
+
+html:is([data-desktop="macos"], [data-desktop="windows"]) #opengeni-api-update-notice {
+  min-height: var(--og-caption-row-height, 56px);
+}
+
+/* A banner across the top of a page beside the rail (agent work paused, on a
+   page with no session title bar above it): beside a collapsed rail it starts
+   after the macOS controls, like the title bar, and it ends before the
+   Windows buttons. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-canvas] > [data-slot="notice"]:first-child {
+  padding-left: 32px;
+}
+
+html[data-desktop="windows"] [data-canvas] > [data-slot="notice"]:first-child {
   padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }

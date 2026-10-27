@@ -21,6 +21,9 @@ export type ComputerBackendTarget = {
   focused: boolean;
   /** A window that cannot be captured or read until it is back on screen. */
   offScreen?: true;
+  /** A person used the computer's keyboard, mouse or trackpad this many whole
+   * seconds before the listing or observation, within the last minute. */
+  personInputSecondsAgo?: number;
 };
 
 export type ComputerBackendObservation = {
@@ -120,10 +123,13 @@ export interface ComputerBackend {
   clipboard(): Promise<ComputerBackendClipboard>;
   validate(command: ComputerBackendActionCommand): Promise<void>;
   /** A backend that can act on an element of another role than the one an
-   * action's locator named reports each such action to `standIn`. */
+   * action's locator named reports each such action to `standIn`. A backend
+   * whose delivery of a single click or key press was not confirmed (the
+   * app gives no sign it acted on raw input) calls `unconfirmed`. */
   dispatch(
     command: ComputerBackendActionCommand,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null>;
   close(): Promise<void>;
 }

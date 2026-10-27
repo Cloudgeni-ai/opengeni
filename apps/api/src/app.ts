@@ -146,6 +146,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
   databaseContentionHttpError,
@@ -253,6 +254,7 @@ import {
   prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  requireWorkspaceToolApprovalAuthorization,
   workspaceToolGatewayDeclarations,
   workspaceToolGatewayServerTiming,
 } from "./workspace-tool-gateway";
@@ -331,7 +333,7 @@ import { registerPersonalApiKeyRoutes } from "./routes/personal-api-keys";
 import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
-import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
+import { registerBrowserSessionRoutes, type BrowserHoldRenewal } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { createVaultInteractionSecretsPort } from "./interaction-secrets-vault";
 import { registerGitHubRoutes } from "./routes/github";
@@ -502,6 +504,9 @@ function signedStateSecret(
 export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
+  /** One pass renewing the holds of the browsers agent sessions hold; the
+   * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
+  renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -848,6 +853,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Conversation-Filter",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Covered-First",
@@ -2207,6 +2214,7 @@ export function createAppComposition(deps: AppDependencies): {
       await c.req.json().catch(() => null),
       { status: 400, message: "Invalid tool gateway approval" },
     );
+    requireWorkspaceToolApprovalAuthorization(authorization);
     const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
     try {
       return c.json(
@@ -2357,7 +2365,7 @@ export function createAppComposition(deps: AppDependencies): {
       }),
     log: (event, fields) => console.warn(event, fields),
   });
-  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  const browserSessionRoutes = registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);
@@ -2489,6 +2497,7 @@ export function createAppComposition(deps: AppDependencies): {
             })
           : (sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
+            insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
             scheduledTaskTargetAccessHttpError(rawError) ??
@@ -2547,7 +2556,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps };
+  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {
@@ -4211,6 +4220,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   if (
     pathname === "/v1/auth/organization-onboarding" ||
+    pathname === "/v1/auth/organization-onboarding/use-case" ||
     pathname === "/v1/auth/organization-setup"
   ) {
     return true;

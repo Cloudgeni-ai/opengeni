@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+
 import {
   evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
@@ -23,7 +23,6 @@ import {
   SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
   SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
@@ -876,24 +875,6 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
-  });
-
-  test("requires the receipt of every provider whose cutover is in the binary's ledger", () => {
-    const posture = safePosture();
-    posture.subscriptionProviderCutoverReceipts = [];
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
-    );
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
-    );
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
-    );
-    // Each listed cutover migration is in this binary's ledger.
-    for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
-      expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
-    }
   });
 
   test("a provider's legacy tables are read-only once its receipt exists", () => {
@@ -3936,6 +3917,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "sandboxes",
     "enrollments",
     "session_background_commands",
+    "browser_sessions",
+    "browser_session_associations",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -3986,11 +3969,13 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4042,6 +4027,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

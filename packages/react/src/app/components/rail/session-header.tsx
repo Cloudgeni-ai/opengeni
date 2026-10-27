@@ -22,7 +22,8 @@ import { ModelMark } from "../../../components/model-mark";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
 import type { SessionSummary } from "@opengeni/sdk";
-import { SiteOriginLink } from "../session/site-origin-link";
+import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
+import { sessionSiteOrigin } from "../../lib/session-site-origin";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -52,9 +53,15 @@ import { ConnectionPill } from "../common";
 import {
   GrantSessionAdminAccessDialog,
   SessionAdminAccessIndicator,
+  SessionAdminAccessMenuItems,
   type SessionAdminAccessControl,
 } from "../session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "../session/subagents";
+import {
+  SESSION_HEADER_PARTS,
+  useSessionHeaderOverflow,
+  type SessionHeaderPart,
+} from "./session-header-overflow";
 import { Button } from "../../../ui/button";
 import {
   DropdownMenu,
@@ -246,6 +253,36 @@ export function SessionHeader({
   const pinKeys = useActionShortcut("chat.pin");
   const archiveKeys = useActionShortcut("chat.archive");
   const panelKeys = useActionShortcut("view.workspacePanel");
+  const hasCrumb =
+    Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
+  const overflow = useSessionHeaderOverflow({
+    present: SESSION_HEADER_PARTS.filter((part) => {
+      switch (part) {
+        case "panel":
+          return Boolean(onToggleInspector);
+        case "access":
+          return Boolean(accessSlot);
+        case "fullAccess":
+          return Boolean(adminAccess?.state.active);
+        case "automations":
+          return Boolean(onOpenAutomations);
+        case "machine":
+          return Boolean(sandboxSlot);
+        case "site":
+          return sessionSiteOrigin(session) !== null;
+        case "accessKey":
+          return keyAuthRequired;
+        default:
+          return true;
+      }
+    }),
+    contentKey: sessionDisplayTitle(session),
+    resetKey: session.id,
+    frozen: rename.editing,
+  });
+  // In the "…" menu instead of the row (see SESSION_HEADER_PARTS).
+  const inMenu = (part: SessionHeaderPart) => overflow.collapsed.has(part);
+  const part = overflow.partRef;
   // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
   const startRenaming = rename.startEditing;
   useEffect(() => {
@@ -277,140 +314,174 @@ export function SessionHeader({
     <header
       data-window-drag
       data-titlebar
-      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65"
     >
       {leading}
-      {/* One row for every chat, so the header is the same height whether or
-          not a chat has a parent, a Site or automations. The parent link
-          leads into the title; what only some chats have comes last, so the
-          title and access chips never move when a chat gains one. The title
-          takes every pixel the actions leave and truncates first. When the
-          row is crowded, the parent link and the title split it evenly (each
-          up to its natural width), so neither squeezes the other to nothing;
-          a narrow title area (`titlegroup`) shows only the arrow back. */}
-      <div className="@container/titlegroup flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
-        <div
-          className={cn(
-            "grid min-w-0 items-center gap-x-1.5",
-            session.parentSessionId
-              ? "grid-cols-[minmax(1.5rem,max-content)_minmax(0,max-content)] pointer-coarse:grid-cols-[minmax(2.75rem,max-content)_minmax(0,max-content)]"
-              : "grid-cols-[minmax(0,max-content)]",
-          )}
-        >
-          <SessionAncestryBreadcrumb
-            workspaceId={session.workspaceId}
-            parentSessionId={session.parentSessionId}
-            ancestors={ancestors}
-            loading={lineageLoading}
-            error={lineageError}
-          />
-          <SessionTitleEditor session={session} rename={rename} />
-        </div>
-        {/* Below lg the lifecycle is a dot beside the title; the full badge
-            and connection pill take over from lg. */}
-        <CompactSessionStatus
-          paused={sessionControlPaused(session)}
-          waiting={Boolean(waiting)}
-          status={displayStatus}
-          label={startupLabel}
+      {/* Every chat's header is one row of the same height. A child chat's
+          way back is a small line above its title, never beside it. The title
+          keeps a readable width: when the row is too narrow, the least
+          important parts move into the "…" menu (SESSION_HEADER_PARTS). */}
+      <div className="flex min-w-0 flex-1 flex-col justify-center">
+        <SessionAncestryBreadcrumb
+          workspaceId={session.workspaceId}
+          parentSessionId={session.parentSessionId}
+          ancestors={ancestors}
+          loading={lineageLoading}
+          error={lineageError}
         />
-        {accessSlot}
-        {adminAccess ? (
-          <SessionAdminAccessIndicator
-            control={adminAccess}
-            onChangeTimeLimit={() => setGrantAdminOpen(true)}
-          />
-        ) : null}
-        <SiteOriginLink session={session} />
-        {onOpenAutomations ? (
-          // Only the room the title and access chips leave: its words
-          // truncate before the title does, and at worst it is its icon.
-          <div className="flex min-w-6 flex-[1_1_0%] pointer-coarse:min-w-11">
-            <AutomationWaitChip session={session} onOpen={onOpenAutomations} />
+        <div
+          ref={overflow.rowRef}
+          data-session-title-row=""
+          className={cn("flex min-w-0 items-center gap-1", hasCrumb && "h-7")}
+        >
+          <div
+            ref={overflow.titleRef}
+            className={cn("flex min-w-0 items-center", rename.editing && "flex-1")}
+          >
+            <SessionTitleEditor session={session} rename={rename} />
           </div>
-        ) : null}
-      </div>
-      <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
-        {/* Provider + model · effort · speed stay one cluster on the action side. */}
-        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted lg:flex xl:max-w-[22rem]">
-          {policyLoading ? (
+          {/* Below lg (or when the full badge has no room) the lifecycle is a
+              dot beside the title. */}
+          <CompactSessionStatus
+            paused={sessionControlPaused(session)}
+            waiting={Boolean(waiting)}
+            status={displayStatus}
+            label={startupLabel}
+            always={inMenu("status")}
+          />
+          {accessSlot && !inMenu("access") ? (
+            <span ref={part("access")} className="flex shrink-0 items-center">
+              {accessSlot}
+            </span>
+          ) : null}
+          {adminAccess?.state.active && !inMenu("fullAccess") ? (
+            <span ref={part("fullAccess")} className="flex shrink-0 items-center">
+              <SessionAdminAccessIndicator
+                control={adminAccess}
+                onChangeTimeLimit={() => setGrantAdminOpen(true)}
+              />
+            </span>
+          ) : null}
+          {sessionSiteOrigin(session) && !inMenu("site") ? (
+            <span ref={part("site")} className="flex shrink-0 items-center">
+              <SiteOriginLink session={session} />
+            </span>
+          ) : null}
+          {onOpenAutomations && !inMenu("automations") ? (
+            // The first to give way: its words shorten to its icon before
+            // anything moves into the menu. The weight is high enough that
+            // the title keeps every pixel until then (a sliver would already
+            // truncate it).
             <span
-              className="inline-flex items-center gap-1.5"
-              aria-busy="true"
-              aria-label="Loading model"
+              ref={part("automations")}
+              className="flex min-w-6 shrink-[100000] items-center pointer-coarse:min-w-11"
             >
-              <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
-              <Skeleton className="h-3 w-36" />
+              <AutomationWaitChip session={session} onOpen={onOpenAutomations} />
             </span>
-          ) : (
-            <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
-              {providerControl}
-              <span className="min-w-0 truncate font-normal">
-                {policyBits.map((bit, index) => (
-                  <span key={bit}>
-                    {index > 0 ? " · " : null}
-                    {bit}
-                  </span>
-                ))}
-              </span>
-            </span>
-          )}
+          ) : null}
         </div>
+      </div>
+      <div ref={overflow.clusterRef} className="flex shrink-0 items-center gap-0.5 lg:gap-2">
+        {/* Provider + model · effort · speed stay one cluster on the action side. */}
+        {inMenu("model") ? null : (
+          <div
+            ref={part("model")}
+            className="hidden max-w-[18rem] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted lg:flex xl:max-w-[22rem]"
+          >
+            {policyLoading ? (
+              <span
+                className="inline-flex items-center gap-1.5"
+                aria-busy="true"
+                aria-label="Loading model"
+              >
+                <Skeleton className="h-6 w-11 shrink-0 rounded-full" />
+                <Skeleton className="h-3 w-36" />
+              </span>
+            ) : (
+              <span className="inline-flex min-w-0 items-center gap-1.5 truncate font-medium text-fg-muted">
+                {providerControl}
+                <span className="min-w-0 truncate font-normal">
+                  {policyBits.map((bit, index) => (
+                    <span key={bit}>
+                      {index > 0 ? " · " : null}
+                      {bit}
+                    </span>
+                  ))}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
         {/* Below lg, machine, find and pin live in the "…" menu. */}
-        <span className="hidden min-w-0 lg:contents">{sandboxSlot}</span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => requestConversationFind(uiEvents)}
-          aria-label="Find in conversation"
-          data-conversation-find-trigger=""
-          title="Find in conversation (Ctrl/Cmd+F)"
-          className="hidden pointer-coarse:size-11 lg:inline-flex"
-        >
-          <SearchIcon className="size-4" />
-        </Button>
-        <Button
-          type="button"
-          variant={session.pinned ? "secondary" : "ghost"}
-          size="icon-sm"
-          aria-label={session.pinned ? "Unpin session" : "Pin session"}
-          aria-pressed={Boolean(session.pinned)}
-          aria-busy={pin.busy}
-          disabled={pin.busy}
-          className="hidden pointer-coarse:size-11 lg:inline-flex"
-          onClick={pin.toggle}
-        >
-          <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
-        </Button>
+        {sandboxSlot && !inMenu("machine") ? (
+          <span ref={part("machine")} className="hidden items-center lg:flex">
+            {sandboxSlot}
+          </span>
+        ) : null}
+        {inMenu("find") ? null : (
+          <Button
+            ref={part("find")}
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => requestConversationFind(uiEvents)}
+            aria-label="Find in conversation"
+            data-conversation-find-trigger=""
+            title="Find in conversation (Ctrl/Cmd+F)"
+            className="hidden pointer-coarse:size-11 lg:inline-flex"
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        )}
+        {inMenu("pin") ? null : (
+          <Button
+            ref={part("pin")}
+            type="button"
+            variant={session.pinned ? "secondary" : "ghost"}
+            size="icon-sm"
+            aria-label={session.pinned ? "Unpin session" : "Pin session"}
+            aria-pressed={Boolean(session.pinned)}
+            aria-busy={pin.busy}
+            disabled={pin.busy}
+            className="hidden pointer-coarse:size-11 lg:inline-flex"
+            onClick={pin.toggle}
+          >
+            <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
+          </Button>
+        )}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {pin.announcement}
         </span>
-        <div className="hidden items-center gap-2 lg:flex">
-          <ConnectionPill state={connectionState} />
-          {/* Admission vs lifecycle are different axes, but showing both when
-              control is Active (Running + Active) is redundant noise. When
-              paused, admission is the headline — hide lifecycle so we don't
-              imply the session is still "Running"/"Idle" under a pause gate. */}
-          {!sessionControlPaused(session) ? (
-            waiting ? (
-              <span
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
-                data-session-wait-badge=""
-              >
-                <span aria-hidden className="size-1.5 rounded-full bg-current" />
-                Waiting
-              </span>
+        {inMenu("status") ? null : (
+          <div ref={part("status")} className="hidden items-center gap-2 lg:flex">
+            <ConnectionPill state={connectionState} />
+            {/* Admission vs lifecycle are different axes, but showing both when
+                control is Active (Running + Active) is redundant noise. When
+                paused, admission is the headline — hide lifecycle so we don't
+                imply the session is still "Running"/"Idle" under a pause gate. */}
+            {!sessionControlPaused(session) ? (
+              waiting ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
+                  data-session-wait-badge=""
+                >
+                  <span aria-hidden className="size-1.5 rounded-full bg-current" />
+                  Waiting
+                </span>
+              ) : (
+                <SessionStatusBadge status={displayStatus} label={startupLabel} />
+              )
             ) : (
-              <SessionStatusBadge status={displayStatus} label={startupLabel} />
-            )
-          ) : (
-            <WorkstreamControlIndicator session={session} />
-          )}
-        </div>
-        <span className="sr-only lg:hidden">Connection {connectionState}.</span>
-        {keyAuthRequired ? (
+              <WorkstreamControlIndicator session={session} />
+            )}
+          </div>
+        )}
+        <span className={cn("sr-only", !inMenu("status") && "lg:hidden")}>
+          Connection {connectionState}.
+        </span>
+        {keyAuthRequired && !inMenu("accessKey") ? (
           <Button
+            ref={part("accessKey")}
             type="button"
             variant="ghost"
             size="icon-sm"
@@ -421,8 +492,9 @@ export function SessionHeader({
             <LockIcon className="size-4" />
           </Button>
         ) : null}
-        {onToggleInspector ? (
+        {onToggleInspector && !inMenu("panel") ? (
           <Button
+            ref={part("panel")}
             type="button"
             variant={inspectorOpen ? "secondary" : "ghost"}
             size="icon-sm"
@@ -466,8 +538,20 @@ export function SessionHeader({
               action();
             }}
           >
+            {onToggleInspector && inMenu("panel") ? (
+              <DropdownMenuItem
+                aria-keyshortcuts={panelKeys?.ariaKeys}
+                onSelect={() => {
+                  afterMenuClose.current = onToggleInspector;
+                }}
+              >
+                {inspectorOpen ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
+                {inspectorOpen ? "Hide workspace" : "Open workspace"}
+                {panelKeys ? <DropdownMenuShortcut>{panelKeys.label}</DropdownMenuShortcut> : null}
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
-              className="lg:hidden"
+              className={inMenu("find") ? undefined : "lg:hidden"}
               aria-keyshortcuts={findKeys?.ariaKeys}
               onSelect={() => {
                 afterMenuClose.current = () => requestConversationFind(uiEvents);
@@ -496,7 +580,7 @@ export function SessionHeader({
               ) : null}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="lg:hidden"
+              className={inMenu("pin") ? undefined : "lg:hidden"}
               aria-keyshortcuts={pinKeys?.ariaKeys}
               disabled={pin.busy}
               onSelect={() => pin.toggle()}
@@ -516,9 +600,36 @@ export function SessionHeader({
               </DropdownMenuItem>
             ) : null}
             {sandboxSlot ? (
-              <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
+              <div
+                className={cn(
+                  "flex min-h-9 items-center px-2 empty:hidden",
+                  !inMenu("machine") && "lg:hidden",
+                )}
+              >
                 {sandboxSlot}
               </div>
+            ) : null}
+            {/* Parts with no room in the header row (SESSION_HEADER_PARTS). */}
+            {accessSlot && inMenu("access") ? (
+              <div className="flex min-h-9 items-center gap-2 px-2 text-sm text-fg-muted">
+                Access
+                {accessSlot}
+              </div>
+            ) : null}
+            {onOpenAutomations && inMenu("automations") ? (
+              <AutomationWaitMenuItem
+                session={session}
+                onOpen={() => {
+                  afterMenuClose.current = onOpenAutomations;
+                }}
+              />
+            ) : null}
+            {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
+            {keyAuthRequired && inMenu("accessKey") ? (
+              <DropdownMenuItem onSelect={onForgetAccessKey}>
+                <LockIcon />
+                Clear access key
+              </DropdownMenuItem>
             ) : null}
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
@@ -536,7 +647,18 @@ export function SessionHeader({
                 Usage limit
               </DropdownMenuItem>
             ) : null}
-            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+            {adminAccess?.state.active && inMenu("fullAccess") ? (
+              <>
+                <DropdownMenuSeparator />
+                <SessionAdminAccessMenuItems
+                  control={adminAccess}
+                  onChangeTimeLimit={() => setGrantAdminOpen(true)}
+                  runAfterClose={(action) => {
+                    afterMenuClose.current = action;
+                  }}
+                />
+              </>
+            ) : adminAccess?.state.active && adminAccess.state.canRevoke ? (
               <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
                 <ShieldOffIcon />
                 Turn off full access
@@ -608,7 +730,7 @@ function AutomationWaitChip({ session, onOpen }: { session: Session; onOpen: () 
           aria-label={t("automations.wait.openPanel", {
             wait: wait?.label ?? t("automations.wait.none"),
           })}
-          className="inline-flex min-w-0 max-w-60 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+          className="inline-flex min-w-0 max-w-60 items-center justify-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <AutomationWaitIcon kind={kind} />
           <span className="hidden min-w-0 truncate sm:block @max-[34rem]/titlebar:hidden!">
@@ -654,25 +776,43 @@ function AutomationWaitIcon({ kind }: { kind: "event" | "schedule" | "none" }) {
   );
 }
 
-/** Small-screen status: a dot beside the title, named for assistive tech. */
+/** The automation chip as a "…" menu item, for a header with no room for it. */
+function AutomationWaitMenuItem({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const wait = sessionAutomationWaitWords(t, session, { now: new Date() });
+  return (
+    <DropdownMenuItem
+      onSelect={onOpen}
+      aria-label={t("automations.wait.openPanel", {
+        wait: wait?.label ?? t("automations.wait.none"),
+      })}
+    >
+      <AutomationWaitIcon kind={wait?.kind ?? "none"} />
+      <span className="min-w-0 truncate">{wait?.short ?? t("sessionChrome.automation")}</span>
+    </DropdownMenuItem>
+  );
+}
+
+/**
+ * Small-screen status: a dot beside the title, named for assistive tech.
+ * `always` keeps it on wide screens too, when the full badge has no room.
+ */
 function CompactSessionStatus({
   paused,
   waiting,
   status,
   label,
+  always = false,
 }: {
   paused: boolean;
   waiting: boolean;
   status: SessionDisplayStatus;
   label?: string | undefined;
+  always?: boolean | undefined;
 }) {
+  const className = cn("inline-flex shrink-0 items-center", !always && "lg:hidden");
   if (paused) {
     return (
-      <span
-        data-compact-session-status="paused"
-        title="Paused"
-        className="inline-flex shrink-0 items-center lg:hidden"
-      >
+      <span data-compact-session-status="paused" title="Paused" className={className}>
         <PauseIcon aria-hidden className="size-2.5 shrink-0 fill-current text-status-waiting" />
         <span className="sr-only">Paused</span>
       </span>
@@ -680,11 +820,7 @@ function CompactSessionStatus({
   }
   if (waiting) {
     return (
-      <span
-        data-compact-session-status="waiting"
-        title="Waiting"
-        className="inline-flex shrink-0 items-center lg:hidden"
-      >
+      <span data-compact-session-status="waiting" title="Waiting" className={className}>
         <span aria-hidden className="size-2 rounded-full bg-status-waiting" />
         <span className="sr-only">Waiting</span>
       </span>
@@ -696,7 +832,7 @@ function CompactSessionStatus({
       data-compact-session-status={status}
       data-status={status}
       title={name}
-      className="inline-flex shrink-0 items-center lg:hidden"
+      className={className}
     >
       <StatusDot status={status} className="size-2" />
       <span className="sr-only">{name}</span>
@@ -807,7 +943,7 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
         dir="auto"
-        className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden"
+        className="-mx-1.5 w-full min-w-0 truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden"
         style={{ outline: "none" }}
       />
     );
@@ -820,6 +956,7 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
         dir="auto"
+        data-session-title-text=""
         className="min-w-0 shrink truncate rounded-sm text-left text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg hover:text-fg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:min-h-11 pointer-coarse:px-2"
       >
         {display}

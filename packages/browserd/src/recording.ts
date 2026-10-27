@@ -15,6 +15,7 @@ import { mkdir, open, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { InteractionControllerError } from "@opengeni/interaction";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const RECORDING_BUNDLE_MAGIC = "OGREC1\n";
 export const RECORDING_MAX_DURATION_MS = 30 * 60_000;
@@ -283,7 +284,7 @@ export class BrowserRecording {
         this.stopStream = await this.attach(targetId);
       })
       .catch((error: unknown) => {
-        this.streamError = error instanceof Error ? error.message : String(error);
+        this.streamError = errorMessage(error);
       });
   }
 

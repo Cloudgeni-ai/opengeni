@@ -66,6 +66,8 @@ Description=Compute host guard: stops the VMs when the fleet lease ends
 [Service]
 ExecStart=/usr/local/bin/compute-host guard
 Restart=no
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=1
 UNIT
 cat >/etc/systemd/system/compute-host.service <<UNIT
 [Unit]

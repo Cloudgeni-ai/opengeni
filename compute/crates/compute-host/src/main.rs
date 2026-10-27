@@ -3,21 +3,21 @@
 mod bench;
 mod fleet_cli;
 mod observing;
+mod policy;
 mod readying;
 
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy, Step};
+use compute_core::Step;
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
-use compute_host::cpu_share::ProcessorShare;
-use compute_host::fleet::{FleetConfig, Leased, Prepared};
+use compute_host::fleet::{FleetConfig, GuardConfig, Leased, Lossy, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
 use compute_host::observe::canary::{self, CanaryConfig};
@@ -30,8 +30,10 @@ use compute_host::{
     PagerConfig, PoolConfig, Store, Threads, serve,
 };
 use tokio::signal::unix::SignalKind;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 use crate::bench::{BenchArgs, bench, exec};
+use crate::policy::{guarantee_vm_processors, host_policy, processor_share};
 
 /// How long a template's freshly booted guest may take to become ready.
 const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -160,6 +162,8 @@ impl CreateArgs {
             settings.compress = compress;
         }
         SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: self.image,
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -221,7 +225,9 @@ struct ServeArgs {
     pager_record_ms: u64,
     /// The guest kernel's command line. The engine adds the clock source and
     /// the free-page reporting order for the host's memory profile unless
-    /// this names them.
+    /// this names them. The agent adds `init=/opengeni/init`, the init every
+    /// image has, so a sandbox whose packages replaced `/sbin/init` still
+    /// boots.
     #[arg(
         long,
         default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1"
@@ -305,7 +311,8 @@ struct ServeArgs {
     /// Every guest must listen on it: the agent also connects to it to
     /// find guests that stopped while their VMs run on (a power-off, a
     /// halt, a hung kernel), and ends the VM of one that takes no
-    /// connection for five checks thirty seconds apart, as if it crashed.
+    /// connection for five checks thirty seconds apart, as if it crashed;
+    /// one whose kernel said on its console that it halted, at its first.
     #[arg(long)]
     restore_notice_port: Option<u32>,
     /// Keep warm templates: a guest vsock port that accepts connections
@@ -352,6 +359,16 @@ struct ServeArgs {
     /// host, metadata services or other sandboxes. Repeatable.
     #[arg(long = "reach")]
     reach: Vec<compute_host::net::Reach>,
+    /// A destination, as for `--reach`, that only the sandboxes that ask
+    /// for it by name may open: `NAME=DESTINATION:PORTS`, such as
+    /// `previews=k3s.internal:6443`. Entries with one name make one offer
+    /// of all their destinations; a sandbox's create lists the names it
+    /// asks for in its `reach`, and the host opens and answers them in its
+    /// namespace alone. In a fleet, the host tells the control service
+    /// its offers' names, and only such sandboxes are placed on it for
+    /// them. Needs `--network`. Repeatable.
+    #[arg(long = "offer", requires = "network")]
+    offers: Vec<compute_host::net::Offer>,
     /// Another range sandboxes may not reach, such as the host's public
     /// address where the cloud maps it onto a private one. Repeatable.
     #[arg(long = "block")]
@@ -409,6 +426,17 @@ impl ServeArgs {
             blocking: get(self.blocking_threads, compress + 64),
             compress,
         }
+    }
+
+    /// The sandboxes' network, if the host makes one, taking its settings.
+    fn take_network(&mut self) -> Option<NetworkConfig> {
+        self.network.then(|| NetworkConfig {
+            pool: self.network_pool,
+            reach: std::mem::take(&mut self.reach),
+            offers: std::mem::take(&mut self.offers),
+            blocked: std::mem::take(&mut self.blocked),
+            dns: std::mem::take(&mut self.dns),
+        })
     }
 }
 
@@ -544,12 +572,59 @@ fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output =
     output
 }
 
+/// Runs the guard (`compute-host guard`) until it stops; `log` is the
+/// log it says what it does in, written without waiting.
+async fn guard(config: GuardConfig, log: Option<&Lossy>) -> anyhow::Result<()> {
+    // On a thread of its own: the guard takes over the watchdog and feeds
+    // it while its pages are brought in.
+    std::thread::Builder::new()
+        .name("guard-lock".into())
+        .spawn(|| {
+            if let Err(error) = compute_host::fleet::keep_resident() {
+                tracing::error!(
+                    %error,
+                    "the guard could not lock itself in memory: a host short of memory may stall it until the watchdog resets the machine"
+                );
+            }
+        })?;
+    // Asked to stop, the guard stops at its first step that may feed the
+    // watchdog (see `run_guard`), not where the signal finds it.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
+    let asked = Arc::clone(&stop);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+        asked.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let guarded =
+        tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop)).await?;
+    // What it last said, unless the journal has stalled: the next guard has
+    // to feed the watchdog in time.
+    if let Some(log) = log {
+        let _ = log.flush_within(compute_host::fleet::GUARD_STEP);
+    }
+    guarded
+}
+
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
+    // The guard must never wait on the journal (see `fleet::Lossy`).
+    let guard_log = match &cli.command {
+        Command::Guard(_) => Some(Lossy::new(std::io::stderr())?),
+        _ => None,
+    };
+    let writer = match &guard_log {
+        Some(log) => BoxMakeWriter::new(log.clone()),
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         .init();
     let client = Client::new(&cli.socket);
     match cli.command {
@@ -604,25 +679,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
-        Command::Guard(args) => {
-            let config = args.config();
-            // Asked to stop, the guard stops at its first step that may
-            // feed the watchdog (see `run_guard`), not where the signal
-            // finds it.
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
-            let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
-            let asked = Arc::clone(&stop);
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = terminate.recv() => {}
-                    _ = interrupt.recv() => {}
-                }
-                asked.store(true, std::sync::atomic::Ordering::Relaxed);
-            });
-            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop))
-                .await?
-        }
+        Command::Guard(args) => guard(args.config(), guard_log.as_ref()).await,
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;
@@ -692,62 +749,8 @@ fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
     })
 }
 
-/// What the host may do, from its flags.
-fn host_policy(
-    args: &ServeArgs,
-    memory_profile: MemoryProfile,
-    sample_every: Duration,
-) -> anyhow::Result<HostPolicy> {
-    let mut policy = HostPolicy::default();
-    for &(step, limit) in &args.limits {
-        policy.limits = policy.limits.with(step, limit);
-    }
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-    let budget = admission_budget(
-        &meminfo,
-        memory_profile,
-        args.memory_capacity_mib,
-        args.memory_headroom_mib,
-    );
-    tracing::info!(capacity_mib = budget >> 20, "guest memory capacity");
-    policy.admission = Some(Admission {
-        budget,
-        buffer: args.memory_buffer_mib.map_or(budget / 16, |mib| mib << 20),
-        // Work of its own is reported once per busy window, at the first
-        // sample after the window ends: work seen within a window and two
-        // samples keeps a sandbox from being pushed deeper to make room.
-        busy_grace: args.busy_window + 2 * sample_every,
-    });
-    // Those its VMs may run on.
-    let processors = compute_host::cpu_share::processors(&args.cgroup);
-    let cpu = cpu_budget(
-        processors,
-        args.cpu_capacity_millis,
-        args.cpu_headroom_millis,
-    )?;
-    policy.cpu_budget = Some(cpu);
-    policy.memory = memory_policy(
-        memory_profile,
-        args.memory_low_mib,
-        args.memory_high_mib,
-        meminfo_field(&meminfo, "MemTotal:") << 10,
-    )?;
-    if let Some(memory) = policy.memory {
-        tracing::info!(
-            low_mib = memory.low_watermark >> 20,
-            high_mib = memory.high_watermark >> 20,
-            "memory pressure relief"
-        );
-    }
-    policy.disk = Some(disk_policy(
-        &args.root,
-        args.disk_reserve_mib,
-        args.disk_reserve_inodes,
-    )?);
-    Ok(policy)
-}
-
-async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let network = args.take_network();
     let pool = pool_config(&args);
     let threads = args.threads();
     tracing::info!(?threads, "thread counts");
@@ -767,19 +770,22 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
     readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);
-    let budget = policy
-        .admission
+    let prepare =
+        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
+    // Only a host with a store to keep them builds images.
+    let guest = prepare
         .as_ref()
-        .map_or(0, |admission| admission.budget);
-    let fleet = args.fleet.config(&fleet_cli::Described {
-        root: &args.root,
-        memory_profile: memory_profile.to_string(),
-        cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
-        memory_bytes: budget,
-        cpu_millis: policy
-            .cpu_budget
-            .context("a serving host guarantees processor time")?,
-    })?;
+        .filter(|_| args.store.is_some())
+        .map(|config| config.guest_digest.clone());
+    let fleet = fleet_of(
+        &args.fleet,
+        &args.root,
+        &engine,
+        memory_profile,
+        &policy,
+        network.as_ref(),
+        guest,
+    )?;
     let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
@@ -793,8 +799,6 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
          the control service only"
     );
-    let prepare =
-        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -810,12 +814,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
         pool,
-        network: args.network.then_some(NetworkConfig {
-            pool: args.network_pool,
-            reach: args.reach,
-            blocked: args.blocked,
-            dns: args.dns,
-        }),
+        network,
         busy: (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
             cpu_percent: args.busy_cpu_percent,
             io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),
@@ -852,6 +851,33 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         fleet.zip(prepared),
     ))
     .await
+}
+
+/// The fleet this host joins, if any, told what the host is: its shape,
+/// what it offers sandboxes and, when it builds images, its guest programs.
+fn fleet_of(
+    fleet: &fleet_cli::FleetArgs,
+    root: &std::path::Path,
+    engine: &Firecracker,
+    memory_profile: MemoryProfile,
+    policy: &compute_core::HostPolicy,
+    network: Option<&NetworkConfig>,
+    guest: Option<String>,
+) -> anyhow::Result<Option<FleetConfig>> {
+    fleet.config(&fleet_cli::Described {
+        root,
+        memory_profile: memory_profile.to_string(),
+        cpu_template: compute_engine::Engine::runtime(engine).to_owned(),
+        memory_bytes: policy
+            .admission
+            .as_ref()
+            .map_or(0, |admission| admission.budget),
+        cpu_millis: policy
+            .cpu_budget
+            .context("a serving host guarantees processor time")?,
+        offers: network.map_or_else(Vec::new, NetworkConfig::offer_names),
+        guest,
+    })
 }
 
 /// The memory profile the CPU's hypervisor flag calls for, when the
@@ -982,190 +1008,9 @@ async fn run_agent<S: Store>(
 /// How long a stopping agent waits for its last events to be exported.
 const FLUSH_WITHIN: Duration = Duration::from_secs(5);
 
-/// One number from `/proc/meminfo`, such as `MemTotal:` (in KiB) or
-/// `HugePages_Total:`; 0 when missing.
-fn meminfo_field(meminfo: &str, name: &str) -> u64 {
-    meminfo
-        .lines()
-        .find_map(|line| line.strip_prefix(name))
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
-/// Bytes of guest memory the host promises its sandboxes at once:
-/// `capacity_mib` if given, else the huge-page pool where guest memory
-/// lives in it (nothing else on the host uses it), else the host's memory
-/// less `headroom_mib` (default a sixteenth, at least 1 GiB).
-fn admission_budget(
-    meminfo: &str,
-    profile: MemoryProfile,
-    capacity_mib: Option<u64>,
-    headroom_mib: Option<u64>,
-) -> u64 {
-    if let Some(capacity) = capacity_mib {
-        return capacity << 20;
-    }
-    if profile.pages == compute_engine::PageSize::Huge {
-        let pages = meminfo_field(meminfo, "HugePages_Total:");
-        return pages * (meminfo_field(meminfo, "Hugepagesize:") << 10);
-    }
-    let total = meminfo_field(meminfo, "MemTotal:") << 10;
-    let headroom = headroom_mib.map_or((total / 16).max(1 << 30), |mib| mib << 20);
-    total.saturating_sub(headroom)
-}
-
-/// Millicores a host of `processors` guarantees its sandboxes at once:
-/// `capacity` when given, otherwise its processors less `headroom`, by
-/// default a sixteenth of them, at least 500 millicores.
-fn cpu_budget(
-    processors: usize,
-    capacity: Option<u64>,
-    headroom: Option<u64>,
-) -> anyhow::Result<u64> {
-    if let Some(capacity) = capacity {
-        return Ok(capacity);
-    }
-    let total = u64::try_from(processors)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(1000);
-    let headroom = headroom.unwrap_or((total / 16).max(500));
-    let budget = total.saturating_sub(headroom);
-    anyhow::ensure!(
-        budget > 0,
-        "a processor headroom of {headroom} millicores leaves sandboxes none of this host's \
-         {total}: lower --cpu-headroom-millis or give --cpu-capacity-millis"
-    );
-    Ok(budget)
-}
-
-/// The VMs' processor share, when the host guarantees processor time: of
-/// `policy`'s budget, kept as given when the operator gave it.
-fn processor_share(args: &ServeArgs, policy: &HostPolicy) -> Option<ProcessorShare> {
-    let share = ProcessorShare::new(args.cgroup.clone(), policy.cpu_budget?);
-    Some(if args.cpu_capacity_millis.is_some() {
-        share.stated()
-    } else {
-        share
-    })
-}
-
-/// Gives the VMs' group the processor `share` that covers the host's
-/// budget against the groups beside and above it (see
-/// [`compute_host::cpu_share`]), and sets `policy`'s budget to what the
-/// host guarantees with it; returns the share, which the agent keeps up
-/// to date as those groups change.
-fn guarantee_vm_processors(
-    share: Option<ProcessorShare>,
-    policy: &mut HostPolicy,
-) -> anyhow::Result<Option<ProcessorShare>> {
-    let Some(share) = share else {
-        return Ok(None);
-    };
-    let budget = share.budget();
-    let applied = share.apply().with_context(|| {
-        format!(
-            "setting the processor share of {}",
-            share.cgroup().display()
-        )
-    })?;
-    if applied.capacity == budget && applied.whole(budget) {
-        tracing::info!(
-            capacity_millis = applied.capacity,
-            weight = applied.weight,
-            processors_millis = applied.processors,
-            "guaranteed processor capacity"
-        );
-    } else if applied.capacity > applied.gets {
-        tracing::warn!(
-            capacity_millis = applied.capacity,
-            gets_millis = applied.gets,
-            weight = applied.weight,
-            "the processor capacity given is more than the VMs get with every group beside \
-             them busy: requests then hold only in proportion"
-        );
-    } else {
-        tracing::warn!(
-            capacity_millis = applied.capacity,
-            budget_millis = budget,
-            weight = applied.weight,
-            "with every group beside and above them busy the VMs get less than the processor \
-             budget; guaranteeing what they get"
-        );
-    }
-    policy.cpu_budget = Some(applied.capacity);
-    Ok(Some(share))
-}
-
-/// The least default low watermark on 4 KiB pages.
-const DEFAULT_LOW_WATERMARK_MIN: u64 = 512 << 20;
-
-/// When the host relieves memory pressure (ADR 14): at the watermarks
-/// given, which go together. Without them a host on 4 KiB pages still
-/// relieves it, because its sandboxes may use more than their request and
-/// nothing else keeps that use from running the host out of memory: from
-/// a thirty-second of the host's `total` bytes available (at least
-/// 512 MiB) until twice that is. With huge pages every awake sandbox is
-/// booked whole, so there is relief only when asked for.
-fn memory_policy(
-    profile: MemoryProfile,
-    low_mib: Option<u64>,
-    high_mib: Option<u64>,
-    total: u64,
-) -> anyhow::Result<Option<MemoryPolicy>> {
-    let (low, high) = match (low_mib, high_mib) {
-        (Some(low), Some(high)) => (low << 20, high << 20),
-        (None, None) if profile.pages == compute_engine::PageSize::Base => {
-            let low = (total / 32).max(DEFAULT_LOW_WATERMARK_MIN);
-            (low, 2 * low)
-        }
-        (None, None) => return Ok(None),
-        _ => bail!("--memory-low-mib and --memory-high-mib go together"),
-    };
-    if high < low {
-        bail!("--memory-high-mib must be at least --memory-low-mib");
-    }
-    Ok(Some(MemoryPolicy {
-        low_watermark: low,
-        high_watermark: high,
-        compressed_percent: 25,
-        balloon_grace: Duration::from_secs(3),
-    }))
-}
-
-/// The local disk kept back from saves on the filesystem holding `root`:
-/// as given, or a twentieth of its bytes (at least 1 GiB) and inodes (at
-/// least 1024).
-fn disk_policy(
-    root: &Path,
-    reserve_mib: Option<u64>,
-    reserve_inodes: Option<u64>,
-) -> anyhow::Result<DiskPolicy> {
-    // Before anything is made there: a state root on a filesystem whose
-    // saves cannot be booked is refused untouched.
-    compute_host::check_filesystem(root)
-        .with_context(|| format!("state root {}", root.display()))?;
-    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
-    let stat = rustix::fs::statvfs(root)
-        .with_context(|| format!("reading the filesystem of {}", root.display()))?;
-    let size = stat.f_blocks.saturating_mul(stat.f_frsize);
-    let policy = DiskPolicy {
-        reserve: reserve_mib.map_or((size / 20).max(1 << 30), |mib| mib << 20),
-        reserve_inodes: reserve_inodes.unwrap_or((stat.f_files / 20).max(1024)),
-    };
-    tracing::info!(
-        reserve_mib = policy.reserve >> 20,
-        reserve_inodes = policy.reserve_inodes,
-        "disk kept back from saves"
-    );
-    Ok(policy)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const GIB: u64 = 1 << 30;
 
     /// Work left on a blocking thread when the command ends does not hold
     /// the process up: an agent's lease is no longer renewed by then.
@@ -1191,84 +1036,6 @@ mod tests {
             began.elapsed() < Duration::from_secs(2),
             "waited {:?} for blocking work",
             began.elapsed()
-        );
-    }
-
-    /// A host keeps a sixteenth of its processors back, at least half of
-    /// one, unless told otherwise.
-    #[test]
-    fn processor_capacity_keeps_headroom_back() {
-        assert_eq!(cpu_budget(16, None, None).unwrap(), 15_000);
-        assert_eq!(cpu_budget(64, None, None).unwrap(), 60_000);
-        assert_eq!(cpu_budget(2, None, None).unwrap(), 1500);
-        assert_eq!(cpu_budget(8, None, Some(2000)).unwrap(), 6000);
-        // Given outright, overcommitted or not.
-        assert_eq!(cpu_budget(8, Some(32_000), None).unwrap(), 32_000);
-        assert!(cpu_budget(1, None, Some(1000)).is_err());
-    }
-
-    /// A host on 4 KiB pages relieves memory pressure without being told
-    /// to: its sandboxes may use more than they are guaranteed.
-    #[test]
-    fn four_kib_pages_relieve_pressure_by_default() {
-        let policy = memory_policy(MemoryProfile::bare_metal(), None, None, 32 * GIB)
-            .unwrap()
-            .unwrap();
-        assert_eq!(policy.low_watermark, GIB);
-        assert_eq!(policy.high_watermark, 2 * GIB);
-        // A small host keeps at least 512 MiB.
-        let small = memory_policy(MemoryProfile::bare_metal(), None, None, 4 * GIB)
-            .unwrap()
-            .unwrap();
-        assert_eq!(small.low_watermark, 512 << 20);
-        assert_eq!(small.high_watermark, GIB);
-    }
-
-    /// Huge pages book every awake sandbox whole: relief only when asked.
-    #[test]
-    fn huge_pages_relieve_pressure_only_when_asked() {
-        assert_eq!(
-            memory_policy(MemoryProfile::nested(), None, None, 32 * GIB).unwrap(),
-            None
-        );
-        let asked = memory_policy(MemoryProfile::nested(), Some(1024), Some(1536), 32 * GIB)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (asked.low_watermark, asked.high_watermark),
-            (GIB, 1536 << 20)
-        );
-    }
-
-    #[test]
-    fn watermarks_go_together_in_order() {
-        let profile = MemoryProfile::bare_metal();
-        assert!(memory_policy(profile, Some(1024), None, 32 * GIB).is_err());
-        assert!(memory_policy(profile, None, Some(1024), 32 * GIB).is_err());
-        assert!(memory_policy(profile, Some(2048), Some(1024), 32 * GIB).is_err());
-        let given = memory_policy(profile, Some(4096), Some(4096), 32 * GIB)
-            .unwrap()
-            .unwrap();
-        assert_eq!(given.low_watermark, given.high_watermark);
-    }
-
-    /// The capacity a host offers: the huge-page pool, or its memory less
-    /// a sixteenth (at least 1 GiB), unless given.
-    #[test]
-    fn capacity_follows_the_profile() {
-        let meminfo =
-            "MemTotal:       33554432 kB\nHugePages_Total:   13000\nHugepagesize:       2048 kB\n";
-        assert_eq!(
-            admission_budget(meminfo, MemoryProfile::bare_metal(), None, None),
-            30 * GIB
-        );
-        assert_eq!(
-            admission_budget(meminfo, MemoryProfile::nested(), None, None),
-            13000 * (2 << 20)
-        );
-        assert_eq!(
-            admission_budget(meminfo, MemoryProfile::bare_metal(), Some(1024), None),
-            GIB
         );
     }
 }

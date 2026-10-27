@@ -30,6 +30,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -336,6 +337,12 @@ const LazyFailedSessionBanner = lazy(() =>
 const LazyCreditRefusalNotice = lazy(() =>
   import("../components/credits/credit-refusal-notice").then((module) => ({
     default: module.CreditRefusalNotice,
+  })),
+);
+// Add credits from the chat opens checkout here; paying returns to this chat.
+const LazyCreditTopupPrompt = lazy(() =>
+  import("../components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -1429,7 +1436,16 @@ export function SessionRoute({
         session={session}
         events={events}
         connectionState={connectionState}
-        primary={chatPane}
+        primary={
+          <ChatPaymentPages
+            accountId={
+              session?.accountId ??
+              context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
+            }
+          >
+            {chatPane}
+          </ChatPaymentPages>
+        }
         onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -3365,6 +3381,24 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
+  const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  const creditTopupPrompt =
+    canBuyCredits && workspaceAccountId ? (
+      <Suspense fallback={null}>
+        {creditTopupOpen ? (
+          <LazyCreditTopupPrompt
+            purpose="topup"
+            open
+            workspaceId={props.session.workspaceId}
+            accountId={workspaceAccountId}
+            canBuyCredits
+            onOpenChange={setCreditTopupOpen}
+            beforeLeave={composer.flushDraft}
+          />
+        ) : null}
+      </Suspense>
+    ) : null;
   const canConnectModel = hasWorkspacePermission(
     context.accessContext,
     props.session.workspaceId,
@@ -3398,6 +3432,7 @@ function SessionChatPane(props: {
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={canBuyCredits}
+            onAddCredits={openCreditTopup}
             canConnectModel={canConnectModel}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
@@ -3480,9 +3515,16 @@ function SessionChatPane(props: {
           })}
           message={sessionCreditRefusal.message}
           workspaceId={props.session.workspaceId}
+          accountId={workspaceAccountId}
+          canReadBilling={
+            Boolean(workspaceAccountId) &&
+            hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:read")
+          }
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
+          continuing
           onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onAddCredits={openCreditTopup}
           onDismiss={() => setCreditRefusal(null)}
         />
       </Suspense>
@@ -3516,6 +3558,7 @@ function SessionChatPane(props: {
     Fragment,
     null,
     reviewDetailPane,
+    creditTopupPrompt,
     createElement(
       "div",
       { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },

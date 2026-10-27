@@ -740,12 +740,21 @@ covers Batch's seconds-cheap source contracts, lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
 The cheap source contracts are the shared pending-changeset release plan
 (`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
-ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
-Site runtime check, the committed workflow execution graph (otherwise only a unit
-test that workflow-changing PRs defer to Batch), and the impact plan's guards
-except lint (its own step), `subscription-contract` (about 20 seconds) and the
-output-producing guards Batch also defers. A broken changeset or stale public API
-snapshot therefore fails its own PR instead of a batch of up to 15.
+ignored/not-ignored changeset or an ignored-only plan fails the PR), every
+generated artifact Batch verifies (`scripts/ci/check-generated-artifacts.ts`: the
+Site runtime, organization MCP action catalog, React compiled CSS, Site gateway
+shell, child lifecycle notice protocol and client Skill mirrors, each re-rendered
+in seconds; a stale one fails with the exact regenerate command), the committed
+workflow execution graph (otherwise only a unit
+test that workflow-changing PRs defer to Batch), and every impact-plan guard
+Batch source contracts run, except lint (its own step). The legacy subscription
+runtime scan reads only the PR's changed files there (the whole tree when its
+registry, engine or toolchain changes); Batch scans the whole tree. A broken
+changeset, stale public API snapshot or public-hygiene finding therefore fails
+its own PR instead of a batch of up to 15.
+When the web app or a workspace it builds from is affected (any broad impact
+included), the job also runs Batch's "Production web bundle" step unchanged, so
+the bundle's chunk guards fail the PR rather than a batch.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
 defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
@@ -753,7 +762,10 @@ trigger this deferral: the selector re-plans without them to confirm no other
 broad fence is hidden, then selects the capped direct-package units. The original
 impact planner and Batch plan remain unchanged. The retained PR plan records the selection
 reason and original, direct, selected and deferred counts; intentional deferral
-is not a claim that those tests passed. All selected tests must execute successfully
+is not a claim that those tests passed. Separately, `PR_INVENTORY_TESTS` in
+`scripts/ci/pr-fast-plan.ts` lists cross-package inventory tests (routes, SDK
+surfaces, workflow graph, release schema contract) that run whenever their area
+changes, outside the cap and broad deferral. All selected tests must execute successfully
 for the fast job and required aggregate to pass. A failed selected test is never
 converted into an intentional skip. Type selection is unchanged. Full guards
 and the full suite remain in Batch CI, whose impact plan is not capped.
@@ -988,6 +1000,12 @@ off with a five-submission budget. Uncertain observation has an eight-check budg
 Blocked effects do not falsely mark an ejection announced or starve unrelated
 queue work. All state is rebuildable from Git, not a local-only outbox.
 
+A build drops every member whose merge tree conflicts with the candidate
+predecessor or an earlier member, in the same controller step. Each dropped
+exact head is ejected with its comment intent in the same fenced state
+transaction, and the remaining members are rebuilt as their own canonical
+manifest and published when the slot allows. Conflicts never cost extra steps.
+
 After investigating a blocked/uncertain effect and confirming it was not applied,
 an operator can explicitly reset only that effect using the observed state SHA:
 
@@ -1002,6 +1020,20 @@ It is a write operation, not permitted during the current local-only task.
 Exactly-once arbitrary REST effects are not promised: external marker deletion,
 manual reruns, or operator recovery based on incomplete evidence remain provider/
 operator limitations. Git landing itself remains atomic and restart-reconcilable.
+
+Each maintenance tick first processes the highest-priority due effect
+(disable-auto-merge, then follow-up, then rerun, then the oldest other effect,
+such as a cancel or comment). When that was a rerun, it also processes the next
+due non-rerun effect. It then drains further due comments, oldest first, up to
+eight comments in the tick, counting any comment already processed. Batch
+landings stage one comment per member, so a single comment per tick falls
+behind. Every drained comment reloads state, rechecks the lease and uses the
+same durable claim, final lease read and marker reconciliation. The drain is
+skipped when an earlier effect in the tick was throttled, deferred or rejected,
+and it stops at once when the lease moves to another owner or a drained comment
+ends any way other than submitted or reconciled (throttled, rejected, uncertain,
+out of retry budget, or a changed claim). The remaining comments keep their
+order for the next tick.
 
 ## Shadow evidence and operations
 

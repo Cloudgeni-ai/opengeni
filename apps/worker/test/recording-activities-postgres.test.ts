@@ -735,7 +735,11 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
   });
 });
 
-async function capturedDictation(storage: ReturnType<typeof memoryStorage>, seconds = 3) {
+async function capturedDictation(
+  storage: ReturnType<typeof memoryStorage>,
+  seconds = 3,
+  options: { language?: string; keyterms?: string[] } = {},
+) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -790,7 +794,7 @@ async function capturedDictation(storage: ReturnType<typeof memoryStorage>, seco
     transcription: {
       providerId: "voice-one",
       model: "voice-input",
-      options: {},
+      options,
       creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
     },
   });
@@ -866,6 +870,8 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       },
     });
     expect(calls[0]!.billing!.trustedDurationSeconds).toBeGreaterThan(2);
+    // No language was named, so the provider detects it.
+    expect(calls[0]!.language).toBeUndefined();
 
     const stored = await getRecording(client.db, {
       ...dictation.actor,
@@ -890,6 +896,32 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     ).rejects.toThrow();
     // Already gone is done.
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a dictation started in a language is heard in it, listening for the vocabulary", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage, 3, {
+      language: "nb",
+      keyterms: ["Kubernetes"],
+    });
+    const calls: TranscriptionRequest[] = [];
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      return {
+        text: "Husk å sende tallene.",
+        languages: ["no"],
+        providerId: "voice-one",
+        audioSeconds: 3,
+        latencyMs: 5,
+        creditCostMicros: 0,
+      };
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toMatchObject({
+      outcome: "complete",
+    });
+    expect(calls.map((call) => call.language)).toEqual(["nb"]);
+    expect(calls.map((call) => call.keyterms)).toEqual([["Kubernetes"]]);
   });
 
   test("a retried dictation asks afresh and is still billed once per piece", async () => {

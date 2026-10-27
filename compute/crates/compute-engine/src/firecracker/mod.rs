@@ -9,11 +9,14 @@
 
 mod api;
 mod balloon;
+mod drives;
 mod holder;
 mod jail;
+mod logs;
 mod pager;
 mod process;
 mod runtime;
+mod snapshot;
 
 use std::fs::{self, File};
 use std::io;
@@ -31,6 +34,7 @@ use tokio::time::{Instant, sleep, timeout};
 use self::api::Api;
 pub use self::api::ApiError;
 use self::balloon::Balloon;
+use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
 use self::jail::{
     API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
@@ -38,8 +42,11 @@ use self::jail::{
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use self::runtime::{Binary, chosen, readable, record_runtime, recorded_runtime};
+use self::snapshot::{
+    check_source, create_request, lacks_realtime_clock, load_failure, load_request,
+};
 use crate::Readable;
-use crate::cgroup::{Cgroup, MemoryStats};
+use crate::cgroup::{Cgroup, MemoryStats, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
@@ -140,66 +147,6 @@ fn machine_config(spec: &VmSpec, profile: MemoryProfile) -> Value {
         "track_dirty_pages": profile.tracks_dirty_pages(),
         "huge_pages": huge_pages(profile.pages),
     })
-}
-
-/// The `/snapshot/load` request for restoring `files` as the VM in `spec`.
-///
-/// Host-side paths and devices are taken from `spec`, not from the snapshot, so
-/// a snapshot restores the same way on another host or in another directory.
-/// Paths are the ones the jailed VMM sees. Page size and dirty tracking come
-/// from this host's profile, not from the host that took the snapshot: the
-/// image is plain memory either way. The profile must already allow
-/// `files.memory` (see [`check_source`]).
-fn load_request(
-    spec: &VmSpec,
-    jail: &Jail,
-    files: &RestoreFiles,
-    profile: MemoryProfile,
-) -> Result<Value, String> {
-    let backend = match &files.memory {
-        MemorySource::File(path) => {
-            json!({ "backend_type": "File", "backend_path": jail.inside(path)? })
-        }
-        MemorySource::Pager(pager) => {
-            json!({ "backend_type": "Uffd", "backend_path": jail.inside(&pager.socket)? })
-        }
-    };
-    let mut body = json!({
-        "snapshot_path": jail.inside(&files.state)?,
-        "mem_backend": backend,
-        "huge_pages": huge_pages(profile.pages),
-        "track_dirty_pages": profile.tracks_dirty_pages(),
-        "resume_vm": false,
-        "clock_realtime": true,
-        "vsock_override": { "uds_path": jail.inside(&spec.vsock_path())? },
-    });
-    if let Some(network) = &spec.network {
-        body["network_overrides"] = json!([{ "iface_id": "eth0", "host_dev_name": network.tap }]);
-    }
-    Ok(body)
-}
-
-/// Refuses memory sources the profile cannot back: Firecracker maps
-/// huge-page memory only through a fault handler.
-fn check_source(memory: &MemorySource, profile: MemoryProfile) -> Result<(), ProfileError> {
-    match memory {
-        MemorySource::File(_) if profile.needs_pager() => Err(ProfileError::FileBackedHugePages),
-        _ => Ok(()),
-    }
-}
-
-/// The `/snapshot/create` request writing `files`, as the jailed VMM sees
-/// them.
-fn create_request(jail: &Jail, files: &SnapshotFiles, kind: SnapshotKind) -> Result<Value, String> {
-    Ok(json!({
-        "snapshot_type": match kind {
-            SnapshotKind::Diff => "Diff",
-            SnapshotKind::Full => "Full",
-        },
-        "snapshot_path": jail.inside(&files.state)?,
-        "mem_file_path": jail.inside(&files.memory)?,
-        "sync_snapshot_files": true,
-    }))
 }
 
 /// How [`Firecracker`] runs VMs.
@@ -446,6 +393,7 @@ impl Firecracker {
             jail: jail.clone(),
             memory_low: AtomicU64::new(u64::from(spec.memory_request_mib) << 20),
             runtime: recorded_runtime(jail),
+            console: spec.logs.join(logs::CONSOLE_LOG),
         })
     }
 
@@ -532,27 +480,6 @@ impl Firecracker {
     }
 }
 
-/// What a failed `/snapshot/load` means for the image. A VMM that answered
-/// and refused it, or exited while loading it, did not load it: the caller
-/// decides whether the image is at fault, which a refusal alone never
-/// proves (the host may have run short of memory, say). A request lost or
-/// late on the way did not even reach a verdict, so it is a transient
-/// failure and the image is tried again.
-fn load_failure(error: ApiError, running: bool) -> EngineError {
-    const OP: &str = "restore";
-    match error {
-        _ if !running => EngineError::new(
-            ErrorKind::MemoryLost,
-            OP,
-            "the VMM exited while loading the image",
-        ),
-        refused @ ApiError::Status { .. } => {
-            EngineError::caused_by(ErrorKind::MemoryLost, OP, refused)
-        }
-        lost => EngineError::caused_by(ErrorKind::Transient, OP, lost),
-    }
-}
-
 /// The error a launch ends with when it failed before the host held the
 /// VMM it may have started. Whatever it started was then discarded, with
 /// `discarded` saying how that went: only once that is proven, by the VM's
@@ -588,7 +515,7 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
 /// Readies the jail for a launch and opens the VMM's console and log.
 fn prepare(
     jail: &Jail,
-    logs: &Path,
+    dir: &Path,
     owned: &[(PathBuf, Owned)],
     uid: u32,
     gid: u32,
@@ -599,23 +526,7 @@ fn prepare(
     for (path, kind) in owned {
         crate::confined::hand_over(path, *kind, uid, gid)?;
     }
-    fs::create_dir_all(logs)?;
-    Ok((
-        fresh_log(&logs.join("console.log"))?,
-        fresh_log(&logs.join("vmm.log"))?,
-    ))
-}
-
-/// A new, empty file at `path` for a launch's log. A new file rather than
-/// the old one emptied: the host trims long logs from their start while
-/// VMs run, and a trim measured on the old file must never punch out what
-/// the new launch writes into the same file.
-fn fresh_log(path: &Path) -> io::Result<File> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    File::options().write(true).create_new(true).open(path)
+    logs::open(dir)
 }
 
 /// Removes what one launch leaves in the jail: the jailer's copy of the
@@ -651,6 +562,8 @@ pub struct FirecrackerVm {
     balloon: Balloon,
     /// See [`Engine::vm_runtime`].
     runtime: String,
+    /// Its guest's serial console, written by this VM process alone.
+    console: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -863,13 +776,9 @@ impl Engine for Firecracker {
 
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {
         const OP: &str = "boot";
-        let owned = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
-        let vm = self.launch(spec, OP, owned, &self.binary).await?;
+        let vm = self
+            .launch(spec, OP, drives::owned(&spec.drives), &self.binary)
+            .await?;
         let configure = async {
             // A rejected configuration will not fix itself: fatal.
             let put = |path: &'static str, body: Value| {
@@ -888,21 +797,12 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
-                // No `cache_type`: Firecracker's default, `Unsafe`, offers
-                // the guest no flush, so the VMM syncs a drive only while
-                // it takes a snapshot. Callers that check a disk for lost
-                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,
                     "PUT",
                     &format!("/drives/{}", drive.id),
-                    &json!({
-                        "drive_id": drive.id,
-                        "path_on_host": vm.inside(OP, &drive.path)?,
-                        "is_root_device": drive.root,
-                        "is_read_only": drive.read_only,
-                    }),
+                    &drive_config(drive, &vm.inside(OP, &drive.path)?),
                 )
                 .await?;
             }
@@ -959,35 +859,41 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let body = load_request(spec, &jail, files, self.memory)
-            .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let owned: Vec<(PathBuf, Owned)> = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from.
         let binary = self.binary_for(files.made_under.as_deref());
-        let vm = self.launch(spec, OP, owned, binary).await?;
-        if let MemorySource::Pager(pager) = &files.memory {
-            // The host's own failure: the image is not in question.
-            let started = async {
-                pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
-                    .await
-                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+        // The guest's clock is moved on by the time the image was saved,
+        // unless the image recorded no realtime clock to move it by: a VMM
+        // that refused it for that is ended, and a new one loads the image
+        // with the clock left as saved.
+        let mut realtime = true;
+        loop {
+            let body = load_request(spec, &jail, files, self.memory, realtime)
+                .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
+            let vm = self
+                .launch(spec, OP, drives::owned(&spec.drives), binary)
+                .await?;
+            if let MemorySource::Pager(pager) = &files.memory {
+                // The host's own failure: the image is not in question.
+                let started = async {
+                    pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
+                        .await
+                        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+                };
+                self.or_kill(&vm, started).await?;
+            }
+            let Err(error) = vm.api.call("PUT", "/snapshot/load", Some(&body)).await else {
+                return Ok(vm);
             };
-            self.or_kill(&vm, started).await?;
+            let again = realtime && lacks_realtime_clock(&error);
+            let failed = self.ended(&vm, load_failure(error, vm.is_running())).await;
+            // Only a VM that ended may be launched again; one that would not
+            // end makes the failure fatal.
+            if !again || failed.kind == ErrorKind::Fatal {
+                return Err(failed);
+            }
+            realtime = false;
         }
-        let load = async {
-            let answer = vm.api.call("PUT", "/snapshot/load", Some(&body)).await;
-            answer
-                .map(drop)
-                .map_err(|error| load_failure(error, vm.is_running()))
-        };
-        self.or_kill(&vm, load).await?;
-        Ok(vm)
     }
 
     async fn pause(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
@@ -1161,6 +1067,10 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("set_memory_limit", error))
     }
 
+    async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
+        drives::resize(vm, spec).await
+    }
+
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
         vm.cgroup
             .cpu_time()
@@ -1173,10 +1083,30 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("io_bytes", error))
     }
 
+    fn writes(&self, vm: &FirecrackerVm) -> Result<Writes, EngineError> {
+        vm.cgroup
+            .writes()
+            .map_err(|error| EngineError::io("writes", error))
+    }
+
+    fn settle_writes(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        drives::settled(vm.api.clone())
+    }
+
     fn memory_stats(&self, vm: &FirecrackerVm) -> Result<MemoryStats, EngineError> {
         vm.cgroup
             .memory_stats()
             .map_err(|error| EngineError::io("memory_stats", error))
+    }
+
+    fn halted(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        logs::halted(vm.console.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

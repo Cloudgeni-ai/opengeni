@@ -17,6 +17,9 @@ export {
 // the same resolver model execution applies after approval.
 export {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
+  type LiteralSecretScope,
   type SecretArgumentMode,
 } from "./secret-argument-resolution";

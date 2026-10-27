@@ -64,6 +64,9 @@ async function renderMeeting() {
       </MeetingRecorderStoreProvider>,
     ),
   );
+  // The ready meeting has notes, so it opens on Summary; speakers are named in the transcript.
+  await waitFor(() => transcriptTab(container) !== undefined);
+  await act(async () => transcriptTab(container)!.click());
   await waitFor(
     () => container.querySelector('ol [aria-label="Speaker 2, name this speaker"]') !== null,
   );
@@ -77,6 +80,11 @@ async function renderMeeting() {
     },
   };
 }
+
+const transcriptTab = (container: HTMLElement) =>
+  [...container.querySelectorAll<HTMLButtonElement>('[data-slot="segmented-control-item"]')].find(
+    (item) => item.textContent?.trim() === "Transcript",
+  );
 
 /** Open the menu of an unnamed speaker's first turn and pick a person. */
 async function nameSpeaker(container: HTMLElement, speaker: string, person: string) {

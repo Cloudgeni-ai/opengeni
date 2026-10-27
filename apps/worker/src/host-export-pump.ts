@@ -13,6 +13,7 @@ import {
   type HostExportKind,
 } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type HostExportDrainResult =
   | { kind: HostExportKind; outcome: "not_configured" | "idle" }
@@ -430,7 +431,7 @@ function validateInstanceId(value: string): string {
 }
 
 function exactHostExportErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return errorMessage(error);
 }
 
 type HostExportPublicFailureCode =

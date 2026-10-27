@@ -67,6 +67,8 @@ import {
   type LiveTranscriptTransport,
   type LiveWebSocketConstructor,
 } from "./recording-live";
+import { errorMessage } from "@opengeni/contracts/values";
+import { ownerNameField } from "./recording-owner";
 
 export * from "./recording-live";
 
@@ -1140,8 +1142,81 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** The largest piece {@link uploadRecordingAudio} sends in one upload. */
+export const RECORDING_AUDIO_UPLOAD_PIECE_BYTES = 8 * 1024 * 1024;
+
+export type UploadRecordingAudioOptions = {
+  uploader: RecordingUploader;
+  workspaceId: string;
+  /** One encoded audio file, such as a recorder's WebM or a phone's AAC. */
+  audio: Blob;
+  /** Its type; the blob's own type by default. */
+  mimeType?: string;
+  /** How long it plays, when known; 0 otherwise. */
+  durationMilliseconds?: number;
+  /** A new id by default. */
+  recordingId?: string;
+  /** What the recording is, as at the start of a capture. */
+  create?: Omit<CreateRecordingRequest, "recordingId" | "tracks" | "startedAt"> & {
+    startedAt?: string;
+  };
+  /** What the audio was recorded from. Default: the microphone. */
+  source?: RecordingCaptureSource;
+  /** Stop waiting for the upload (it continues in the background). */
+  signal?: AbortSignal;
+};
+
+/**
+ * Send audio the app already has, such as a file or speech kept on the
+ * device, as a new one-track recording. It goes the way live capture does:
+ * stored locally first and uploaded in the background, so a dropped
+ * connection only delays it. Resolves as {@link RecordingUploader.finish}
+ * does, once the server has it and transcription has started.
+ */
+export async function uploadRecordingAudio(
+  options: UploadRecordingAudioOptions,
+): Promise<RecordingUploadStatus> {
+  const mimeType = options.mimeType || options.audio.type;
+  if (!mimeType) throw new TypeError("uploadRecordingAudio needs the audio's type.");
+  const bytes = new Uint8Array(await options.audio.arrayBuffer());
+  if (bytes.byteLength === 0) throw new TypeError("uploadRecordingAudio needs audio.");
+  const recordingId = options.recordingId ?? crypto.randomUUID();
+  const duration = Math.max(0, Math.round(options.durationMilliseconds ?? 0));
+  const { startedAt, ...create } = options.create ?? {};
+  await options.uploader.begin({
+    workspaceId: options.workspaceId,
+    recordingId,
+    create: {
+      ...create,
+      recordingId,
+      startedAt: startedAt ?? new Date(Date.now() - duration).toISOString(),
+      tracks: [{ trackNumber: 0, source: options.source ?? "microphone", mimeType }],
+    },
+  });
+  // Pieces of one file concatenate back into it, as a recorder's chunks do.
+  const pieces = Math.max(1, Math.ceil(bytes.byteLength / RECORDING_AUDIO_UPLOAD_PIECE_BYTES));
+  for (let index = 0; index < pieces; index += 1) {
+    const from = index * RECORDING_AUDIO_UPLOAD_PIECE_BYTES;
+    const piece = bytes.subarray(
+      from,
+      Math.min(bytes.byteLength, from + RECORDING_AUDIO_UPLOAD_PIECE_BYTES),
+    );
+    const start = Math.round((duration * from) / bytes.byteLength);
+    const end = Math.round((duration * (from + piece.byteLength)) / bytes.byteLength);
+    await options.uploader.addChunk({
+      recordingId,
+      trackNumber: 0,
+      chunkNumber: index,
+      bytes: piece,
+      sha256: await sha256Hex(piece),
+      startMilliseconds: start,
+      durationMilliseconds: end - start,
+    });
+  }
+  return await options.uploader.finish(recordingId, {
+    endedAt: new Date(),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
 }
 
 // --- Local stores -------------------------------------------------------------
@@ -1434,6 +1509,12 @@ export type RecorderOptions = {
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /**
@@ -2087,6 +2168,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
+          ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({
             trackNumber: capture.trackNumber,
             source: capture.source,

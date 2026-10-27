@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm";
 
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /* End to end through the real app and PostgreSQL: an agent whose session has
    full access uses the ordinary session tools on a chat in another workspace
@@ -95,7 +96,7 @@ async function call(
       isError: result.isError === true,
     };
   } catch (error) {
-    return { text: error instanceof Error ? error.message : String(error), isError: true };
+    return { text: errorMessage(error), isError: true };
   }
 }
 

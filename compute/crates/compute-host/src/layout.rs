@@ -38,6 +38,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use compute_engine::{Drive, Network, SnapshotFiles, VmSpec};
+use compute_guest::config::INIT_PATH;
 
 use crate::net::{Link, NetworkConfig};
 use crate::protocol::Id;
@@ -51,6 +52,26 @@ const JAIL: &str = "root";
 /// [`crate::restore_notice`]). Dotted, so the kernel leaves it out of the
 /// init process's arguments and environment.
 pub(crate) const SANDBOX_ARG: &str = "opengeni.sandbox";
+
+/// The kernel command line every VM on a host boots with, before any
+/// sandbox's own arguments: the host's `requested` arguments, the guest's
+/// init by its own path and, when sandboxes are `networked`, the guest
+/// network.
+///
+/// The init is named because `/sbin/init`, which the image build points at
+/// it, belongs to the sandbox's files: installing a package that owns it
+/// (Debian's and Ubuntu's systemd does) replaces the link, and the disk
+/// must still boot as a sandbox, on its next boot and in every sandbox
+/// started from a template made of it. Named after `requested`, it wins
+/// over an `init=` there.
+pub(crate) fn command_line(requested: &str, networked: bool) -> String {
+    let mut args = vec![requested.trim().to_owned(), format!("init={INIT_PATH}")];
+    if networked {
+        args.push(NetworkConfig::boot_args());
+    }
+    args.retain(|arg| !arg.is_empty());
+    args.join(" ")
+}
 
 /// Longest Unix socket path the kernel accepts, without the trailing NUL.
 const MAX_SOCKET_PATH: usize = 107;
@@ -160,8 +181,7 @@ pub(crate) fn check_root(root: &Path) -> Result<(), String> {
 pub(crate) struct Images {
     /// The host's guest kernel, linked into each jail.
     pub kernel: PathBuf,
-    /// The kernel command line, including the guest's network
-    /// configuration when sandboxes are networked.
+    /// The kernel command line, as [`command_line`] makes it.
     pub boot_args: String,
     /// The user id of the sandbox with ordinal 0; each sandbox's VMM runs
     /// as `first_uid + ordinal`, with the same group id. Never 0.
@@ -221,7 +241,10 @@ impl Images {
     /// The network `record` was given, if any.
     pub fn link(record: &Record) -> Option<Link> {
         let Allocation { uid, gid, link, .. } = record.allocation;
-        link.map(|addresses| Link::new(record.host(), record.ordinal, addresses, uid, gid))
+        link.map(|addresses| {
+            Link::new(record.host(), record.ordinal, addresses, uid, gid)
+                .reaching(&record.config.reach)
+        })
     }
 }
 
@@ -762,6 +785,24 @@ fn copy_contents(mut source: &File, mut target: &File) -> io::Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Every VM boots the guest's init by its path, whatever the host's own
+    /// arguments say, with the guest network after it on a networked host.
+    #[test]
+    fn guests_boot_their_init_by_its_path() {
+        assert_eq!(
+            command_line("console=ttyS0 quiet", false),
+            "console=ttyS0 quiet init=/opengeni/init"
+        );
+        assert_eq!(command_line("  ", false), "init=/opengeni/init");
+        assert_eq!(
+            command_line("quiet init=/sbin/init", true),
+            format!(
+                "quiet init=/sbin/init init=/opengeni/init {}",
+                NetworkConfig::boot_args()
+            )
+        );
+    }
 
     /// Writes that fail on purpose: a path and the point it fails at.
     pub(crate) static FAILPOINTS: std::sync::Mutex<Vec<(PathBuf, &'static str)>> =

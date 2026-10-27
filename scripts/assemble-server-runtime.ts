@@ -90,6 +90,38 @@ const operatorCommands = [
   "admission-settings",
 ] as const;
 
+/**
+ * Root package scripts that run a bundled `scripts/*.ts` entry under their own
+ * name. Ops workflows and Helm Jobs call these with `bun run <script>` from /app.
+ */
+export const API_RUNTIME_SCRIPT_COMMANDS = [
+  // The stock Helm catalog-import Job.
+  { script: "catalog:import", path: "scripts/import-integrations-catalog.ts" },
+  // The opengeni-ops Update Model Catalog workflow.
+  { script: "model-catalog:upsert", path: "scripts/upsert-model-catalog.ts" },
+] as const;
+
+/** Every script kept in the slim API root package.json. */
+export const API_RUNTIME_PACKAGE_SCRIPTS = [
+  "db:migrate",
+  "db:migrate-plan",
+  "db:provision-roles",
+  "db:assert-runtime-posture",
+  "db:backfill-lifecycle-facts",
+  // admission-settings is run by path (`bun scripts/admission-settings.ts`); it has no root script.
+  ...operatorCommands
+    .filter((command) => command !== "admission-settings")
+    .map((command) => `db:${command}`),
+  ...API_RUNTIME_SCRIPT_COMMANDS.map(({ script }) => script),
+];
+
+/** Source files bundled as runnable command entries into the API image. */
+export const API_RUNTIME_COMMAND_ENTRIES: readonly (readonly [command: string, path: string])[] = [
+  ...databaseCommands.map((name) => [name, `packages/db/src/${name}.ts`] as const),
+  ...operatorCommands.map((name) => [name, `scripts/${name}.ts`] as const),
+  ...API_RUNTIME_SCRIPT_COMMANDS.map(({ script, path }) => [script, path] as const),
+];
+
 export async function assembleServerRuntime(root: string, role: "api" | "worker") {
   const destination = join(root, ".release/server-runtime", role);
   await rm(destination, { recursive: true, force: true });
@@ -135,11 +167,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
       new Uint8Array(await doctor.outputs[0]!.arrayBuffer()),
     );
     const commands = await Bun.build({
-      entrypoints: [
-        ...databaseCommands.map((command) => join(root, `packages/db/src/${command}.ts`)),
-        ...operatorCommands.map((command) => join(root, `scripts/${command}.ts`)),
-        join(root, "scripts/import-integrations-catalog.ts"),
-      ],
+      entrypoints: API_RUNTIME_COMMAND_ENTRIES.map(([, path]) => join(root, path)),
       root,
       outdir: destination,
       naming: {
@@ -157,11 +185,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     if (!commands.success) {
       throw new Error(`Operator runtime build failed: ${commands.logs.join("\n")}`);
     }
-    for (const [command, relativePath] of [
-      ...databaseCommands.map((name) => [name, `packages/db/src/${name}.ts`] as const),
-      ...operatorCommands.map((name) => [name, `scripts/${name}.ts`] as const),
-      ["import-integrations-catalog", "scripts/import-integrations-catalog.ts"] as const,
-    ]) {
+    for (const [command, relativePath] of API_RUNTIME_COMMAND_ENTRIES) {
       const builtPath = join(destination, relativePath);
       await writeFile(
         builtPath,
@@ -190,15 +214,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
         name: manifest.name,
         type: "module",
         scripts: Object.fromEntries(
-          [
-            "db:migrate",
-            "db:migrate-plan",
-            "db:provision-roles",
-            "db:assert-runtime-posture",
-            "db:backfill-lifecycle-facts",
-            ...operatorCommands.map((command) => `db:${command}`),
-            "catalog:import",
-          ].map((command) => [command, manifest.scripts[command]]),
+          API_RUNTIME_PACKAGE_SCRIPTS.map((command) => [command, manifest.scripts[command]]),
         ),
       }),
     );

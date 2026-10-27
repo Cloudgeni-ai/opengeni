@@ -85,11 +85,13 @@ import { executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
   startMcpOAuth,
+  integrationBaseUrl,
   requireIntegrationsStateSecret,
   gmailOAuthClientConfigured,
   googleDriveOAuthClientConfigured,
   googleCalendarOAuthClientConfigured,
 } from "../integrations/oauth-client";
+import { CONNECT_FINISHED_PATH, connectFinishedPage } from "../integrations/connect-finished-page";
 import {
   OFFICIAL_GMAIL_MCP_URL,
   OFFICIAL_DRIVE_MCP_URL,
@@ -1460,20 +1462,29 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     );
   });
+  // Public and content-free: the sign-in popup's last page (finishInPopup).
+  app.get(CONNECT_FINISHED_PATH, () => connectFinishedPage());
   app.post("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const requested = await parseRequestJson(c, BeginConnectRequest);
+    const { finishInPopup, ...requested } = await parseRequestJson(c, BeginConnectRequest);
     // A sign-in started in the desktop app finishes in the person's browser;
     // return that browser to the console's hand-back page, which reopens the
-    // app. The browser's Origin names the console that made this request.
+    // app. The browser's Origin names the console that made this request. A
+    // sign-in in a popup ends on a page that closes the popup, never on a
+    // second copy of the host page.
     const input = c.req.header(OPENGENI_DESKTOP_APP_HEADER)
       ? {
           ...requested,
           returnUrl: desktopAppReturnUrl(requested.returnUrl, c.req.header("origin") ?? null),
         }
-      : requested;
+      : finishInPopup
+        ? {
+            ...requested,
+            returnUrl: `${integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url)}${CONNECT_FINISHED_PATH}`,
+          }
+        : requested;
     const setupPermission =
       input.providerId === "mcp-install"
         ? "capabilities:manage"

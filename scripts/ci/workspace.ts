@@ -7,6 +7,7 @@ import {
   workspacePackages,
   type WorkspacePackage,
 } from "../publishable-workspaces";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type WorkspaceGraph = {
   packages: WorkspacePackage[];
@@ -434,7 +435,7 @@ function testShardWeights(
     return {
       mode: "source-bytes",
       weights: null,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: errorMessage(error),
       profileSha256: null,
     };
   }

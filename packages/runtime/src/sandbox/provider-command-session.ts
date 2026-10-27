@@ -7,7 +7,9 @@ import type {
 
 export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
-  /** Exact read baseline for atomic byte-offset capture; absent for legacy pages. */
+  /** Exact read baseline for atomic byte-offset capture; absent when a page
+   * carries command identity only (an idle supervised launch or an unavailable
+   * first observation). */
   expected?: ModalRouterProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
@@ -21,8 +23,7 @@ export type ProviderCommandOutput = {
 export type ProviderCommandPersistence = {
   rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
-  acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
-  reserveInput(byteLength?: number): Promise<number>;
+  reserveInput(byteLength: number): Promise<number>;
   recordSupervisionReceipt?(receipt: CommandSupervisionReceipt): Promise<void>;
   loadSupervisionReceipt?(): Promise<CommandSupervisionReceipt | null>;
   requestCancellation?(reason: "provider_deadline" | "explicit_stop"): Promise<void>;
@@ -129,7 +130,7 @@ export type ProviderCommandSession = {
   ): void;
   getProviderCommandOutput?(result: unknown): ProviderCommandOutput | null;
   acknowledgeCommandOutput?(result: string): Promise<void>;
-  /** Returns false for a legacy receipt. True means bytes and offsets committed
+  /** Returns false for an unknown receipt. True means bytes and offsets committed
    * together (or the page lost a cursor CAS and was safely discarded). */
   captureCommandOutput?(result: string): Promise<boolean>;
 };

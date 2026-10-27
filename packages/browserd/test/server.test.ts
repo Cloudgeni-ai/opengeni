@@ -186,6 +186,15 @@ describe("BrowserControlServer", () => {
       error: new CdpSessionDetachedError("Page.getFrameTree"),
     },
     {
+      // The target state route is as read-only as an observation.
+      operation: "targetState" as const,
+      label: "observation",
+      suffix: "/state",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
+    {
       operation: "listTargets" as const,
       label: "target inventory",
       suffix: "",
@@ -254,6 +263,50 @@ describe("BrowserControlServer", () => {
       );
     },
   );
+
+  test("classifies a page read whose tab debugging ended as a retryable observation failure", async () => {
+    let failing = false;
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/dom-read`;
+        const body = {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          expectedFrameId: "frame-1",
+        };
+        failing = true;
+        const failed = await request(server, path, { method: "POST", token: viewToken, body });
+        expect(failed.status).toBe(503);
+        expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        });
+        expect(attempts).toBe(1);
+        failing = false;
+        expect(
+          (await request(server, path, { method: "POST", token: viewToken, body })).status,
+        ).toBe(200);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (failing && name === "readDom") {
+            attempts++;
+            throw new CdpSessionDetachedError("DOM.resolveNode");
+          }
+        },
+      },
+    );
+  });
 
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
@@ -943,6 +996,7 @@ describe("BrowserControlServer", () => {
       );
       expect(screenshot.status).toBe(200);
       expect(screenshot.headers.get("content-type")).toBe("image/png");
+      expect(screenshot.headers.get("x-opengeni-browser-frame-note")).toBeNull();
       expect(
         decodeBrowserFrameMetadataHeader(screenshot.headers.get("x-opengeni-browser-frame")!),
       ).toMatchObject({
@@ -1448,6 +1502,71 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a wait hold is admin-only, exact-generation and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`;
+      const until = new Date(Date.now() + 30 * 60_000).toISOString();
+      const hold = async (token: string, body: unknown) =>
+        await request(server, path, { method: "POST", token, body });
+      // Nothing is running yet: the hold never launches a browser.
+      const before = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect(before.status).toBe(200);
+      expect((await json(before)).data).toEqual({ held: false });
+      await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(
+        (await hold(controlToken, { controllerGeneration: reference.controllerGeneration, until }))
+          .status,
+      ).toBe(401);
+      const held = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect((await json(held)).data).toEqual({ held: true });
+      const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
+      expect((await json(stale)).data).toEqual({ held: false });
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until: new Date().toISOString(),
+      });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            endsWaitUntil: until,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until: "tomorrow",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            extra: true,
+          })
+        ).status,
+      ).toBe(400);
+    });
+  });
+
   test("keeps encrypted state capture behind exact admin authority and replays its receipt", async () => {
     let uploads = 0;
     await withServer(
@@ -1571,7 +1690,14 @@ async function withServer(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1646,7 +1772,14 @@ function fakeDriver(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1719,6 +1852,7 @@ function fakeDriver(
       return observation();
     },
     async targetState() {
+      options.beforeDriverOperation?.("targetState");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1729,6 +1863,7 @@ function fakeDriver(
       };
     },
     async readDom(_targetId, domRequest) {
+      options.beforeDriverOperation?.("readDom");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,

@@ -15,7 +15,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "migration-lock-order": ["bun", "scripts/check-migration-lock-order.ts"],
   "migration-deployment-mode": ["bun", "scripts/check-migration-deployment-mode.ts"],
   "migration-online-safety": ["bun", "scripts/check-migration-online-safety.ts"],
-  "migration-schema-contract": ["bun", "scripts/check-migration-schema-contract.ts"],
+  "migration-immutability": ["bun", "scripts/check-migration-immutability.ts"],
   "migration-test-budgets": ["bun", "scripts/check-migration-test-budgets.ts"],
   "subscription-contract": ["bun", "run", "check:subscription-contract"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
@@ -35,10 +35,13 @@ function exampleBuildCommands(projects: readonly string[]): string[][] {
   });
 }
 
-async function runCommand(command: readonly string[]): Promise<void> {
+async function runCommand(
+  command: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
   const child = Bun.spawn([...command], {
     cwd: process.cwd(),
-    env: process.env,
+    env,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -57,8 +60,15 @@ async function main(): Promise<void> {
     }
   }
   if (!planPath) {
-    throw new Error("usage: run-guards-plan.ts --plan <json> [--exclude <guard>]...");
+    throw new Error(
+      "usage: run-guards-plan.ts --plan <json> [--exclude <guard>]... [--scope-scans-to-changes]",
+    );
   }
+  // PR fast checks: whole-tree scans whose findings are per file (today the
+  // legacy subscription runtime scan) read only the plan's changed files.
+  const env = process.argv.includes("--scope-scans-to-changes")
+    ? { ...process.env, OPENGENI_GUARD_SCOPE_PLAN: planPath }
+    : process.env;
   const plan = JSON.parse(readFileSync(planPath, "utf8")) as ImpactPlan;
   if (
     plan.schemaVersion !== 1 ||
@@ -88,7 +98,7 @@ async function main(): Promise<void> {
       command = [...command, "--require-client-dist"];
     }
     process.stdout.write(`[guard] ${guard}\n`);
-    await runCommand(command);
+    await runCommand(command, env);
   }
   process.stdout.write(`[guard] passed: ${plan.guards.join(", ") || "none"}\n`);
 }

@@ -99,7 +99,6 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   serves wherever it reaches and nowhere else; there is no second, hidden
   per-workspace copy of it and no per-workspace preference between the
   workspace's own connections and the organization's. Verification:
-  `packages/db/test/migration-0907-subscription-connection-one-owner.test.ts`,
   `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`.
 - **SUB-OWN-02** A connection's scope is one of: the whole organization,
   a set of chosen workspaces (with a separate switch for Personal workspaces),
@@ -351,17 +350,16 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
   Verification: `packages/db/test/subscription-core-claude-copy-paths-postgres.test.ts`,
-  `apps/worker/test/parent-wake-postgres.test.ts`,
-  `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
-  `packages/db/test/codex-credential-leases.test.ts`.
+  `apps/worker/test/parent-wake-postgres.test.ts`
+  and `apps/worker/test/scheduled-task-personal-authority.test.ts`.
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
-  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
+  Verification: `packages/db/test/subscription-core-accepted-turn.test.ts`.
 - **SUB-ACCESS-03** A private session arms, waits, is observed by the
   workflow, recovers and keeps pins exactly like a shared session.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
-  private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
+  private session. Verification: `packages/db/test/subscription-core-accepted-turn.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
   the next selection and physical request authorization. Chat-turn lease renewal
   checks ownership and liveness; operation leases additionally recheck access.
@@ -451,13 +449,10 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 
 - **SUB-COMPAT-01** Migration preserves existing credentials, scopes, pins,
   settings, accepted authority, live waits and workflow histories.
-  Verification: `packages/db/test/migration-0689-subscription-core-codex-cutover.test.ts`,
-  `test/integration/subscription-core-codex-cutover.integration.ts`,
-  `test/integration/subscription-core-claude-cutover.integration.ts`,
-  `test/integration/subscription-core-xai-cutover.integration.ts`.
+  Verification: retired.
 - **SUB-COMPAT-02** Existing per-provider API and SDK shapes keep working as
   aliases that delegate to the core until they are versioned out.
-  Verification: `packages/db/test/migration-0747-subscription-core-xai-cutover.test.ts`, `packages/db/test/migration-0748-subscription-core-claude-cutover.test.ts`.
+  Verification: retired.
 - **SUB-COMPAT-03** Historical shadow comparison precedes one drained move
   per provider, with no dual writes. Preflight failure rolls back the migration
   transaction; after activation, recovery is forward-only and an old binary
@@ -607,10 +602,9 @@ core.
 
 Before the provider cutovers (SUB-COMPAT-03), the worker compared each legacy
 selection with the core and the reference model's `checkDecision`. That
-production shadow and its legacy readers are deleted after migration. The
-retained comparison fixture is
-`packages/db/test/fixtures/legacy-subscription-world.ts`; current production
-placement runs directly through the shared core, not a second selector.
+production shadow and its legacy readers are deleted after migration; current
+production placement runs directly through the shared core, not a second
+selector.
 
 The former shadow protocol had these isolation guarantees:
 

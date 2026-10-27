@@ -348,13 +348,10 @@ export function useMcpCapabilityConnect({
       let reserved: ReturnType<ConnectWindowHost["reserve"]>;
       try {
         reserved = windowHost.current.reserve();
-      } catch (failure) {
-        // Opening the sign-in window explains itself (for example, allow popups).
-        throw new ConnectCardMessage(
-          failure instanceof Error
-            ? failure.message
-            : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
-        );
+      } catch {
+        // The browser refused the sign-in window (usually a pop-up blocker);
+        // its own error text is technical and untranslated.
+        throw new ConnectCardMessage(t("connectWindowHost.allowPopups"));
       }
       reservedPopup.current = reserved.close;
       try {
@@ -399,6 +396,9 @@ export function useMcpCapabilityConnect({
           providerId: mcpUrl === GOOGLE_DRIVE_MCP_URL ? "google-drive" : "mcp-oauth",
           ownership,
           returnUrl,
+          // A browser popup ends on a page that closes itself instead of
+          // loading this page a second time; a phone returns to the app.
+          ...(windowHost.current.finishInPopup ? { finishInPopup: true as const } : {}),
           idempotencyKey: startKey.current,
           ...(reconnectAccountId ? { reconnectAccountId } : {}),
         });

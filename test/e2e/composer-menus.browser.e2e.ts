@@ -154,7 +154,7 @@ describe("consistent production composer menus", () => {
     expect(policy.vaultIds).not.toContain("vault-2");
     expect(policy.vaultIds).not.toContain("vault-20");
     expect(await vault("Vault 2").getAttribute("aria-checked")).toBe("false");
-    await page.screenshot({ path: `${root}/composer-secrets-mobile.png` });
+    await page.screenshot({ path: `${root}/test-results/composer-secrets-mobile.png` });
     await page.keyboard.press("Escape");
     expect(
       await page

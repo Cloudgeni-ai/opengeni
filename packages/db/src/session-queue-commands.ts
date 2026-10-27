@@ -56,7 +56,6 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
-  rawRows,
   setSubjectRlsContext,
   type Database,
   type SessionActivityDatabase,
@@ -149,12 +148,11 @@ export class QueueCommandConflictError extends Error {
 }
 
 /**
- * A session that keeps personal memory (a private session, a user-scoped
- * memory session, or any session in a personal workspace) can only run work
- * caused by a verified human: its owner for a private session. Every turn
- * resolves that owner before the model runs, so admitting a prompt without
- * one only produces a turn that fails on start. Refuse it at admission with a
- * reason the caller can act on.
+ * A session that keeps personal memory (a private session or a user-scoped
+ * memory session) can only run work caused by a verified human: its owner for
+ * a private session. Every turn resolves that owner before the model runs, so
+ * admitting a prompt without one only produces a turn that fails on start.
+ * Refuse it at admission with a reason the caller can act on.
  */
 export class PersonalSessionInitiatorRequiredError extends Error {
   readonly name = "PersonalSessionInitiatorRequiredError";
@@ -167,29 +165,24 @@ export class PersonalSessionInitiatorRequiredError extends Error {
   }
 }
 
-/** Mirrors the personal-destination guard every agent attempt applies on start. */
-async function assertPersonalSessionInitiatorInTransaction(
-  db: SessionActivityDatabase,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
-    initiatingHumanSubjectId: string | null;
-  },
-): Promise<void> {
+/**
+ * Mirrors the personal-destination guard every agent attempt applies on start
+ * (`knowledge_resolve_actor` / `knowledge_learning_for_turn`, migration 0868).
+ * A personal workspace alone is not personal memory without a human: work
+ * there with no initiating human (a published Site's visitor, other service
+ * work) starts in the Workspace destination with learning off, so its
+ * follow-up prompts are admitted like its first one.
+ */
+function assertPersonalSessionInitiator(input: {
+  session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
+  initiatingHumanSubjectId: string | null;
+}): void {
   const subject = input.initiatingHumanSubjectId;
   const ownerMismatch =
     input.session.visibility === "user_private" && input.session.ownerSubjectId !== subject;
   if (subject && !ownerMismatch) return;
-  let personal =
+  const personal =
     input.session.visibility === "user_private" || input.session.memoryScope === "user";
-  if (!personal) {
-    const [row] = await rawRows<{ kind: string | null }>(
-      db,
-      sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
-    );
-    personal = row?.kind === "personal";
-  }
   if (personal) throw new PersonalSessionInitiatorRequiredError();
 }
 
@@ -2604,9 +2597,7 @@ export async function submitHumanPromptInTransaction(
   ) {
     throw new SessionControlInvariantError("Prompt sender changed during admission");
   }
-  await assertPersonalSessionInitiatorInTransaction(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
+  assertPersonalSessionInitiator({
     session: storedSession,
     initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
   });

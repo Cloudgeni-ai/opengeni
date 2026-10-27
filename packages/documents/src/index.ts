@@ -68,6 +68,7 @@ import {
 } from "@opengeni/contracts";
 import { projectKnowledgeRecord } from "./knowledge-projection";
 import { knowledgeIndexChunks } from "./knowledge-index";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { projectKnowledgeRecord } from "./knowledge-projection";
 
@@ -2174,7 +2175,7 @@ export async function indexDocumentNow(
           .update(schema.documents)
           .set({
             status: "failed",
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
             updatedAt: new Date(),
           })
           .where(
@@ -2230,7 +2231,7 @@ async function searchDocumentCandidates(
         "document hybrid search vector component failed; falling back to keyword search",
         {
           workspaceId: input.workspaceId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         },
       );
     }

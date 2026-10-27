@@ -116,6 +116,7 @@ import {
   type SecretFileWriter,
 } from "../secret-delivery";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -1755,14 +1756,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
     // Router byte-offset pages atomically append output and advance the exact
-    // expected cursor. Never send these through the legacy append-then-ack path.
+    // expected cursor. Never send these through the append-then-ack path.
     const atomicReceipt =
       record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
     if (
       atomicReceipt &&
       record.backend.session.captureCommandOutput &&
-      record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind ===
-        "modal-router-v1"
+      record.backend.session.getProviderCommandOutput?.(atomicReceipt)
     ) {
       record.pendingProviderReceipt = atomicReceipt;
       try {
@@ -3462,7 +3462,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
     throw cause;
   }
@@ -3481,7 +3481,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: returnedOutput || null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
   }
   const status = parseExecResponseBanner(output);

@@ -275,6 +275,8 @@ const IMAGE_SAVE_FAILED_EXIT_CODE: i32 = 4;
 /// `codemode call`: run the tool, then write any images to files. A failure
 /// to save an image after the call completed still prints the result, with
 /// `imageSaveError` and the operation ID, and exits with status 4.
+/// An error result (`isError`) with `--save-image` prints as the call's
+/// answer, saves no file and exits 0, so scripts check `isError`.
 async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(), CodemodeError> {
     use std::io::Write as _;
     let full = args.full;
@@ -284,6 +286,13 @@ async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(),
     }
     let operation_id = Uuid::new_v4().to_string();
     let result = client.call_as(args, operation_id.clone()).await?;
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    let save_image = if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        None
+    } else {
+        save_image
+    };
     let materialized = if full && save_image.is_none() {
         Ok(result.clone())
     } else {
@@ -1441,6 +1450,59 @@ mod tests {
         preflight_image_path(&nested).expect("allowed");
         assert!(nested.parent().expect("parent").is_dir());
         assert!(!nested.exists());
+    }
+
+    #[tokio::test]
+    async fn an_error_result_with_save_image_is_the_answer_not_an_image_save_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "interaction", "toolName": "browser_screenshot" },
+                    "modelName": "interaction__browser_screenshot",
+                    "codemodePath": ["interaction", "browser", "screenshot"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "completed", "result": {
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "API 404: browser target does not exist" }]
+                }}}),
+            )
+            .await;
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shot.png");
+        // Before the fix this branch reported an image-save failure and exited
+        // the process with status 4.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_call(
+                &client,
+                CodemodeCallArgs {
+                    tool: "interaction.browser.screenshot".to_string(),
+                    arguments: "{}".to_string(),
+                    full: false,
+                    save_image: Some(target.clone()),
+                },
+            ),
+        )
+        .await
+        .expect("the call finishes")
+        .expect("an error result is printed as the answer");
+        assert!(!target.exists(), "an error result saves no image");
+        server.await.expect("server");
     }
 
     #[test]

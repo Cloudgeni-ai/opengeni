@@ -475,6 +475,11 @@ export function buildTimeline(
       if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
         item.status = disposition;
       }
+      // A call that was still waiting for approval when its turn ended never ran.
+      if (item.kind === "tool-call" && item.awaitingApproval) {
+        item.status = disposition;
+        delete item.awaitingApproval;
+      }
       if (item.kind === "sandbox" && item.status === "running") {
         item.status = disposition;
       }
@@ -1041,6 +1046,7 @@ export function buildTimeline(
               }
             : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
+        delete target.awaitingApproval;
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
           : truncation && typeof payload.preview === "string"
@@ -1376,6 +1382,13 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
+        // The calls named here have not run: they wait for the person.
+        for (const callId of approvalCallIds(payload)) {
+          const call = callsById.get(callId);
+          if (call?.kind === "tool-call" && call.status === "complete" && call.output == null) {
+            call.awaitingApproval = true;
+          }
+        }
         rememberPresentationWait(
           {
             kind: "notice",
@@ -3718,6 +3731,21 @@ function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
     case "turn":
       return group.startedAt;
   }
+}
+
+/** The tool call ids a `session.requiresAction` payload asks a person to approve. */
+function approvalCallIds(payload: Record<string, unknown>): string[] {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const ids: string[] = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (id) ids.push(id);
+  }
+  return ids;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

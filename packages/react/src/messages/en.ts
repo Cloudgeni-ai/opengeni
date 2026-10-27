@@ -1504,6 +1504,8 @@ export const englishMessages = {
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
     "Your request was sent. GitHub asked the owners of your organization to approve {product}.",
+  "connectWindowHost.allowPopups":
+    "Your browser blocked the sign-in window. Allow pop-ups for this page, then try again.",
   "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
   "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
@@ -1538,6 +1540,107 @@ export const englishMessages = {
   "counts.timelineAnnotations_other": "{count} timeline annotations",
   "counts.tools_one": "{count} tool",
   "counts.tools_other": "{count} tools",
+  "desktopDictation.host.cantRecord": "This computer can't record audio.",
+  "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
+  "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
+  "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.stopped": "Dictation stopped. Try again.",
+  "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
+  "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
+  "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
+  "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
+  "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.settings.accessibilityDescription":
+    "Lets {product} type the text into other apps. Without it, the text is only copied.",
+  "desktopDictation.settings.accessibilityLabel": "Accessibility",
+  "desktopDictation.settings.acceleratorToggle":
+    "Press it to start, and again to finish. Works while {product} is open.",
+  "desktopDictation.settings.add": "Add shortcut",
+  "desktopDictation.settings.addDescription":
+    "Give another shortcut its own language, such as one for English and one for Norwegian.",
+  "desktopDictation.settings.addLabel": "Another language",
+  "desktopDictation.settings.allow": "Allow",
+  "desktopDictation.settings.allowed": "Allowed",
+  "desktopDictation.settings.anyLanguage": "Any language",
+  "desktopDictation.settings.cancelRecording": "Cancel",
+  "desktopDictation.settings.cancelShortcutDescription":
+    "Throws away the dictation you're speaking. Esc does this too.",
+  "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
+  "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
+  "desktopDictation.settings.chordToggle":
+    "Press the keys together and let go to start. Press them again to finish.",
+  "desktopDictation.settings.clearHistory": "Clear",
+  "desktopDictation.settings.copyText": "Copy text",
+  "desktopDictation.settings.description":
+    "Press a shortcut in any app and speak. The text is typed where your cursor is.",
+  "desktopDictation.settings.detectAutomatically": "Detect automatically",
+  "desktopDictation.settings.historyDescription":
+    "Kept on this computer only, with what you said, to play or transcribe again.",
+  "desktopDictation.settings.historyTitle": "Recent dictations",
+  "desktopDictation.settings.keyCombination": "Key combination…",
+  "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
+  "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
+  "desktopDictation.settings.languageLabel": "Language",
+  "desktopDictation.settings.modeHold": "Hold while speaking",
+  "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
+  "desktopDictation.settings.modeLabel": "How the keys work",
+  "desktopDictation.settings.modeToggle": "Press to start and finish",
+  "desktopDictation.settings.modeToggleDescription": "Press once to start and again to finish.",
+  "desktopDictation.settings.noShortcut": "None",
+  "desktopDictation.settings.otherKeyCombination": "Other key combination…",
+  "desktopDictation.settings.outputCopy": "Copy it only",
+  "desktopDictation.settings.outputCopyDescription": "Paste it yourself where you want it.",
+  "desktopDictation.settings.outputDescription": "Where the text goes when you finish.",
+  "desktopDictation.settings.outputLabel": "Text",
+  "desktopDictation.settings.outputPaste": "Type it where the cursor is",
+  "desktopDictation.settings.outputPasteAndCopy": "Type it and keep it copied",
+  "desktopDictation.settings.outputPasteAndCopyDescription": "It stays on the clipboard too.",
+  "desktopDictation.settings.outputPasteDescription": "Your clipboard is put back afterwards.",
+  "desktopDictation.settings.pairHold": "Hold both keys while you speak, and let go to finish.",
+  "desktopDictation.settings.pairToggle":
+    "Press both keys together, left and right, to start. Press them again to finish.",
+  "desktopDictation.settings.pasteAccessibility":
+    "Allow Accessibility so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteUnsupported":
+    "This computer can't type into other apps, so the text is copied.",
+  "desktopDictation.settings.pasteWtype":
+    "Install wtype or ydotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteXdotool":
+    "Install xdotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.play": "Play",
+  "desktopDictation.settings.recordKeys": "Press the key combination now. Esc cancels.",
+  "desktopDictation.settings.remove": "Remove shortcut",
+  "desktopDictation.settings.retryShortcutDescription":
+    "Transcribes your last dictation again and types it, such as after a failure.",
+  "desktopDictation.settings.retryShortcutLabel": "Retry shortcut",
+  "desktopDictation.settings.saveFailed": "Couldn't save the change. Try again.",
+  "desktopDictation.settings.shortcutFailed":
+    "The shortcut couldn't be set up. Turn dictation off and on again.",
+  "desktopDictation.settings.shortcutLabel": "Shortcut",
+  "desktopDictation.settings.shortcutStopped":
+    "The shortcut stopped working. Turn dictation off and on again.",
+  "desktopDictation.settings.shortcutTaken":
+    "That key combination is taken or not allowed. Choose another.",
+  "desktopDictation.settings.shortcutUnsupported":
+    "This computer can't use those keys alone. Choose a key combination.",
+  "desktopDictation.settings.stopPlaying": "Stop",
+  "desktopDictation.settings.title": "Dictation",
+  "desktopDictation.settings.toggleLabel": "Dictate from anywhere",
+  "desktopDictation.settings.toggleOff": "Off. Turn on to dictate into any app with a shortcut.",
+  "desktopDictation.settings.toggleOn": "{shortcut} starts and finishes dictation in any app.",
+  "desktopDictation.settings.toggleOnHold": "Hold {shortcut} while you speak, in any app.",
+  "desktopDictation.settings.toggleOnMany": "Each shortcut dictates in its language, in any app.",
+  "desktopDictation.settings.transcribeAgain": "Transcribe again",
+  "desktopDictation.settings.usedByAnother": "Another shortcut uses these keys.",
+  "desktopDictation.settings.vocabularyDescription":
+    "Names and words to listen for, such as people, products and terms you use. One per line.",
+  "desktopDictation.settings.vocabularyLabel": "Vocabulary",
+  "desktopDictation.settings.vocabularyPlaceholder": "Ada Lovelace\nKubernetes",
+  "desktopDictation.settings.vocabularyTermTooLong":
+    "“{term}” is too long. Keep each to {max} characters.",
+  "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
@@ -1756,25 +1859,29 @@ export const englishMessages = {
     "Unknown transcription adapter failure.",
   "hooks.useTurnQueue.thatQueuedPromptChangedBefore":
     "That queued prompt changed before Steer could be sent.",
+  "humanInputForm.back": "Back",
   "humanInputForm.loadingTheExactSkillFiles": "Loading the exact Skill files…",
   "humanInputForm.loadTheExactSkillFiles": "Load the exact Skill files before saving.",
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
+  "humanInputForm.next": "Next",
   "humanInputForm.orSkipAndLetThe": "Or skip and let the agent decide.",
   "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
+  "humanInputForm.questionOfTotal": "Question {current} of {total}",
   "humanInputForm.retryPreview": "Retry preview",
   "humanInputForm.savingActivatesTheseExactFiles":
     "Saving activates these exact files. No additional review is required.",
   "humanInputForm.scopeLengthFiles": "· {scope} · {length} files",
   "humanInputForm.skill": "Skill",
+  "humanInputForm.somethingElse": "Something else…",
   "humanInputForm.theRequestedSkillRevisionCould":
     "The requested Skill revision could not be verified.",
   "humanInputForm.thisClientCannotPreviewSkill":
     "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
-  "humanInputForm.typeAValue": "Type a value…",
+  "humanInputForm.typeYourAnswer": "Type your answer…",
   "humanInputModel.apiKey": "API key",
   "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
   "humanInputModel.chooseAtLeastMin": "Choose at least {min}.",
@@ -1883,7 +1990,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "Your remaining credits don't cover this model. Choose a model they cover or add credits. The conversation is preserved.",
+    "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
@@ -1911,7 +2018,7 @@ export const englishMessages = {
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
+    "There aren't enough credits for this model. Add credits, or choose another model. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -2256,6 +2363,11 @@ export const englishMessages = {
   "mcpConnectionStatus.connect": "Connect",
   "mcpConnectionStatus.connected": "Connected",
   "mcpConnectionStatus.reviewConnection": "Review connection",
+  "meetings.ask.couldNotAsk": "Couldn't start the chat",
+  /** The input at the bottom of a meeting's Summary and Transcript tabs. */
+  "meetings.ask.placeholder": "Ask about this meeting",
+  /** The send button of "Ask about this meeting". */
+  "meetings.ask.send": "Ask",
   "meetings.deleteDialog.couldnTDeleteThisMeeting": "Couldn't delete this meeting",
   "meetings.deleteDialog.deleteMeeting": "Delete meeting?",
   "meetings.deleteDialog.deleteMeeting2": "Delete meeting",
@@ -2346,11 +2458,15 @@ export const englishMessages = {
   "meetings.detailPage.setItWhenTheMeeting": "Pick one if the transcript got the language wrong.",
   "meetings.detailPage.settings": "Settings",
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
+  /** Names the Summary · Transcript · Notepad switch for screen readers. */
+  "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
   "meetings.detailPage.starting": "Starting…",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested by voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
+  /** The meeting page's first tab: the written notes. */
+  "meetings.detailPage.summary": "Summary",
   "meetings.detailPage.theAudioForThisMeeting":
     "The audio is gone, so this meeting can't be played or transcribed again.",
   "meetings.detailPage.theAudioIsOnThe": "Waiting for the audio from the device that recorded it.",
@@ -2451,6 +2567,10 @@ export const englishMessages = {
   "meetings.notes.cancel": "Cancel",
   "meetings.notes.changedMeanwhile":
     "Someone else changed these notes while you were editing. Saving replaces their changes.",
+  "meetings.notes.copied": "Copied",
+  /** Copies the written notes as Markdown, with names in place of mentions. */
+  "meetings.notes.copy": "Copy",
+  "meetings.notes.couldNotCopy": "Couldn't copy the notes",
   "meetings.notes.couldNotSave": "Couldn't save the notes",
   "meetings.notes.edit": "Edit",
   "meetings.notes.edited": "Edited · {time}",
@@ -2779,6 +2899,8 @@ export const englishMessages = {
   "meetings.transcript.changeSpeaker": "Change speaker",
   "meetings.transcript.corrected": " (corrected)",
   "meetings.transcript.correctTheWords": "Correct the words",
+  /** The pencil beside a transcript turn; opens "Correct the words" for it. */
+  "meetings.transcript.correctTheWordsOfNameAt": "Correct the words of {name} at {formatClock}",
   "meetings.transcript.couldnTChangeTheSpeaker": "Couldn't change the speaker",
   "meetings.transcript.couldnTClearThisName": "Couldn't clear this name",
   "meetings.transcript.couldnTConfirmThisName": "Couldn't confirm this name",
@@ -3741,6 +3863,7 @@ export const englishMessages = {
   "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
+  "realtime.realtimeControl.checkingVoice": "Checking voice",
   "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
   "realtime.realtimeControl.chooseVoiceModelAndOptions": "Choose voice model and options",
   "realtime.realtimeControl.clientAck": "client ack",
@@ -3754,6 +3877,7 @@ export const englishMessages = {
   "realtime.realtimeControl.dismissFailuretext": "Dismiss: {failureText}",
   "realtime.realtimeControl.endingVoice": "Ending voice…",
   "realtime.realtimeControl.endVoiceConversation": "End voice conversation",
+  "realtime.realtimeControl.findingTheVoiceModelsYou": "Finding the voice models you can use.",
   "realtime.realtimeControl.ignoredProviderEvents": "ignored provider events",
   "realtime.realtimeControl.interruptNaturallyWheneverYouWant":
     "Interrupt naturally whenever you want.",
@@ -3762,6 +3886,8 @@ export const englishMessages = {
   "realtime.realtimeControl.labelDetail": "{label}. {detail}",
   "realtime.realtimeControl.lastIgnoredEvent": "last ignored event",
   "realtime.realtimeControl.listening": "Listening",
+  "realtime.realtimeControl.microphoneCantBeUsedHere":
+    "Your microphone can't be used here. Type your message instead.",
   "realtime.realtimeControl.microphoneMuted": "microphone muted",
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
@@ -3803,6 +3929,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
+  "realtime.realtimeControl.voiceCouldNotLoad": "Voice couldn't load. Try again later.",
   "realtime.realtimeControl.voiceLanguage": "Language",
   "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
   "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",
@@ -4574,6 +4701,15 @@ export const englishMessages = {
   "thisComputer.card.note":
     "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app.",
   "thisComputer.card.openApp": "Open app and connect",
+  "thisComputer.card.connectAnother": "Connect another computer",
+  "thisComputer.card.anotherSteps":
+    "Do this on the computer you want to connect: open this chat there, install the app, then choose Open app and connect.",
+  "thisComputer.card.anotherGetApp":
+    "Do this on the computer you want to connect: open this chat there, install the {productName} app, then turn on “Use this computer”.",
+  "thisComputer.card.anotherIsThisOne": "If it's this computer:",
+  "thisComputer.card.connectOnThatComputer":
+    "A computer connects from the computer itself. Open this chat on the computer you want to use, then choose Connect.",
+  "thisComputer.card.shareConversation": "Share link to this chat",
   "thisComputer.card.installThenOpen":
     "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
   "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",
@@ -4876,6 +5012,27 @@ export const englishMessages = {
   "timeline.patchApplyCommand.runsGitApplyInYour":
     "Runs git apply in your project folder. Works on macOS, Linux and Git Bash.",
   "timeline.patchApplyCommand.tryAgain": "Try again",
+  "timeline.paymentPage.balanceNow": "Balance {balance}",
+  "timeline.paymentPage.billingPortal": "Billing",
+  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.continueToPayment": "Continue to payment",
+  "timeline.paymentPage.checkFailed":
+    "Couldn't check your payment from here. If you paid, your credits still arrive.",
+  "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
+  "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
+  "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",
+  "timeline.paymentPage.linkExpired": "This link has expired. Ask here for a new one.",
+  "timeline.paymentPage.openBilling": "Open billing",
+  "timeline.paymentPage.opensBillingPage": "Opens your billing page in a new tab.",
+  "timeline.paymentPage.opensSecurePage": "Opens a secure payment page in a new tab.",
+  "timeline.paymentPage.opensSecurePageConfirms":
+    "Opens a secure payment page in a new tab. Your credits show up here once you've paid.",
+  "timeline.paymentPage.pay": "Pay",
+  "timeline.paymentPage.payAmount": "Pay {amount}",
+  "timeline.paymentPage.payForCredits": "{amount} in credits",
+  "timeline.paymentPage.subscribe": "Subscribe",
+  "timeline.paymentPage.waitingForPayment":
+    "Waiting for your payment. Come back here when you're done.",
   "timeline.platformActivityPresentation.compactingConversationFirst":
     "Compacting conversation first",
   "timeline.platformActivityPresentation.connectingTools": "Connecting tools",

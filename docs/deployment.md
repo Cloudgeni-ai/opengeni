@@ -671,15 +671,6 @@ tool callable from a Site, even when its provider recommends Ask. A saved Ask
 on a tool the provider allows keeps it listed and the call returns approval
 required; a tool that is still Ask by default stays hidden from Sites.
 
-Migrations `0404_mcp_oauth_authorization_server.sql` and
-`0405_tool_gateway_approval_capabilities.sql` are one drained maintenance
-boundary even when `OPENGENI_MCP_OAUTH_ENABLED=false`. They add tables, grants,
-and FORCE-RLS state to the exact startup/readiness posture, so neither the
-previous runtime evaluator nor the target evaluator can operate in a mixed
-pre/post-schema fleet. Follow the
-[0404-0405 operator cutover](#mcp-oauth-and-tool-gateway-posture-cutover-0404-0405)
-before deploying the release that contains them.
-
 Refresh-token rotation is family-fenced. Reuse of any known revoked generation
 atomically revokes every descendant refresh and access token before returning
 `invalid_grant`.
@@ -931,43 +922,11 @@ workspace credentials.
 SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
 connection path; private user scope requires the exact managed-browser human.
 Organization owners and admins can also share subscriptions with their shared
-and Personal workspaces. Migration `0423_organization_supergrok_subscriptions.sql`
-is a maintenance cutover: drain all API/control/turn processes, apply with the
-complete runtime role list, and restart only the matching release. Older workers
-cannot parse the new accepted-work organization scope.
-The same stable environments encryption key protects its OAuth material. See
+and Personal workspaces. The same stable environments encryption key protects its OAuth material. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 `OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` optionally overrides the
 five-minute maximum silence between complete, valid SSE response events; it is
 not a total model-call or agent-run deadline.
-
-Migration `0390_organization_model_provider_connections.sql` is a maintenance
-activation for organization-owned Vercel AI Gateway/OpenRouter keys and custom
-models. Drain API/control/turn processes, apply with the complete application
-role list, deploy the matching release, then restart. Pre-0390 workers do not
-understand the new credential/billing branch. No new environment variable is
-required; the stable environments encryption key protects these credentials.
-
-Migration `0492_codex_accepted_source_authority.sql` is a forward-only maintenance
-activation for non-blocking Codex source settings. Stop every old/new API,
-control-worker, and turn-worker process, supply the complete runtime login list
-through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration, and
-run `db:provision-roles`. Its before/after guards reject live listed database
-sessions. Select
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0492_codex_accepted_source_authority`
-for generated plans. Start only matching binaries; never restart pre-0492 images.
-Do not cancel or require accepted turns to finish: preserve checkpoints and
-recover those logical turns with their retained source. This one-time process
-drain is distinct from ordinary settings changes, which require no idle window.
-
-Migration `0422_personal_workspace_organization_codex_inheritance.sql` is a
-maintenance activation for Personal workspace Codex inheritance. Stop all API,
-control-worker, and turn-worker processes and provide every runtime login in
-`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Apply the migration, run
-`db:provision-roles`, and start only the matching release. Select
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0422_personal_workspace_organization_codex_inheritance`
-for generated deployment plans. Never restart a pre-0422 binary: its organization
-Codex mutations omit Personal workspace source fences and capacity wakeups.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
@@ -1000,42 +959,8 @@ Generated Kubernetes deployment plans default to one rolling `helm upgrade
 --install`. Profiles whose durable dependencies live inside the Opengeni chart
 add the disabled-application revision only when the Helm release does not yet
 exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
-migration hook without turning every later release into an outage. A reviewed
-maintenance migration must be selected explicitly; migration 0389 uses
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
-plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
-operator completes the documented database-role, image-digest, and application
-drain preflight. The 0404-0405 posture boundary uses
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0404_mcp_oauth_authorization_server`
-with the same preflight acknowledgement. Migration 0394 likewise requires a complete API and worker
-drain and
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
-a pre-0394 worker would treat the newly admitted activation mode as an ambient
-workspace Skill, so none may remain live or restart after the cutover. Postgres
-and Garage PVCs remain attached. Migration 0402 is another clean maintenance
-cutover: stop every API, control worker, and turn worker, provide the exact old
-and new runtime database login list through
-`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and select
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0402_session_input_wait_and_background_command_results`.
-It moves active long-wait state from `session_goals` to `sessions`, removes the
-old columns and `goal_wait` protocol, and activates terminal background-command
-agent input. After it commits, never restart a pre-0402 image. This forward-only
-cutover was documented on September 3, 2026. Migration 0403 likewise requires
-a complete API and worker drain and
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`;
-before applying it, provide
-`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` as the comma-separated list of
-every old and new runtime database login that may still be connected. Include
-both roles when rotating the runtime login, and use
-`MigrationRuntimeOptions.applicationDatabaseRoles` for embedded callers. The
-list must be explicit, non-empty, unique, and contain no role longer than 63
-UTF-8 bytes; migration 0403 rechecks it before and after taking its locks and
-aborts with SQLSTATE `55000` when the list is missing, malformed, or any listed
-application session remains live. It removes the temporary Codex allocator
-cutover columns, so pre-0403 binaries must never run or restart after commit.
-Database migrations
-are forward-only: after a maintenance migration succeeds, remain on the new
-image/schema and fix forward.
+migration hook without turning every later release into an outage. Database migrations are forward-only: after a migration succeeds, stay on the
+new image and schema and fix forward.
 
 Failure behavior is intentionally uneven:
 
@@ -1228,6 +1153,122 @@ the schedule and Document identity tables. A live application rejects the
 cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
+
+### Rotating the runtime database password
+
+PostgreSQL keeps one password per role, and every runtime pool keeps opening
+new connections (30 s idle timeout, 600 s maximum lifetime, growth under load).
+A password that is fixed in `OPENGENI_DATABASE_URL` at process start therefore
+fails every new connection with SQLSTATE `28P01` from the moment the role's
+password changes until each pod restarts. To rotate `opengeni_app` while pods
+keep serving, without restarting them, give the runtime its password through
+files instead:
+
+| Setting | Meaning |
+| --- | --- |
+| `OPENGENI_DATABASE_PASSWORD_FILE` | File with the current password. Missing or empty: the URL password. |
+| `OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE` | File with the previous password during a rotation. Missing or empty: none. |
+
+Both are optional. Unset, the runtime uses the URL password exactly as before.
+Each pool that logs in as the runtime role re-reads the files on every new
+connection (trailing newlines are ignored) and keeps the candidates
+`[previous, current]` (previous only when non-empty and different). It starts
+on the previous password, moves to the current one after the first `28P01` of
+a login that used the previous password, and then stays there. Each refusal is
+attributed to the password that refused login actually used: logins that were
+already authenticating with a password the pool has since replaced are refused
+without moving the pool again (stale refusals). A refusal of the newly selected
+password moves the pool on at once, back to the first candidate after the last
+(for example when a rollback restored the old password); there is no
+time-based grace. Only a change in the files' contents starts the order over.
+Logs and metrics never carry a password. Each pool logs one content-free
+warning per event (`reloaded database credential candidates`, `database
+credential candidate refused`, `switched database credential candidate`,
+`database credential retries exhausted`, `database password file
+unreadable; treating it as missing`) with the fields `databasePool` (`api`,
+`managed-auth`, `worker`, `worker-readiness`, `worker-activities`, with a
+`-notifications` suffix for the API's LISTEN connection), `credentialIndex`,
+`credentialFromIndex`, `credentialToIndex`, `credentialCandidates`,
+`credentialStale` (refusals), and `credentialFile` and
+`credentialFileErrorCode` (unreadable files), plus `reason` on exhaustion
+lines. Indexes are positions in `[previous, current]`: while both files are
+set, 0 is the previous password and 1 the current one.
+The same events are counted, labelled by `pool`, in
+`opengeni_database_credential_refusals_total` (`index`, and `refusal` =
+`stale` or `fresh`), `opengeni_database_credential_switches_total`
+(`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total`
+(`index`, and `reason` = `every_candidate_refused` or `attempt_cap`, also on
+the log line) and `opengeni_database_credential_reloads_total`
+(`candidates`). The counters are exact; repeated refusal, switch and
+exhaustion lines of one pool are logged at most once per 10 seconds per kind,
+the next line carrying `suppressedCount`. A rotation should show exactly one
+switch per pool and no exhaustion; stale refusals are expected, at most one per
+connection that was logging in when the password changed.
+
+A query or transaction start refused with `28P01` is retried on the newly
+selected candidate, but only at the connection layer, and only when the pool
+now selects another password than the refused login used (a stale refusal, or
+a fresh one that moved the pool on). A rotation costs an operation at most one
+extra attempt (two when a rollback lands while it retries), and no operation
+makes more than five attempts. This is safe
+because PostgreSQL raises `28P01` only while authenticating a new connection,
+before any statement runs. With a single candidate (no previous password), a
+wrong password fails fast exactly as before. Session persistence, turn
+admission and the API add no retry of their own.
+
+This covers the API's application pool, its session-list LISTEN connection and
+the Better Auth (managed auth) pool; the worker's application, readiness and
+activity pools; and the `db:assert-runtime-posture`, session-content compaction
+and (when it falls back to the runtime URL) lifecycle backfill commands.
+Migration, role-provisioning and dedicated service logins (artifact
+materializer, outbox dispatcher) keep their own URLs.
+
+With Helm, set `runtimeDatabasePasswordFiles.enabled=true`. The api,
+worker-control and worker-turns pods then mount the optional keys
+`OPENGENI_DATABASE_PASSWORD` and `OPENGENI_DATABASE_PREVIOUS_PASSWORD` of the
+runtime Secret (or `runtimeDatabasePasswordFiles.secretName`) read-only at
+`/var/run/opengeni/database/password` and
+`/var/run/opengeni/database/previous-password`, and set both file settings.
+The volume is optional, so pods start and keep using the URL password while
+the keys are absent. It is a directory mount, because `subPath` mounts never
+receive kubelet's Secret updates. Because the pods also load the runtime
+Secret as environment variables, the two keys also appear as unused
+environment variables of the same names; the runtime ignores them.
+
+To rotate, in this order:
+
+1. Write `OPENGENI_DATABASE_PREVIOUS_PASSWORD` = the old password and
+   `OPENGENI_DATABASE_PASSWORD` = the new one into the runtime Secret. The
+   pools keep using the old password, which is still valid. Before step 2,
+   confirm that every api, worker-control and worker-turns pod sees both
+   files. kubelet refreshes them on its sync period plus its Secret cache TTL
+   (often one to two minutes), so check rather than wait a fixed time, without
+   printing the files: for example `kubectl exec <pod> -- test -s
+   /var/run/opengeni/database/previous-password` on each pod (when the image
+   has `test`), or a `reloaded database credential candidates` log line with
+   `credentialCandidates: 2` (or a `candidates="2"` reload counter) from each
+   pod.
+2. In one step, with no release in between: run `ALTER ROLE opengeni_app
+   PASSWORD ...` with the new password, set `OPENGENI_APP_DATABASE_PASSWORD`
+   (role provisioning resets the role to it on every release), and set the
+   password in `OPENGENI_DATABASE_URL` to the new value (release jobs such as
+   `db:assert-runtime-posture` log in with the URL and mount no files). Update
+   every source those values are rebuilt from as well, such as CI secrets.
+   Running pods keep using the files, and each pool meets one `28P01` on its
+   next new connection and switches to the new password.
+3. Clear `OPENGENI_DATABASE_PREVIOUS_PASSWORD`.
+
+To roll back after step 2, mirror it: write the files reversed (previous = the
+new password, current = the old one), confirm every pod sees them, then
+restore the role's old password. A change in the files starts the order over
+at the first candidate, which is then the password the server still has, so
+nothing is refused until the role changes back, and each pool switches once.
+
+Change the role only after the files show both passwords. If the role changes
+first, new connections fail until the files catch up. Outside Kubernetes,
+where the files are written one at a time, write the previous file before the
+current one: the other order briefly leaves only the new password, and a
+single password fails fast.
 
 ### Pre-registration invitation cutover (0314)
 
@@ -1880,8 +1921,9 @@ only the process bundle, runtime assets and the exact installed dependency graph
 of its external packages (including optional native bindings and required peers).
 The worker retains its prebuilt workflows and managed Codemode client; API retains
 signed machine installers, the read-only artifact runtime, bundled database
-commands with the unchanged SQL ledger, and the stock catalog-import command and
-reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+commands with the unchanged SQL ledger, the stock catalog-import command, the
+`model-catalog:upsert` command and reviewed catalog/logo assets.
+Office/OCR/media, Docker and source-control tools
 are unchanged. Temporal retains only its loader-selected native platform binary;
 its Rust build tree and foreign binaries are not runtime dependencies. Source
 workflow compilation remains available but its compiler is loaded only on demand.
@@ -3354,239 +3396,6 @@ without Opengeni metadata (another product sharing the Stripe account) and
 Opengeni sessions for an account this deployment does not hold (another
 Opengeni deployment sharing the account) are acknowledged and ignored.
 
-### MCP OAuth and tool-gateway posture cutover (0404-0405)
-
-The same drained rollout procedure below applies to
-`0418_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
-allows hash-free HTML versions and optional source, and widens stored byte counts.
-Stop old API and both worker roles, supply the complete runtime login list,
-migrate, provision the target roles, then start the matching binary. After this
-cutover, do not restart a pre-0417 binary. Existing Site versions and source remain
-readable; local development data does not need resetting.
-
-Migrations `0404_mcp_oauth_authorization_server.sql` and
-`0405_tool_gateway_approval_capabilities.sql` change the exact application-role
-table, grant, and RLS inventory. The previous API/worker runtime-posture
-evaluator rejects the provisioned target schema, while the target evaluator
-rejects the old schema. This is therefore a single drained, forward-only
-maintenance rollout; it is not safe to let the normal Helm pre-upgrade Job run
-while old application pods still serve traffic.
-
-1. Bind the exact database, schema, release artifacts, and every API/control
-   worker/turn worker database login. Set
-   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to the complete
-   comma-separated old/new login list (normally `opengeni_app`). During a role
-   rotation, include both identities. This list is drain detection only; it is
-   not a grant allow-list. `OPENGENI_APP_DATABASE_USER` and its password name
-   the sole target role that `db:provision-roles` grants after migration.
-2. Bind the drain and final upgrade to the same immutable API/worker/web and
-   migrations images. For a generated Kubernetes plan, set:
-
-   ```bash
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0404_mcp_oauth_authorization_server
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
-   ```
-
-   Do not set the confirmation until the release/database/login binding,
-   accepted-turn handling, and exact image digests have been reviewed. The
-   generated plan emits the migrations-disabled application drain only with
-   both values present.
-3. Stop every API, control worker, and turn worker using the target database and
-   prove that every listed old/new login has zero other sessions in
-   `pg_stat_activity`. Keep the application stopped through migration, role
-   provisioning, and posture assertion.
-4. From the exact new image, run the ordinary rollout gate in this order:
-
-   ```bash
-   bun run db:migrate
-   bun run db:provision-roles
-   bun run db:assert-runtime-posture
-   ```
-
-   Migration 0404 and migration 0405 each validate the explicit role list and
-   repeat the live-session check after installing their schema. A live listed
-   identity aborts with SQLSTATE `55000` and rolls back that migration. Both
-   migrations remove every explicit non-owner ACL inherited from owner default
-   privileges; they grant none of the listed drain identities. Only the
-   following role-provision step grants the exact current target role.
-5. Require both migration receipts in `schema_migrations`, then start only the
-   same new image generation and require startup/readiness posture checks before
-   reopening admission. `OPENGENI_MCP_OAUTH_ENABLED` may remain false; feature
-   enablement is independent of the mandatory schema/posture cutover.
-
-After either migration commits, do not restart a pre-0404 application image or
-attempt a mixed-version rolling rollback. Keep the application drained and fix
-forward on the target schema.
-
-### Deployment database model catalog cutover
-
-The default source remains the reviewed code/env catalog. Database mode is an
-operator-owned singleton, not a boot-time reconciliation loop. Migration 0389
-changes the exact runtime-posture table/grant contract, so this is a drained
-maintenance cutover rather than a rolling migration. A mixed pre/post-0389
-fleet is unsupported even while every process still uses `code`:
-
-1. Bind and verify the exact database, schema, new application image, and every
-   API/worker database login. Set
-   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to that complete comma-separated
-   login list (normally `opengeni_app`). This list is only the maintenance-drain
-   detector; it is not a runtime grant allow-list. During role rotation it may
-   contain both old and new logins, while the exact
-   `OPENGENI_APP_DATABASE_USER` and password identify the sole target role that
-   `db:provision-roles` grants after migration.
-2. Stop every API, control worker, and turn worker, then prove no configured
-   application login remains in `pg_stat_activity`. Do not rely on the normal
-   Helm pre-upgrade hook while old pods still serve traffic: after 0387 commits,
-   their repeated runtime-posture readiness check fails.
-
-   For the bundled Helm chart, perform the drain as a migrations-disabled Helm
-   revision using the same new chart, exact `sha256:` API/worker/web/migrations
-   image digests, and values that the final upgrade will use. Mutable tags and
-   registry cache state are not acceptable evidence across this drain boundary.
-   The generated `local-kubernetes` plan is the sole tag-based exception: before
-   draining, it builds all three images, derives one content identity from their
-   Docker image IDs, loads those exact tags into kind, and persists the tag for
-   both the drain and final Helm revisions.
-
-   The generated deployment plan emits this drain only when both of these
-   operator acknowledgements are present:
-
-   ```bash
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
-   ```
-
-   Do not set the confirmation until the exact release/database/login binding,
-   accepted-turn handling, and no-live-application-session checks above are
-   complete. Ordinary plans omit the drain and retain rolling availability.
-
-   ```bash
-   helm upgrade --install "$RELEASE" deploy/helm/opengeni \
-     --namespace "$NAMESPACE" --values "$VALUES" \
-     --set api.enabled=false \
-     --set worker.enabled=false \
-     --set web.enabled=false \
-     --set relay.enabled=false \
-     --set artifactMaterializer.enabled=false \
-     --set artifactOutboxDispatcher.enabled=false \
-     --set terraformMcp.enabled=false \
-     --set migrations.enabled=false \
-     --wait --timeout 15m
-
-   if kubectl -n "$NAMESPACE" get pods \
-     -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
-     -o name | grep -q .; then
-     kubectl -n "$NAMESPACE" wait --for=delete pod \
-       -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
-       --timeout=10m
-   fi
-   ```
-
-   Verify the application Deployments are absent and the configured database
-   login has zero sessions. Then run the ordinary upgrade with those disable
-   overrides removed; its pre-upgrade Job applies pending migrations through
-   0387 before Helm recreates the application. Generated maintenance plans make
-   this final upgrade atomic and clean up newly created resources on failure.
-   Its rollback target is the immediately preceding new-chart, exact-image,
-   migrations-disabled revision above, so a failed post-migration rollout
-   restores the drained state without starting pre-migration application bytes.
-   Remain drained and fix forward.
-
-3. Apply `0389_model_catalog_and_gateway_custom_models.sql`, provision roles,
-   and assert runtime posture using the catalog-aware release artifacts. The
-   migration repeats the configured-login drain check before and after schema
-   installation and aborts with SQLSTATE `55000` if a listed session is live.
-   The migration strips inherited non-owner ACLs from the new tables and grants
-   none of the listed drain identities; the following `db:provision-roles` step
-   grants only the exact current application role.
-   After commit, never restart a pre-0389 image or use it as an application
-   rollback target; remain on the new schema and fix forward.
-4. Start the catalog-aware API and workers with
-   `OPENGENI_MODEL_CATALOG_SOURCE=code`, then verify startup and readiness.
-5. Prepare a strict, secret-free schema-v1 JSON document that is semantically
-   equivalent to the active code/env catalog. Set `defaultModel` explicitly to
-   the product ID that new sessions should use; omission retains the schema-v1
-   compatibility behavior of choosing the first `builtInModels` entry.
-   Membership and optional one-line notes belong in the document; keys, enabled
-   flags, billing, cost policy, and pricing do not.
-6. Validate and upsert it with a migration/admin database credential. Run the
-   command from the catalog-aware release environment with the exact runtime
-   model provider, credential, cost-policy, and pricing variables present; the
-   database variables shown below are additions, not a complete environment:
-
-   ```bash
-   OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
-     OPENGENI_DB_SCHEMA='opengeni' \
-     bun run model-catalog:upsert -- --file ./model-catalog.json --expected-version 0
-   ```
-
-   Omit `OPENGENI_DB_SCHEMA` for the default `public` schema. Set it to the
-   same dedicated schema used by migration and runtime connections for embedded
-   deployments; the command validates it and uses the canonical
-   `<schema>,opengeni_private,public` search path.
-
-   `--expected-version` is mandatory compare-and-swap protection. Use `0` only
-   when the singleton must not exist yet; for later changes, pass the exact
-   version reported by the previous successful command. A mismatch makes no
-   database change. The command uses transaction-local lock and statement
-   timeouts so a competing operator cannot block it indefinitely. Before the
-   write transaction, it applies the candidate to the same database-mode
-   deployment settings and secret bindings used by runtime and validates the
-   fully resolved executable catalog. Provider transport/credential, default
-   model, and cost/pricing failures therefore leave the live singleton intact.
-
-7. Confirm the command reports the expected version, then roll every API,
-   control worker, and turn worker with
-   `OPENGENI_MODEL_CATALOG_SOURCE=database` while the document remains
-   equivalent to code mode.
-8. Verify `/v1/config/client`, one authenticated workspace model catalog, a
-   model picker, and the `list_models` tool after the whole fleet converges.
-9. Only then add database-only membership. Before removing membership, changing
-   an executable model definition, or changing a product's `free`/`credits`
-   classification, drain or fence queued and active accepted turns that still
-   name the affected product. Executable-definition drift fails closed rather
-   than switching providers; workspace-facing cost is a separate live
-   deployment policy and therefore must not change underneath accepted turns.
-   A full maintenance window that stops catalog consumers is the simpler
-   alternative. Turning on hosted web search for an existing model (changing
-   only `capabilities.hostedTools.webSearch` from `{ "upstream": "unknown",
-   "runnable": false }` to a runnable state, plus a matching legacy
-   `hostedWebSearch: true` when present) needs no drain: accepted turns keep
-   running without the tool and new turns get it. See
-   [`model-providers.md`](model-providers.md#secret-safe-definition-versions).
-
-Database mode fails closed when the singleton is missing or invalid and never
-falls back to code. After the maintenance cutover, rollback is limited to the
-catalog-aware binary with the source flag restored to `code`; that makes the
-singleton inert but leaves it available for inspection or correction. Catalog
-cost remains separately controlled by `OPENGENI_MODEL_COST_POLICY_JSON`; a
-model marked `credits` needs `OPENGENI_MODEL_PRICING_JSON` under managed
-billing/limits when no built-in price exists. Database mode allows cost-policy
-and pricing entries to be staged before the corresponding product ID is added
-to the singleton; code mode continues to reject unknown cost-policy IDs.
-
-An authenticated database `registryProviders` entry must name a provider that
-is also declared in host `OPENGENI_MODEL_PROVIDERS_JSON`. Its provider kind,
-base URL, and wire API/profile must exactly match the host declaration. Default
-headers/query and their public-name classifications are forbidden in the
-database document and inherited only from the host declaration, alongside the
-credential. The database document controls model membership and labels. Any
-transport mismatch fails closed instead of forwarding a host credential to a
-database-selected endpoint.
-
-Workspace custom Vercel AI Gateway, OpenRouter, and Opper slugs are not part of this
-singleton. They are provider-qualified admin-managed rows protected by FORCE
-RLS, overlaid only for that workspace, and become selectable only when the
-matching encrypted workspace provider connection and workspace policy are
-ready. The table is bounded to 100 active rows and 1,000 retained generations
-per provider and workspace. If a deployment catalog later claims the same
-provider/upstream slug, the reviewed deployment entry wins and the colliding
-custom row is omitted from executable membership. Removing a custom slug
-retires its row: it disappears from new selection, while already accepted turns
-and existing-session continuations may still resolve the frozen definition.
-Re-adding the same slug creates a fresh generation without rewriting the
-retired execution authority.
-
 ### Optional OpenSandbox Kubernetes provider
 
 OpenSandbox is an additive provisioned backend; production Modal behavior and
@@ -3857,6 +3666,19 @@ that understands the additive owner-route fields. Older agents remain compatible
 with standalone relays but do not supply routes for affinity-free multi-replica
 pairing. Existing pre-upgrade producer channels acquire routes when re-registered.
 No frontend protocol change or special ingress-controller configuration is needed.
+
+### Viewer input on the relay
+
+The relay enforces each viewer token's `mode` and stream binding. Every token
+must name the machine and stream it opens. A `view` token only watches. Typing
+into a terminal, ending its shell, and typed desktop input require a `control`
+token, and every input or close must name the stream the connection opened. The
+API mints terminal tokens with `control` for a viewer holding `terminal:attach`;
+desktop tokens stay `view`, and the agent still applies the owner's
+screen-control consent. Input from a socket that a reconnect replaced is
+dropped. Roll out the API before, or together with, the relay: a relay that
+enforces `mode` drops keystrokes from terminal tokens an older API minted as
+`view` until the viewer refreshes its token.
 
 ### Runtime-secret keys
 

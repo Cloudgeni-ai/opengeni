@@ -1,4 +1,4 @@
-import { ChevronRightIcon, CloudIcon, CodeXmlIcon } from "lucide-react";
+import { ChevronRightIcon, CloudIcon, CodeXmlIcon, MessageCircleIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
@@ -10,6 +10,12 @@ const USE_CASES: Array<{
   description: string;
   icon: ReactNode;
 }> = [
+  {
+    id: "everyday",
+    title: "Get help with everyday things",
+    description: "Ask questions, write, plan and look things up in a simple chat.",
+    icon: <MessageCircleIcon />,
+  },
   {
     id: "embed",
     title: "Add AI agents to my product",
@@ -38,7 +44,7 @@ export function OnboardingUseCaseStep({
       <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
         <h1 className="text-xl font-semibold tracking-tight">How do you want to use Opengeni?</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          Pick one to get started. You can do both later.
+          Pick one to get started. You can do the others later.
         </p>
         <ul className="mt-6 grid gap-2" aria-label="Ways to use Opengeni">
           {USE_CASES.map((useCase) => (

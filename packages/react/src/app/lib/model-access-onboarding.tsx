@@ -1,4 +1,5 @@
 import { t } from "./console-text";
+import { checkoutPageReturnUrl } from "./credit-checkout";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   ClientModel,
@@ -189,11 +190,14 @@ export async function applyConnectedModelToNewSessionDraft(
  * payment webhook lands. `modelSource=default` marks that policy as the
  * resolved default rather than the person's choice, so the draft keeps
  * following the default and a later subscription connect still replaces it.
+ * With the paying account, the new-chat page also confirms the credits once
+ * they land.
  */
 export function creditCheckoutSuccessUrl(
   origin: string,
   workspaceId: string,
   model: { id: string; effort: string } | null,
+  accountId?: string | undefined,
 ): string {
   const url = new URL(`/workspaces/${encodeURIComponent(workspaceId)}/sessions`, origin);
   if (model) {
@@ -201,7 +205,7 @@ export function creditCheckoutSuccessUrl(
     url.searchParams.set("effort", model.effort);
     url.searchParams.set("modelSource", "default");
   }
-  return url.toString();
+  return accountId ? checkoutPageReturnUrl(url.toString(), accountId, "success") : url.toString();
 }
 
 /** Resolve the credits model for a checkout return; a catalog failure never blocks checkout. */

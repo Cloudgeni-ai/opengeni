@@ -18,7 +18,6 @@ import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
   createProviderCommandRetainer,
   getRetainedProviderCommand,
-  acknowledgeRetainedProviderOutput,
   reserveRetainedProviderInput,
   requestRetainedProcessCancellation,
 } from "@opengeni/db/retained-provider-commands";
@@ -350,10 +349,10 @@ async function promoteTurnProcess(
   const providerSessionId = input.providerSessionId ?? 71;
   const invocationId = crypto.randomUUID();
   const command: SandboxProviderCommand | null =
-    input.supervised || input.routerCommand
+    input.supervised || input.routerCommand || input.providerCommand
       ? {
           kind: "modal-router-v1",
-          sandboxId: instanceId,
+          sandboxId: input.providerCommandSandboxId ?? instanceId,
           taskId: "ta-test",
           execId: crypto.randomUUID(),
           ...(input.supervised
@@ -371,18 +370,7 @@ async function promoteTurnProcess(
             stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
           },
         }
-      : input.providerCommand
-        ? {
-            kind: "modal-control-v1",
-            sandboxId: input.providerCommandSandboxId ?? instanceId,
-            taskId: "ta-test",
-            execId: `tp-${crypto.randomUUID()}`,
-            streams: {
-              stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-              stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-            },
-          }
-        : null;
+      : null;
   const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -1249,31 +1237,20 @@ describe("retained-process terminal-owner reconciliation", () => {
     }, 60_000);
   }
 
-  test("provider identity and cursors survive fresh database reads without accepting a rebind", async () => {
+  test("provider identity survives fresh database reads and input reservations stay monotonic", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ providerCommand: true });
     const scope = { ...fixture, processId: fixture.process.id };
     const original = (await getRetainedProviderCommand(db, scope))!;
     expect(original.sandboxId).toBe(fixture.process.providerInstanceId);
-    const next = structuredClone(original);
-    next.streams.stdout.batchIndex = 2;
-    next.streams.stderr.batchIndex = 3;
-    await acknowledgeRetainedProviderOutput(db, scope, next);
-    expect(await acknowledgeRetainedProviderOutput(db, scope, original)).toEqual(next);
-    expect(await getRetainedProviderCommand(db, scope)).toEqual(next);
-    await expect(
-      acknowledgeRetainedProviderOutput(db, scope, { ...next, execId: "tp-foreign" }),
-    ).rejects.toThrow("identity");
-    const conflicting = structuredClone(next);
-    conflicting.streams.stdout.exitCode = 0;
-    await expect(acknowledgeRetainedProviderOutput(db, scope, conflicting)).rejects.toThrow(
-      "conflicts",
-    );
+    expect(await getRetainedProviderCommand(db, scope)).toEqual(original);
     expect(
       (
-        await Promise.all(Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope)))
+        await Promise.all(
+          Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope, 2)),
+        )
       ).sort(),
-    ).toEqual([1, 2, 3, 4, 5]);
+    ).toEqual([0, 2, 4, 6, 8]);
     expect(
       await getRetainedProviderCommand(db, { ...scope, sessionId: crypto.randomUUID() }),
     ).toBeNull();
@@ -2076,13 +2053,13 @@ describe("retained-process terminal-owner reconciliation", () => {
       let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
       const providerCommand: SandboxProviderCommand | null = withProviderCommand
         ? {
-            kind: "modal-control-v1",
+            kind: "modal-router-v1",
             sandboxId: instanceId,
             taskId: "ta-test",
-            execId: "tp-paused-test",
+            execId: crypto.randomUUID(),
             streams: {
-              stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-              stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+              stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+              stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
             },
           }
         : null;

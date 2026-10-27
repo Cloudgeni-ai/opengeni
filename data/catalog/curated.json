@@ -119,7 +119,7 @@
             "description": "Read mailbox changes, account settings and configuration. Optional notifications use an operator-configured Pub/Sub topic."
           }
         ],
-        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. Choose Allow, Ask first, or Block for the available tools in Approvals.",
+        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. Choose Allow, Ask first, or Block for the available tools in Approvals. Models paid with Opengeni credits do not train on your mail. If agents run on your own AI subscription, turn off model training in that provider's settings first.",
         "scopeLabels": {
           "https://www.googleapis.com/auth/gmail.readonly": {
             "label": "Read your mail",

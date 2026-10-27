@@ -931,7 +931,7 @@ export async function completeSelfServiceOrganizationSetup(input: {
   organizationName: string;
   operationId: string;
   /** The signup answer to "How do you want to use Opengeni?", kept on the organization. */
-  useCase?: "embed" | "cloud";
+  useCase?: "everyday" | "embed" | "cloud";
 }): Promise<{
   status: "complete";
   organizationId: string;
@@ -945,6 +945,21 @@ export async function completeSelfServiceOrganizationSetup(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/**
+ * The person went Back after their organization exists and chose again: their
+ * new answer becomes the current one, so the new-chat page follows it on every
+ * device.
+ */
+export async function changeSignupUseCase(input: {
+  organizationId: string;
+  useCase: "everyday" | "embed" | "cloud";
+}): Promise<{ useCase: "everyday" | "embed" | "cloud" }> {
+  return await authRequest<{ useCase: "everyday" | "embed" | "cloud" }>(
+    "/organization-onboarding/use-case",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
 }
 
 export async function completeOrganizationUserSetup(input: {
@@ -1286,7 +1301,8 @@ export function mountApiUpdateNotice(container: HTMLElement | null): void {
   }
 }
 
-function showApiUpdateNotice(willReload: boolean): void {
+/** Exported for the desktop notices fixture (apps/web/test/desktop-notices-fixture.tsx). */
+export function showApiUpdateNotice(willReload: boolean): void {
   if (typeof document === "undefined") {
     return;
   }
@@ -1294,18 +1310,24 @@ function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  notice.textContent = willReload
-    ? "Opengeni updated — reloading…"
-    : "Opengeni updated. Reload this tab to continue.";
-  Object.assign(notice.style, {
-    width: "100%",
-    boxSizing: "border-box",
-    borderBottom: "1px solid var(--og-color-border)",
-    background: "var(--og-color-surface-1)",
-    color: "var(--og-color-fg)",
-    font: "500 14px/1.4 Inter, system-ui, sans-serif",
-    padding: "10px 14px",
-  });
+  // A notice across the top of the app: in the desktop app it is the window's
+  // top row, so it keeps clear of the window controls and moves the window
+  // (apps/web/src/styles.css).
+  notice.setAttribute("data-app-notice", "");
+  notice.setAttribute("data-window-drag", "");
+  const message = document.createElement("span");
+  message.textContent = willReload ? "Opengeni updated — reloading…" : "Opengeni updated.";
+  if (willReload) {
+    notice.replaceChildren(message);
+  } else {
+    // The same words in a browser tab and in the desktop app: Reload is the
+    // one action, so the notice needs no instructions.
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.textContent = "Reload";
+    reload.addEventListener("click", () => window.location.reload());
+    notice.replaceChildren(message, reload);
+  }
   if (!existing) {
     (apiUpdateNoticeContainer ?? document.body).append(notice);
   }

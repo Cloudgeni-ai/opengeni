@@ -171,6 +171,41 @@ const LINES: Array<[label: string, seconds: number, text: string]> = [
   ["speaker_0", 140, "I'll send the numbers before then."],
 ];
 
+const TOMAS = "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e";
+
+/**
+ * The ready meeting's notes, as an agent writes them: an overview, topics with
+ * nested points, then Decisions and Action items. Speakers and people are
+ * mentions (`speaker:<label>`, `person:<id>`), shown with their current names.
+ */
+const SUMMARY_NOTES = [
+  "The first-run experience and the pricing page. [Ingrid Solberg](speaker:track-0) and [Tomas Eriksen](speaker:speaker_0) agreed onboarding comes first: completion is up, but the empty state after connecting still loses people.",
+  "",
+  "## Onboarding",
+  "",
+  "- The empty state after connecting doesn't say what to do next",
+  "  - [Speaker 2](speaker:speaker_1) sees the same stall in the session replays",
+  "  - One suggested first task, with a link to the full list",
+  "- Three starter tasks were too many: choice is what caused the stall",
+  "",
+  "## Pricing page",
+  "",
+  `- Two months free on annual, with the monthly price shown first`,
+  `  - Finance is fine with it, says [Tomas Eriksen](person:${TOMAS})`,
+  "- The comparison table needs a monthly and annual toggle",
+  "",
+  "## Decisions",
+  "",
+  "- Keep the first-run suggestion to one task.",
+  "- Review both pricing tables on Monday and ship the clearer one.",
+  "",
+  "## Action items",
+  "",
+  "- [ ] [Speaker 2](speaker:speaker_1) drafts the suggested task by Thursday",
+  "- [ ] [Lea Haugen](speaker:speaker_2) mocks both pricing tables",
+  `- [ ] [Tomas Eriksen](person:${TOMAS}) sends the numbers before Monday`,
+].join("\n");
+
 export type MeetingsFixture = {
   client: RecordingsClientLike;
   workspaceId: string;
@@ -212,6 +247,8 @@ export function createMeetingsFixture(
     pinned?: boolean;
     /** The workspace meeting language the server reports. */
     language?: string | null;
+    /** Whether the server reports the workspace's recorders start with live text on. */
+    liveTranscript?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -220,7 +257,7 @@ export function createMeetingsFixture(
       memberSubjectId: ME,
       voice: rememberedVoice("self"),
     }),
-    person("1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e", "Tomas Eriksen"),
+    person(TOMAS, "Tomas Eriksen"),
     person("9c8b7a6f-5e4d-4c3b-a291-807f6e5d4c3b", "Lea Haugen", {
       voice: rememberedVoice("attested"),
     }),
@@ -434,6 +471,7 @@ export function createMeetingsFixture(
   const models: ListRecordingModelsResponse = {
     ...(options.pinned ? pinnedModels : unpinnedModels),
     ...(options.language !== undefined ? { language: options.language } : {}),
+    ...(options.liveTranscript !== undefined ? { liveTranscript: options.liveTranscript } : {}),
   };
   const liveSegments: RecordingLiveSegment[] = LIVE_LINES.map(
     ([trackNumber, seconds, text], index) => ({
@@ -475,7 +513,7 @@ export function createMeetingsFixture(
         },
         {
           kind: "notes",
-          body: "## Summary\n\nThe release went out cleanly and the error rate is flat. Onboarding completion is up, but the second step still loses people.\n\n## Decisions\n\n- Ship the migration once the schema change is reviewed.\n\n## Action items\n\n- [ ] Tomas reviews the schema change today\n- [ ] Ingrid shares the onboarding numbers by Friday",
+          body: SUMMARY_NOTES,
           revision: 1,
           updatedAt: iso(minutes(36)),
           updatedBy: { subjectId: ME, sessionId: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f" },

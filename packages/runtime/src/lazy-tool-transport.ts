@@ -38,6 +38,7 @@ import {
   notifyModelRequestCapture,
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -343,10 +344,6 @@ type FunctionCallItem = {
   providerData?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isFunctionTool(tool: Tool): tool is Tool & {
   type: "function";
@@ -764,6 +761,12 @@ export class LazyToolRuntime {
   /** One decision and one detached receipt per call; never recompute historical output. */
   async prepareSearch(rawArguments: unknown, signal?: AbortSignal): Promise<GenericSearchMarker> {
     signal?.throwIfAborted();
+    // The decision is replayed verbatim when the call executes, so it must
+    // read the prepared catalog. Preparation can settle while the model is
+    // still answering the first request; the tools that request carried then
+    // lack every deferred server, and a search decided from them would report
+    // tools that exist as unavailable.
+    await this.ensurePrepared();
     const { query, names, limit } = parseSearchArgs(rawArguments);
     if (names !== undefined) {
       return {

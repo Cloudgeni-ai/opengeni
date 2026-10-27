@@ -51,6 +51,7 @@ import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
 import { serializedStripeCustomer } from "../billing-stripe-customer";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionRoutes(app, deps);
@@ -358,7 +359,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ received: true });
     } catch (error) {
       throw new HTTPException(500, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });
@@ -492,18 +493,22 @@ export function stripeCheckoutSessionCreateParams(input: {
    */
   fullyDiscounted?: boolean | undefined;
 }): Stripe.Checkout.SessionCreateParams {
+  // Without return URLs (a checkout an agent made, or another API caller),
+  // the payment page was opened from somewhere else, usually a chat in
+  // another tab that confirms the credits itself: land on the small page that
+  // sends the person back, which needs no sign-in, so it works from an embed.
   const successUrl = checkoutReturnUrl(
     input.publicBaseUrl,
     input.webBaseUrl,
     input.successUrl,
-    "/billing?checkout=success",
+    "/checkout-complete.html?checkout=success",
     "successUrl",
   );
   const cancelUrl = checkoutReturnUrl(
     input.publicBaseUrl,
     input.webBaseUrl,
     input.cancelUrl,
-    "/billing?checkout=cancelled",
+    "/checkout-complete.html?checkout=cancelled",
     "cancelUrl",
   );
   return {

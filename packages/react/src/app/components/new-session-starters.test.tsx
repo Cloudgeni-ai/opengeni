@@ -88,3 +88,12 @@ test("without the chat list, the new-chat page shows no recent chats or project 
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
   expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
 });
+
+test("the new-chat page's Add credits button follows the addCredits switch", () => {
+  const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
+  expect(route).toContain('const addCredits = useSessionUiFeature("addCredits");');
+  expect(route).toMatch(
+    /const canTopUpCredits =\s*addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/,
+  );
+  expect(route).toMatch(/\{canTopUpCredits && workspace\?\.accountId \? \(/);
+});

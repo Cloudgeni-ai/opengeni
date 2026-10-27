@@ -1053,10 +1053,11 @@ impl Host {
         // A checkpoint leaves its sandbox running, booking its next save as
         // before, so what it wrote, its new memory image, is booked here
         // whatever it came to: one cancelled while it uploads has written
-        // it too. A step that certainly wrote nothing, such as one
-        // cancelled before it began, books nothing: a checkpoint cancelled
-        // so, and due again at once, would otherwise book an image each
-        // time it is tried.
+        // it too, and one cancelled while its guest wrote its disks out may
+        // have had the guest trim them. A step that certainly wrote
+        // nothing, such as one cancelled before it began, books nothing: a
+        // checkpoint cancelled so, and due again at once, would otherwise
+        // book an image each time it is tried.
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
             (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
@@ -1064,15 +1065,20 @@ impl Host {
             _ => DiskSpace::default(),
         };
         self.disk_spent = self.disk_spent.add(written);
-        if !wrote && flight.step == Step::Checkpoint {
-            // Nor did it clone the disk, so what it booked for the guest's
-            // writes over a clone stood for nothing: it is not kept until
-            // the next reading, as what a booking stops standing for is.
-            // What the guest may write to its own disk stays booked.
+        if !wrote && matches!(flight.step, Step::Checkpoint | Step::Pause) {
+            // Nor did it clone the disk or have the guest trim it, so what
+            // it booked for the guest's writes meanwhile stood for nothing:
+            // it is not kept until the next reading, as what a booking
+            // stops standing for is. What the guest may write to its own
+            // disk stays booked.
             slot.local_disk.booked = slot
                 .local_disk
                 .booked
                 .saturating_sub(slot.checkpoint_need());
+        } else if flight.step == Step::Pause {
+            // Its guest trimmed its disk: until a reading measures the disk
+            // again, it may grow by its whole bound, also once it wakes.
+            slot.local_disk.growth = slot.size.disk;
         }
         let before = slot.state;
         let backoff = if flight.step.wakes() {
