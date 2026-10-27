@@ -204,6 +204,19 @@ describe("computer actions", () => {
 });
 
 describe("redactInteractionSecretValues", () => {
+  test("keeps line and short-value behaviour of typed values", () => {
+    // Every line of a multi-line typed value, from four characters, spaces allowed.
+    expect(redactInteractionSecretValues("value second", { note: "line one\nsecond" })).toBe(
+      "value [secret]",
+    );
+    // A typed value that also occurs inside the marker text is still masked.
+    expect(redactInteractionSecretValues("my secret here", { word: "secret" })).toBe(
+      "my [secret] here",
+    );
+    // A clipped start counts from four characters.
+    expect(redactInteractionSecretValues("typed hunt", { pw: "hunter22" })).toBe("typed [secret]");
+  });
+
   test("removes values from text but keeps identifiers and short values", () => {
     const result = redactInteractionSecretValues(
       {
@@ -274,6 +287,18 @@ describe("redactInteractionSecretValues", () => {
     expect(form).toContain("%21");
     const result = redactInteractionSecretValues({ url: `https://example.test/?${form}` }, typed);
     expect(result.url).toBe(`https://example.test/?q=${INTERACTION_REDACTED_SECRET}`);
+  });
+
+  test("hides clipped percent-encoded forms and clipped lines of typed values", () => {
+    const typed = { key: "hunter2-fake pass!", lines: "first line fake\nsecond-line-fake-value" };
+    const result = redactInteractionSecretValues(
+      { url: "https://example.test/?p=hunter2-fake%2", field: "second-line-fa" },
+      typed,
+    );
+    expect(result).toEqual({
+      url: `https://example.test/?p=${INTERACTION_REDACTED_SECRET}`,
+      field: INTERACTION_REDACTED_SECRET,
+    });
   });
 });
 

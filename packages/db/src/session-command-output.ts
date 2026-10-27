@@ -5,6 +5,7 @@ import { withSessionActivityRlsContext } from "./database";
 import { lockSessionEventWriteRows } from "./session-control";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
+import { maskSecretValuesForStorage } from "./secret-value-masking";
 
 export type SessionCommandOutputInput = {
   accountId: string;
@@ -57,6 +58,8 @@ export async function appendSessionCommandOutput(
   if (!input.chunkId || input.chunkId.length > 200)
     throw new Error("Invalid command output chunk ID");
   if (!input.chunk) return [];
+  // Secret backstop before the retry comparison below (docs/secrets.md, Masking).
+  input = { ...input, chunk: maskSecretValuesForStorage(input.chunk, "command_output") };
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const events: SessionEvent[] = [];
     const locks = await lockSessionEventWriteRows(tx, {
