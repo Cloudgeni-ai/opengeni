@@ -1444,6 +1444,9 @@ export type ComputerActionReceipt = {
   error: InteractionError | null;
   /** Actions that acted on an element of another role than the one named. */
   roleStandIns?: ComputerActionRoleStandIn[] | undefined;
+  /** The action sent raw input (a click or a key press) that its driver
+   * reported as delivered without any confirmation that the app acted on it. */
+  unconfirmedInput?: true | undefined;
 };
 
 /** An action that named a button or link by role and name, when nothing of

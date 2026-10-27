@@ -21,6 +21,7 @@ import {
 } from "../computer-backend";
 import {
   callDesktop,
+  deliveredUnconfirmed,
   CuaFailure,
   runSteps,
   walkIncompleteness,
@@ -376,6 +377,7 @@ export class CuaComputerBackend implements ComputerBackend {
   dispatch(
     command: ComputerBackendActionCommand,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null> {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
@@ -419,17 +421,20 @@ export class CuaComputerBackend implements ComputerBackend {
       const known = new Set(this.targetsById.keys());
       const fronted = await this.front(acted.windowId, operations);
       let report = "";
+      // A click or key press CUA could only send, with nothing confirming
+      // the app acted on it.
+      const rawInput =
+        command.action.type === "keyboard" ||
+        (command.action.type === "pointer" &&
+          (command.action.action === "click" || command.action.action === "double_click"));
+      let unconfirmedInput = false;
       try {
         for (let index = 0; index < operations.length; index++) {
           const operation = operations[index]!;
           try {
-            const { result } = await callDesktop(
-              this.runtime,
-              operation.name,
-              operation.args,
-              true,
-            );
-            report += openedWindowsReport(result.text);
+            const call = await callDesktop(this.runtime, operation.name, operation.args, true);
+            report += openedWindowsReport(call.result.text);
+            if (rawInput && deliveredUnconfirmed(call)) unconfirmedInput = true;
           } catch (error) {
             if (index > 0)
               throw new ComputerBackendError(
@@ -479,6 +484,7 @@ export class CuaComputerBackend implements ComputerBackend {
       } finally {
         await fronted.giveBack();
       }
+      if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -1328,6 +1334,7 @@ export class CuaComputerBackend implements ComputerBackend {
       state.elements,
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
+      state.web_content_takes_press === true,
     );
     const shownTitle = readWindowTitle(state.elements, this.identity.platform);
     const document = documentTitle(shownTitle, target.native.title);
