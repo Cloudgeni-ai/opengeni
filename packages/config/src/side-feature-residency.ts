@@ -192,6 +192,26 @@ export function sideFeatureRouteFeatures(route: SideFeatureRouteId): readonly In
   return SIDE_FEATURE_ROUTES[route].features;
 }
 
+/** Routes whose residency an operator declares for one endpoint. */
+export type DeclarableSideFeatureRouteId = {
+  [K in SideFeatureRouteId]: (typeof SIDE_FEATURE_ROUTES)[K]["declarable"] extends true ? K : never;
+}[SideFeatureRouteId];
+/** Routes with a code-owned rule, the same wherever they are called. */
+export type CodeOwnedSideFeatureRouteId = Exclude<SideFeatureRouteId, DeclarableSideFeatureRouteId>;
+
+/**
+ * What a side-feature call names: a code-owned route, or a route with the
+ * endpoint the call actually sends to. A declaration describes one endpoint,
+ * so a declarable route without its resolved endpoint is unknown.
+ */
+export type SideFeatureTarget =
+  | CodeOwnedSideFeatureRouteId
+  | { route: SideFeatureRouteId; endpoint: string | null | undefined };
+
+export function sideFeatureTargetRoute(target: SideFeatureTarget): SideFeatureRouteId {
+  return typeof target === "string" ? target : target.route;
+}
+
 export type SideFeatureResidencySettings = {
   /** `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`: declarable route id to residency declaration. */
   sideFeatureResidencyJson?: string | undefined;
@@ -201,10 +221,43 @@ export type SideFeatureResidencySettings = {
 
 const SIDE_FEATURE_RULES_REVIEWED_AT = "2026-10-26";
 
+/**
+ * Vendor default hosts of declarable routes: no deployment there is the
+ * operator's own, so they carry a code-owned non-EU rule and cannot be
+ * declared.
+ */
+const VENDOR_DEFAULT_HOSTS: Record<string, Rule> = {
+  "api.openai.com": {
+    geography: "us",
+    deploymentType: "provider_default",
+    reference: "OpenAI's default API host api.openai.com processes in the US.",
+  },
+  "s.jina.ai": saas("Jina Search"),
+  "r.jina.ai": saas("Jina Reader"),
+  "api.firecrawl.dev": saas("Firecrawl"),
+};
+
+/** The origin a URL sends to, or null when it is not an http(s) URL. */
+export function sideFeatureEndpointOrigin(endpoint: string | null | undefined): string | null {
+  if (!endpoint) return null;
+  try {
+    const url = new URL(endpoint);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One operator declaration: the residency of the deployment at `endpoint`. */
+const SideFeatureResidencyDeclaration = z.object({
+  endpoint: z.string().trim().min(1),
+  residency: ModelResidencyDeclaration,
+});
+
 const SideFeatureResidencyDeclarations = z
-  .record(z.string(), ModelResidencyDeclaration)
+  .record(z.string(), SideFeatureResidencyDeclaration)
   .superRefine((value, context) => {
-    for (const key of Object.keys(value)) {
+    for (const [key, declaration] of Object.entries(value)) {
       if (!isSideFeatureRouteId(key)) {
         context.addIssue({ code: "custom", path: [key], message: "unknown side-feature route" });
       } else if (!(SIDE_FEATURE_ROUTES[key] as RouteSpec).declarable) {
@@ -214,13 +267,30 @@ const SideFeatureResidencyDeclarations = z
           message: "this route's residency is a code-owned rule and cannot be declared",
         });
       }
+      const origin = sideFeatureEndpointOrigin(declaration.endpoint);
+      if (!origin) {
+        context.addIssue({
+          code: "custom",
+          path: [key, "endpoint"],
+          message: "must be the http(s) URL this route sends to",
+        });
+      } else if (Object.hasOwn(VENDOR_DEFAULT_HOSTS, new URL(origin).hostname)) {
+        context.addIssue({
+          code: "custom",
+          path: [key, "endpoint"],
+          message: "a vendor default host has a code-owned rule and cannot be declared",
+        });
+      }
     }
   });
+
+/** A parsed declaration: the endpoint origin it describes and its residency. */
+export type SideFeatureResidencyDeclarationV1 = { endpoint: string; residency: ModelResidencyV1 };
 
 /** Parse `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`; throws a readable error when invalid. */
 export function parseSideFeatureResidencyJson(
   value: string,
-): Partial<Record<SideFeatureRouteId, ModelResidencyV1>> {
+): Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> {
   let raw: unknown;
   try {
     raw = JSON.parse(value);
@@ -235,24 +305,30 @@ export function parseSideFeatureResidencyJson(
         .join("; ")}`,
     );
   }
-  const declarations: Partial<Record<SideFeatureRouteId, ModelResidencyV1>> = {};
-  for (const [route, declaration] of Object.entries(parsed.data)) {
-    declarations[route as SideFeatureRouteId] = ModelResidencyV1.parse({
-      geography: declaration.geography,
-      deploymentType: declaration.deploymentType,
-      // Sorted and deduplicated, like chat model declarations.
-      regions: [...new Set(declaration.regions)].sort(),
-      evidence: declaration.evidence,
-    });
+  const declarations: Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> = {};
+  for (const [route, { endpoint, residency }] of Object.entries(parsed.data)) {
+    declarations[route as SideFeatureRouteId] = {
+      endpoint: sideFeatureEndpointOrigin(endpoint)!,
+      residency: ModelResidencyV1.parse({
+        geography: residency.geography,
+        deploymentType: residency.deploymentType,
+        // Sorted and deduplicated, like chat model declarations.
+        regions: [...new Set(residency.regions)].sort(),
+        evidence: residency.evidence,
+      }),
+    };
   }
   return declarations;
 }
 
-const declarationsCache = new Map<string, Partial<Record<SideFeatureRouteId, ModelResidencyV1>>>();
+const declarationsCache = new Map<
+  string,
+  Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>>
+>();
 
 function declaredSideFeatureResidency(
   settings: SideFeatureResidencySettings,
-): Partial<Record<SideFeatureRouteId, ModelResidencyV1>> {
+): Partial<Record<SideFeatureRouteId, SideFeatureResidencyDeclarationV1>> {
   const raw = settings.sideFeatureResidencyJson?.trim();
   if (!raw) return {};
   let declarations = declarationsCache.get(raw);
@@ -269,38 +345,47 @@ function declaredSideFeatureResidency(
   return declarations;
 }
 
-/**
- * Where a side-feature route processes data: the operator's declaration for
- * a declarable route, the code-owned rule otherwise, and unknown when a
- * declarable route is undeclared.
- */
-export function sideFeatureRouteResidency(
-  settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
-): ModelResidencyV1 {
-  const spec: RouteSpec = SIDE_FEATURE_ROUTES[route];
-  if (spec.declarable) {
-    return declaredSideFeatureResidency(settings)[route] ?? UNKNOWN_MODEL_RESIDENCY;
-  }
-  if (!spec.rule) return UNKNOWN_MODEL_RESIDENCY;
+function ruleResidency(rule: Rule): ModelResidencyV1 {
   return {
-    geography: spec.rule.geography,
-    deploymentType: spec.rule.deploymentType,
+    geography: rule.geography,
+    deploymentType: rule.deploymentType,
     regions: [],
     evidence: {
       source: "built_in_rule",
-      reference: spec.rule.reference,
+      reference: rule.reference,
       verifiedAt: SIDE_FEATURE_RULES_REVIEWED_AT,
     },
   };
 }
 
+/**
+ * Where a side-feature call processes data. A code-owned route has its rule.
+ * A declarable route is resolved from the endpoint the call sends to: a
+ * vendor default host has its code-owned rule; otherwise the operator's
+ * declaration applies only when it names that same endpoint origin. An
+ * undeclared route, a missing endpoint or a different endpoint is unknown.
+ */
+export function sideFeatureRouteResidency(
+  settings: SideFeatureResidencySettings,
+  target: SideFeatureTarget,
+): ModelResidencyV1 {
+  const route = sideFeatureTargetRoute(target);
+  const spec: RouteSpec = SIDE_FEATURE_ROUTES[route];
+  if (!spec.declarable) return spec.rule ? ruleResidency(spec.rule) : UNKNOWN_MODEL_RESIDENCY;
+  const origin = sideFeatureEndpointOrigin(typeof target === "string" ? null : target.endpoint);
+  if (!origin) return UNKNOWN_MODEL_RESIDENCY;
+  const vendor = VENDOR_DEFAULT_HOSTS[new URL(origin).hostname];
+  if (vendor) return ruleResidency(vendor);
+  const declaration = declaredSideFeatureResidency(settings)[route];
+  return declaration?.endpoint === origin ? declaration.residency : UNKNOWN_MODEL_RESIDENCY;
+}
+
 /** Whether the route is EU by its residency record. */
 export function sideFeatureRouteIsEu(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  target: SideFeatureTarget,
 ): boolean {
-  return isEuResidency(sideFeatureRouteResidency(settings, route));
+  return isEuResidency(sideFeatureRouteResidency(settings, target));
 }
 
 /**
@@ -311,9 +396,9 @@ export function sideFeatureRouteIsEu(
  */
 export function sideFeatureRouteAllowed(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  target: SideFeatureTarget,
 ): boolean {
-  return settings.requiredModelGeography !== "eu" || sideFeatureRouteIsEu(settings, route);
+  return settings.requiredModelGeography !== "eu" || sideFeatureRouteIsEu(settings, target);
 }
 
 /**
@@ -330,9 +415,9 @@ export type SideFeatureProcessingResidency = {
 
 export function sideFeatureProcessingResidency(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  target: SideFeatureTarget,
 ): SideFeatureProcessingResidency {
-  const residency = sideFeatureRouteResidency(settings, route);
+  const residency = sideFeatureRouteResidency(settings, target);
   return {
     geography: residency.geography,
     deploymentType: residency.deploymentType,

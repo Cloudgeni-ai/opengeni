@@ -32,6 +32,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { textModelCapabilities } from "@opengeni/core/transcription-service";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -943,6 +944,23 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       errorCode: "insufficient_credits",
       expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
     });
+  });
+
+  test("an EU-only region refusal fails the dictation without retrying", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    let calls = 0;
+    const run = dictationActivities(storage, async () => {
+      calls += 1;
+      throw new InferenceRegionRestrictedError("voice-one");
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "failed",
+      errorCode: "region_restricted",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+    expect(calls).toBe(1);
   });
 
   test("expiry leaves meetings alone", async () => {

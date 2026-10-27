@@ -8,7 +8,12 @@ import {
   type CodexUsagePayload,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
+import {
+  modelResidencyClaim,
+  ModelResidencyV1,
+  UNKNOWN_MODEL_RESIDENCY,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,
   admitModelCall,
@@ -249,9 +254,17 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       };
       // EU-only inference: resolution refuses a non-EU route, and the
       // transport refuses any request that is not on one.
+      let servedResidency: ReturnType<typeof modelResidencyClaim> | undefined;
       const execute = async (): Promise<SingleModelCallResult> =>
         await withInferenceResidency(settings, async () => {
           const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
+          // Where the call ran: the served route's residency claim; a missing
+          // or invalid record is unknown. TODO: use #6213's
+          // `modelCallProcessingResidency` once it lands (same projection).
+          const record = ModelResidencyV1.safeParse(binding.residency);
+          servedResidency = modelResidencyClaim(
+            record.success ? record.data : UNKNOWN_MODEL_RESIDENCY,
+          );
           return await runSingleModelCall(
             {
               client: binding.client,
@@ -309,6 +322,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId,
+            ...(servedResidency ? { processingResidency: servedResidency } : {}),
             ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
             usageLimitMetrics: deps.usageLimitMetrics ?? null,
             // A failed task-usage receipt never suppresses the credit

@@ -3,6 +3,7 @@ import type { Settings } from "@opengeni/config";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
+import { clientAgentConfig } from "../src/app";
 import { regionRestrictedHttpError } from "../src/http/api-error";
 import { withRegionAvailability } from "../src/model-catalog";
 import { videoGenerationFundingOptions } from "../src/routes/video-generation";
@@ -94,7 +95,11 @@ describe("video funding under EU-only inference", () => {
     });
     expect(options).toHaveLength(3);
     for (const option of options) {
-      expect(option).toMatchObject({ available: false, unavailableReason: "Not supported in EU" });
+      expect(option).toMatchObject({
+        available: false,
+        unavailableReason: "Not supported in EU",
+        unavailableCode: "region_restricted",
+      });
     }
   });
 
@@ -104,6 +109,32 @@ describe("video funding under EU-only inference", () => {
       residencySettings: testSettings(),
     });
     expect(options.every((option) => option.available)).toBe(true);
+    expect(options.some((option) => "unavailableCode" in option)).toBe(false);
+  });
+});
+
+describe("agent capabilities under EU-only inference", () => {
+  test("a capability with no configured EU route carries the region_restricted code", () => {
+    const capabilities = (settings: Settings) =>
+      new Map(clientAgentConfig(settings).capabilities.map((c) => [c.id, c]));
+    const eu = capabilities(
+      testSettings({
+        requiredModelGeography: "eu",
+        webSearchEnabled: true,
+        webSearchProvider: "tavily",
+        webSearchProviderCredentials: { tavily: { apiKey: "key" } },
+      }),
+    );
+    for (const id of ["webSearch", "media"] as const) {
+      expect(eu.get(id)).toEqual({
+        id,
+        available: false,
+        reason: "Not supported in EU",
+        code: "region_restricted",
+      });
+    }
+    const open = capabilities(testSettings());
+    expect(open.get("webSearch")?.code).toBeUndefined();
   });
 });
 

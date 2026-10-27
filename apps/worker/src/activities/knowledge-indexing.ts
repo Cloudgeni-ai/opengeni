@@ -3,6 +3,7 @@ import {
   documentEmbeddingCostMicros,
   paidDocumentEmbedding,
   workspaceCreditsDisabled,
+  knowledgeEmbeddingTarget,
   sideFeatureAllowedForWorkspace,
 } from "@opengeni/core";
 import {
@@ -273,7 +274,7 @@ export function createKnowledgeIndexingActivities(
                   lockedDb,
                   settings,
                   { accountId: claim.accountId, workspaceId: current.billingWorkspaceId },
-                  "knowledge.embeddings",
+                  knowledgeEmbeddingTarget(embedder),
                 ))
               ) {
                 await deferKnowledgeIndexJob(lockedDb, claim);
@@ -335,7 +336,7 @@ export function createKnowledgeIndexingActivities(
                   : {
                       processingResidency: sideFeatureProcessingResidency(
                         settings,
-                        "knowledge.embeddings",
+                        knowledgeEmbeddingTarget(embedder),
                       ),
                     }),
               });

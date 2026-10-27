@@ -1,5 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { decisionModelConfiguration, type Settings } from "@opengeni/config";
+import { decisionModelConfiguration, decisionModelTarget, type Settings } from "@opengeni/config";
 import { DecisionUnavailableError, DecisionRequestError } from "@opengeni/decisions";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
@@ -290,7 +290,7 @@ export function codeSearchToolDefinitions(input: {
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
   if (!input.enabled || !config || input.backend === "none") return [];
   // EU-only inference: no code_search without an EU decision model.
-  if (!sideFeatureRouteRunnable(input.settings, `decision_model.${config.provider}`)) return [];
+  if (!sideFeatureRouteRunnable(input.settings, decisionModelTarget(config))) return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }

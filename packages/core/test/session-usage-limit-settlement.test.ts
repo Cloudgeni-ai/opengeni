@@ -259,6 +259,39 @@ describe("per-task usage limit settlement across funding paths", () => {
     for (const event of usageEvents) expect(event.input.sessionId).toBeUndefined();
   });
 
+  test("a passed processing residency is recorded on every usage event of the response", async () => {
+    active = spyWrites();
+    const processingResidency = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+    };
+    await settleModelUsage(
+      testSettings({ billingMode: "stripe", usageLimitsMode: "managed", modelPricingJson: PRICED }),
+      db,
+      { ...settlementInput({ model: "priced-model" }, null), processingResidency },
+    );
+    const usageEvents = active.calls.filter((call) => call.fn === "usage");
+    expect(usageEvents.map((event) => event.input.eventType).sort()).toEqual([
+      "model.cost",
+      "model.tokens",
+    ]);
+    for (const event of usageEvents) {
+      expect(event.input.processingResidency).toEqual(processingResidency);
+    }
+    // Without one, nothing is recorded (turns record it on their model call facts).
+    active.restore();
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({ billingMode: "disabled", modelPricingJson: PRICED }),
+      db,
+      settlementInput({ model: "priced-model" }, null),
+    );
+    for (const event of active.calls.filter((call) => call.fn === "usage")) {
+      expect(event.input).not.toHaveProperty("processingResidency");
+    }
+  });
+
   test("a source identity past the receipt bound is recorded under a stable digest", async () => {
     const turnId = "00000000-0000-4000-8000-000000000001";
     // The longest identity the event trigger and legacy import accept is kept as is.

@@ -4,7 +4,7 @@ import {
   type DecisionModelSettings,
   type SideFeatureProcessingResidency,
   type SideFeatureResidencySettings,
-  type SideFeatureRouteId,
+  type CodeOwnedSideFeatureRouteId,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -16,16 +16,18 @@ import {
 /**
  * EU-only gates for the turn's media tools. Under EU a media tool is offered
  * only when its route's residency record is EU; otherwise the agent never
- * sees it. Each execution checks again before any byte leaves, because the
- * workspace setting can change mid-turn. No media route has an EU record
- * today, so these tools are off in EU-only workspaces.
+ * sees it. Each execution checks again before any byte leaves, against the
+ * turn's settings and the residency context it runs in (a nested EU or
+ * unresolved context refuses). A workspace setting changed mid-turn applies
+ * from the next turn. No media route has an EU record today, so these tools
+ * are off in EU-only workspaces.
  */
 
 /** The route an image tool for this turn would use. */
 export function imageGenerationRoute(input: {
   nativeHosted: boolean;
   providerKind: string | undefined;
-}): SideFeatureRouteId {
+}): CodeOwnedSideFeatureRouteId {
   if (input.nativeHosted) return "image_generation.openai_hosted";
   if (input.providerKind === "codex-subscription") return "image_generation.codex_subscription";
   if (input.providerKind === "xai-subscription") return "image_generation.supergrok_subscription";
@@ -33,7 +35,9 @@ export function imageGenerationRoute(input: {
 }
 
 /** The route a video tool funded this way would use. */
-export function videoGenerationRoute(fundingSource: string | null | undefined): SideFeatureRouteId {
+export function videoGenerationRoute(
+  fundingSource: string | null | undefined,
+): CodeOwnedSideFeatureRouteId {
   return fundingSource === "supergrok_subscription"
     ? "video_generation.supergrok_subscription"
     : "video_generation.ai_gateway";
@@ -41,7 +45,7 @@ export function videoGenerationRoute(fundingSource: string | null | undefined): 
 
 export function gateImageGenerationOption(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  route: CodeOwnedSideFeatureRouteId,
   option: Pick<BuildAgentOptions, "imageGeneration">,
 ): Pick<BuildAgentOptions, "imageGeneration"> {
   const imageGeneration = option.imageGeneration;
@@ -61,7 +65,7 @@ export function gateImageGenerationOption(
 
 export function gateVideoGenerationOption(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  route: CodeOwnedSideFeatureRouteId,
   option: Pick<BuildAgentOptions, "videoGeneration">,
 ): Pick<BuildAgentOptions, "videoGeneration"> {
   const videoGeneration = option.videoGeneration;

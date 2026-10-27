@@ -2,6 +2,7 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
   WEB_FETCH_TOOL_NAME,
   isSideFeatureRouteId,
+  webSearchEndpointTarget,
   sideFeatureProcessingResidency,
   WEB_SEARCH_TOOL_NAME,
   webSearchCallPricing,
@@ -233,9 +234,11 @@ async function callWithFailover<Adapter, T>(input: {
   for (const [index, candidate] of ordered.entries()) {
     const provider = candidate.endpoint.provider;
     // EU-only inference, checked again at the call: a provider whose route is
-    // not EU is never called, and failover never moves to one.
-    const routeId = `web_search.${provider}`;
-    const route = isSideFeatureRouteId(routeId) ? routeId : null;
+    // not EU (for the endpoint it calls) is never called, and failover never
+    // moves to one.
+    const route = isSideFeatureRouteId(`web_search.${provider}`)
+      ? webSearchEndpointTarget(candidate.endpoint, input.operation)
+      : null;
     if (
       route
         ? !sideFeatureRouteRunnable(input.settings, route)

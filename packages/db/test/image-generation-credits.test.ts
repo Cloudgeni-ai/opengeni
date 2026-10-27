@@ -220,8 +220,11 @@ async function imageLedger(value: Fixture) {
 }
 
 async function imageUsage(value: Fixture) {
-  const rows = await shared!.admin<{ eventType: string; quantity: string; turnId: string }[]>`
-    select event_type as "eventType", quantity::text as quantity, turn_id::text as "turnId"
+  const rows = await shared!.admin<
+    { eventType: string; quantity: string; turnId: string; residency: unknown }[]
+  >`
+    select event_type as "eventType", quantity::text as quantity, turn_id::text as "turnId",
+      processing_residency as residency
     from usage_events
     where workspace_id = ${value.grant.workspaceId} and event_type like 'image_generation%'`;
   return [...rows];
@@ -250,7 +253,11 @@ describe("Opengeni-credit funded image generation", () => {
     expect(await imageLedger(value)).toEqual([]);
 
     await retainReadyArtifact(value, operation, "call-credit-image");
-    const completed = await completeImageGenerationOperation(client.db, scope(value, operation));
+    const processingResidency = { geography: "global", deploymentType: "gateway", regions: [] };
+    const completed = await completeImageGenerationOperation(client.db, {
+      ...scope(value, operation),
+      processingResidency,
+    });
     expect(completed).toMatchObject({ status: "completed", creditState: "debited" });
     // Recovery and retries converge on the same completed operation.
     await completeImageGenerationOperation(client.db, scope(value, operation));
@@ -262,7 +269,13 @@ describe("Opengeni-credit funded image generation", () => {
       { type: "image_generation_debit", amount: String(-PRICE), sourceId: operation.id },
     ]);
     expect(await imageUsage(value)).toEqual([
-      { eventType: "image_generation.cost", quantity: String(PRICE), turnId: value.turnId },
+      {
+        eventType: "image_generation.cost",
+        quantity: String(PRICE),
+        turnId: value.turnId,
+        // Where the image route ran: the claim only.
+        residency: processingResidency,
+      },
     ]);
     expect(await workspaceAllowanceUsed(value.grant.workspaceId)).toBe(PRICE);
   }, 60_000);

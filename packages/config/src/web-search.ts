@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   sideFeatureRouteAllowed,
   type SideFeatureResidencySettings,
+  type SideFeatureTarget,
 } from "./side-feature-residency";
 
 /**
@@ -519,11 +520,28 @@ export function webSearchProviderConfig(
   const resolution = resolveWebSearchProvider(settings);
   if (resolution.status !== "configured") return null;
   if (settings.requiredModelGeography !== "eu") return resolution.config;
-  const allowed = (endpoint: WebSearchProviderEndpoint) =>
-    sideFeatureRouteAllowed(settings, `web_search.${endpoint.provider}`);
-  const search = resolution.config.search.filter(allowed);
+  const allowed = (operation: "search" | "fetch") => (endpoint: WebSearchProviderEndpoint) =>
+    sideFeatureRouteAllowed(settings, webSearchEndpointTarget(endpoint, operation));
+  const search = resolution.config.search.filter(allowed("search"));
   if (search.length === 0) return null;
-  return { ...resolution.config, search, fetch: resolution.config.fetch.filter(allowed) };
+  return { ...resolution.config, search, fetch: resolution.config.fetch.filter(allowed("fetch")) };
+}
+
+/**
+ * The route a search provider sends over, with the endpoint it calls: its
+ * configured base URL, else the provider's default host for the operation.
+ */
+export function webSearchEndpointTarget(
+  endpoint: WebSearchProviderEndpoint,
+  operation: "search" | "fetch",
+): SideFeatureTarget {
+  return {
+    route: `web_search.${endpoint.provider}`,
+    endpoint:
+      endpoint.baseUrl ??
+      WEB_SEARCH_PROVIDER_CATALOG[endpoint.provider][operation]?.defaultBaseUrl ??
+      null,
+  };
 }
 
 /** Hosted provider search runs on the provider's search backend: never EU. */

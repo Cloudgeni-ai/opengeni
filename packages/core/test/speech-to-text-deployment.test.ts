@@ -143,6 +143,9 @@ describe("speech-to-text deployment", () => {
     const deployment = createSpeechToTextDeployment(
       { settings: testSettings({}) },
       {
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // this workspace is not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, scope) => (scope.workspaceId === "keyed" ? "el" : null),
       },
     );
@@ -362,6 +365,7 @@ describe("dictation over the shared providers", () => {
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("elevenlabs", "workspace_key", async (input, credentials) => {
             heard.push({ model: input.model, key: credentials, scope: input.scope });
@@ -411,6 +415,7 @@ describe("dictation over the shared providers", () => {
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
+        isEuOnly: async () => false,
         providers: [
           fakeTextProvider("first", "workspace_subscription", async () => {
             throw new RecordingTranscriptionError("signed out", "unauthorized", false);
@@ -459,7 +464,7 @@ describe("dictation over the shared providers", () => {
     const service = createTranscriptionService({
       settings,
       db: {} as never,
-      deployment: createSpeechToTextDeployment({ settings }),
+      deployment: createSpeechToTextDeployment({ settings }, { isEuOnly: async () => false }),
     });
     expect(await service.availableProviderIds?.({ workspaceId: "w" })).toEqual(["azure-speech"]);
     expect(await service.selectProvider?.({ workspaceId: "w", preferredProvider: "openai" })).toBe(

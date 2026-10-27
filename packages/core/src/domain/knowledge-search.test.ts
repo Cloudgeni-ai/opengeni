@@ -74,6 +74,9 @@ mock.module("@opengeni/db", () => ({
   countWorkspacesForAccount: async () => 0,
   countActiveApiKeysForWorkspace: async () => 0,
   countActiveOrganizationApiKeysForAccount: async () => 0,
+  // These workspaces are not EU-only; the EU paths are covered in
+  // packages/core/test/side-feature-region.test.ts.
+  isWorkspaceEuOnly: async () => false,
 }));
 const { searchKnowledgeEntries } = await import("./knowledge-search");
 const { checkLimit } = await import("../billing/limits");

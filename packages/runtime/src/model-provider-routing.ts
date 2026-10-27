@@ -519,6 +519,7 @@ export class MultiProviderModelProvider implements ModelProvider {
           client: resolved.client,
           model: resolved.model,
           modelId: resolved.configured.upstreamModelId,
+          residency: resolved.configured.residency,
         };
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
@@ -549,12 +550,8 @@ export class MultiProviderModelProvider implements ModelProvider {
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
     const modelId = modelName ?? this.settings.openaiModel;
-    if (
-      !modelRouteMeetsResidencyRequirement(
-        this.settings,
-        builtinModelResidency(this.settings, modelId),
-      )
-    ) {
+    const residency = builtinModelResidency(this.settings, modelId);
+    if (!modelRouteMeetsResidencyRequirement(this.settings, residency)) {
       throw new InferenceRegionRestrictedError(modelId);
     }
     const client = buildProviderClient(builtin, this.settings);
@@ -563,6 +560,7 @@ export class MultiProviderModelProvider implements ModelProvider {
       client,
       model: new OpenGeniResponsesModel(client, modelId, builtin),
       modelId,
+      residency,
     };
   }
 }
@@ -573,6 +571,8 @@ export type ModelProviderBinding = {
   model: Model;
   /** The id sent on the provider wire (the upstream id for a registry model). */
   modelId: string;
+  /** The residency record of the route that serves the binding (never from a name). */
+  residency: ConfiguredModel["residency"];
 };
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {

@@ -25,6 +25,7 @@ import {
   parseSideFeatureResidencyJson,
   sideFeatureRouteAllowed,
   type SideFeatureResidencySettings,
+  type SideFeatureTarget,
 } from "./side-feature-residency";
 import {
   WebSearchProviderCredentialsSchema,
@@ -2561,22 +2562,36 @@ export function decisionModelConfiguration(
   | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
   | undefined {
   const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
-  return config && sideFeatureRouteAllowed(settings, `decision_model.${config.provider}`)
+  return config && sideFeatureRouteAllowed(settings, decisionModelTarget(config))
     ? config
     : undefined;
 }
 
 /**
- * The side-feature route the configured decision model sends over, whether
- * or not it may run under the settings' residency requirement.
+ * The route a decision model sends over. An OpenAI-compatible model is
+ * resolved with the endpoint it calls (api.openai.com without a base URL),
+ * so a declaration covers only the endpoint it names.
+ */
+export function decisionModelTarget(config: {
+  provider: "jev" | "openai" | "openrouter";
+  baseUrl?: string | undefined;
+}): SideFeatureTarget {
+  return config.provider === "openai"
+    ? { route: "decision_model.openai", endpoint: config.baseUrl ?? "https://api.openai.com/v1" }
+    : `decision_model.${config.provider}`;
+}
+
+/**
+ * The side-feature route (with its endpoint) the configured decision model
+ * sends over, whether or not it may run under the residency requirement.
  */
 export function decisionModelRoute(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
-): `decision_model.${"jev" | "openai" | "openrouter"}` | null {
+): SideFeatureTarget | null {
   const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
-  return config ? `decision_model.${config.provider}` : null;
+  return config ? decisionModelTarget(config) : null;
 }
 
 function unrestrictedDecisionModelConfiguration(

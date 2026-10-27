@@ -151,6 +151,63 @@ describe("EU-only inference enforcement", () => {
     expect(sent).toHaveLength(2);
   });
 
+  test("under EU only tools Opengeni executes pass; unknown and hosted entries are refused", async () => {
+    const { sent, inner } = recordingFetch();
+    const guarded = instrumentedModelFetch(
+      "azure-eu",
+      inner,
+      false,
+      inferenceResidencyRequirement(eu()),
+    );
+    const withTools = (tools: unknown, extra: Record<string, unknown> = {}): RequestInit => ({
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-eu", input: "hi", tools, ...extra }),
+    });
+    // Client-executed tools: allowed.
+    const allowed: unknown[] = [
+      { type: "function", name: "lookup" },
+      { type: "custom", name: "grammar" },
+      { type: "local_shell" },
+      { type: "apply_patch" },
+      { type: "computer_use_preview" },
+      { type: "shell" },
+      { type: "shell", environment: { type: "local" } },
+      { type: "tool_search", execution: "client" },
+      { type: "bash_20250124", name: "bash" },
+      { type: "text_editor_20250728", name: "str_replace_based_edit_tool" },
+      { type: "computer_20250124", name: "computer" },
+      { type: "memory_20250818", name: "memory" },
+      { name: "lookup", input_schema: { type: "object" } },
+      { type: "namespace", name: "crm", tools: [{ type: "function", name: "find" }] },
+    ];
+    await guarded(URL_RESPONSES, withTools(allowed));
+    expect(sent).toHaveLength(1);
+    // Each case the review proved reached the provider is refused.
+    for (const [tools, extra] of [
+      [[{ type: "shell", environment: { type: "container_auto" } }], {}],
+      [[{ type: "mcp_toolset", mcp_server_name: "crm" }], {}],
+      [[], { mcp_servers: [{ type: "url", url: "https://mcp.example.com", name: "crm" }] }],
+      [[{ google_search: {} }], {}],
+      [[], { plugins: [{ id: "web" }] }],
+      [[], { data_sources: [{ type: "azure_search", parameters: {} }] }],
+      [[], { search_parameters: { mode: "on" } }],
+      [[{ type: "a_future_hosted_tool" }], {}],
+      [[{ type: "tool_search" }], {}],
+      [[{ type: "tool_search", execution: "server" }], {}],
+      [[{ type: "namespace", name: "x", tools: [{ type: "web_search" }] }], {}],
+      [[{ name: "no_schema" }], {}],
+      [{ type: "web_search" }, {}],
+    ] as [unknown, Record<string, unknown>][]) {
+      await expect(guarded(URL_RESPONSES, withTools(tools, extra))).rejects.toThrow(
+        InferenceRegionRestrictedError,
+      );
+    }
+    expect(sent).toHaveLength(1);
+    // Empty hosted options request nothing.
+    await guarded(URL_RESPONSES, withTools([], { plugins: [], mcp_servers: null }));
+    expect(sent).toHaveLength(2);
+  });
+
   test("a non-model request with a body is refused under EU; reads pass", async () => {
     const { sent, inner } = recordingFetch();
     const guarded = instrumentedModelFetch(

@@ -8,6 +8,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createRealtimeVoiceBilling,
   inferenceFeatureAvailability,
+  prepareKnowledgeSave,
   realtimeVoiceRegionAllowed,
   realtimeVoiceRoute,
   sideFeatureAllowedForWorkspace,
@@ -33,7 +34,18 @@ function declaration(deploymentType: "self_hosted" | "azure_data_zone", region: 
   } as const;
 }
 
-const declare = (routes: Record<string, ReturnType<typeof declaration>>) => JSON.stringify(routes);
+/** Operator declarations, each for the one endpoint a route sends to. */
+const declare = (routes: Record<string, [endpoint: string, ReturnType<typeof declaration>]>) =>
+  JSON.stringify(
+    Object.fromEntries(
+      Object.entries(routes).map(([route, [endpoint, residency]]) => [
+        route,
+        { endpoint, residency },
+      ]),
+    ),
+  );
+
+const EMBEDDINGS = "https://embed.example.openai.azure.com";
 
 const scope = { accountId: "account", workspaceId: "workspace" };
 const database = {} as Database;
@@ -48,12 +60,30 @@ describe("live voice under EU-only inference", () => {
   const azureModel = "opengeni-azure/gpt-live-1";
 
   test("each model's route comes from the deployment's own tables", () => {
-    expect(realtimeVoiceRoute(azureModel)).toBe("realtime_voice.azure_live");
-    expect(realtimeVoiceRoute(gatewayModel)).toBe("realtime_voice.ai_gateway");
-    expect(realtimeVoiceRoute("unknown/eu-voice")).toBeNull();
+    const settings = testSettings(azureLive);
+    expect(realtimeVoiceRoute(azureModel, settings)).toEqual({
+      route: "realtime_voice.azure_live",
+      endpoint: azureLive.azureLiveEndpoint,
+    });
+    expect(realtimeVoiceRoute(gatewayModel, settings)).toBe("realtime_voice.ai_gateway");
+    expect(realtimeVoiceRoute("unknown/eu-voice", settings)).toBeNull();
     const eu = testSettings({ requiredModelGeography: "eu" });
     expect(realtimeVoiceRegionAllowed(eu, "unknown/eu-voice")).toBe(false);
     expect(realtimeVoiceRegionAllowed(testSettings(), gatewayModel)).toBe(true);
+  });
+
+  test("an Azure Live declaration for another endpoint does not admit this one", () => {
+    const eu = testSettings({
+      ...azureLive,
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declare({
+        "realtime_voice.azure_live": [
+          "https://other-voice.example.test",
+          declaration("azure_data_zone", "swedencentral"),
+        ],
+      }),
+    });
+    expect(realtimeVoiceRegionAllowed(eu, azureModel)).toBe(false);
   });
 
   test("admission refuses a non-EU model in an EU-only workspace before any connection", async () => {
@@ -84,7 +114,10 @@ describe("live voice under EU-only inference", () => {
       billingMode: "disabled",
       usageLimitsMode: "none",
       sideFeatureResidencyJson: declare({
-        "realtime_voice.azure_live": declaration("azure_data_zone", "swedencentral"),
+        "realtime_voice.azure_live": [
+          azureLive.azureLiveEndpoint,
+          declaration("azure_data_zone", "swedencentral"),
+        ],
       }),
     });
     const attribution = { kind: "human", initiatingHumanSubjectId: "user:a" } as never;
@@ -133,12 +166,18 @@ describe("speech to text under EU-only inference", () => {
     const settings = testSettings({
       ...azureSpeech,
       sideFeatureResidencyJson: declare({
-        "transcription.azure-speech": declaration("azure_data_zone", "swedencentral"),
+        "transcription.azure-speech": [
+          azureSpeech.recordingAzureSpeechEndpoint,
+          declaration("azure_data_zone", "swedencentral"),
+        ],
       }),
     });
     const deployment = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => true });
     expect(deployment.route("openai")).toBe("transcription.openai");
-    expect(deployment.route("azure-speech")).toBe("transcription.azure-speech");
+    expect(deployment.route("azure-speech")).toEqual({
+      route: "transcription.azure-speech",
+      endpoint: azureSpeech.recordingAzureSpeechEndpoint,
+    });
     expect(await deployment.regionAllowed("openai", scope)).toBe(false);
     expect(await deployment.regionAllowed("azure-speech", scope)).toBe(true);
     expect(await deployment.available("openai", scope)).toBe(false);
@@ -183,6 +222,25 @@ describe("speech to text under EU-only inference", () => {
     expect(await deployment.regionAllowed("openai", scope)).toBe(true);
     expect(await deployment.available("openai", scope)).toBe(true);
   });
+
+  test("a declaration for another Azure Speech resource does not admit this one", async () => {
+    const settings = testSettings({
+      ...azureSpeech,
+      sideFeatureResidencyJson: declare({
+        "transcription.azure-speech": [
+          "https://other.cognitiveservices.azure.com",
+          declaration("azure_data_zone", "swedencentral"),
+        ],
+      }),
+    });
+    const deployment = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => true });
+    expect(await deployment.regionAllowed("azure-speech", scope)).toBe(false);
+  });
+
+  test("without a database the EU-only setting cannot be read, so every route is held to EU", async () => {
+    const deployment = createSpeechToTextDeployment({ settings: testSettings(azureSpeech) });
+    expect(await deployment.regionAllowed("openai", scope)).toBe(false);
+  });
 });
 
 describe("feature availability", () => {
@@ -197,8 +255,11 @@ describe("feature availability", () => {
     const availability = inferenceFeatureAvailability(
       testSettings({
         requiredModelGeography: "eu",
+        webSearchEnabled: true,
+        webSearchProvider: "searxng",
+        webSearchProviderCredentials: { searxng: { baseUrl: "https://search.example.test" } },
         sideFeatureResidencyJson: declare({
-          "web_search.searxng": declaration("self_hosted", "fsn1"),
+          "web_search.searxng": ["https://search.example.test", declaration("self_hosted", "fsn1")],
         }),
       }),
     );
@@ -223,72 +284,88 @@ describe("feature availability", () => {
     ).toBe("Not supported in EU");
   });
 
+  test("availability follows the route the deployment is configured to use", () => {
+    // An EU declaration for a provider the deployment does not use changes nothing.
+    const tavily = testSettings({
+      requiredModelGeography: "eu",
+      webSearchEnabled: true,
+      webSearchProvider: "tavily",
+      webSearchProviderCredentials: { tavily: { apiKey: "key" } },
+      sideFeatureResidencyJson: declare({
+        "web_search.firecrawl": ["https://crawl.example.test", declaration("self_hosted", "fsn1")],
+        "knowledge.embeddings": [EMBEDDINGS, declaration("azure_data_zone", "swedencentral")],
+      }),
+    });
+    const byId = (sources: Parameters<typeof inferenceFeatureAvailability>[1]) =>
+      new Map(inferenceFeatureAvailability(tavily, sources).map((f) => [f.id, f.available]));
+    expect(byId({}).get("web_search")).toBe(false);
+    // Knowledge follows the configured embedder's endpoint; a local one sends nothing.
+    expect(byId({}).get("knowledge_embeddings")).toBe(false);
+    expect(byId({ embedder: { endpoint: EMBEDDINGS } }).get("knowledge_embeddings")).toBe(true);
+    expect(
+      byId({ embedder: { endpoint: "https://api.openai.com/v1" } }).get("knowledge_embeddings"),
+    ).toBe(false);
+    expect(byId({ embedder: { local: true } }).get("knowledge_embeddings")).toBe(true);
+  });
+
   test("outside a turn the workspace setting decides, and only EU records pass", async () => {
     const settings = testSettings({
       sideFeatureResidencyJson: declare({
-        "knowledge.embeddings": declaration("azure_data_zone", "swedencentral"),
+        "knowledge.embeddings": [EMBEDDINGS, declaration("azure_data_zone", "swedencentral")],
       }),
     });
+    const target = { route: "knowledge.embeddings", endpoint: EMBEDDINGS } as const;
     const euOnly = async () => true;
     const notEuOnly = async () => false;
     expect(
-      await sideFeatureAllowedForWorkspace(
-        database,
-        testSettings(),
-        scope,
-        "knowledge.embeddings",
-        euOnly,
-      ),
+      await sideFeatureAllowedForWorkspace(database, testSettings(), scope, target, euOnly),
     ).toBe(false);
+    expect(await sideFeatureAllowedForWorkspace(database, settings, scope, target, euOnly)).toBe(
+      true,
+    );
+    // The same declaration does not cover the vendor default host.
     expect(
       await sideFeatureAllowedForWorkspace(
         database,
         settings,
         scope,
-        "knowledge.embeddings",
+        { ...target, endpoint: "https://api.openai.com/v1" },
         euOnly,
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
-      await sideFeatureAllowedForWorkspace(
-        database,
-        testSettings(),
-        scope,
-        "knowledge.embeddings",
-        notEuOnly,
-      ),
+      await sideFeatureAllowedForWorkspace(database, testSettings(), scope, target, notEuOnly),
     ).toBe(true);
     // A failed read of the setting never lets the call through.
     await expect(
-      sideFeatureAllowedForWorkspace(
-        database,
-        testSettings(),
-        scope,
-        "knowledge.embeddings",
-        async () => {
-          throw new Error("database unavailable");
-        },
-      ),
+      sideFeatureAllowedForWorkspace(database, testSettings(), scope, target, async () => {
+        throw new Error("database unavailable");
+      }),
     ).rejects.toThrow("database unavailable");
   });
 });
 
 describe("Knowledge semantic search under EU-only inference", () => {
   const context = { ...scope, actor: { kind: "human", subjectId: "user:a" } } as const;
-  function fakeEmbedder() {
+  function fakeEmbedder(endpoint: string = "https://api.openai.com/v1") {
     const queries: string[] = [];
+    let resolved = 0;
     return {
       queries,
-      embedder: () =>
-        ({
+      resolved: () => resolved,
+      embedder: () => {
+        resolved += 1;
+        return {
           model: "embedding",
           dimensions: 3,
+          endpoint,
           embedQuery: async (query: string) => {
             queries.push(query);
             return [1, 0, 0];
           },
           embedMany: async () => [[1, 0, 0]],
-        }) as never,
+        } as never;
+      },
     };
   }
 
@@ -324,6 +401,81 @@ describe("Knowledge semantic search under EU-only inference", () => {
       euOnly.mockRestore();
       list.mockRestore();
     }
+  });
+
+  test("the embedder is resolved once, so the region check covers the call that runs", async () => {
+    const euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(true);
+    const list = spyOn(db, "listKnowledgeEntries").mockResolvedValue({
+      entries: [],
+      nextCursor: null,
+    } as never);
+    try {
+      // Declared EU for another endpoint than the one the embedder calls.
+      const fake = fakeEmbedder("https://api.openai.com/v1");
+      const result = await searchKnowledgeEntries(
+        database,
+        context as never,
+        { query: "where does it run", mode: "hybrid" },
+        fake.embedder,
+        testSettings({
+          sideFeatureResidencyJson: declare({
+            "knowledge.embeddings": [EMBEDDINGS, declaration("azure_data_zone", "swedencentral")],
+          }),
+        }),
+      );
+      expect(result).toMatchObject({ searchMode: "keyword", fallbackReason: "region_restricted" });
+      expect(fake.queries).toEqual([]);
+      expect(fake.resolved()).toBe(1);
+    } finally {
+      euOnly.mockRestore();
+      list.mockRestore();
+    }
+  });
+
+  test("Knowledge preparation keeps the embedder's placement and residency settings for both views", async () => {
+    const settings = testSettings();
+    const seen: Array<{
+      local: unknown;
+      endpoint: unknown;
+      metering: unknown;
+      residency: unknown;
+    }> = [];
+    const search = (async (
+      _db: unknown,
+      _context: unknown,
+      _request: unknown,
+      embedder: () => { local?: boolean; endpoint?: string },
+      metering?: unknown,
+      ...rest: unknown[]
+    ) => {
+      const provider = embedder();
+      // Like the real search, residency defaults to the metering settings.
+      const residency = rest.length > 0 ? rest[0] : metering;
+      seen.push({ local: provider.local, endpoint: provider.endpoint, metering, residency });
+      return { entries: [], searchMode: "hybrid" };
+    }) as never;
+    await prepareKnowledgeSave(
+      database,
+      { ...context, actor: { kind: "agent", subjectId: "agent:a" } } as never,
+      { query: "where does it run", collectionCursors: { published: null, needs_review: null } },
+      () =>
+        ({
+          model: "local",
+          dimensions: 3,
+          local: true,
+          endpoint: EMBEDDINGS,
+          embedQuery: async () => [1, 0, 0],
+          embedMany: async () => [[1, 0, 0]],
+        }) as never,
+      { get: (async () => null) as never, list: (async () => ({ entries: [] })) as never, search },
+      settings,
+    );
+    expect(seen).toEqual([
+      { local: true, endpoint: EMBEDDINGS, metering: settings, residency: settings },
+      // The second view reuses the query embedding: it meters nothing, but its
+      // region check still reads the residency declarations.
+      { local: true, endpoint: EMBEDDINGS, metering: undefined, residency: settings },
+    ]);
   });
 
   test("a deployment whose embedder cannot be resolved still falls back to keyword search", async () => {

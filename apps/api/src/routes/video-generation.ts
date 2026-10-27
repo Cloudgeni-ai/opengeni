@@ -1,4 +1,5 @@
 import {
+  REGION_RESTRICTED,
   UpdateVideoGenerationPolicyRequest,
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,
@@ -210,6 +211,13 @@ export function videoGenerationFundingOptions(input: {
   ];
   return options.map((option) => {
     const restricted = region(option.source);
-    return restricted ? { ...option, available: false, unavailableReason: restricted } : option;
+    return restricted
+      ? {
+          ...option,
+          available: false,
+          unavailableReason: restricted,
+          unavailableCode: REGION_RESTRICTED,
+        }
+      : option;
   });
 }

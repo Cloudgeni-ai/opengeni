@@ -14,7 +14,7 @@ import {
   sideFeatureRouteAllowed,
   type RealtimeVoicePricing,
   type Settings,
-  type SideFeatureRouteId,
+  type SideFeatureTarget,
 } from "@opengeni/config";
 import type { SessionRealtimeModel } from "@opengeni/contracts";
 import {
@@ -116,8 +116,12 @@ export function deploymentRealtimeVoice(
  */
 export function realtimeVoiceRoute(
   model: SessionRealtimeModel | string,
-): SideFeatureRouteId | null {
-  if (model === AZURE_LIVE_REALTIME_MODEL_ID) return "realtime_voice.azure_live";
+  settings: Pick<Settings, "azureLiveEndpoint">,
+): SideFeatureTarget | null {
+  // The deployment's own Azure resource, at the endpoint it connects to.
+  if (model === AZURE_LIVE_REALTIME_MODEL_ID) {
+    return { route: "realtime_voice.azure_live", endpoint: settings.azureLiveEndpoint };
+  }
   if (model === CODEX_REALTIME_MODEL_ID) return "realtime_voice.codex_subscription";
   if (model === SUPERGROK_REALTIME_MODEL_ID) return "realtime_voice.supergrok_subscription";
   for (const gateway of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
@@ -133,11 +137,14 @@ export function realtimeVoiceRoute(
 
 /** Whether a live-voice model may run under these (residency-narrowed) settings. */
 export function realtimeVoiceRegionAllowed(
-  settings: Pick<Settings, "sideFeatureResidencyJson" | "requiredModelGeography">,
+  settings: Pick<
+    Settings,
+    "sideFeatureResidencyJson" | "requiredModelGeography" | "azureLiveEndpoint"
+  >,
   model: SessionRealtimeModel | string,
 ): boolean {
   if (settings.requiredModelGeography !== "eu") return true;
-  const route = realtimeVoiceRoute(model);
+  const route = realtimeVoiceRoute(model, settings);
   return route !== null && sideFeatureRouteAllowed(settings, route);
 }
 
@@ -418,7 +425,7 @@ export function createRealtimeVoiceBilling(deps: {
         keys: minutes.map((minute) => minute.key),
       });
       // Where the voice call ran, recorded on each minute's receipt.
-      const processingRoute = realtimeVoiceRoute(facts.model);
+      const processingRoute = realtimeVoiceRoute(facts.model, deps.settings);
       let debitedMicros = 0;
       for (const minute of minutes) {
         if (recorded.has(minute.key)) continue;

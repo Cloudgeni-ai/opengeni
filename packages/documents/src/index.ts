@@ -123,6 +123,12 @@ export type DocumentEmbedder = {
    * anywhere, so EU-only inference needs no route for them.
    */
   readonly local?: boolean;
+  /**
+   * The URL texts are sent to, for EU-only inference: a residency
+   * declaration covers only the endpoint it names. Absent for a local
+   * embedder.
+   */
+  readonly endpoint?: string;
   embedMany: (texts: string[]) => Promise<number[][]>;
   embedQuery: (text: string) => Promise<number[]>;
 };
@@ -403,10 +409,13 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     this.defaultQuery = args.defaultQuery;
     this.model = args.model ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL;
     this.dimensions = args.dimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
+    // Where the OpenAI SDK sends without a configured base URL.
+    this.endpoint = args.baseURL ?? process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
   }
 
   readonly model: string;
   readonly dimensions: number;
+  readonly endpoint: string;
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
 

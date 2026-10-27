@@ -43,6 +43,7 @@ import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
   normalizeOrganizationAccessPolicy,
+  REGION_RESTRICTED,
   REGION_RESTRICTED_MESSAGE,
 } from "@opengeni/contracts";
 import {
@@ -551,6 +552,14 @@ export function createAppComposition(deps: AppDependencies): {
   const getDocumentServices = () => {
     documentServices ??= createDocumentServices(deps.settings);
     return documentServices;
+  };
+  // The Knowledge embedder for availability answers; none when it cannot be built.
+  const configuredEmbedder = () => {
+    try {
+      return getDocumentServices().embedder;
+    } catch {
+      return null;
+    }
   };
   const documentIndexer = deps.documentIndexer ?? {
     indexDocument: async ({
@@ -1665,7 +1674,11 @@ export function createAppComposition(deps: AppDependencies): {
         agentConfig: clientAgentConfig(residencySettings),
         // Region availability of every model-backed side feature for the
         // caller's workspace: `region_restricted` shows "Not supported in EU".
-        inferenceFeatures: inferenceFeatureAvailability(residencySettings),
+        // Knowledge reads the deployment's embedder (only resolved under EU).
+        inferenceFeatures: inferenceFeatureAvailability(
+          residencySettings,
+          requiredModelGeography === "eu" ? { embedder: configuredEmbedder() } : {},
+        ),
         // Producer capability for per-task usage limits. Clients only offer a
         // new limit when enabled; existing limits stay visible and removable.
         sessionUsageLimits: {
@@ -4278,9 +4291,9 @@ function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
 }
 
 /** Client-safe agent-configuration projection. */
-function clientAgentConfig(settings: Settings): ClientAgentConfig {
+export function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
-  // EU-only: capabilities whose every model-backed route is switched off.
+  // EU-only: capabilities with no configured EU route here.
   const regionRestricted: Partial<Record<(typeof AGENT_CAPABILITY_IDS)[number], boolean>> = {
     webSearch: !inferenceFeatureRegionAllowed(settings, "web_search"),
     media:
@@ -4292,7 +4305,15 @@ function clientAgentConfig(settings: Settings): ClientAgentConfig {
     enabled: true,
     defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
-      const reason = regionRestricted[id] ? REGION_RESTRICTED_MESSAGE : policy.unavailable[id];
+      if (regionRestricted[id]) {
+        return {
+          id,
+          available: false,
+          reason: REGION_RESTRICTED_MESSAGE,
+          code: REGION_RESTRICTED,
+        };
+      }
+      const reason = policy.unavailable[id];
       return reason === undefined ? { id, available: true } : { id, available: false, reason };
     }),
   };

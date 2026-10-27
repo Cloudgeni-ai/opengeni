@@ -81,6 +81,7 @@ import {
   type Settings,
   type VoiceInputPricing,
 } from "@opengeni/config";
+import { findInferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
@@ -853,6 +854,10 @@ export function createRecordingActivities(
         });
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
+        // EU-only refused the route before any audio was sent; a retry gets
+        // the same answer, and the job never moves to another provider.
+        if (findInferenceRegionRestrictedError(error))
+          return await fail("region_restricted", error);
         if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
         if (error instanceof RecordingAudioError) {
           if (error.code === "missing_chunk") {

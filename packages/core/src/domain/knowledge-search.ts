@@ -1,5 +1,9 @@
 import { KnowledgeEntryListRequest, type KnowledgeEntryListResponse } from "@opengeni/contracts";
-import { sideFeatureProcessingResidency, type Settings } from "@opengeni/config";
+import {
+  sideFeatureProcessingResidency,
+  type Settings,
+  type SideFeatureResidencySettings,
+} from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
@@ -17,7 +21,10 @@ import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
 import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
 import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
-import { sideFeatureAllowedForWorkspace } from "../side-feature-availability";
+import {
+  knowledgeEmbeddingTarget,
+  sideFeatureAllowedForWorkspace,
+} from "../side-feature-availability";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable
@@ -64,6 +71,13 @@ export async function searchKnowledgeEntries(
   input: z.input<typeof KnowledgeEntryListRequest>,
   embedder: () => DocumentEmbedder,
   settings?: Settings,
+  /**
+   * The residency settings (EU requirement and side-feature declarations)
+   * for the region check, when they differ from the metering `settings`: a
+   * caller reusing an earlier query embedding passes no metering settings
+   * but still needs the declarations.
+   */
+  residencySettings: SideFeatureResidencySettings | undefined = settings,
 ): Promise<KnowledgeEntryListResponse> {
   const request = KnowledgeEntryListRequest.parse(input);
   // Copy trusted actor fields before any provider/lock await. Request lifetime
@@ -103,20 +117,29 @@ export async function searchKnowledgeEntries(
       fallbackReason,
     };
   };
-  // Whether the query would leave this process. An embedder that cannot be
-  // resolved sends nothing; the provider path below falls back as before.
-  const sendsQuery = (() => {
-    try {
-      return !embedder().local;
-    } catch {
-      return false;
-    }
-  })();
+  // The embedder is resolved once: the region check, the call and the
+  // recorded region all use this one provider. One that cannot be resolved
+  // sends nothing; the provider path below falls back as before.
+  let provider: DocumentEmbedder | null = null;
+  let resolveError: unknown = null;
+  try {
+    provider = embedder();
+  } catch (error) {
+    resolveError = error;
+  }
+  const sendsQuery = provider !== null && provider.local !== true;
   // EU-only: the query is never sent to an embedding route without an EU
-  // residency record; keyword search answers instead (vector mode refuses).
+  // residency record for the endpoint it calls; keyword search answers
+  // instead (vector mode refuses).
   if (
+    provider &&
     sendsQuery &&
-    !(await sideFeatureAllowedForWorkspace(db, settings, context, "knowledge.embeddings"))
+    !(await sideFeatureAllowedForWorkspace(
+      db,
+      residencySettings,
+      context,
+      knowledgeEmbeddingTarget(provider),
+    ))
   ) {
     return keywordFallback(
       db,
@@ -152,11 +175,15 @@ export async function searchKnowledgeEntries(
   const retrieveThenSettle = async (queryDb: Database) => {
     let embedding: { model: string; values: number[] };
     // Where the query was embedded; nothing is sent anywhere by a local embedder.
-    const processingResidency = sendsQuery
-      ? sideFeatureProcessingResidency(settings ?? {}, "knowledge.embeddings")
-      : undefined;
+    const processingResidency =
+      provider && sendsQuery
+        ? sideFeatureProcessingResidency(
+            residencySettings ?? {},
+            knowledgeEmbeddingTarget(provider),
+          )
+        : undefined;
     try {
-      const provider = embedder();
+      if (!provider) throw resolveError;
       const values = await provider.embedQuery(request.query!);
       if (
         values.length !== provider.dimensions ||

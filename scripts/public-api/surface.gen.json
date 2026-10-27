@@ -13373,6 +13373,7 @@
         "$.agentConfig.capabilities": "array!",
         "$.agentConfig.capabilities[]": "object",
         "$.agentConfig.capabilities[].available": "boolean!",
+        "$.agentConfig.capabilities[].code": "enum?=[\"\\\"region_restricted\\\"\"]",
         "$.agentConfig.capabilities[].id": "ref(AgentCapabilityId)!",
         "$.agentConfig.capabilities[].reason": "string?",
         "$.agentConfig.defaultForNewSessions": "boolean!",
@@ -31203,6 +31204,7 @@
         "$.description": "string!",
         "$.label": "string!",
         "$.source": "ref(VideoGenerationFundingSource)!",
+        "$.unavailableCode": "enum?=[\"\\\"region_restricted\\\"\"]",
         "$.unavailableReason": "string! null"
       }
     },

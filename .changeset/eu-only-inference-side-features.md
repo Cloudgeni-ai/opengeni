@@ -4,6 +4,7 @@
 "@opengeni/core": minor
 "@opengeni/contracts": minor
 "@opengeni/db": minor
+"@opengeni/documents": minor
 "@opengeni/sdk": minor
 ---
 
@@ -12,5 +13,6 @@ generation, live voice, transcription, Knowledge embeddings and decision
 models each have residency records; under EU only routes with an EU record
 run, nothing falls back outside the EU, and switched-off features report
 `region_restricted` (shown as "Not supported in EU"). Operators declare EU
-routes with `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`, and usage events record
-where each call ran.
+routes with `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`, each for the one endpoint
+it describes, and usage events record where each call ran. Under EU the model
+transport admits only tools Opengeni executes itself.

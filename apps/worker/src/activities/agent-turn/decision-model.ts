@@ -1,5 +1,7 @@
 import {
   decisionModelConfiguration,
+  decisionModelTarget,
+  sideFeatureTargetRoute,
   type DecisionModelSettings,
   type Settings,
 } from "@opengeni/config";
@@ -25,9 +27,13 @@ export function configuredDecisionModel(
 ): { id: string; model: DecisionModel } | undefined {
   const config = decisionModelConfiguration(settings, options.allowLegacyCodeSearch);
   if (!config) return undefined;
-  const route = `decision_model.${config.provider}` as const;
+  const route = decisionModelTarget(config);
   if (!sideFeatureRouteRunnable(settings, route)) return undefined;
-  const fetch = sideFeatureRouteFetch(settings, route, options.fetch ?? globalThis.fetch);
+  const fetch = sideFeatureRouteFetch(
+    settings,
+    sideFeatureTargetRoute(route),
+    options.fetch ?? globalThis.fetch,
+  );
   const model =
     config.provider === "jev"
       ? createJevDecisionModel(

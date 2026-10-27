@@ -59,12 +59,38 @@ describe("side-feature route gates", () => {
   });
 
   test("under EU a declarable route runs only once declared EU", () => {
-    expect(sideFeatureRouteRunnable(eu(), "web_search.searxng")).toBe(false);
+    const searxng = { route: "web_search.searxng", endpoint: "http://searxng.internal" } as const;
+    expect(sideFeatureRouteRunnable(eu(), searxng)).toBe(false);
     const declared = eu({
-      sideFeatureResidencyJson: JSON.stringify({ "web_search.searxng": euSelfHosted }),
+      sideFeatureResidencyJson: JSON.stringify({
+        "web_search.searxng": { endpoint: searxng.endpoint, residency: euSelfHosted },
+      }),
     });
-    expect(sideFeatureRouteRunnable(declared, "web_search.searxng")).toBe(true);
-    expect(() => assertSideFeatureRoute(declared, "web_search.searxng")).not.toThrow();
+    expect(sideFeatureRouteRunnable(declared, searxng)).toBe(true);
+    expect(() => assertSideFeatureRoute(declared, searxng)).not.toThrow();
+    // The declaration is for that endpoint only.
+    expect(
+      sideFeatureRouteRunnable(declared, { ...searxng, endpoint: "https://elsewhere.example" }),
+    ).toBe(false);
+  });
+
+  test("a guarded declarable route checks each request's own URL", async () => {
+    const { calls, inner } = countingFetch();
+    const declared = eu({
+      sideFeatureResidencyJson: JSON.stringify({
+        "decision_model.openai": {
+          endpoint: "https://decide.example.com",
+          residency: euSelfHosted,
+        },
+      }),
+    });
+    const guarded = sideFeatureRouteFetch(declared, "decision_model.openai", inner);
+    await guarded("https://decide.example.com/v1/chat/completions");
+    expect(calls).toHaveLength(1);
+    await expect(guarded("https://api.openai.com/v1/chat/completions")).rejects.toBeInstanceOf(
+      InferenceRegionRestrictedError,
+    );
+    expect(calls).toHaveLength(1);
   });
 
   test("the guarded transport never sends a byte on a refused route", async () => {

@@ -4,8 +4,11 @@ import {
   euModelRoutes,
   sideFeatureRouteFeatures,
   sideFeatureRouteIsEu,
+  sideFeatureTargetRoute,
+  type CodeOwnedSideFeatureRouteId,
   type SideFeatureResidencySettings,
   type SideFeatureRouteId,
+  type SideFeatureTarget,
   type Settings,
 } from "@opengeni/config";
 import { modelEndpointDeployment, type InferenceFeatureId } from "@opengeni/contracts";
@@ -76,10 +79,10 @@ export function sideFeatureRequiresEu(settings: SideFeatureResidencySettings): b
  */
 export function assertSideFeatureRoute(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
-  feature: InferenceFeatureId = sideFeatureRouteFeatures(route)[0]!,
+  target: SideFeatureTarget,
+  feature: InferenceFeatureId = sideFeatureRouteFeatures(sideFeatureTargetRoute(target))[0]!,
 ): void {
-  if (sideFeatureRequiresEu(settings) && !sideFeatureRouteIsEu(settings, route)) {
+  if (sideFeatureRequiresEu(settings) && !sideFeatureRouteIsEu(settings, target)) {
     throw sideFeatureRegionRestrictedError(feature);
   }
 }
@@ -87,7 +90,8 @@ export function assertSideFeatureRoute(
 /**
  * A transport for a side-feature provider adapter that checks the route
  * before every request, so nothing is sent on a route that may not run here
- * even when the adapter was built earlier.
+ * even when the adapter was built earlier. The endpoint is each request's
+ * own URL, so a declaration covers only the endpoint it names.
  */
 export function sideFeatureRouteFetch(
   settings: SideFeatureResidencySettings,
@@ -95,7 +99,7 @@ export function sideFeatureRouteFetch(
   inner: typeof fetch = globalThis.fetch,
 ): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    assertSideFeatureRoute(settings, route);
+    assertSideFeatureRoute(settings, { route, endpoint: requestUrl(input) });
     return await inner(input, init);
   }) as typeof fetch;
 }
@@ -103,9 +107,9 @@ export function sideFeatureRouteFetch(
 /** Whether a side-feature call may use this route now (the non-throwing form). */
 export function sideFeatureRouteRunnable(
   settings: SideFeatureResidencySettings,
-  route: SideFeatureRouteId,
+  target: SideFeatureTarget,
 ): boolean {
-  return !sideFeatureRequiresEu(settings) || sideFeatureRouteIsEu(settings, route);
+  return !sideFeatureRequiresEu(settings) || sideFeatureRouteIsEu(settings, target);
 }
 
 /**
@@ -236,49 +240,110 @@ export function currentInferenceResidency(): InferenceResidencyContext | undefin
 type RequestBodyFacts = {
   model: string | null;
   /**
-   * Provider-hosted tools the request asks the provider to run (search,
-   * image generation, code execution): their side-feature route, or null for
-   * a hosted tool with no residency record. Function tools run here and are
-   * not listed.
+   * Everything the request asks the provider itself to run (hosted tools and
+   * hosted body options such as search or MCP servers): their side-feature
+   * route, or null when there is no residency record. Only tools Opengeni
+   * executes (functions, local shell, editors) are not listed.
    */
-  hostedTools: { type: string; route: SideFeatureRouteId | null }[];
+  hostedTools: { type: string; route: CodeOwnedSideFeatureRouteId | null }[];
 };
 
-/** The side-feature route of a provider-hosted tool type, by the provider's wire type. */
-function hostedToolRoute(type: string): SideFeatureRouteId | null | undefined {
-  // OpenAI and Azure `web_search`/`web_search_preview*`, Anthropic
-  // `web_search_*`/`web_fetch_*`, SuperGrok `x_search`.
-  if (type.startsWith("web_search") || type.startsWith("web_fetch") || type === "x_search") {
+/**
+ * Body keys that ask the provider to run something itself: Chat Completions
+ * search options, SuperGrok live search, Anthropic MCP servers, OpenRouter
+ * plugins and Azure "on your data" sources.
+ */
+const HOSTED_BODY_KEYS = [
+  "web_search_options",
+  "search_parameters",
+  "mcp_servers",
+  "plugins",
+  "data_sources",
+] as const;
+
+/** A record-backed route for the hosted tool types that have one, else null. */
+function hostedToolRoute(type: string): CodeOwnedSideFeatureRouteId | null {
+  if (
+    type.startsWith("web_search") ||
+    type.startsWith("web_fetch") ||
+    type === "x_search" ||
+    type === "search_parameters"
+  ) {
     return "web_search.hosted";
   }
   if (type === "image_generation") return "image_generation.openai_hosted";
-  // Hosted execution and retrieval run on the provider's own services.
-  if (
-    type === "code_interpreter" ||
-    type.startsWith("code_execution") ||
-    type === "file_search" ||
-    type === "mcp"
-  ) {
-    return null;
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Whether a tool entry runs in Opengeni rather than on the provider: an
+ * allow-list, so an unknown or future tool type counts as hosted.
+ */
+function clientExecutedTool(tool: unknown): boolean {
+  if (!isRecord(tool)) return false;
+  const type = tool.type;
+  // Anthropic custom tools carry no type: a name and an input schema.
+  if (type === undefined) {
+    return typeof tool.name === "string" && isRecord(tool.input_schema);
   }
-  // Function and client-executed tools run here.
-  return undefined;
+  if (typeof type !== "string") return false;
+  if (["function", "custom", "local_shell", "apply_patch"].includes(type)) return true;
+  // OpenAI `computer*` and Anthropic `bash_*`, `text_editor_*`, `computer_*`,
+  // `memory_*` are executed by the client.
+  if (/^(computer|bash_|text_editor_|memory_)/u.test(type)) return true;
+  if (type === "tool_search") return tool.execution === "client";
+  if (type === "shell") {
+    return (
+      tool.environment === undefined ||
+      tool.environment === null ||
+      (isRecord(tool.environment) && tool.environment.type === "local")
+    );
+  }
+  // A group of tools passes only when every tool in it does.
+  if (type === "namespace") {
+    return Array.isArray(tool.tools) && tool.tools.every(clientExecutedTool);
+  }
+  return false;
+}
+
+/** A readable name for a refused tool entry. */
+function toolLabel(tool: unknown): string {
+  if (!isRecord(tool)) return "tool";
+  if (typeof tool.type === "string") return tool.type;
+  const [key] = Object.keys(tool);
+  return key ?? "tool";
+}
+
+function hasHostedValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === false) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
 function bodyFacts(value: unknown): RequestBodyFacts {
   if (value === null || typeof value !== "object") return { model: null, hostedTools: [] };
-  const body = value as { model?: unknown; tools?: unknown };
+  const body = value as Record<string, unknown>;
   const hostedTools: RequestBodyFacts["hostedTools"] = [];
-  for (const tool of Array.isArray(body.tools) ? (body.tools as unknown[]) : []) {
-    const type =
-      tool !== null && typeof tool === "object" ? (tool as { type?: unknown }).type : undefined;
-    if (typeof type !== "string") continue;
-    const route = hostedToolRoute(type);
-    if (route !== undefined) hostedTools.push({ type, route });
+  if (hasHostedValue(body.tools) && !Array.isArray(body.tools)) {
+    hostedTools.push({ type: "tools", route: null });
   }
-  // Chat Completions search models and SuperGrok live search are hosted search too.
-  if ("web_search_options" in body || "search_parameters" in body) {
-    hostedTools.push({ type: "web_search_options", route: "web_search.hosted" });
+  for (const tool of Array.isArray(body.tools) ? (body.tools as unknown[]) : []) {
+    if (clientExecutedTool(tool)) continue;
+    const type = toolLabel(tool);
+    hostedTools.push({ type, route: hostedToolRoute(type) });
+  }
+  for (const key of HOSTED_BODY_KEYS) {
+    if (hasHostedValue(body[key])) {
+      hostedTools.push({
+        type: key,
+        route:
+          key === "web_search_options" || key === "search_parameters" ? "web_search.hosted" : null,
+      });
+    }
   }
   return { model: typeof body.model === "string" ? body.model : null, hostedTools };
 }

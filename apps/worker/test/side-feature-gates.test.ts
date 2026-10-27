@@ -180,7 +180,14 @@ describe("web search failover under EU-only inference", () => {
         searxng: { baseUrl: "http://searxng.internal" },
       },
       ...(declare
-        ? { sideFeatureResidencyJson: JSON.stringify({ "web_search.searxng": euSelfHosted }) }
+        ? {
+            sideFeatureResidencyJson: JSON.stringify({
+              "web_search.searxng": {
+                endpoint: "http://searxng.internal",
+                residency: euSelfHosted,
+              },
+            }),
+          }
         : {}),
     });
 

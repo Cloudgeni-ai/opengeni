@@ -9,6 +9,7 @@ import {
   type Database,
   type ImageGenerationOperationStatus,
 } from "@opengeni/db";
+import type { SideFeatureProcessingResidency } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import {
@@ -102,6 +103,11 @@ export type ExecuteImageGenerationOperationInput = {
    * `provider_started` and is never blindly replayed.
    */
   isProviderDispatchRejected?: (error: unknown) => boolean;
+  /**
+   * Where the image route processes the request (its residency claim),
+   * recorded on the operation's usage event.
+   */
+  processingResidency?: SideFeatureProcessingResidency;
   generate: () => Promise<GeneratedImageOutput>;
 };
 
@@ -219,6 +225,7 @@ export async function executeImageGenerationOperation(
       workspaceId: input.workspaceId,
       operationId: identity.operationId,
       operationKey: identity.operationKey,
+      ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
     });
     return retained.receipt;
   } catch (error) {
@@ -315,6 +322,7 @@ async function recoverCompletedImage(
     | "toolCallId"
     | "providerId"
     | "providerBindingHash"
+    | "processingResidency"
   >,
   identity: { artifactId: string; operationId: string; operationKey: string },
 ): Promise<GeneratedImageReceipt | null> {
@@ -353,6 +361,7 @@ async function recoverCompletedImage(
     workspaceId: input.workspaceId,
     operationId: identity.operationId,
     operationKey: identity.operationKey,
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
   });
   return retainedGeneratedImageFromArtifact(recovered).receipt;
 }
