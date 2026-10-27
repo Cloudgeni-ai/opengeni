@@ -120,6 +120,42 @@ test("times keep their minutes, with seconds only when they matter", () => {
   expect(at("2026-10-28T00:00:00.0000000", "UTC")).toBe("2026-10-28 00:00 (UTC)");
   expect(at("2026-10-28T09:15:30")).toBe("2026-10-28 09:15:30");
   expect(at("2026-10-28T09:15:00Z")).toBe("2026-10-28 09:15 UTC");
+  expect(at("2026-10-28T23:30:15Z", "UTC")).toBe("2026-10-28 23:30:15 UTC");
+});
+
+test("a link always shows where it goes, closed or not, and only its real href counts", () => {
+  const message = (content: string) =>
+    rows({ body: { body: { contentType: "HTML", content } } })[0]![1];
+  expect(
+    message(
+      '<a data-href="https://bank.example" href="https://evil.example">https://bank.example</a>',
+    ),
+  ).toBe("https://bank.example (https://evil.example)");
+  expect(message('<p><a href="https://evil.example/login">sign in here</p><p>Thanks</p>')).toBe(
+    "sign in here (https://evil.example/login)\n\nThanks (https://evil.example/login)",
+  );
+  expect(
+    message('<a href="https://x.example/a">outer <a href="https://y.example">inner</a></a>'),
+  ).toBe("outer (https://x.example/a) inner (https://y.example)");
+  // Decoded once: "&amp;#64;" is the text "&#64;", not "@".
+  expect(
+    message('<a href="https://bank.example&amp;#64;evil.example">bank</a> a &amp;#64; b'),
+  ).toBe("bank (https://bank.example&#64;evil.example) a &#64; b");
+  // A ">" inside an attribute stays inside the tag.
+  expect(message('<span title="a > b">Hi</span> <img alt="x"> 1 < 2')).toBe("Hi  1 < 2");
+  expect(message('<a href="https://img.example"><img src="logo.png"></a>')).toBe(
+    "https://img.example",
+  );
+});
+
+test("header values show on the card, and cookies show as protected", () => {
+  expect(
+    rows({ path: { id: "7" }, header: { "If-Match": "*" }, cookie: { theme: "dark" } }),
+  ).toEqual([
+    ["ID", "7"],
+    ["If match", "*"],
+    ["Theme", "[Protected value]"],
+  ]);
 });
 
 test("an HTML message shows where its links go, with entities and comments read plainly", () => {

@@ -121,6 +121,7 @@ const CRUD_VERBS: Readonly<Record<string, readonly [string, "one" | "many"]>> = 
   set: ["Set", "one"],
   delete: ["Delete", "one"],
   remove: ["Remove", "one"],
+  modify: ["Update", "one"],
 };
 
 function words(text: string): string[] {
@@ -136,7 +137,8 @@ function words(text: string): string[] {
 const NOT_PLURAL = /(ss|us|is|settings|analytics|details|news|series)$/;
 
 function singular(word: string): string {
-  if (NOT_PLURAL.test(word)) return word;
+  // "as", "bus", "ids": too short to tell a plural from a word.
+  if (word.length <= 3 || NOT_PLURAL.test(word)) return word;
   if (/ies$/.test(word)) return `${word.slice(0, -3)}y`;
   if (/(ss|x|ch|sh)es$/.test(word)) return word.slice(0, -2);
   if (/[^s]s$/.test(word)) return word.slice(0, -1);
@@ -156,6 +158,12 @@ const COUNTING =
 // A read whose first word is one of these already says what it does.
 const READ_VERB =
   /^(read|search|find|check|count|download|export|fetch|lookup|query|preview|validate|resolve|list|get)$/;
+
+// "setDefault" says how, not what: the thing it acts on is its parent.
+const QUALIFIER = /^(default|primary|active|current|main|preferred|public|private)$/;
+// A POST to "/accounts/{id}/close" performs that action on the account.
+const ROUTE_ACTION =
+  /^(accept|activate|apply|approve|archive|cancel|capture|close|confirm|copy|deactivate|decline|deploy|disable|dismiss|enable|finalize|generate|lock|mark|merge|move|open|pause|pay|publish|refund|reject|renew|reopen|rerun|reset|resolve|restart|restore|resume|retry|revoke|run|send|start|stop|submit|suspend|sync|transfer|trigger|unarchive|unlock|unpublish|verify|void)$/;
 
 /** Action phrases whose meaning needs the thing they act on. */
 const SUBJECT_ACTIONS: Readonly<Record<string, (subject: string) => string>> = {
@@ -196,16 +204,34 @@ export function integrationOperationDisplayTitle(
 ): string | undefined {
   const key = operationKey.trim();
   if (!key || key.length > 512) return undefined;
-  if (graphHost(context.serverUrl))
-    for (const [pattern, title] of REVIEWED_GRAPH_TITLES) if (pattern.test(key)) return title;
+  const graph = graphHost(context.serverUrl);
+  if (graph) {
+    // Graph appends a short hash to repeated operation ids: "driveItem.delta-fa14".
+    const reviewed = key.replace(/-[0-9a-f]{4}$/, "");
+    for (const [pattern, title] of REVIEWED_GRAPH_TITLES) if (pattern.test(reviewed)) return title;
+  }
   // An operation without an id is keyed by its method and path: "get_/pets/{id}".
   const route = /^(get|head|post|put|patch|delete)_(\/.*)$/.exec(key);
   if (route) {
+    const method = route[1]!;
     const path = route[2]!.split("/").filter(Boolean);
-    const resource = path.filter((segment) => !segment.startsWith("{"));
+    const isParameter = (segment: string | undefined) => segment?.startsWith("{") === true;
+    const resource = path.filter((segment) => !isParameter(segment));
+    const named = words(path.at(-1) ?? "");
+    // "post_/repos/{owner}/{repo}/archive" archives one repo.
+    if (
+      method === "post" &&
+      isParameter(path.at(-2)) &&
+      named.length > 0 &&
+      ROUTE_ACTION.test(named[0]!) &&
+      resource.length >= 2
+    )
+      return sentence([...named, ...singularObject(words(resource.at(-2)!))]);
     const noun = resource.length > 0 ? words(resource.at(-1)!) : [];
     if (noun.length === 0) return undefined;
-    const one = path.at(-1)?.startsWith("{") === true || !["get", "head"].includes(route[1]!);
+    // One thing when the path names it, or when a POST creates it;
+    // "delete_/users" acts on every user.
+    const one = isParameter(path.at(-1)) || method === "post";
     const verb = {
       get: "Read",
       head: "Read",
@@ -228,16 +254,34 @@ export function integrationOperationDisplayTitle(
   const subject = parent.join(" ") === "me" ? [] : parent;
   if (parts[0] === "get" && parts[1] === "count" && parts.length === 2)
     return subject.length > 0 ? sentence(["Count", ...subject]) : undefined;
-  const verb = Object.hasOwn(CRUD_VERBS, parts[0]!) ? CRUD_VERBS[parts[0]!] : undefined;
+  // "messages.batchDelete" acts on several messages at once.
+  const batch = parts[0] === "batch" && parts.length > 1 && Object.hasOwn(CRUD_VERBS, parts[1]!);
+  const verbParts = batch ? parts.slice(1) : parts;
+  const verb = Object.hasOwn(CRUD_VERBS, verbParts[0]!) ? CRUD_VERBS[verbParts[0]!] : undefined;
   if (verb) {
     const [action, count] = verb;
-    const own = parts.slice(1);
-    // "createPet" names its own object.
-    if (own.length > 0 && !PREPOSITION.test(own[0]!))
-      return sentence([action, ...(count === "one" ? singularObject(own) : own)]);
+    const own = verbParts.slice(1);
+    const scope = batch ? ["multiple"] : [];
+    if (own.length > 0 && !PREPOSITION.test(own[0]!)) {
+      // "smimeInfo.setDefault" sets the default smime info.
+      if (own.every((word) => QUALIFIER.test(word)) && subject.length > 0)
+        return sentence([action, ...own, ...(count === "one" ? singularObject(subject) : subject)]);
+      // "createPet" names its own object, and "removeAllLabels" its real
+      // scope. Only Graph names one item by its plural collection.
+      return sentence([
+        action,
+        ...scope,
+        ...(count === "one" && graph && !batch ? singularObject(own) : own),
+      ]);
+    }
     // "drive.files.get" and "issues/list-for-repo" act on their parent.
     if (subject.length > 0)
-      return sentence([action, ...(count === "one" ? singularObject(subject) : subject), ...own]);
+      return sentence([
+        action,
+        ...scope,
+        ...(count === "one" && !batch ? singularObject(subject) : subject),
+        ...own,
+      ]);
     return own.length > 0 ? sentence([action, ...own]) : undefined;
   }
   if (graphql && parts.length === 1)

@@ -432,6 +432,8 @@ function apiEnvelopeEntries(args: Record<string, unknown>): ApiEntry[] | null {
     ...body,
     ...children("path", true),
     ...children("query", true),
+    ...children("header", true),
+    ...children("cookie", true),
     ...(args.contentType === undefined
       ? []
       : [{ key: "contentType", value: args.contentType, path: "/contentType", parameter: true }]),
@@ -481,37 +483,90 @@ function decodeEntities(text: string): string {
   });
 }
 
-const stripTags = (html: string) => html.replace(/<[^>]*>/g, "");
+// One tag, with quoted attribute values that may hold ">"; "a < b" is text.
+const HTML_TAG = /<(\/?)([a-z][a-z0-9:-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>|<![^>]*>|<\?[^>]*>/gi;
+const HTML_ATTRIBUTE = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+const HTML_DROPPED = /^(head|title|script|style)$/i;
+
+/** The value of a tag's own `href` attribute (not `data-href`), or undefined. */
+function hrefOf(attributes: string): string | undefined {
+  for (const match of attributes.matchAll(HTML_ATTRIBUTE))
+    if (match[1]!.toLowerCase() === "href") return match[2] ?? match[3] ?? match[4] ?? "";
+  return undefined;
+}
 
 /**
  * The text a person reads in an HTML message. A link whose target differs from
  * its text shows both, "our portal (https://pay.example.net)", because where a
- * link goes is what a person checks before sending.
+ * link goes is what a person checks before sending. That holds for a link that
+ * is never closed too: mail clients keep it a link to the end of its text.
+ * Text and link targets are decoded exactly once.
  */
 function plainText(content: string, contentType: unknown): string {
   if (typeof contentType !== "string" || contentType.toLowerCase() !== "html") return content;
-  return decodeEntities(
-    content
-      .replace(/<!--[\s\S]*?-->/g, "")
-      .replace(/<(head|title|script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
-      .replace(
-        /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
-        (_match, double?: string, single?: string, bare?: string, inner = "") => {
-          const text = stripTags(inner);
-          const target = decodeEntities((double ?? single ?? bare ?? "").trim()).replace(
-            /^mailto:/i,
-            "",
-          );
-          const shown = decodeEntities(text).trim();
-          if (!target || target.startsWith("#") || shown === target) return text;
-          return shown ? `${text} (${target.replace(/[<>]/g, "")})` : target.replace(/[<>]/g, "");
-        },
-      )
-      // Paragraphs and headings keep the blank line the email will show.
-      .replace(/<\/(p|h[1-6]|blockquote)\s*>/gi, "\n\n")
-      .replace(/<br\s*\/?>|<\/(div|li|tr)\s*>/gi, "\n")
-      .replace(/<[^>]*>/g, ""),
-  )
+  const html = content.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  // Text is collected raw and decoded per piece, so nothing decodes twice.
+  const pieces: string[] = [];
+  let out = "";
+  let link: { target: string; continued: boolean } | undefined;
+  let dropped: string | undefined;
+  const flush = () => {
+    pieces.push(decodeEntities(out));
+    out = "";
+  };
+  // Everything collected since a link opened is its text.
+  const closeLink = () => {
+    if (!link) return;
+    const { target, continued } = link;
+    link = undefined;
+    flush();
+    const text = pieces.pop()!;
+    const shown = text.trim();
+    if (!target || target.startsWith("#") || shown === target) pieces.push(text);
+    else if (shown) {
+      // The target follows the words, before any space after them.
+      const words = text.trimEnd();
+      pieces.push(`${words} (${target})${text.slice(words.length)}`);
+    } else pieces.push(continued ? text : `${text}${target}`);
+  };
+  const block = (separator: string) => {
+    // A link still open across a paragraph keeps going in the next one.
+    const open = link;
+    closeLink();
+    flush();
+    pieces.push(separator);
+    if (open) link = { target: open.target, continued: true };
+  };
+  let index = 0;
+  for (const match of html.matchAll(HTML_TAG)) {
+    if (!dropped) out += html.slice(index, match.index);
+    index = match.index + match[0].length;
+    const [, closing, rawName, attributes = ""] = match;
+    if (!rawName) continue;
+    const name = rawName.toLowerCase();
+    if (dropped) {
+      if (closing && name === dropped) dropped = undefined;
+      continue;
+    }
+    if (!closing && HTML_DROPPED.test(name)) {
+      dropped = name;
+      continue;
+    }
+    if (name === "a") {
+      closeLink();
+      const href = closing ? undefined : hrefOf(attributes);
+      if (href !== undefined) {
+        flush();
+        link = { target: decodeEntities(href.trim()).replace(/^mailto:/i, ""), continued: false };
+      }
+    } else if (closing && /^(p|h[1-6]|blockquote)$/.test(name)) block("\n\n");
+    else if ((!closing && name === "br") || (closing && /^(div|li|tr)$/.test(name))) block("\n");
+  }
+  if (!dropped) out += html.slice(index);
+  closeLink();
+  flush();
+  return pieces
+    .join("")
     .replace(/\u00a0/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -548,7 +603,11 @@ function dateTimeText(dateTime: string, timeZone: unknown): string {
         parsed[5] ? (parsed[5].toUpperCase() === "Z" ? " UTC" : ` ${parsed[5]}`) : ""
       }`
     : dateTime;
-  return typeof timeZone === "string" && timeZone.trim() ? `${text} (${timeZone.trim()})` : text;
+  const zone = typeof timeZone === "string" ? timeZone.trim() : "";
+  // "23:30 UTC" already says its zone.
+  return zone && !(text.endsWith(" UTC") && /^(utc|z|etc\/utc)$/i.test(zone))
+    ? `${text} (${zone})`
+    : text;
 }
 
 /** One plain reading of a structured value, or undefined to fall back to its size. */

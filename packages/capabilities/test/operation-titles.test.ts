@@ -33,6 +33,9 @@ test("everyday Microsoft 365 operations read as plain actions", () => {
     "chats.CreateMessages": "Send a chat message",
     "chats.ListMessages": "Read chat messages",
     "me.chats.ListMessages": "Read messages",
+    "drives.drive.items.driveItem.delta-fa14": "Read changes to files",
+    "me.messages.delta-1a2b": "Read changes to emails",
+    "me.mailFolders.CreateChildFolders": "Create child folder",
   };
   for (const [key, title] of Object.entries(cases))
     expect(integrationOperationDisplayTitle(key, graph)).toBe(title);
@@ -44,7 +47,7 @@ test("everyday Microsoft 365 operations read as plain actions", () => {
 
 test("Microsoft 365 phrasing stays on Microsoft Graph", () => {
   const stripe = { serverUrl: "https://api.stripe.com", method: "get" };
-  expect(integrationOperationDisplayTitle("GetEvents", stripe)).toBe("Read event");
+  expect(integrationOperationDisplayTitle("GetEvents", stripe)).toBe("Read events");
   expect(integrationOperationDisplayTitle("getSchedule", { method: "post" })).toBe("Read schedule");
   expect(integrationOperationDisplayTitle("me.sendMail")).toBe("Send mail");
 });
@@ -70,6 +73,24 @@ test("other operation ids read as their verb and object", () => {
     "mutation:createIssue": "Create issue",
   };
   for (const [key, title] of Object.entries(cases))
+    expect(integrationOperationDisplayTitle(key)).toBe(title);
+  // A person approving a destructive action sees its real scope.
+  const scope: Record<string, string> = {
+    "actions/delete-workflow-run-logs": "Delete workflow run logs",
+    "issues/remove-assignees": "Remove assignees",
+    "issues/remove-all-labels": "Remove all labels",
+    "pulls/remove-requested-reviewers": "Remove requested reviewers",
+    "delete_/users": "Delete users",
+    "delete_/users/{id}": "Delete user",
+    "post_/repos/{owner}/{repo}/archive": "Archive repo",
+    "post_/accounts/{id}/close": "Close account",
+    "post_/repos/{owner}/{repo}/forks": "Create fork",
+    "gmail.users.messages.batchDelete": "Delete multiple messages",
+    "gmail.users.messages.batchModify": "Update multiple messages",
+    "gmail.users.settings.sendAs.delete": "Delete send as",
+    "gmail.users.settings.sendAs.smimeInfo.setDefault": "Set default smime info",
+  };
+  for (const [key, title] of Object.entries(scope))
     expect(integrationOperationDisplayTitle(key)).toBe(title);
   // A read named by what it returns says that it reads.
   expect(integrationOperationDisplayTitle("me.outlook.supportedTimeZones", { method: "get" })).toBe(
