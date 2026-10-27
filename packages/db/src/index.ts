@@ -895,7 +895,10 @@ import {
 import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
+  type InteractionRequestCurrentTarget,
   InteractionResourceStateError,
+  interactionRequestRefusalText,
+  isInteractionResourceRefusal,
   persistAttemptInteractionInterventionInTransaction,
   resolveInteractionInterventionInTransaction,
   settleSessionMaintenanceInTransaction,
@@ -82519,6 +82522,8 @@ export type ApplySessionTurnSettlementInput = {
       operationId: string;
       toolCallId: string;
       input: RequestHumanInteractionToolInput;
+      /** The target as read at this pause, or why it could not be read. */
+      currentTarget?: InteractionRequestCurrentTarget | string;
     }>;
   };
   recording?: SessionTurnRecordingSettlement;
@@ -83022,6 +83027,7 @@ export async function applySessionTurnSettlement(
         }),
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
+      let interactionRefusalEvent: AppendEventInput | null = null;
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -83166,25 +83172,57 @@ export async function applySessionTurnSettlement(
           }
         }
         for (const request of interactionInterventionRequests) {
-          await persistAttemptInteractionInterventionInTransaction(tx as unknown as Database, {
-            ...request,
-            accountId: session.accountId,
-            workspaceId,
-            originatingSessionId: input.sessionId,
-            originatingTurnId: input.turnId,
-            originatingAttemptId: input.attemptId,
-          });
+          try {
+            // A savepoint, so a refused request leaves nothing behind.
+            await tx.transaction(async (savepoint) => {
+              await persistAttemptInteractionInterventionInTransaction(
+                savepoint as unknown as Database,
+                {
+                  ...request,
+                  accountId: session.accountId,
+                  workspaceId,
+                  originatingSessionId: input.sessionId,
+                  originatingTurnId: input.turnId,
+                  originatingAttemptId: input.attemptId,
+                },
+              );
+            });
+          } catch (error) {
+            if (!isInteractionResourceRefusal(error)) throw error;
+            // The target changed or is gone. The agent learns it as this
+            // call's result: the same pause records a system rejection, so
+            // the turn resumes at once instead of failing. One decision
+            // resumes a pause; any other refused request re-freezes and is
+            // answered the same way.
+            interactionRefusalEvent ??= {
+              type: "user.approvalDecision",
+              payload: {
+                approvalId: request.toolCallId,
+                decision: "reject",
+                refusal: interactionRequestRefusalText(error.message),
+              },
+              clientEventId: `system:interaction-request-refused:${request.id}:${turn.executionGeneration}`,
+            };
+          }
         }
         // The child is now blocked on a human. Tell its parent through the
         // durable outbox (the worker delivers it): one row per exact
         // (child, turn, generation), so a same-generation re-freeze after an
         // activity retry dedupes and a later generation is a new notice.
-        await enqueueChildRequiresActionOutboxTx(tx as unknown as Database, workspaceId, session, {
-          turnId: input.turnId,
-          turnGeneration: turn.executionGeneration,
-          humanInputRequests,
-          pendingApprovals: input.runState.pendingApprovals,
-        });
+        // A refused request resumes the turn at once, so nobody is waited on.
+        if (!interactionRefusalEvent) {
+          await enqueueChildRequiresActionOutboxTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            {
+              turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              humanInputRequests,
+              pendingApprovals: input.runState.pendingApprovals,
+            },
+          );
+        }
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -83533,6 +83571,7 @@ export async function applySessionTurnSettlement(
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
+        ...(interactionRefusalEvent ? [interactionRefusalEvent] : []),
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {

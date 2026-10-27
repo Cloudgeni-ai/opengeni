@@ -44,6 +44,7 @@ import {
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
+  interactionRequestNeedingCurrentTarget,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
   findAnthropicRequestSizeError,
@@ -2165,20 +2166,32 @@ export async function runTurnStreamAttempt(
             },
           },
         }));
-      const interactionInterventionRequests = interactionInterventionInterruptions.map(
-        (interruption) => ({
-          id: stableInteractionInterventionId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          operationId: stableInteractionInterventionOperationId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          toolCallId: interruption.toolCallId,
-          input: interruption.input,
+      const readInteractionTarget = eventing.interactionRequestTargetReader;
+      const interactionInterventionRequests = await Promise.all(
+        interactionInterventionInterruptions.map(async (interruption) => {
+          // Generations the call left out are the target's as it is now.
+          const unread = interactionRequestNeedingCurrentTarget(interruption.input);
+          return {
+            id: stableInteractionInterventionId(
+              input.sessionId,
+              activeTurnId,
+              interruption.toolCallId,
+            ),
+            operationId: stableInteractionInterventionOperationId(
+              input.sessionId,
+              activeTurnId,
+              interruption.toolCallId,
+            ),
+            toolCallId: interruption.toolCallId,
+            input: interruption.input,
+            ...(unread
+              ? {
+                  currentTarget: readInteractionTarget
+                    ? await readInteractionTarget(unread)
+                    : "the target's current state cannot be read here",
+                }
+              : {}),
+          };
         }),
       );
       const pendingApprovals = [

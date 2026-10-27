@@ -178,7 +178,21 @@ export async function resultItemForOpenSuffixMember(input: {
 }): Promise<{ resultItem: Record<string, unknown>; eventOutput: unknown }> {
   const name = toolNameFromCallItem(input.row.callItem);
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
-    const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
+    const payload = input.trigger.payload as {
+      message?: unknown;
+      decision?: unknown;
+      refusal?: unknown;
+    };
+    if (
+      input.row.interruptionKind === "interaction_intervention" &&
+      payload.decision === "reject" &&
+      typeof payload.refusal === "string" &&
+      payload.refusal.trim().length > 0
+    ) {
+      // Refused at the pause itself (a person-handoff request whose target
+      // changed): nothing ran, and the refusal says what to do next.
+      return memberResult({ callId: input.row.callId, name, output: payload.refusal });
+    }
     if (
       input.row.interruptionKind === "approval" &&
       payload.decision === "reject" &&
