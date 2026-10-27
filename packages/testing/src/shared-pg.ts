@@ -870,6 +870,8 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.summarize_queued_turns_by_hold()
       TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
+      TO ${grantee};
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth_passkeys TO ${grantee};
     GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(

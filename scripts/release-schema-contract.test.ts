@@ -2341,6 +2341,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "1002_organization_inference_residency.sql",
+      "1002_browser_wait_hold.sql",
       "1001_browser_session_display.sql",
       "0998_managed_auth_passkeys.sql",
       "0996_personal_machine_reconnect_elsewhere.sql",
