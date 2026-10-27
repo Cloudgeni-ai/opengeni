@@ -41,8 +41,9 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
-    pattern: /\/callback$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
-    reason: "a provider's browser redirect back to Opengeni",
+    pattern:
+      /\/callback$|^\/v1\/integrations\/connect\/finished$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
+    reason: "a provider's browser redirect back to Opengeni, and the page it ends on",
   },
   {
     pattern:

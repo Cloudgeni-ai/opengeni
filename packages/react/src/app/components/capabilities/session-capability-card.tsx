@@ -32,7 +32,7 @@ import {
 import { userErrorText } from "../../../ui/api-error";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
-import { AuthNeededRow } from "../../../components/message-timeline";
+import { AuthNeededRow } from "../../../components/auth-needed-row";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
