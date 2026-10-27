@@ -740,8 +740,12 @@ covers Batch's seconds-cheap source contracts, lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
 The cheap source contracts are the shared pending-changeset release plan
 (`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
-ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
-Site runtime check, the committed workflow execution graph (otherwise only a unit
+ignored/not-ignored changeset or an ignored-only plan fails the PR), every
+generated artifact Batch verifies (`scripts/ci/check-generated-artifacts.ts`: the
+Site runtime, organization MCP action catalog, React compiled CSS, Site gateway
+shell, child lifecycle notice protocol and client Skill mirrors, each re-rendered
+in seconds; a stale one fails with the exact regenerate command), the committed
+workflow execution graph (otherwise only a unit
 test that workflow-changing PRs defer to Batch), and every impact-plan guard
 Batch source contracts run, except lint (its own step). The legacy subscription
 runtime scan reads only the PR's changed files there (the whole tree when its
