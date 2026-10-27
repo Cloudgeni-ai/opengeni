@@ -107,8 +107,20 @@ function inferenceFeatureConfigured(
       );
     case "voice_input":
     case "meeting_transcription":
-    case "live_transcription":
       return configuredDeclarableTargets(settings, feature, sources).length > 0;
+    case "live_transcription": {
+      // Any live-capable provider counts, with or without a live route: one
+      // with none (ElevenLabs) is still a route here, just never an EU one.
+      let deployment: ReturnType<typeof createSpeechToTextDeployment>;
+      try {
+        deployment = createSpeechToTextDeployment({ settings });
+      } catch {
+        return false;
+      }
+      return deployment.order.some((providerId) =>
+        deployment.registry.get(providerId)?.models.some((spec) => spec.capabilities.live),
+      );
+    }
   }
 }
 

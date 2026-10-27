@@ -363,13 +363,8 @@ describe("feature availability", () => {
       }),
     );
     const byId = new Map(availability.map((feature) => [feature.id, feature]));
-    // No search, no embedder, no decision model, no live transcription provider.
-    for (const id of [
-      "web_search",
-      "knowledge_embeddings",
-      "code_search",
-      "live_transcription",
-    ] as const) {
+    // No search, no embedder, no decision model.
+    for (const id of ["web_search", "knowledge_embeddings", "code_search"] as const) {
       expect(byId.get(id)).toEqual({ id, available: false, unavailableReason: null });
     }
     // Media and live voice can always run on a connected subscription, never in the EU.
@@ -378,6 +373,14 @@ describe("feature availability", () => {
     }
     // A configured route that isn't EU still says so.
     expect(byId.get("meeting_transcription")?.unavailableReason).toBe("region_restricted");
+    // ElevenLabs is always registered and streams live without a live route
+    // of its own: a live transcript exists here, just not in the EU, as the
+    // recording model list says too.
+    expect(byId.get("live_transcription")).toEqual({
+      id: "live_transcription",
+      available: false,
+      unavailableReason: "region_restricted",
+    });
   });
 
   test("availability follows the route the deployment is configured to use", () => {
