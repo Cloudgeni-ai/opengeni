@@ -745,8 +745,6 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         connectionAuthorities: true,
         pinnedAccounts: true,
         pinnedAccountsRequired: true,
-        variableSetId: true,
-        environmentId: true,
         ...(events ? {} : { events: true as const }),
       })
       .strict(),
@@ -2383,7 +2381,6 @@ export function buildOpenGeniMcpServer(
             grant,
             targetSessionId: task.targetSessionId,
             runMode: task.runMode,
-            variableSetId: task.variableSetId,
             rigId: task.rigId,
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
@@ -4470,8 +4467,6 @@ function scheduledTaskUpdateChangesState(
   ) {
     return true;
   }
-  if (update.variableSetId !== undefined && update.variableSetId !== task.variableSetId)
-    return true;
   if (update.rigId !== undefined && update.rigId !== task.rigId) return true;
   if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
     return true;
@@ -5778,7 +5773,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. An unchanged snapshot is not new evidence of a child's progress: do not poll it between session_wait calls as a ritual. For a long or uncertain child wait, call wait_for_input instead; no preliminary snapshot or short wait is required. Its terminal result wakes you and carries its final answer (payload.finalAnswer). Meaningful user/task/Skill monitoring cadences remain supported. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. An unchanged snapshot is not new evidence of a child's progress: do not poll it between session_wait calls as a ritual. For a long or uncertain child wait, call wait_for_input instead; no preliminary snapshot or short wait is required. Its terminal result wakes you and carries its final answer (payload.finalAnswer). Meaningful user/task/Skill monitoring cadences remain supported. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs and effectiveToolPolicy. Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
           sessionId: z4
             .string()

@@ -216,16 +216,16 @@ export function SecretsRoute({
   const navigate = useNavigate();
   const access = context.accessContext;
   const can = (permission: string) => hasWorkspacePermission(access, workspaceId, permission);
-  const canList = can("secrets:list") || can("variable-sets:list");
+  const canList = can("secrets:list");
   const canWrite = can("secrets:write");
   // "use = reveal": viewers can see that an item exists, never its value.
-  const canUse = can("secrets:use") || can("variable-sets:use") || can("environments:use");
+  const canUse = can("secrets:use");
   const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const accountId = workspaceGrant?.accountId ?? null;
   const canManageOrganization = Boolean(
     accountId && hasAccountPermission(access, accountId, "account:admin"),
   );
-  const canWriteWorkspace = can("variable-sets:write") || can("secrets:write");
+  const canWriteWorkspace = can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace
     ? orgLabel(t, workspace.accountId, access.accountGrants)

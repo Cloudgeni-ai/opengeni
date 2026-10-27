@@ -891,9 +891,6 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).not.toContain('"const":"shared"');
       expect(serialized).not.toContain('"enum":["shared"');
       expect(serialized).toContain("machineTarget");
-      // Variable Sets were replaced by vaults: no legacy selection fields.
-      expect(serialized).not.toContain("variableSetId");
-      expect(serialized).not.toContain("environmentId");
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');

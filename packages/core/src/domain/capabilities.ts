@@ -41,11 +41,11 @@ import {
   CODEX_APPS_STARTUP_TIMEOUT_MS,
 } from "@opengeni/codex";
 import {
-  decryptVariableSetValue,
+  decryptEnvironmentValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
@@ -571,7 +571,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
       );
     }
   }
@@ -744,7 +744,7 @@ async function resolveMcpCredentialHeaders(
     return Object.fromEntries(
       Object.entries(storedCiphertext).map(([name, value]) => [
         name,
-        decryptVariableSetValue(key, value),
+        decryptEnvironmentValue(key, value),
       ]),
     );
   } catch {

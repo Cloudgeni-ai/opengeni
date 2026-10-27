@@ -234,7 +234,6 @@ test.each([
           effectiveTools: policy.turnTools,
           attemptId: crypto.randomUUID(),
           effectiveSandboxBackend: "docker",
-          variableSet: null,
         });
         const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
         expect(requests.at(-1)).toMatchObject({ lane, mcpServers: [remote], turnId: turn.id });

@@ -26,8 +26,6 @@ const PAGES = new Set([
   "files",
   "agents",
   "secrets",
-  "variable-sets",
-  "environments",
   "rigs",
   "playground",
   "read-only-chats",

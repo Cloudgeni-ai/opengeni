@@ -164,7 +164,6 @@ async function fixture(lane: "workspace" | "organization") {
       attemptId,
       effectiveTools: [],
       effectiveSandboxBackend: "none",
-      variableSet: null,
     });
     if (!resolver) throw new Error("Provider was not bound");
     return resolver;

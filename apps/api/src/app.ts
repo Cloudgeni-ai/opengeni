@@ -323,7 +323,6 @@ import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
-import { variableSetsRemovedErrorResponse } from "./http/variable-sets-removed";
 import { registerVaultRoutes } from "./routes/vaults";
 import { registerCredentialProfileRoutes } from "./routes/credential-profiles";
 import { registerFileRoutes } from "./routes/files";
@@ -2490,8 +2489,6 @@ export function createAppComposition(deps: AppDependencies): {
     // Archives remain read-only through the existing Send/Steer/control paths.
     const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
     if (importErrorResponse) return importErrorResponse;
-    const removedResponse = variableSetsRemovedErrorResponse(c, rawError);
-    if (removedResponse) return removedResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
@@ -2808,14 +2805,9 @@ export function assertConfiguredCodemodeSessionProxyPath(
         // Resource-derived sandbox mechanics are not platform capabilities.
         allowed = true;
       } else if (
-        [
-          "agent",
-          "tool-policy",
-          "mcp-servers",
-          "mcp-credentials",
-          "variable-sets",
-          "project",
-        ].includes(operation ?? "")
+        ["agent", "tool-policy", "mcp-servers", "mcp-credentials", "project"].includes(
+          operation ?? "",
+        )
       ) {
         allowed = allows("project_get") && targetAllowed;
       } else {
@@ -2845,8 +2837,6 @@ export function assertConfiguredCodemodeSessionProxyPath(
         sandboxes: "sandboxes_list",
         machines: "sandboxes_list",
         rigs: "rig_list",
-        environments: "environment_list",
-        "variable-sets": "variable_set_list",
         capabilities: "capability_catalog_search",
         catalog: "capability_catalog_search",
         members: "project_get",
@@ -3899,19 +3889,6 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/skills/:id",
   },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments$/,
-    label: "/v1/workspaces/:workspaceId/environments",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+\/variables\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/environments/:id/variables/:name",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/environments/:id",
-  },
-
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
     label: "/v1/workspaces/:workspaceId/plugins/preview",

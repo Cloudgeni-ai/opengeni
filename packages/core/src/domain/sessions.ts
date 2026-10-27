@@ -152,7 +152,6 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
-  type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -163,7 +162,7 @@ import {
   canonicalSessionCommandHash,
   frozenInitiatorForCommandActor,
   getComposerDraftInTransaction,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getAnySessionInGroup,
   getEnrollment,
   getChannel,
@@ -291,7 +290,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIdsFor,
 } from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
-import { requireEnvironmentEncryption, variableSetsRemovedError } from "./encryption-key";
+import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -777,7 +776,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey!, value),
+        encryptEnvironmentValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -879,7 +878,7 @@ export function validateSessionMcpCredentialUpdates(input: {
       headersEncrypted: Object.fromEntries(
         Object.entries(headers).map(([name, value]) => [
           name,
-          encryptVariableSetValue(encryptionKey, value),
+          encryptEnvironmentValue(encryptionKey, value),
         ]),
       ),
     };
@@ -1035,13 +1034,6 @@ export async function createAndStartSessionWithOutcome(input: {
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
-  // Ordered low-to-high precedence. Names/ids only; session.created never
-  // carries variable values.
-  variableSets?: Array<{
-    id: string;
-    name: string;
-    scope: VariableSet["scope"];
-  }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -1325,8 +1317,6 @@ export async function createAndStartSessionWithOutcome(input: {
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode ?? "standard",
           sandboxBackend: input.sandboxBackend,
-          variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-          variableSetId: input.variableSets?.at(-1)?.id ?? null,
           rigId: input.rigId ?? null,
           rigVersionId: input.rigVersionId ?? null,
           channelId: input.channelId ?? null,
@@ -1439,8 +1429,6 @@ export async function createAndStartSessionWithOutcome(input: {
         reasoningEffort: input.reasoningEffort,
         latencyMode: input.latencyMode ?? "standard",
         sandboxBackend: input.sandboxBackend,
-        variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-        variableSetId: input.variableSets?.at(-1)?.id ?? null,
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId: input.channelId ?? null,
@@ -1584,11 +1572,6 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSets?: Array<{
-      id: string;
-      name: string;
-      scope: VariableSet["scope"];
-    }>;
     goal?: GoalSpec | null;
     initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
@@ -1674,15 +1657,6 @@ async function finishStartSession(
       surface: input.surface ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
-        ...(input.variableSets?.length
-          ? {
-              variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-              variableSets: input.variableSets,
-              // Legacy highest-precedence aliases.
-              variableSetId: input.variableSets.at(-1)!.id,
-              variableSetName: input.variableSets.at(-1)!.name,
-            }
-          : {}),
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
       },
       goal: input.goal
@@ -2280,7 +2254,7 @@ export async function postUserMessageTurn(
 
 /**
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
- * `session_create` tool: payload validation, resource/tool/variableSet
+ * `session_create` tool: payload validation, resource/tool
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
  * their meaning: a child inherits repositories (never files), tools, and MCP
@@ -2920,7 +2894,6 @@ async function createSessionForRequestInFileScope(
               ? { requestedSessionId: payload.requestedSessionId }
               : {}),
             visibility: effectiveVisibility,
-            variableSetIds: payload.variableSetIds ?? [],
             initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
             deferInitialTurn: payload.startMode === "realtime",
             agentConfig,
@@ -3364,7 +3337,7 @@ async function createSessionForRequestInFileScope(
   let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
-  const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
+  const attachmentOwnerContext = await measureSessionStartPhase(
     unresolvedDeps.observability,
     "resource_validation",
     async () => {
@@ -3391,9 +3364,7 @@ async function createSessionForRequestInFileScope(
         resources,
         ownerContext,
       );
-      // Variable Sets were replaced by vaults (RM-1); a session never selects one.
-      if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
-      return { attachmentOwnerContext: ownerContext, variableSets: [] as VariableSet[] };
+      return ownerContext;
     },
   );
   const attachmentOwner =
@@ -3516,12 +3487,6 @@ async function createSessionForRequestInFileScope(
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
             ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(variableSets.length
-              ? {
-                  variableSetIds: variableSets.map((variableSet) => variableSet.id),
-                  variableSetId: variableSets.at(-1)!.id,
-                }
-              : {}),
             ...(payload.rigId ? { rigId: payload.rigId } : {}),
             ...(payload.goal ? { goal: payload.goal } : {}),
             ...(payload.firstPartyMcpPermissions
@@ -4173,11 +4138,6 @@ async function createSessionForRequestInFileScope(
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,

@@ -5,11 +5,6 @@ import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
 import { currentTraceContext, withTraceContext, type Span } from "@opengeni/observability";
 import { measureSessionCreatePhase } from "../src/session-create-observability";
-import {
-  legacyVariableSetFields,
-  variableSetsRemovedResponse,
-  withoutEmptyLegacyVariableSetFields,
-} from "../src/http/variable-sets-removed";
 import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import { currentSiteViewerRlsContext } from "@opengeni/db";
 import {
@@ -84,8 +79,7 @@ function productionRoute() {
     `
     const { requireAccessGrantAuthorization, CreateSessionRequest, resolveSiteSessionOrigin,
       withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
-      withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
-      variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
+      withEffectivePolicy, measureSessionCreatePhase,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext } = ports;
@@ -130,9 +124,6 @@ function routeFixture() {
       return undefined;
     },
     measureSessionCreatePhase,
-    legacyVariableSetFields,
-    variableSetsRemovedResponse,
-    withoutEmptyLegacyVariableSetFields,
     requireAccessGrantAuthorization: (...args: unknown[]) => {
       calls.push({ name: "authorization", args });
       return hold.authorization.promise;

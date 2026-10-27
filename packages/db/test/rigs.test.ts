@@ -228,7 +228,6 @@ describe("rig CRUD lifecycle", () => {
         setupScript: "apt-get install -y ripgrep",
         checks: [{ name: "rg", command: "rg --version" }],
         credentialHooks: ["azure-cli-login"],
-        defaultVariableSetIds: [],
         changelog: "Initial version",
         createdBy: "user:alice",
       },

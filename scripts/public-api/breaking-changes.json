@@ -432,5 +432,38 @@
     "removedInMajor": 6,
     "sunset": "2026-10-27",
     "reason": "Pre-launch removal of surfaces with no remaining users, recorded in docs/design/api-compatibility-policy.md: the first automation API and PR Review on it (replaced by scheduled tasks with event triggers), resumable transcription recordings (replaced by recordings), the retired Knowledge search routes, the deprecation-notice option, and the response-header compatibility for SDKs up to 7.x. No security exception or SDK revision refusal is claimed."
+  },
+  {
+    "ids": [
+      "schema:CreateRigRequest:$.defaultVariableSetIds",
+      "schema:CreateScheduledTaskRequest:$|1.environmentId",
+      "schema:CreateScheduledTaskRequest:$|1.variableSetId",
+      "schema:CreateSessionRequest:$.environmentId",
+      "schema:CreateSessionRequest:$.variableSetId",
+      "schema:CreateSessionRequest:$.variableSetIds",
+      "schema:CreateSessionResponse:$.environmentId",
+      "schema:CreateSessionResponse:$.variableSetId",
+      "schema:CreateSessionResponse:$.variableSetIds",
+      "schema:ForkSessionRequest:$.variableSetIds",
+      "schema:IncidentTelemetryDataRoute:$",
+      "schema:IncidentTelemetryPreflight:$.requiredVariableNames",
+      "schema:IncidentTelemetryPreflight:$.requiredVariableSetNames",
+      "schema:NewSessionDraftOptions:$.variableSetId",
+      "schema:NewSessionDraftOptions:$.variableSetIds",
+      "schema:RigDefinitionEditPayload:$.defaultVariableSetIds",
+      "schema:RigVersion:$.defaultVariableSetIds",
+      "schema:SaveNewSessionDraftRequest:$.options",
+      "schema:ScheduledTask:$.environmentId",
+      "schema:ScheduledTask:$.variableSetId",
+      "schema:Session:$.environmentId",
+      "schema:Session:$.variableSetId",
+      "schema:Session:$.variableSetIds",
+      "schema:UpdateScheduledTaskRequest:$.environmentId",
+      "schema:UpdateScheduledTaskRequest:$.variableSetId"
+    ],
+    "deprecation": ".changeset/remove-variable-sets.md",
+    "removedInMajor": 6,
+    "sunset": "2026-10-27",
+    "reason": "Pre-launch removal of the retired Variable Set and environment fields, recorded in docs/design/api-compatibility-policy.md: vaults replaced Variable Sets in SDK 2.0.0, no session, scheduled task, rig version or draft has used them since, and incident telemetry names its vault and secrets directly. No security exception or SDK revision refusal is claimed."
   }
 ]

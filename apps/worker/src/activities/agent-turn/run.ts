@@ -1431,7 +1431,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             capabilitySettings,
             runSettings,
             rigVersion,
-            workspaceRefs,
           });
           const {
             turnResources: claimedTurnResources,

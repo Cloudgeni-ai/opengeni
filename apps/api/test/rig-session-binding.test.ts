@@ -14,7 +14,6 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { createSessionForRequest, createValidatedScheduledTask } from "@opengeni/core";
-import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // M3 rig session binding, driven through the REAL createSessionForRequest
@@ -53,14 +52,13 @@ async function seedRig(
   accountId: string,
   workspaceId: string,
   name: string,
-  defaultVariableSetIds: string[] = [],
 ): Promise<{ rigId: string; activeVersionId: string }> {
   const rig = await createRig(db, {
     accountId,
     workspaceId,
     name,
     createdBy: "user:test",
-    initialVersion: { changelog: "v1", defaultVariableSetIds },
+    initialVersion: { changelog: "v1" },
   });
   return { rigId: rig.id, activeVersionId: rig.activeVersion!.id };
 }
@@ -135,27 +133,6 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M3 rig binding: freeze at create", () => {
-  test("a legacy rig version that still lists default Variable Sets creates sessions without them", async () => {
-    if (!available) return;
-    const bus = new MemoryEventBus();
-    const { accountId, workspaceId } = await freshWorkspace();
-    const variableSet = await createLegacyVariableSet(db, {
-      accountId,
-      workspaceId,
-      name: "rig-default-secret",
-    });
-    const { rigId } = await seedRig(accountId, workspaceId, "secret-rig", [variableSet.id]);
-
-    const created = await createSessionForRequest(
-      deps(bus),
-      grant(accountId, workspaceId),
-      workspaceId,
-      { initialMessage: "legacy rig defaults", rigId },
-    );
-    expect(created.rigId).toBe(rigId);
-    expect(created.variableSetIds).toEqual([]);
-  }, 60_000);
-
   test("binds the rig's active version and freezes it — a later promote never moves an existing session", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();

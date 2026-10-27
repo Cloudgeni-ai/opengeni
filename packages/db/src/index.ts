@@ -854,7 +854,6 @@ import type {
   Workspace,
   WorkspaceMember,
   WorkspaceControlEvent,
-  VariableSet,
   WorkspaceMemoryPromptMode,
   Channel,
   Rig,
@@ -1304,10 +1303,6 @@ export {
 export * from "./workspace-integrations";
 export * from "./native-push";
 export * from "./inbox";
-export {
-  decryptEnvironmentValue as decryptVariableSetValue,
-  encryptEnvironmentValue as encryptVariableSetValue,
-} from "./environment-crypto";
 export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
@@ -7054,7 +7049,6 @@ export type CreateScheduledTaskInput = {
   /** Trusted frozen creator boundary, never copied from task metadata. */
   creatorPolicy?: ScheduledTaskCreatorPolicy | null;
   targetSessionId?: string | null;
-  variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
   metadata: Record<string, unknown>;
@@ -7078,7 +7072,6 @@ export type UpdateScheduledTaskInput = Partial<{
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
   targetSessionId: string | null;
-  variableSetId: string | null;
   rigId: string | null;
   metadata: Record<string, unknown>;
   refreshPersonalResourceAuthority: boolean;
@@ -7797,7 +7790,7 @@ export type EnabledMcpCapabilityServer = {
   approvalFloor?: SessionMcpApprovalPolicy;
   /**
    * Credential request headers stored encrypted at enable time
-   * (AES-256-GCM under the workspace-variableSets key). Decrypted only at
+   * (AES-256-GCM under the workspace encryption key). Decrypted only at
    * the runtime boundary that builds the MCP client; never exposed by the
    * capability API surface.
    */
@@ -19037,7 +19030,6 @@ export async function createScheduledTask(
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
-          variableSetId: input.variableSetId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
           // before 0739 (and older-migration fixtures) keep working.
           ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
@@ -19353,7 +19345,6 @@ export async function updateScheduledTask(
           : input.reusableSessionId !== undefined
             ? { reusableSessionId: input.reusableSessionId }
             : {}),
-        ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.vaultPolicy !== undefined ? { vaultPolicy: input.vaultPolicy } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
@@ -20271,7 +20262,6 @@ export async function deleteScheduledTask(
           .set({
             status: "paused",
             deletedAt: new Date(),
-            variableSetId: null,
             reusableSessionId: null,
             updatedAt: new Date(),
           })
@@ -20551,7 +20541,6 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "scheduled_authority_unavailable"
   | "machine_target_unavailable"
   | "machine_enrollment_inactive"
-  | "variable_set_unavailable"
   | "rig_version_unavailable"
   | "scheduled_model_unavailable"
   | "insufficient_credits"
@@ -21552,62 +21541,6 @@ async function validateScheduledTargetExecutionAtClaim(
       ),
     )
     .orderBy(asc(schema.sessionMcpServers.serverId));
-  const targetVariableSets =
-    target.variableSets.length > 0
-      ? target.variableSets
-      : target.variableSetId && target.variableSetGeneration
-        ? [
-            {
-              id: target.variableSetId,
-              generation: target.variableSetGeneration,
-            },
-          ]
-        : [];
-  const liveVariableSets = await Promise.all(
-    targetVariableSets.map(async (selected) => {
-      const variableSet = await getVariableSet(
-        tx,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
-        },
-        selected.id,
-      );
-      return variableSet ? { id: variableSet.id, generation: variableSet.generation } : null;
-    }),
-  );
-  const [rigVersion] =
-    target.rigId && target.rigVersionId
-      ? await tx
-          .select({
-            defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds,
-          })
-          .from(schema.rigVersions)
-          .where(
-            and(
-              eq(schema.rigVersions.accountId, input.accountId),
-              eq(schema.rigVersions.rigId, target.rigId),
-              eq(schema.rigVersions.id, target.rigVersionId),
-            ),
-          )
-          .for("share")
-          .limit(1)
-      : [];
-  const rigDefaultVariableSets = await Promise.all(
-    (rigVersion?.defaultVariableSetIds ?? []).map(async (variableSetId) => {
-      const defaultSet = await getVariableSet(
-        tx,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
-        },
-        variableSetId,
-      );
-      return defaultSet ? { id: defaultSet.id, generation: defaultSet.generation } : null;
-    }),
-  );
   return target.sessionId !== input.session.id ||
     (target.visibility !== input.session.visibility &&
       !(target.visibility === "user_private" && input.session.visibility === "workspace_shared")) ||
@@ -21619,14 +21552,8 @@ async function validateScheduledTargetExecutionAtClaim(
     stableJson(target.toolPolicy) !== stableJson(input.session.toolPolicy) ||
     stableJson(target.mcpServerIds) !== stableJson(mcpServers.map((server) => server.id)) ||
     target.toolPolicyVersion !== input.session.toolPolicyVersion ||
-    stableJson(targetVariableSets) !==
-      stableJson(liveVariableSets.filter((value) => value !== null)) ||
-    stableJson(targetVariableSets.map((variableSet) => variableSet.id)) !==
-      stableJson((input.session.variableSetIds as string[]) ?? []) ||
     target.rigId !== (input.session.rigId ?? null) ||
     target.rigVersionId !== (input.session.rigVersionId ?? null) ||
-    stableJson(target.rigDefaultVariableSets) !==
-      stableJson(rigDefaultVariableSets.filter((value) => value !== null)) ||
     target.maxNestedAgentDepthOverride !== (input.session.maxNestedAgentDepthOverride ?? null) ||
     target.effectiveMaxNestedAgentDepth !== input.session.effectiveMaxNestedAgentDepth
     ? "scheduled_target_execution_changed"
@@ -21737,29 +21664,6 @@ export async function listScheduledTaskRuns(
   });
 }
 
-/**
- * One Variable Set header (no values). Kept only for legacy scheduled-run
- * admission, which still fences set headers until the contract migration
- * drops Variable Sets entirely.
- */
-export async function getVariableSet(
-  db: Database,
-  context: { accountId: string; workspaceId: string; subjectId: string },
-  variableSetId: string,
-): Promise<VariableSet | null> {
-  return await withRlsContext(db, context, async (scopedDb) => {
-    await setSubjectRlsContext(scopedDb, context.subjectId);
-    const [row] = await rawRows<{ value: VariableSet }>(
-      scopedDb,
-      sql`select value from list_scoped_variable_sets(
-        ${context.accountId}::uuid, ${context.workspaceId}::uuid,
-        ${variableSetId}::uuid, null, null
-      ) value`,
-    );
-    return row?.value ?? null;
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Rigs (migration 0047). Workspace-scoped, versioned sandbox machine definitions.
 // Versions are append-only + content-immutable: NO function below ever UPDATEs a
@@ -21817,7 +21721,6 @@ export type RigVersionContentInput = {
   setupScript?: string | null;
   checks?: RigCheck[];
   credentialHooks?: string[];
-  defaultVariableSetIds?: string[];
   changelog?: string | null;
   createdBy?: string | null;
 };
@@ -21837,7 +21740,6 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
     setupScript: row.setupScript,
     checks: row.checks,
     credentialHooks: row.credentialHooks,
-    defaultVariableSetIds: row.defaultVariableSetIds,
     changelog: row.changelog,
     providerImages: row.providerImages,
     createdBy: row.createdBy,
@@ -22078,7 +21980,6 @@ export async function createRig(
               setupScript: content.setupScript ?? null,
               checks: content.checks ?? [],
               credentialHooks: content.credentialHooks ?? [],
-              defaultVariableSetIds: content.defaultVariableSetIds ?? [],
               changelog: content.changelog ?? null,
               createdBy: content.createdBy ?? input.createdBy ?? null,
             })}::jsonb, ${input.allowOrganization === true}
@@ -22118,7 +22019,6 @@ export async function createRig(
           setupScript: content.setupScript ?? null,
           checks: content.checks ?? [],
           credentialHooks: content.credentialHooks ?? [],
-          defaultVariableSetIds: content.defaultVariableSetIds ?? [],
           changelog: content.changelog ?? null,
           providerImages: {},
           createdBy: content.createdBy ?? input.createdBy ?? null,
@@ -22468,66 +22368,10 @@ function isSessionChannelFkViolation(error: unknown): boolean {
   );
 }
 
-const sessionVariableSetSelectionFkConstraints = new Set([
-  // Legacy final-entry mirror on sessions.variable_set_id.
-  "sessions_environment_id_fkey",
-  // Ordered attachment projection populated by the session INSERT/UPDATE trigger.
-  "session_variable_set_attachments_variable_set_id_fkey",
-]);
-
-/** A selected Variable Set disappeared after validation; unrelated FKs stay loud. */
-function isSessionVariableSetSelectionFkViolation(error: unknown): boolean {
-  return (
-    nestedPostgresSqlState(error) === "23503" &&
-    sessionVariableSetSelectionFkConstraints.has(safeDatabaseErrorFacts(error).constraint ?? "")
-  );
-}
-
-export class SessionVariableSetSelectionUnavailableError extends Error {
-  readonly variableSetIds: string[];
-
-  constructor(variableSetIds: string[], cause?: unknown) {
-    super(
-      "One or more selected Variable Sets are no longer available.",
-      cause === undefined ? undefined : { cause },
-    );
-    this.name = "SessionVariableSetSelectionUnavailableError";
-    this.variableSetIds = variableSetIds;
-  }
-}
-
-async function translateSessionCreateError(
-  db: Database,
-  input: SessionCreateInput,
-  error: unknown,
-): Promise<never> {
+function translateSessionCreateError(error: unknown): never {
   const connectionFailure = sessionCreateConnectionSelectionFailure(error);
   if (connectionFailure) throw connectionFailure;
-  if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error;
-
-  // The failed create transaction, including its session row and projection
-  // trigger, has rolled back. Resolve the exact requested identities under the
-  // original account/workspace/subject RLS scope before translating the known
-  // FK race. If every identity is still available, preserve the original
-  // integrity failure so an unrelated defect cannot be hidden.
-  const variableSetIds = [
-    ...new Set(input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : [])),
-  ];
-  const unavailableVariableSetIds: string[] = [];
-  for (const variableSetId of variableSetIds) {
-    const current = await getVariableSet(
-      db,
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-      },
-      variableSetId,
-    );
-    if (!current) unavailableVariableSetIds.push(variableSetId);
-  }
-  if (unavailableVariableSetIds.length === 0) throw error;
-  throw new SessionVariableSetSelectionUnavailableError(unavailableVariableSetIds, error);
+  throw error;
 }
 
 function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
@@ -22877,7 +22721,6 @@ export async function createRigVersion(
         setupScript: input.setupScript ?? null,
         checks: input.checks ?? [],
         credentialHooks: input.credentialHooks ?? [],
-        defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
         providerImages: {},
         createdBy: input.createdBy ?? null,
@@ -22994,7 +22837,6 @@ export async function createRigVersionForChangePromotion(
         setupScript: input.setupScript ?? null,
         checks: input.checks ?? [],
         credentialHooks: input.credentialHooks ?? [],
-        defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
         providerImages,
         createdBy: input.createdBy ?? null,
@@ -23056,7 +22898,6 @@ export type RigVersionMonitoringSummary = {
   setupScriptBytes: number;
   checkCount: number;
   credentialHookCount: number;
-  defaultVariableSetCount: number;
   changelog: string | null;
   changelogOriginalChars: number | null;
   createdBy: string | null;
@@ -23087,7 +22928,6 @@ export async function listRigVersionMonitoringSummaries(
         setupScriptBytes: sql<number>`octet_length(coalesce(${schema.rigVersions.setupScript}, ''))::int`,
         checkCount: sql<number>`jsonb_array_length(${schema.rigVersions.checks})::int`,
         credentialHookCount: sql<number>`jsonb_array_length(${schema.rigVersions.credentialHooks})::int`,
-        defaultVariableSetCount: sql<number>`jsonb_array_length(${schema.rigVersions.defaultVariableSetIds})::int`,
         changelog: sql<string | null>`left(${schema.rigVersions.changelog}, 600)`,
         changelogOriginalChars: sql<
           number | null
@@ -23113,7 +22953,6 @@ export async function listRigVersionMonitoringSummaries(
         setupScriptBytes: Number(row.setupScriptBytes),
         checkCount: Number(row.checkCount),
         credentialHookCount: Number(row.credentialHookCount),
-        defaultVariableSetCount: Number(row.defaultVariableSetCount),
         imageOriginalChars: row.imageOriginalChars === null ? null : Number(row.imageOriginalChars),
         changelogOriginalChars:
           row.changelogOriginalChars === null ? null : Number(row.changelogOriginalChars),
@@ -23854,11 +23693,6 @@ export async function beginRigChangeVerificationAttempt(
   });
 }
 
-/**
- * The ONLY helper that selects value_encrypted. Used exclusively by the worker
- * activity that materializes a sandbox for a run whose session carries an
- * variableSet attachment. Do not call from API routes: values are write-only.
- */
 /**
  * Live session authority epoch, for stamping viewer-facing claims (stream
  * tokens, viewer holders). Identity/epoch only; NULL when the session is not
@@ -29846,8 +29680,6 @@ async function assertMeetingSummarySessionShape(
     (input.selectedInstalledSkillIds ?? []).length === 0 &&
     (input.mcpServers ?? []).length === 0 &&
     (input.personalConnectionDelegations ?? []).length === 0 &&
-    (input.variableSetIds ?? []).length === 0 &&
-    !input.variableSetId &&
     !input.rigId &&
     (input.tools ?? []).every((tool) => tool.kind === "mcp" && tool.id === "opengeni") &&
     tools.size === MEETING_SUMMARY_TOOLS.length &&
@@ -29931,8 +29763,6 @@ export type SessionCreateInput = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
-  variableSetIds?: string[];
-  variableSetId?: string | null;
   rigId?: string | null;
   rigVersionId?: string | null;
   channelId?: string | null;
@@ -30277,7 +30107,6 @@ type SessionCreateReplayIdentity = {
   bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
-  variableSetIds: string[];
   selectedInstalledSkillIds: string[];
 
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
@@ -30365,9 +30194,6 @@ function assertSessionCreateReplayIdentity(
     stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
     stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
   ) {
-    throw new SessionCreateIdempotencyConflictError();
-  }
-  if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
@@ -30592,8 +30418,6 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   // A session an agent starts never stores a secret value its attempt knows.
   input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
-  const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
-  const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
     withBundledSkillSelectionMetadata(
@@ -30656,7 +30480,6 @@ async function createSessionInTransaction(
         bundledSkillIds: input.bundledSkillIds,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
-        variableSetIds,
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
 
         initialPersonalResourceAttachmentIntent:
@@ -30916,8 +30739,6 @@ async function createSessionInTransaction(
         sandboxBackend: input.sandboxBackend,
         sandboxOs: input.sandboxOs ?? "linux",
         sandboxGroupId: input.sandboxGroupId ?? id,
-        variableSetIds,
-        variableSetId,
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
@@ -31046,7 +30867,6 @@ async function createSessionInTransaction(
           bundledSkillIds: input.bundledSkillIds,
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
-          variableSetIds,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
 
           initialPersonalResourceAttachmentIntent:
@@ -31144,7 +30964,7 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
         ),
     );
   } catch (error) {
-    return await translateSessionCreateError(db, input, error);
+    return translateSessionCreateError(error);
   }
   if (result.denied) {
     // Throw only after withRlsContext's outer transaction commits the denial.
@@ -31181,7 +31001,7 @@ export async function createSessionWithIdempotencyKeyResult(
         ),
     );
   } catch (error) {
-    return await translateSessionCreateError(db, input, error);
+    return translateSessionCreateError(error);
   }
 }
 
@@ -31263,7 +31083,6 @@ export async function getInitializedSessionCreateReplay(
     createIdempotencyKey: string;
     requestedSessionId?: string;
     visibility?: "user_private" | "workspace_shared";
-    variableSetIds: string[];
     selectedInstalledSkillIds: string[];
 
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
@@ -32668,7 +32487,7 @@ export async function getAnySessionInGroup(
 }
 
 // M3 rig sharing gate: the distinct frozen rig_version_ids across a group's
-// sessions. Mirrors listDistinctVariableSetIdsInGroup — the box's rig-baked
+// sessions. The box's rig-baked
 // setup is fixed at cold-create, so a session joining a group must carry the
 // SAME rig_version_id (or the join is a genuine shared-state conflict). A null
 // entry means a rig-less member (compatible only with another rig-less join).
@@ -76931,33 +76750,6 @@ export async function claimSessionWorkForAttempt(
                   ),
                 )
                 .orderBy(asc(schema.sessionMcpServers.serverId));
-              const targetVariableSets =
-                targetPolicy.variableSets.length > 0
-                  ? targetPolicy.variableSets
-                  : targetPolicy.variableSetId && targetPolicy.variableSetGeneration
-                    ? [
-                        {
-                          id: targetPolicy.variableSetId,
-                          generation: targetPolicy.variableSetGeneration,
-                        },
-                      ]
-                    : [];
-              const liveVariableSets = await Promise.all(
-                targetVariableSets.map(async (selected) => {
-                  const variableSet = await getVariableSet(
-                    tx as unknown as Database,
-                    {
-                      accountId: session.accountId,
-                      workspaceId,
-                      subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
-                    },
-                    selected.id,
-                  );
-                  return variableSet
-                    ? { id: variableSet.id, generation: variableSet.generation }
-                    : null;
-                }),
-              );
               if (
                 targetPolicy.sessionId !== sessionId ||
                 (targetPolicy.visibility !== session.visibility &&
@@ -76975,10 +76767,6 @@ export async function claimSessionWorkForAttempt(
                 stableJson(targetPolicy.mcpServerIds) !==
                   stableJson(targetMcpServers.map((server) => server.id)) ||
                 targetPolicy.toolPolicyVersion !== session.toolPolicyVersion ||
-                stableJson(targetVariableSets) !==
-                  stableJson(liveVariableSets.filter((value) => value !== null)) ||
-                stableJson(targetVariableSets.map((variableSet) => variableSet.id)) !==
-                  stableJson((session.variableSetIds as string[]) ?? []) ||
                 targetPolicy.rigId !== (session.rigId ?? null) ||
                 targetPolicy.rigVersionId !== (session.rigVersionId ?? null) ||
                 targetPolicy.maxNestedAgentDepthOverride !==
@@ -85264,8 +85052,6 @@ export async function getScheduledTargetSessionExecution(
         firstPartyMcpPermissions: schema.sessions.firstPartyMcpPermissions,
         toolPolicy: schema.sessions.toolPolicy,
         toolPolicyVersion: schema.sessions.toolPolicyVersion,
-        variableSetIds: schema.sessions.variableSetIds,
-        variableSetId: schema.sessions.variableSetId,
         rigId: schema.sessions.rigId,
         rigVersionId: schema.sessions.rigVersionId,
         maxNestedAgentDepthOverride: schema.sessions.maxNestedAgentDepthOverride,
@@ -85288,25 +85074,6 @@ export async function getScheduledTargetSessionExecution(
       .orderBy(asc(schema.sessionMcpServers.serverId));
     const latestStarted = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
     const [effectivePolicy] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
-    const variableSets = await Promise.all(
-      ((session.variableSetIds as string[]) ?? []).map(async (variableSetId) => {
-        const variableSet = await getVariableSet(
-          scopedDb,
-          {
-            accountId: session.accountId,
-            workspaceId,
-            // Common organization/workspace sets need no personal owner;
-            // user-owned sets resolve only for the frozen causal subject.
-            subjectId: authoritySubjectId ?? "scheduled-task",
-          },
-          variableSetId,
-        );
-        if (!variableSet) {
-          throw new Error(`scheduled target session Variable Set is unavailable: ${variableSetId}`);
-        }
-        return { id: variableSet.id, generation: variableSet.generation };
-      }),
-    );
     const rigMetadata =
       session.rigId && session.rigVersionId
         ? await getScheduledScopedRigVersionMetadata(
@@ -85323,25 +85090,6 @@ export async function getScheduledTargetSessionExecution(
     if (session.rigId && session.rigVersionId && !rigMetadata) {
       throw new Error("scheduled target session sandbox environment version is unavailable");
     }
-    const rigDefaultVariableSets = await Promise.all(
-      (rigMetadata?.version.defaultVariableSetIds ?? []).map(async (variableSetId) => {
-        const defaultSet = await getVariableSet(
-          scopedDb,
-          {
-            accountId: session.accountId,
-            workspaceId,
-            subjectId: authoritySubjectId ?? "scheduled-task",
-          },
-          variableSetId,
-        );
-        if (!defaultSet) {
-          throw new Error(
-            `scheduled target sandbox environment default Variable Set is unavailable: ${variableSetId}`,
-          );
-        }
-        return { id: defaultSet.id, generation: defaultSet.generation };
-      }),
-    );
     return {
       sessionId: session.id,
       visibility: session.visibility as "user_private" | "workspace_shared",
@@ -85368,12 +85116,14 @@ export async function getScheduledTargetSessionExecution(
       mcpServerIds: targetMcpServers.map((server) => server.id),
       effectiveMcpServerIds: targetMcpServers.map((server) => server.id),
       toolPolicyVersion: session.toolPolicyVersion,
-      variableSets,
-      variableSetId: session.variableSetId ?? null,
-      variableSetGeneration: variableSets.at(-1)?.generation ?? null,
+      // Retired Variable Set fields stay in the accepted-snapshot schema until
+      // the follow-up that drops the columns; new snapshots record none.
+      variableSets: [],
+      variableSetId: null,
+      variableSetGeneration: null,
       rigId: session.rigId ?? null,
       rigVersionId: session.rigVersionId ?? null,
-      rigDefaultVariableSets,
+      rigDefaultVariableSets: [],
       maxNestedAgentDepthOverride: session.maxNestedAgentDepthOverride ?? null,
       effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
     };
@@ -90997,10 +90747,6 @@ function mapSession(
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
     workingDir: row.workingDir ?? null,
-    variableSetIds:
-      (row.variableSetIds as string[]) ?? (row.variableSetId ? [row.variableSetId] : []),
-    variableSetId: row.variableSetId,
-    environmentId: row.variableSetId,
     // The rig + frozen rig version the session rides (M3). Both null for a
     // rig-less session; frozen at create so a later promote never moves them.
     rigId: row.rigId ?? null,
@@ -91265,8 +91011,6 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     executionDigest: row.executionDigest,
     reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
     targetSessionId: existingSessionTarget ? row.reusableSessionId : null,
-    variableSetId: row.variableSetId,
-    environmentId: row.variableSetId,
     rigId: row.rigId ?? null,
     vaultPolicy: row.vaultPolicy ?? { mode: "all" },
     metadata: row.metadata,

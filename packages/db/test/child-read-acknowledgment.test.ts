@@ -1,4 +1,4 @@
-import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
+import { attachLegacyVariableSets, createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -180,8 +180,6 @@ async function startSession(
     ...(input.personalVariableSetId
       ? {
           subjectId: grant.subjectId,
-          variableSetIds: [input.personalVariableSetId],
-          variableSetId: input.personalVariableSetId,
           initialPersonalResourceAttachmentIntent: {
             mode: input.personalMode ?? ("session" as const),
             workspaceSharedAcknowledged: true,
@@ -190,6 +188,13 @@ async function startSession(
         }
       : {}),
   });
+  if (input.personalVariableSetId) {
+    await attachLegacyVariableSets(client.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      variableSetIds: [input.personalVariableSetId],
+    });
+  }
   await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,

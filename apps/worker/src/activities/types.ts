@@ -544,7 +544,6 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_authority_unavailable"
         | "machine_target_unavailable"
         | "machine_enrollment_inactive"
-        | "variable_set_unavailable"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
         | "knowledge_source_paused"

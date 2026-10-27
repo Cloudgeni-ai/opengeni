@@ -1330,7 +1330,7 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so variable sets that polyfill fetch after module load work.
+    // Bind lazily so environments that polyfill fetch after module load work.
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
@@ -8644,8 +8644,6 @@ export class OpenGeniClient {
       request,
     );
   }
-
-  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
 
   // --- Capabilities -------------------------------------------------------------------------
 

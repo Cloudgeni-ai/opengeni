@@ -109,7 +109,6 @@ import type {
   EventingState,
   RenewalState,
   SandboxRuntimeState,
-  WorkspaceRefState,
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
@@ -164,7 +163,6 @@ export type PrepareTurnToolPolicyDeps = {
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   runSettings: GovernanceModelOk["runSettings"];
   rigVersion: GovernanceModelOk["rigVersion"];
-  workspaceRefs: WorkspaceRefState;
 };
 
 export type PrepareTurnToolRuntimeDeps = {
@@ -228,16 +226,8 @@ export type PrepareTurnToolRuntimeDeps = {
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
-  const {
-    input,
-    db,
-    turn,
-    session,
-    fileAuthoritySubjectId,
-    capabilitySettings,
-    runSettings,
-    workspaceRefs,
-  } = deps;
+  const { input, db, turn, session, fileAuthoritySubjectId, capabilitySettings, runSettings } =
+    deps;
 
   const turnResources = mergeResourceRefs(session.resources, turn.resources);
   // Repositories remain durable workspace inputs. File attachments do not:
@@ -285,15 +275,13 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,
-  // and nothing user-defined is injected into the sandbox environment. User
+  // Nothing user-defined is injected into the sandbox environment. User
   // secrets reach a command only through `{{secret:…}}` references resolved at
-  // the exec boundary. Variable Sets stay readable elsewhere until W6 removes them.
+  // the exec boundary.
   const connectionScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  workspaceRefs.variableSetId = "";
   return {
     turnResources,
     runtimeResources,
