@@ -21,13 +21,17 @@
 -- the person to reach it as: the most recent person who started a turn of a
 -- holding session. A browser held only by sessions no person started gets
 -- none (null), and the API then leaves it to its plain idle release.
+--
+-- Its runtime EXECUTE is withheld for one release (runtime-posture
+-- DEFERRED_RUNTIME_PRIVATE_ROUTINES): a release that does not know this
+-- definer fails readiness on a runtime grant. Until a later migration grants
+-- it, the API lists nothing and renews no holds.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
 DO $install$
 DECLARE
   data_schema text := current_schema();
-  role_name text;
 BEGIN
   EXECUTE format($create$
     CREATE OR REPLACE FUNCTION opengeni_private.list_idle_interaction_leases(
@@ -144,15 +148,5 @@ BEGIN
 
   REVOKE ALL ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
     FROM PUBLIC;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
-      TO opengeni_app;
-  END IF;
-  FOR role_name IN SELECT rolname FROM pg_roles
-    WHERE rolname <> current_user AND has_function_privilege(oid,
-      'opengeni_private.list_idle_interaction_leases(integer,bigint)', 'EXECUTE')
-  LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO %I', role_name);
-  END LOOP;
 END
 $install$;
