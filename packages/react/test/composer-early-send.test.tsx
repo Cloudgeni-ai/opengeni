@@ -2,6 +2,7 @@ import { afterEach, describe, expect, jest, test } from "bun:test";
 import { act, useState } from "react";
 
 import { ChatComposer } from "../src/components/chat-composer";
+import type { ChatComposerMessages } from "../src/composer-messages";
 import type { ComposerState } from "../src/hooks/use-composer";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -22,15 +23,36 @@ type Gate = { preparing: boolean; canSend: boolean };
 const controls: {
   setGate: (gate: Gate) => void;
   setText: (text: string) => void;
-} = { setGate: () => {}, setText: () => {} };
+  setError: (error: Error | null) => void;
+} = { setGate: () => {}, setText: () => {}, setError: () => {} };
+
+const GAVE_UP = "This is taking longer than usual, so it wasn't sent. Try again in a moment.";
+
+/** The notice the composer shows now (its announcement region; the visible line animates out). */
+function noticeText(container: HTMLElement): string {
+  return container.querySelector(".sr-only")?.textContent ?? "";
+}
 
 // A delivery like a new chat right after the page opens: the text box takes
 // input while what Send needs (the model list, the saved draft) still loads.
-function Harness({ sends, initial }: { sends: string[]; initial: Gate }) {
+function Harness({
+  sends,
+  initial,
+  messages,
+  sendKeepsDraft = false,
+}: {
+  sends: string[];
+  initial: Gate;
+  messages?: Partial<ChatComposerMessages>;
+  /** Leave the text in the box after sending, so only the Send itself can clear a notice. */
+  sendKeepsDraft?: boolean;
+}) {
   const [gate, setGate] = useState<Gate>(initial);
   const [value, setValue] = useState("Sum column B");
+  const [error, setError] = useState<Error | null>(null);
   controls.setGate = setGate;
   controls.setText = setValue;
+  controls.setError = setError;
   const state: ComposerState = {
     value,
     setValue,
@@ -38,7 +60,7 @@ function Harness({ sends, initial }: { sends: string[]; initial: Gate }) {
     // Reads this render's draft, like a real delivery.
     send: async () => {
       sends.push(value);
-      setValue("");
+      if (!sendKeepsDraft) setValue("");
       return true;
     },
     steer: async () => {
@@ -63,10 +85,10 @@ function Harness({ sends, initial }: { sends: string[]; initial: Gate }) {
     resolveDraftConflict: async () => {},
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: null,
-    clearError: () => {},
+    error,
+    clearError: () => setError(null),
   };
-  return <ChatComposer composer={state} />;
+  return <ChatComposer composer={state} messages={messages} />;
 }
 
 function textarea(container: HTMLElement): HTMLTextAreaElement {
@@ -144,14 +166,90 @@ describe("Send pressed before the composer can send", () => {
     expect(sends).toEqual([]);
     expect(sendButton(mounted.container).querySelector(".animate-og-spin")).toBeNull();
     expect(textarea(mounted.container).value).toBe("Sum column B");
-    expect(mounted.container.textContent).toContain(
-      "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
-    );
+    expect(noticeText(mounted.container)).toContain(GAVE_UP);
     // Once it does load, Send works as usual.
     await settle(() => controls.setGate({ preparing: false, canSend: true }));
     await pressEnter(textarea(mounted.container));
     await settle(() => {});
     expect(sends).toEqual(["Sum column B"]);
+    // The notice belonged to the Send that gave up; it goes with the next one.
+    expect(noticeText(mounted.container)).not.toContain(GAVE_UP);
+  });
+
+  async function giveUp(mountedComposer: RenderedComponent): Promise<void> {
+    jest.useFakeTimers();
+    try {
+      await pressEnter(textarea(mountedComposer.container));
+      await act(async () => jest.advanceTimersByTime(30_000));
+    } finally {
+      jest.useRealTimers();
+    }
+    await settle(() => {});
+  }
+
+  test("a later Send clears the notice of a held Send that gave up, and a later error shows", async () => {
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <Harness sends={sends} initial={{ preparing: true, canSend: false }} sendKeepsDraft />,
+    );
+    await giveUp(mounted);
+    expect(noticeText(mounted.container)).toContain(GAVE_UP);
+
+    await settle(() => controls.setGate({ preparing: false, canSend: true }));
+    await pressEnter(textarea(mounted.container));
+    await settle(() => {});
+    expect(sends).toEqual(["Sum column B"]);
+    // The draft didn't change, so the Send itself ended the notice.
+    expect(textarea(mounted.container).value).toBe("Sum column B");
+    expect(noticeText(mounted.container)).not.toContain(GAVE_UP);
+
+    // A real error afterwards is shown, not hidden behind the old notice.
+    await settle(() => controls.setError(new Error("The message could not be delivered.")));
+    expect(noticeText(mounted.container)).toContain("The request could not be completed.");
+  });
+
+  test("editing the draft clears the notice of a held Send that gave up", async () => {
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <Harness sends={sends} initial={{ preparing: true, canSend: false }} />,
+    );
+    await giveUp(mounted);
+    expect(noticeText(mounted.container)).toContain(GAVE_UP);
+    await settle(() => controls.setText("Sum column B, please"));
+    expect(noticeText(mounted.container)).not.toContain(GAVE_UP);
+    expect(sends).toEqual([]);
+  });
+
+  test("a background error doesn't replace the notice of a held Send that gave up", async () => {
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <Harness sends={sends} initial={{ preparing: true, canSend: false }} />,
+    );
+    await giveUp(mounted);
+    // For example the saved draft's read timing out again while it retries:
+    // the person still needs to know their message wasn't sent.
+    await settle(() => controls.setError(new Error("The message could not be delivered.")));
+    expect(noticeText(mounted.container)).toContain(GAVE_UP);
+    // The next Send ends it.
+    await settle(() => controls.setGate({ preparing: false, canSend: true }));
+    await pressEnter(textarea(mounted.container));
+    await settle(() => {});
+    expect(sends).toEqual(["Sum column B"]);
+    expect(noticeText(mounted.container)).not.toContain(GAVE_UP);
+  });
+
+  test("a host can word the held-Send notice through the composer messages", async () => {
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <Harness
+        sends={sends}
+        initial={{ preparing: true, canSend: false }}
+        messages={{ heldSendGaveUp: "Still loading. Send again in a moment." }}
+      />,
+    );
+    await giveUp(mounted);
+    expect(noticeText(mounted.container)).toContain("Still loading. Send again in a moment.");
+    expect(noticeText(mounted.container)).not.toContain(GAVE_UP);
   });
 
   test("a held Send uses the draft as it is when it goes out", async () => {

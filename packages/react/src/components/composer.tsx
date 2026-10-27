@@ -573,6 +573,15 @@ export function useChatComposerController({
   const hasDraftText = visibleValue.trim().length > 0 || (attachments?.attachments.length ?? 0) > 0;
   const waitsForPreparation = preparing && hasDraftText;
   const heldSendRef = useRef<((ready: boolean) => void) | null>(null);
+  // The notice a held Send that gave up showed, so the next Send or edit can
+  // clear exactly it; it must not outlive the moment or hide a later error.
+  const heldSendNoticeRef = useRef<Notice | null>(null);
+  const clearHeldSendNotice = useCallback(() => {
+    const shown = heldSendNoticeRef.current;
+    if (!shown) return;
+    heldSendNoticeRef.current = null;
+    setNotice((current) => (current === shown ? null : current));
+  }, []);
   // A held Send uses the composer as it is when it is released.
   const latestSendRef = useRef({ delivery, resumesOnSend, singleSend });
   useLayoutEffect(() => {
@@ -612,6 +621,7 @@ export function useChatComposerController({
 
   const submit = useCallback(
     async (mode: ComposerSubmitMode): Promise<boolean> => {
+      clearHeldSendNotice();
       if (commandDraftBlocked) {
         setNotice({ tone: "error", message: messages.slashCommandBlocked });
         delivery.clearError();
@@ -648,7 +658,12 @@ export function useChatComposerController({
           });
           if (!ready) {
             if (gaveUp && mountedRef.current) {
-              setNotice({ tone: "error", message: t("composerMessages.heldSendGaveUp") });
+              const gaveUpNotice: Notice = {
+                tone: "error",
+                message: messages.heldSendGaveUp ?? t("composerMessages.heldSendGaveUp"),
+              };
+              heldSendNoticeRef.current = gaveUpNotice;
+              setNotice(gaveUpNotice);
             }
             return false;
           }
@@ -673,10 +688,12 @@ export function useChatComposerController({
     [
       annotationsIncomplete,
       blockedByAttachment,
+      clearHeldSendNotice,
       commandDraftBlocked,
       delivery,
       disabled,
       messages.annotationNotesRequired,
+      messages.heldSendGaveUp,
       messages.slashCommandBlocked,
       t,
       waitsForPreparation,
@@ -830,6 +847,13 @@ export function useChatComposerController({
       current?.message === messages.annotationNotesRequired ? null : current,
     );
   }, [annotationsIncomplete, messages.annotationNotesRequired]);
+  // Editing the draft ends a held Send's notice (so does the next Send). A
+  // background error, such as a draft read being retried, does not: the
+  // person still needs to know their message wasn't sent.
+  const attachmentCount = attachments?.attachments.length ?? 0;
+  useEffect(() => {
+    clearHeldSendNotice();
+  }, [attachmentCount, clearHeldSendNotice, visibleValue]);
 
   const runControlOperation = useCallback(async (operation: () => Promise<void>) => {
     if (controlOperationRef.current) return false;

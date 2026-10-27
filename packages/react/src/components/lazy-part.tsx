@@ -8,27 +8,33 @@ import { LoadFailureNotice } from "./load-failure-notice";
  * a card, a panel) so that when its code fails to download, only this part is
  * replaced and what's around it, such as the message it belongs to, stays
  * visible. `notice` shows the inline Reload notice in its place; `hide` shows
- * nothing, for small affordances that repeat on every message. Other render
- * errors are not handled here and reach the surrounding boundary as before.
+ * nothing, for small affordances that repeat on every message. `failed`, when
+ * given, is shown instead of either, for parts that can still show something
+ * useful without their code. Other render errors are not handled here and
+ * reach the surrounding boundary as before.
  */
 export function LazyPart({
   children,
   fallback = null,
   onLoadFailure = "notice",
+  failed,
 }: {
   children: ReactNode;
   fallback?: ReactNode;
   onLoadFailure?: "notice" | "hide";
+  failed?: ReactNode;
 }) {
   return (
-    <LazyPartBoundary onLoadFailure={onLoadFailure}>
+    <LazyPartBoundary
+      failed={failed ?? (onLoadFailure === "notice" ? <LoadFailureNotice /> : null)}
+    >
       <Suspense fallback={fallback}>{children}</Suspense>
     </LazyPartBoundary>
   );
 }
 
 class LazyPartBoundary extends Component<
-  { onLoadFailure: "notice" | "hide"; children: ReactNode },
+  { failed: ReactNode; children: ReactNode },
   { error: { value: unknown } | null }
 > {
   state: { error: { value: unknown } | null } = { error: null };
@@ -42,6 +48,6 @@ class LazyPartBoundary extends Component<
     if (!error) return this.props.children;
     // Not a download failure: let the surrounding boundary handle it.
     if (!isChunkLoadError(error.value)) throw error.value;
-    return this.props.onLoadFailure === "notice" ? <LoadFailureNotice /> : null;
+    return this.props.failed;
   }
 }
