@@ -4,6 +4,7 @@ import {
   listSessionShareLinks,
   readSharedSession,
   requireAccessGrant,
+  requireSessionAuthorization,
   revokeSessionShareLink,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -18,6 +19,10 @@ import { PublicSetupRateLimiter } from "./managed-onboarding";
  * other session route); anyone holding a link reads its snapshot without
  * signing in, rate limited per client and never cached, so a stopped link
  * stops at once.
+ *
+ * Each session route also calls the authorization seam itself, with the same
+ * operation the session middleware classifies, so it stays authorized however
+ * this module is ordered against the session module.
  */
 export function registerSessionShareLinkRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings } = deps;
@@ -33,11 +38,17 @@ export function registerSessionShareLinkRoutes(app: Hono, deps: ApiRouteDeps): v
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/share-link", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    });
     return c.json(
       await getSessionShareLinkState(deps, grant, {
         workspaceId,
-        sessionId: c.req.param("sessionId"),
+        sessionId,
         webBaseUrl: webBaseUrl(c),
       }),
     );
@@ -45,10 +56,16 @@ export function registerSessionShareLinkRoutes(app: Hono, deps: ApiRouteDeps): v
 
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/share-link", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.share_link.write",
+      surface: "http",
+    });
     const result = await createSessionShareLink(deps, grant, {
       workspaceId,
-      sessionId: c.req.param("sessionId"),
+      sessionId,
       webBaseUrl: webBaseUrl(c),
     });
     return c.json(result.link, result.created ? 201 : 200);
@@ -56,13 +73,14 @@ export function registerSessionShareLinkRoutes(app: Hono, deps: ApiRouteDeps): v
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/share-link", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    return c.json(
-      await revokeSessionShareLink(deps, grant, {
-        workspaceId,
-        sessionId: c.req.param("sessionId"),
-      }),
-    );
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.share_link.write",
+      surface: "http",
+    });
+    return c.json(await revokeSessionShareLink(deps, grant, { workspaceId, sessionId }));
   });
 
   app.get("/v1/workspaces/:workspaceId/share-links", async (c) => {
