@@ -1341,26 +1341,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * it and it is still blank, such as the empty tab a new session starts in.
    * The agent has moved on to another tab, and an empty tab would otherwise
    * stay in the person's browser until the session is released or ends.
-   * Never touches a tab the session did not open, a tab showing a page, or a
-   * tab another session is using. Best effort: a tab that could not be
-   * closed stays recorded, so the session's cleanup closes it later. */
+   * Never touches a tab the session did not open, a tab showing a page, a tab
+   * on its way to one (Chrome still lists a blank address until a navigation
+   * commits), or a tab another session is using. A tab whose navigation this
+   * session cannot see, because it no longer follows that tab, is left too.
+   * Best effort: a tab that could not be closed stays recorded, so the
+   * session's cleanup closes it later. */
   private async closeLeftBlankTarget(
     connection: BrowserCdpConnection,
     targetId: string | null,
   ): Promise<void> {
     if (!this.ownedTabs || targetId === null || targetId === this.selectedTargetId) return;
     if (!this.createdTargetIds.has(targetId) || this.ownedTabs.inUseElsewhere?.(targetId)) return;
+    if (!this.leftWithoutNavigation(targetId)) return;
     try {
       const info = (await this.targetInfos(connection)).find(
         (candidate) => candidate.targetId === targetId,
       );
-      if (!info || !isBlankTabUrl(info.url)) return;
+      // Read again after listing: a navigation may have started meanwhile.
+      if (!info || !isBlankTabUrl(info.url) || !this.leftWithoutNavigation(targetId)) return;
       await this.closeTargetAndSettle(connection, targetId);
     } catch {
       return;
     }
     this.recordClosedBlankTarget(targetId);
     this.ownedTabsChanged();
+  }
+
+  /** Whether this session follows the tab and no navigation of its page has
+   * started without committing. */
+  private leftWithoutNavigation(targetId: string): boolean {
+    const state = this.states.get(targetId);
+    return state !== undefined && !state.navigationPending;
   }
 
   /** Forget a blank tab this session opened and has just closed, keeping its

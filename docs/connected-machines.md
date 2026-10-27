@@ -495,19 +495,36 @@ infer the Chrome device.
 
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
-inventory must name the exact live port. `stateGeneration` is created once per
-extension worker lifetime and reused by every native reconnect in it; Chrome
-keeps the tab ids, pages and debugger attachments that the worker owns for
-exactly that long. The agent reports `stateGeneration` as the profile's
+inventory must name the exact live port. `stateGeneration` names the
+extension's live state: the tab ids, pages and the extension's debugger
+attachments. Chrome keeps those while it stops and restarts the extension's
+background worker, which it does whenever it likes; it drops the attachments
+when the extension reloads or updates, and everything when Chrome restarts.
+The extension keeps `stateGeneration` in `chrome.storage.session`, which lives
+exactly as long, together with the tabs it has attached. A new worker reads
+them, probes each recorded attachment with a debugger command that changes
+nothing, carries on with the ones that answer, and only then reports the same
+`stateGeneration`. The agent reports `stateGeneration` as the profile's
 inventory `connectionGeneration` (the placement instance above), so a
-native-host exit, an agent restart or an agent update reconnects in place and
-the profile's sessions stay live; if the agent restarted, the next action
-re-creates the controller session. A restarted worker, a reloaded or updated
-extension, or a restarted Chrome reports a new `stateGeneration` and ends the
-sessions as above. Extensions that do not send `stateGeneration` keep the
-per-port behavior, and the agent's update gate waits while one of them backs a
-live attached controller, because restarting would end its sessions. A
-quiescent attached session does not otherwise hold back an agent update.
+native-host exit, an agent restart or update, or a restarted extension worker
+reconnects in place and the profile's sessions stay live; if the agent
+restarted, the next action re-creates the controller session. A reloaded or
+updated extension, or a restarted Chrome, starts a new `stateGeneration` and
+ends the sessions as above. Extensions that do not send `stateGeneration`, or
+that keep it per worker (older versions), keep that narrower behavior, and the
+agent's update gate waits while one without it backs a live attached
+controller, because restarting would end its sessions. A quiescent attached
+session does not otherwise hold back an agent update.
+
+The debugger event buffer does not survive a worker restart, and its sequence
+numbers start again. Every `debugger.poll` result names the worker's event
+`stream`; browserd treats a different stream as lost history and
+resynchronizes, re-attaching each tab when it is next used. Commands that were
+in flight on the old worker fail on the closed native port, so their outcome
+is unknown and nothing replays them; once a new stream appears, a tab whose
+input was in flight is usable again. Each time a worker carries on an earlier
+worker's state, the extension adds `{at, attachmentsKept, attachmentsEnded,
+tabsClosed}` to `stateResumptions` in `chrome.storage.local` (the latest 20).
 
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
