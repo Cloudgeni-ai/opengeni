@@ -50,6 +50,7 @@
 .og-session-capability-step { display:grid; gap:16px; min-width:0; }
 .og-session-capability-step:focus { outline:none; }
 .og-session-capability-step > p { margin:0; line-height:1.6; }
+.og-session-capability-step > p.og-session-capability-reminder { margin-top:-8px; color:var(--og-color-fg-muted); }
 .og-session-capability-setup .og-connect-setup > .og-connect-setup-status { margin:0; font-size:13px; line-height:1.5; font-weight:500; color:var(--og-color-fg-muted); }
 .og-session-capability-setup label { display:flex; align-items:flex-start; gap:8px; line-height:1.6; }
 .og-session-capability-setup button { font:inherit; padding:9px 12px; border-radius:var(--og-radius-md,10px); border:1px solid var(--og-color-border); background:var(--og-color-surface-2); color:inherit; cursor:pointer; }
@@ -74,6 +75,7 @@
 .og-session-capability-progress { color:var(--og-color-fg-muted); padding-block:8px; }
 .og-session-capability-waiting { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px 10px; color:var(--og-color-fg-muted); }
 .og-session-capability-waiting > p { flex:1 1 12rem; margin:0; line-height:1.5; }
+.og-session-capability-waiting > p:focus { outline:none; }
 .og-session-capability-spinner { flex:none; box-sizing:border-box; width:14px; height:14px; margin-top:3px; border-radius:999px; border:2px solid color-mix(in srgb,currentColor 25%,transparent); border-top-color:currentColor; animation:og-session-capability-spin .8s linear infinite; }
 .og-session-capability-waiting-actions { display:flex; gap:8px; margin-inline-start:auto; align-self:center; }
 @keyframes og-session-capability-spin { to { transform:rotate(360deg); } }

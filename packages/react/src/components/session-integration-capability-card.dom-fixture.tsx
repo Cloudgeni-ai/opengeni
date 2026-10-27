@@ -20,6 +20,8 @@ let stillSigningIn = false;
 /** What the next poll after sign-in reports instead of the default, or a failure. */
 let nextPoll: Partial<ConnectAttempt> | Error | null = null;
 let popupBlocked = false;
+// A window showing the provider's site: like a browser, the card can't close it.
+let foreignWindow = false;
 const cancels: unknown[] = [];
 const begins: Array<Record<string, unknown>> = [];
 const advances: Array<Record<string, unknown>> = [];
@@ -126,16 +128,20 @@ const client = {
   },
 };
 
-const popups: Array<{ closed: boolean; urls: string[] }> = [];
+const popups: Array<{ closed: boolean; urls: string[]; focused: number }> = [];
 window.open = (() => {
   if (popupBlocked) return null;
   const popup = {
     opener: {} as unknown,
     closed: false,
+    focused: 0,
     urls: [] as string[],
     location: { replace: (url: string) => popup.urls.push(url) },
     close: () => {
-      popup.closed = true;
+      if (!foreignWindow) popup.closed = true;
+    },
+    focus: () => {
+      popup.focused += 1;
     },
   };
   popups.push(popup);
@@ -177,6 +183,7 @@ beforeEach(() => {
   stillSigningIn = false;
   nextPoll = null;
   popupBlocked = false;
+  foreignWindow = false;
   cancels.length = 0;
   sessionStorage.clear();
 });
@@ -310,8 +317,10 @@ test("while the sign-in window is open the card offers one way out, and it ends 
   // sign-in, status check or setup cancel.
   for (const label of ["Sign in", "Check status", "Cancel setup", "Stop waiting"])
     expect(button(host, label)).toBeUndefined();
-  // Focus follows the step instead of falling back to the page.
-  expect(document.activeElement).toBe(button(host, "Reopen window")!);
+  // Focus follows the step to its status line, not a button a second Enter
+  // would press.
+  expect(document.activeElement?.getAttribute("role")).toBe("status");
+  expect(document.activeElement?.textContent).toContain("in the window that opened");
   await act(async () => {
     button(host, "Cancel")!.click();
   });
@@ -321,20 +330,54 @@ test("while the sign-in window is open the card offers one way out, and it ends 
   expect(popups[0]!.closed).toBe(true);
   expect(host.textContent).toContain("Setup cancelled");
   expect(host.textContent).not.toContain("Sign-in window closed");
+  // The window did close, so nothing asks the person to close it.
+  expect(host.textContent).not.toContain("close the sign-in window");
   expect(document.activeElement).toBe(button(host, "Try again")!);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a sign-in window the card can't close is left for the person to close, and the card says so", async () => {
+  foreignWindow = true;
+  const { host, root } = await waitingForSignIn();
+  await act(async () => {
+    button(host, "Cancel")!.click();
+  });
+  await until(() => !!button(host, "Try again"), "try again");
+  expect(cancels).toEqual(["attempt-1"]);
+  expect(popups[0]!.closed).toBe(false);
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).toContain("You can close the sign-in window.");
+  // Once the person moves on, the reminder goes with the step it was for.
+  foreignWindow = false;
+  stillSigningIn = false;
+  await act(async () => {
+    button(host, "Try again")!.click();
+  });
+  await until(() => connected(host), "complete");
+  expect(host.textContent).not.toContain("close the sign-in window");
   await act(async () => root.unmount());
   host.remove();
 });
 
 test("a lost sign-in window can be reopened, and a blocked window says so", async () => {
   const { host, root } = await waitingForSignIn();
+  // A window still open behind others comes forward: no second window.
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  expect(popups).toHaveLength(1);
+  expect(popups[0]!.focused).toBe(1);
+  // One the person closed opens again, for the same attempt.
+  popups[0]!.closed = true;
   await act(async () => {
     button(host, "Reopen window")!.click();
   });
   await until(() => popups.length === 2, "second window");
-  expect(popups[0]!.closed).toBe(true);
   expect(host.textContent).toContain("in the window that opened");
   expect(cancels).toEqual([]);
+  expect(begins).toHaveLength(1);
+  popups[1]!.closed = true;
   popupBlocked = true;
   await act(async () => {
     button(host, "Reopen window")!.click();
@@ -351,6 +394,7 @@ test("a lost sign-in window can be reopened, and a blocked window says so", asyn
 test("a sign-in that fails after the first attempt still says so in plain words", async () => {
   const { host, root } = await waitingForSignIn();
   nextPoll = new Error("upstream 502 with internal detail");
+  popups[0]!.closed = true;
   await act(async () => {
     button(host, "Reopen window")!.click();
   });
@@ -358,6 +402,31 @@ test("a sign-in that fails after the first attempt still says so in plain words"
   expect(host.textContent).not.toContain("internal detail");
   expect(host.textContent).not.toContain("Refresh its status");
   expect(button(host, "Try signing in again")).toBeDefined();
+  // Cancelling then leaves only what is true now: the error was for sign-in.
+  await act(async () => {
+    button(host, "Cancel setup")!.click();
+  });
+  await until(() => !!button(host, "Try again"), "try again");
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).not.toContain("Sign-in couldn't continue");
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a pop-up blocked on the first Connect says so and keeps keyboard focus on the card", async () => {
+  popupBlocked = true;
+  const { host, root } = await mount();
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    const connect = button(host, "Connect Outlook Mail")!;
+    connect.focus();
+    connect.click();
+  });
+  await until(() => host.textContent?.includes("blocked the sign-in window") ?? false, "blocked");
+  expect(document.activeElement).toBe(button(host, "Try again")!);
   await act(async () => root.unmount());
   host.remove();
 });

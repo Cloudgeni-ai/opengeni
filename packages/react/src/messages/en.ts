@@ -1458,7 +1458,7 @@ export const englishMessages = {
   "connectSetup.chooseTools": "Choose tools",
   "connectSetup.chooseWhichToolsToAdd": "Choose which tools to add",
   "connectSetup.completeProviderAuthorizationThenCheck":
-    "Complete provider authorization, then check the connection status.",
+    "Finish signing in there, then press Check status.",
   "connectSetup.connect": "Connect",
   "connectSetup.connectionDetails": "Connection details",
   "connectSetup.connectionReady": "Connection ready",
@@ -4416,6 +4416,7 @@ export const englishMessages = {
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
   "sessionIntegrationCapabilityCard.chatAccessFailed":
     "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
+  "sessionIntegrationCapabilityCard.closeSignInWindow": "You can close the sign-in window.",
   "sessionIntegrationCapabilityCard.connected": "Your account is connected",
   "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
   "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",

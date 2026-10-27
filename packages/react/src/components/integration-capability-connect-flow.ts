@@ -6,6 +6,7 @@ import {
   ConnectPopupClosedError,
   type ConnectAttempt,
   type ConnectNavigation,
+  type ConnectPopup,
   type ConnectTransport,
 } from "@opengeni/connect";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
@@ -52,6 +53,10 @@ class SignInHandedOff extends Error {}
 /** The sign-in window could not open. */
 class SignInBlocked extends Error {}
 
+/** Which step of setup a card message was written for. */
+const stepOf = (attempt: ConnectAttempt | null | undefined) =>
+  attempt ? `${attempt.id}:${attempt.state}` : "none";
+
 /** The in-chat Connect card for a reviewed integration, as a renderer draws it. */
 export type IntegrationCapabilityConnect = {
   controller: ConnectController;
@@ -60,14 +65,21 @@ export type IntegrationCapabilityConnect = {
   busy: boolean;
   /** The sign-in window is open and the card waits for it. */
   waiting: boolean;
-  /** A plain line when starting failed, or null. Never a raw server message. */
+  /**
+   * A plain line when starting or signing in failed, or null. Never a raw
+   * server message. Like {@link notice}, it shows only while setup is still at
+   * the step it was written for, so it is never stale.
+   */
   error: string | null;
   /**
    * The person closed the sign-in window before finishing. Not an error: the
    * card says so and its sign-in button offers to try again.
    */
   signInClosed: boolean;
-  /** "Sign-in window closed…" while {@link signInClosed}, else null. */
+  /**
+   * "Sign-in window closed…" while {@link signInClosed}; after Cancel, a
+   * reminder to close a sign-in window the card couldn't close itself.
+   */
   notice: string | null;
   chatAccessFailed: boolean;
   notRequester: boolean;
@@ -80,12 +92,15 @@ export type IntegrationCapabilityConnect = {
    * and they stay while the setup controls are hidden.
    */
   authorizeAttempt: (next: ConnectAttempt) => Promise<void>;
-  /** End the attempt: the sign-in window closes and the setup is cancelled. */
+  /**
+   * End the attempt. The card closes the sign-in window when the browser lets
+   * it; when it can't, {@link notice} asks the person to close it.
+   */
   stopWaiting: () => void;
   /**
-   * Open the sign-in window again while waiting, for a window the person
-   * closed or lost. Call it from their tap. A browser can't tell the card
-   * when its window closes, so this is how they get it back.
+   * Bring the sign-in window back while waiting. Call it from their tap. A
+   * window the card can still see comes to the front; one that closed or that
+   * the card lost track of is opened again, for the same attempt.
    */
   reopenSignIn: () => void;
   reload: () => void;
@@ -152,10 +167,14 @@ export function useIntegrationCapabilityConnect({
   const [waiting, setWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signInClosed, setSignInClosed] = useState(false);
+  const [leftOpen, setLeftOpen] = useState(false);
+  // Messages belong to the step they were written for (see `stepOf`).
+  const [messageStep, setMessageStep] = useState("none");
   const [chatAccessFailed, setChatAccessFailed] = useState(false);
   const [notRequester, setNotRequester] = useState(false);
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
+  const signInWindow = useRef<ConnectPopup | null>(null);
   const finished = useRef<string | null>(null);
   const configured = useRef(onConfigured);
   configured.current = onConfigured;
@@ -163,6 +182,13 @@ export function useIntegrationCapabilityConnect({
   windowHost.current = windows;
   const hints = windows.hints ?? attemptHint;
   const storageKey = `opengeni:session-integration-connect:${workspaceId}:${sessionId}:${capabilityId}`;
+  /** Show a message for the step setup is at now. */
+  const pin = () => setMessageStep(stepOf(controller.getSnapshot().attempt));
+  const clearMessages = () => {
+    setError(null);
+    setSignInClosed(false);
+    setLeftOpen(false);
+  };
 
   useEffect(() => {
     const abort = new AbortController();
@@ -288,14 +314,14 @@ export function useIntegrationCapabilityConnect({
   async function authorize(next: ConnectAttempt, navigation: ConnectNavigation) {
     const pending = new AbortController();
     authorization.current = pending;
-    setError(null);
-    setSignInClosed(false);
+    clearMessages();
     setWaiting(true);
     let blocked = false;
     const watched: ConnectNavigation = {
       openPopup(url) {
         const popup = navigation.openPopup(url);
         if (!popup) blocked = true;
+        signInWindow.current = popup;
         return popup;
       },
       redirect: (url) => navigation.redirect(url),
@@ -329,13 +355,19 @@ export function useIntegrationCapabilityConnect({
         }
         if (reason instanceof SignInReopened) return;
         if (reason instanceof SetupCancelled) {
-          // The window closed above; end the attempt itself, so finishing
-          // in a window left open elsewhere can't still connect. If it
-          // finished just before, show what really happened instead.
+          // End the attempt itself, so finishing in a window left open can't
+          // still connect. If it finished just before, show what really
+          // happened instead.
           await controller
             .cancel(crypto.randomUUID())
             .catch(() => controller.recover(next.id))
             .catch(() => undefined);
+          // A browser can't close a window that shows the provider's site;
+          // say so only when the window is really still open.
+          if (lifetime.current?.signal.aborted === false && signInWindow.current?.isOpen?.()) {
+            setLeftOpen(true);
+            pin();
+          }
           return;
         }
         throw failure;
@@ -356,18 +388,19 @@ export function useIntegrationCapabilityConnect({
     if (failure instanceof ConnectPopupClosedError) setSignInClosed(true);
     else if (failure instanceof SignInBlocked) setError(t("connectWindowHost.allowPopups"));
     else setError(t("sessionIntegrationCapabilityCard.signInFailed"));
+    pin();
   }
 
   /** Fresh setup from one tap: the sign-in window is reserved inside the tap. */
   function start() {
     if (busy || availability.kind !== "ready") return;
-    setError(null);
-    setSignInClosed(false);
+    clearMessages();
     let reserved: ReturnType<ConnectWindowHost["reserve"]>;
     try {
       reserved = windowHost.current.reserve();
     } catch {
       setError(t("connectWindowHost.allowPopups"));
+      pin();
       return;
     }
     setBusy(true);
@@ -407,8 +440,10 @@ export function useIntegrationCapabilityConnect({
     })()
       .catch((failure) => {
         if (signingIn) reportFailure(failure);
-        else if (lifetime.current && !lifetime.current.signal.aborted)
+        else if (lifetime.current && !lifetime.current.signal.aborted) {
           setError(t("sessionIntegrationCapabilityCard.couldNotStart"));
+          pin();
+        }
       })
       .finally(() => {
         reserved.close();
@@ -416,25 +451,42 @@ export function useIntegrationCapabilityConnect({
       });
   }
 
+  const current = messageStep === stepOf(attempt);
   return {
     controller,
     attempt,
     availability,
     busy,
     waiting,
-    error,
-    signInClosed,
-    notice: signInClosed ? t("connectSetup.signInWindowClosed") : null,
+    error: current ? error : null,
+    signInClosed: current && signInClosed,
+    notice: !current
+      ? null
+      : signInClosed
+        ? t("connectSetup.signInWindowClosed")
+        : leftOpen
+          ? t("sessionIntegrationCapabilityCard.closeSignInWindow")
+          : null,
     chatAccessFailed,
     notRequester,
     restartable: !!attempt && RESTARTABLE.has(attempt.state),
     start,
     authorizeAttempt: (next: ConnectAttempt) =>
       authorize(next, windowHost.current.open()).catch(reportFailure),
-    stopWaiting: () => authorization.current?.abort(new SetupCancelled()),
+    stopWaiting: () => {
+      clearMessages();
+      authorization.current?.abort(new SetupCancelled());
+    },
     reopenSignIn: () => {
       const waitingOn = controller.getSnapshot().attempt;
       if (!authorization.current || waitingOn?.nextAction.type !== "authorize") return;
+      // A window still open behind others comes forward; a second one would
+      // only pile up, as the card can't close the first.
+      const shown = signInWindow.current;
+      if (shown?.isOpen?.()) {
+        shown.focus?.();
+        return;
+      }
       authorization.current.abort(new SignInReopened());
       // Synchronously inside the tap, so the browser lets the window open.
       void authorize(waitingOn, windowHost.current.open()).catch(reportFailure);

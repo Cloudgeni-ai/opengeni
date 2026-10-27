@@ -12703,6 +12703,10 @@
   margin: 0;
   line-height: 1.6;
 }
+:where(.og-root).og-session-capability-step > p.og-session-capability-reminder,:where(.og-root) .og-session-capability-step > p.og-session-capability-reminder {
+  margin-top: -8px;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-setup .og-connect-setup > .og-connect-setup-status,:where(.og-root) .og-session-capability-setup .og-connect-setup > .og-connect-setup-status {
   margin: 0;
   font-size: 13px;
@@ -12804,6 +12808,9 @@
   flex: 1 1 12rem;
   margin: 0;
   line-height: 1.5;
+}
+:where(.og-root).og-session-capability-waiting > p:focus,:where(.og-root) .og-session-capability-waiting > p:focus {
+  outline: none;
 }
 :where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
   flex: none;
@@ -14158,6 +14165,10 @@
   margin: 0;
   line-height: 1.6;
 }
+:where(.og-root).og-session-capability-step > p.og-session-capability-reminder,:where(.og-root) .og-session-capability-step > p.og-session-capability-reminder {
+  margin-top: -8px;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-setup .og-connect-setup > .og-connect-setup-status,:where(.og-root) .og-session-capability-setup .og-connect-setup > .og-connect-setup-status {
   margin: 0;
   font-size: 13px;
@@ -14259,6 +14270,9 @@
   flex: 1 1 12rem;
   margin: 0;
   line-height: 1.5;
+}
+:where(.og-root).og-session-capability-waiting > p:focus,:where(.og-root) .og-session-capability-waiting > p:focus {
+  outline: none;
 }
 :where(.og-root).og-session-capability-spinner,:where(.og-root) .og-session-capability-spinner {
   flex: none;

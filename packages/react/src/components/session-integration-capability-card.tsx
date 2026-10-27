@@ -81,7 +81,13 @@ function ScopedCard({
   // focus to the step's own control so keyboard and screen reader users don't
   // land back at the top of the page. Only when focus was actually lost.
   const setupRef = useRef<HTMLDivElement>(null);
-  const step = waiting ? "waiting" : busy ? "busy" : (attempt?.state ?? "none");
+  // A message (a blocked pop-up, say) counts as a step: the button pressed
+  // may be gone even though the attempt itself didn't move.
+  const step = waiting
+    ? "waiting"
+    : busy
+      ? "busy"
+      : `${attempt?.state ?? "none"}${error ? ":error" : ""}`;
   const shownStep = useRef(step);
   useEffect(() => {
     if (shownStep.current === step) return;
@@ -90,8 +96,10 @@ function ScopedCard({
     const region = setupRef.current;
     const active = region?.ownerDocument.activeElement;
     if (!region || (active && active !== region.ownerDocument.body)) return;
+    // While waiting, focus the status line: a second Enter on a button there
+    // would open another window or cancel.
     const target =
-      region.querySelector<HTMLElement>(".og-session-capability-waiting button") ??
+      region.querySelector<HTMLElement>(".og-session-capability-waiting [role=status]") ??
       region.querySelector<HTMLElement>(
         ".og-session-capability-primary, .og-connect-setup-primary, button:not([disabled])",
       );
@@ -102,7 +110,7 @@ function ScopedCard({
     availability.kind === "ready" && (attempt || busy || error) ? (
       <div ref={setupRef} tabIndex={-1} className="og-session-capability-step">
         {error ? <p role="alert">{error}</p> : null}
-        {flow.notice ? <p role="status">{flow.notice}</p> : null}
+        {flow.notice && flow.signInClosed ? <p role="status">{flow.notice}</p> : null}
         {/* While the sign-in window is open, the card says so and offers one way
             out, which ends the attempt; the sign-in controls return if the
             window closes or the provider moves setup elsewhere. */}
@@ -121,10 +129,16 @@ function ScopedCard({
         ) : busy ? (
           <p role="status">{t("sessionIntegrationCapabilityCard.preparing")}</p>
         ) : null}
+        {/* After Cancel: a sign-in window the browser wouldn't let the card close. */}
+        {flow.notice && !flow.signInClosed ? (
+          <p role="status" className="og-session-capability-reminder">
+            {flow.notice}
+          </p>
+        ) : null}
         {waiting ? (
           <div className="og-session-capability-waiting">
             <span aria-hidden className="og-session-capability-spinner" />
-            <p role="status">
+            <p role="status" tabIndex={-1}>
               {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}
             </p>
             <span className="og-session-capability-waiting-actions">
