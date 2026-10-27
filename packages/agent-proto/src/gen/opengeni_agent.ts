@@ -422,90 +422,6 @@ export function fsEntryKindToJSON(object: FsEntryKind): string {
   }
 }
 
-export enum GitOp {
-  GIT_OP_UNSPECIFIED = 0,
-  GIT_OP_STATUS = 1,
-  GIT_OP_DIFF = 2,
-  GIT_OP_LOG = 3,
-  GIT_OP_ADD = 4,
-  GIT_OP_COMMIT = 5,
-  GIT_OP_BRANCH = 6,
-  GIT_OP_CHECKOUT = 7,
-  GIT_OP_PULL = 8,
-  GIT_OP_PUSH = 9,
-  /** GIT_OP_RAW - Any other subcommand, passed through verbatim via `args`. */
-  GIT_OP_RAW = 15,
-}
-
-export function gitOpFromJSON(object: any): GitOp {
-  switch (object) {
-    case 0:
-    case "GIT_OP_UNSPECIFIED":
-      return GitOp.GIT_OP_UNSPECIFIED;
-    case 1:
-    case "GIT_OP_STATUS":
-      return GitOp.GIT_OP_STATUS;
-    case 2:
-    case "GIT_OP_DIFF":
-      return GitOp.GIT_OP_DIFF;
-    case 3:
-    case "GIT_OP_LOG":
-      return GitOp.GIT_OP_LOG;
-    case 4:
-    case "GIT_OP_ADD":
-      return GitOp.GIT_OP_ADD;
-    case 5:
-    case "GIT_OP_COMMIT":
-      return GitOp.GIT_OP_COMMIT;
-    case 6:
-    case "GIT_OP_BRANCH":
-      return GitOp.GIT_OP_BRANCH;
-    case 7:
-    case "GIT_OP_CHECKOUT":
-      return GitOp.GIT_OP_CHECKOUT;
-    case 8:
-    case "GIT_OP_PULL":
-      return GitOp.GIT_OP_PULL;
-    case 9:
-    case "GIT_OP_PUSH":
-      return GitOp.GIT_OP_PUSH;
-    case 15:
-    case "GIT_OP_RAW":
-      return GitOp.GIT_OP_RAW;
-    default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum GitOp");
-  }
-}
-
-export function gitOpToJSON(object: GitOp): string {
-  switch (object) {
-    case GitOp.GIT_OP_UNSPECIFIED:
-      return "GIT_OP_UNSPECIFIED";
-    case GitOp.GIT_OP_STATUS:
-      return "GIT_OP_STATUS";
-    case GitOp.GIT_OP_DIFF:
-      return "GIT_OP_DIFF";
-    case GitOp.GIT_OP_LOG:
-      return "GIT_OP_LOG";
-    case GitOp.GIT_OP_ADD:
-      return "GIT_OP_ADD";
-    case GitOp.GIT_OP_COMMIT:
-      return "GIT_OP_COMMIT";
-    case GitOp.GIT_OP_BRANCH:
-      return "GIT_OP_BRANCH";
-    case GitOp.GIT_OP_CHECKOUT:
-      return "GIT_OP_CHECKOUT";
-    case GitOp.GIT_OP_PULL:
-      return "GIT_OP_PULL";
-    case GitOp.GIT_OP_PUSH:
-      return "GIT_OP_PUSH";
-    case GitOp.GIT_OP_RAW:
-      return "GIT_OP_RAW";
-    default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum GitOp");
-  }
-}
-
 export enum GoingOfflineReason {
   GOING_OFFLINE_REASON_UNSPECIFIED = 0,
   /** GOING_OFFLINE_REASON_USER_STOP - The user stopped the foreground process. */
@@ -1103,7 +1019,7 @@ export interface Capabilities {
   browserBridge: boolean;
   /**
    * The runner enforces the optional per-connection operation memory policy on
-   * every contained exec/git child. A control plane must fail closed rather than
+   * every contained exec child. A control plane must fail closed rather than
    * send a configured policy to a runner that does not advertise this bit.
    */
   operationResourcePolicy: boolean;
@@ -1145,7 +1061,7 @@ export interface Capabilities {
    */
   transactionalFsWriteMachine: boolean;
   /**
-   * The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+   * The runner honors `run_as` on exec, PTY open and file requests: it runs
    * as root on Linux and switches to the named user per request. False (absent)
    * runners MUST NOT receive a non-empty run_as.
    */
@@ -1492,47 +1408,6 @@ export interface FsRemoveRequest {
 }
 
 export interface FsRemoveResponse {
-}
-
-/**
- * A single git operation. The agent runs git against the repo rooted at `cwd`
- * (or workspace_root) and returns structured results where it can, falling back
- * to raw stdout for pass-through subcommands.
- */
-export interface GitRequest {
-  op: GitOp;
-  /** Repo working directory; defaults to workspace_root. */
-  cwd: string;
-  /** Free-form args for ops that pass through (e.g. log/diff flags). */
-  args: string[];
-  /** Run as this local user (see ExecRequest.run_as). */
-  runAs: string;
-}
-
-export interface GitResponse {
-  exitCode: number;
-  /** Raw stdout/stderr for pass-through fidelity. */
-  stdout: Uint8Array;
-  stderr: Uint8Array;
-  /** Structured status, present for GIT_OP_STATUS. */
-  status: GitStatus | undefined;
-}
-
-export interface GitStatus {
-  branch: string;
-  /** The upstream tracking branch, if any. */
-  upstream: string;
-  ahead: number;
-  behind: number;
-  files: GitFileStatus[];
-  clean: boolean;
-}
-
-export interface GitFileStatus {
-  path: string;
-  /** Two-letter porcelain code (e.g. " M", "??", "A "). */
-  code: string;
-  staged: boolean;
 }
 
 /**
@@ -2397,7 +2272,7 @@ export interface ControlRequest {
   epoch: number;
   /**
    * Per-connection policy snapshot attached to the operation request. It lives
-   * on the envelope so request/reply Git and replayable OpStart share one
+   * on the envelope so request/reply ops and replayable OpStart share one
    * contract. Absent means unrestricted by the control plane.
    */
   resourcePolicy: OperationResourcePolicy | undefined;
@@ -2412,7 +2287,6 @@ export interface ControlRequest {
     | { $case: "fsMove"; fsMove: FsMoveRequest }
     | { $case: "fsStat"; fsStat: FsStatRequest }
     | { $case: "fsRemove"; fsRemove: FsRemoveRequest }
-    | { $case: "git"; git: GitRequest }
     | { $case: "ptyOpen"; ptyOpen: PtyOpenRequest }
     | { $case: "ptyWrite"; ptyWrite: PtyWriteRequest }
     | { $case: "ptyResize"; ptyResize: PtyResizeRequest }
@@ -2459,7 +2333,6 @@ export interface ControlResponse {
     | { $case: "fsMove"; fsMove: FsMoveResponse }
     | { $case: "fsStat"; fsStat: FsStatResponse }
     | { $case: "fsRemove"; fsRemove: FsRemoveResponse }
-    | { $case: "git"; git: GitResponse }
     | { $case: "ptyOpen"; ptyOpen: PtyOpenResponse }
     | { $case: "ptyWrite"; ptyWrite: PtyWriteResponse }
     | { $case: "ptyResize"; ptyResize: PtyResizeResponse }
@@ -7211,464 +7084,6 @@ export const FsRemoveResponse: MessageFns<FsRemoveResponse> = {
   },
   fromPartial(_: DeepPartial<FsRemoveResponse>): FsRemoveResponse {
     const message = createBaseFsRemoveResponse();
-    return message;
-  },
-};
-
-function createBaseGitRequest(): GitRequest {
-  return { op: 0, cwd: "", args: [], runAs: "" };
-}
-
-export const GitRequest: MessageFns<GitRequest> = {
-  encode(message: GitRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.op !== 0) {
-      writer.uint32(8).int32(message.op);
-    }
-    if (message.cwd !== "") {
-      writer.uint32(18).string(message.cwd);
-    }
-    for (const v of message.args) {
-      writer.uint32(26).string(v!);
-    }
-    if (message.runAs !== "") {
-      writer.uint32(34).string(message.runAs);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): GitRequest {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseGitRequest();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.op = reader.int32() as any;
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.cwd = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.args.push(reader.string());
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.runAs = reader.string();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): GitRequest {
-    return {
-      op: isSet(object.op) ? gitOpFromJSON(object.op) : 0,
-      cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
-      args: globalThis.Array.isArray(object?.args) ? object.args.map((e: any) => globalThis.String(e)) : [],
-      runAs: isSet(object.runAs)
-        ? globalThis.String(object.runAs)
-        : isSet(object.run_as)
-        ? globalThis.String(object.run_as)
-        : "",
-    };
-  },
-
-  toJSON(message: GitRequest): unknown {
-    const obj: any = {};
-    if (message.op !== 0) {
-      obj.op = gitOpToJSON(message.op);
-    }
-    if (message.cwd !== "") {
-      obj.cwd = message.cwd;
-    }
-    if (message.args?.length) {
-      obj.args = message.args;
-    }
-    if (message.runAs !== "") {
-      obj.runAs = message.runAs;
-    }
-    return obj;
-  },
-
-  create(base?: DeepPartial<GitRequest>): GitRequest {
-    return GitRequest.fromPartial<DeepPartial<GitRequest>>(base ?? ({} as any));
-  },
-  fromPartial(object: DeepPartial<GitRequest>): GitRequest {
-    const message = createBaseGitRequest();
-    message.op = object.op ?? 0;
-    message.cwd = object.cwd ?? "";
-    message.args = object.args?.map((e) => e) || [];
-    message.runAs = object.runAs ?? "";
-    return message;
-  },
-};
-
-function createBaseGitResponse(): GitResponse {
-  return { exitCode: 0, stdout: new Uint8Array(0), stderr: new Uint8Array(0), status: undefined };
-}
-
-export const GitResponse: MessageFns<GitResponse> = {
-  encode(message: GitResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.exitCode !== 0) {
-      writer.uint32(8).int32(message.exitCode);
-    }
-    if (message.stdout.length !== 0) {
-      writer.uint32(18).bytes(message.stdout);
-    }
-    if (message.stderr.length !== 0) {
-      writer.uint32(26).bytes(message.stderr);
-    }
-    if (message.status !== undefined) {
-      GitStatus.encode(message.status, writer.uint32(34).fork()).join();
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): GitResponse {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseGitResponse();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.exitCode = reader.int32();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.stdout = reader.bytes();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.stderr = reader.bytes();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.status = GitStatus.decode(reader, reader.uint32());
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): GitResponse {
-    return {
-      exitCode: isSet(object.exitCode)
-        ? globalThis.Number(object.exitCode)
-        : isSet(object.exit_code)
-        ? globalThis.Number(object.exit_code)
-        : 0,
-      stdout: isSet(object.stdout) ? bytesFromBase64(object.stdout) : new Uint8Array(0),
-      stderr: isSet(object.stderr) ? bytesFromBase64(object.stderr) : new Uint8Array(0),
-      status: isSet(object.status) ? GitStatus.fromJSON(object.status) : undefined,
-    };
-  },
-
-  toJSON(message: GitResponse): unknown {
-    const obj: any = {};
-    if (message.exitCode !== 0) {
-      obj.exitCode = Math.round(message.exitCode);
-    }
-    if (message.stdout.length !== 0) {
-      obj.stdout = base64FromBytes(message.stdout);
-    }
-    if (message.stderr.length !== 0) {
-      obj.stderr = base64FromBytes(message.stderr);
-    }
-    if (message.status !== undefined) {
-      obj.status = GitStatus.toJSON(message.status);
-    }
-    return obj;
-  },
-
-  create(base?: DeepPartial<GitResponse>): GitResponse {
-    return GitResponse.fromPartial<DeepPartial<GitResponse>>(base ?? ({} as any));
-  },
-  fromPartial(object: DeepPartial<GitResponse>): GitResponse {
-    const message = createBaseGitResponse();
-    message.exitCode = object.exitCode ?? 0;
-    message.stdout = object.stdout ?? new Uint8Array(0);
-    message.stderr = object.stderr ?? new Uint8Array(0);
-    message.status = (object.status !== undefined && object.status !== null)
-      ? GitStatus.fromPartial<DeepPartial<GitStatus>>(object.status)
-      : undefined;
-    return message;
-  },
-};
-
-function createBaseGitStatus(): GitStatus {
-  return { branch: "", upstream: "", ahead: 0, behind: 0, files: [], clean: false };
-}
-
-export const GitStatus: MessageFns<GitStatus> = {
-  encode(message: GitStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.branch !== "") {
-      writer.uint32(10).string(message.branch);
-    }
-    if (message.upstream !== "") {
-      writer.uint32(18).string(message.upstream);
-    }
-    if (message.ahead !== 0) {
-      writer.uint32(24).int32(message.ahead);
-    }
-    if (message.behind !== 0) {
-      writer.uint32(32).int32(message.behind);
-    }
-    for (const v of message.files) {
-      GitFileStatus.encode(v!, writer.uint32(42).fork()).join();
-    }
-    if (message.clean !== false) {
-      writer.uint32(48).bool(message.clean);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): GitStatus {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseGitStatus();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.branch = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.upstream = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.ahead = reader.int32();
-          continue;
-        }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.behind = reader.int32();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.files.push(GitFileStatus.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 6: {
-          if (tag !== 48) {
-            break;
-          }
-
-          message.clean = reader.bool();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): GitStatus {
-    return {
-      branch: isSet(object.branch) ? globalThis.String(object.branch) : "",
-      upstream: isSet(object.upstream) ? globalThis.String(object.upstream) : "",
-      ahead: isSet(object.ahead) ? globalThis.Number(object.ahead) : 0,
-      behind: isSet(object.behind) ? globalThis.Number(object.behind) : 0,
-      files: globalThis.Array.isArray(object?.files) ? object.files.map((e: any) => GitFileStatus.fromJSON(e)) : [],
-      clean: isSet(object.clean) ? globalThis.Boolean(object.clean) : false,
-    };
-  },
-
-  toJSON(message: GitStatus): unknown {
-    const obj: any = {};
-    if (message.branch !== "") {
-      obj.branch = message.branch;
-    }
-    if (message.upstream !== "") {
-      obj.upstream = message.upstream;
-    }
-    if (message.ahead !== 0) {
-      obj.ahead = Math.round(message.ahead);
-    }
-    if (message.behind !== 0) {
-      obj.behind = Math.round(message.behind);
-    }
-    if (message.files?.length) {
-      obj.files = message.files.map((e) => GitFileStatus.toJSON(e));
-    }
-    if (message.clean !== false) {
-      obj.clean = message.clean;
-    }
-    return obj;
-  },
-
-  create(base?: DeepPartial<GitStatus>): GitStatus {
-    return GitStatus.fromPartial<DeepPartial<GitStatus>>(base ?? ({} as any));
-  },
-  fromPartial(object: DeepPartial<GitStatus>): GitStatus {
-    const message = createBaseGitStatus();
-    message.branch = object.branch ?? "";
-    message.upstream = object.upstream ?? "";
-    message.ahead = object.ahead ?? 0;
-    message.behind = object.behind ?? 0;
-    message.files = object.files?.map((e) => GitFileStatus.fromPartial<DeepPartial<GitFileStatus>>(e)) || [];
-    message.clean = object.clean ?? false;
-    return message;
-  },
-};
-
-function createBaseGitFileStatus(): GitFileStatus {
-  return { path: "", code: "", staged: false };
-}
-
-export const GitFileStatus: MessageFns<GitFileStatus> = {
-  encode(message: GitFileStatus, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.path !== "") {
-      writer.uint32(10).string(message.path);
-    }
-    if (message.code !== "") {
-      writer.uint32(18).string(message.code);
-    }
-    if (message.staged !== false) {
-      writer.uint32(24).bool(message.staged);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): GitFileStatus {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseGitFileStatus();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.path = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.code = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.staged = reader.bool();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): GitFileStatus {
-    return {
-      path: isSet(object.path) ? globalThis.String(object.path) : "",
-      code: isSet(object.code) ? globalThis.String(object.code) : "",
-      staged: isSet(object.staged) ? globalThis.Boolean(object.staged) : false,
-    };
-  },
-
-  toJSON(message: GitFileStatus): unknown {
-    const obj: any = {};
-    if (message.path !== "") {
-      obj.path = message.path;
-    }
-    if (message.code !== "") {
-      obj.code = message.code;
-    }
-    if (message.staged !== false) {
-      obj.staged = message.staged;
-    }
-    return obj;
-  },
-
-  create(base?: DeepPartial<GitFileStatus>): GitFileStatus {
-    return GitFileStatus.fromPartial<DeepPartial<GitFileStatus>>(base ?? ({} as any));
-  },
-  fromPartial(object: DeepPartial<GitFileStatus>): GitFileStatus {
-    const message = createBaseGitFileStatus();
-    message.path = object.path ?? "";
-    message.code = object.code ?? "";
-    message.staged = object.staged ?? false;
     return message;
   },
 };
@@ -15649,9 +15064,6 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "fsRemove":
         FsRemoveRequest.encode(message.op.fsRemove, writer.uint32(162).fork()).join();
         break;
-      case "git":
-        GitRequest.encode(message.op.git, writer.uint32(170).fork()).join();
-        break;
       case "ptyOpen":
         PtyOpenRequest.encode(message.op.ptyOpen, writer.uint32(178).fork()).join();
         break;
@@ -15831,14 +15243,6 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           }
 
           message.op = { $case: "fsRemove", fsRemove: FsRemoveRequest.decode(reader, reader.uint32()) };
-          continue;
-        }
-        case 21: {
-          if (tag !== 170) {
-            break;
-          }
-
-          message.op = { $case: "git", git: GitRequest.decode(reader, reader.uint32()) };
           continue;
         }
         case 22: {
@@ -16100,8 +15504,6 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         ? { $case: "fsRemove", fsRemove: FsRemoveRequest.fromJSON(object.fsRemove) }
         : isSet(object.fs_remove)
         ? { $case: "fsRemove", fsRemove: FsRemoveRequest.fromJSON(object.fs_remove) }
-        : isSet(object.git)
-        ? { $case: "git", git: GitRequest.fromJSON(object.git) }
         : isSet(object.ptyOpen)
         ? { $case: "ptyOpen", ptyOpen: PtyOpenRequest.fromJSON(object.ptyOpen) }
         : isSet(object.pty_open)
@@ -16253,8 +15655,6 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.fsStat = FsStatRequest.toJSON(message.op.fsStat);
     } else if (message.op?.$case === "fsRemove") {
       obj.fsRemove = FsRemoveRequest.toJSON(message.op.fsRemove);
-    } else if (message.op?.$case === "git") {
-      obj.git = GitRequest.toJSON(message.op.git);
     } else if (message.op?.$case === "ptyOpen") {
       obj.ptyOpen = PtyOpenRequest.toJSON(message.op.ptyOpen);
     } else if (message.op?.$case === "ptyWrite") {
@@ -16395,12 +15795,6 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             $case: "fsRemove",
             fsRemove: FsRemoveRequest.fromPartial<DeepPartial<FsRemoveRequest>>(object.op.fsRemove),
           };
-        }
-        break;
-      }
-      case "git": {
-        if (object.op?.git !== undefined && object.op?.git !== null) {
-          message.op = { $case: "git", git: GitRequest.fromPartial<DeepPartial<GitRequest>>(object.op.git) };
         }
         break;
       }
@@ -16656,9 +16050,6 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       case "fsRemove":
         FsRemoveResponse.encode(message.result.fsRemove, writer.uint32(162).fork()).join();
         break;
-      case "git":
-        GitResponse.encode(message.result.git, writer.uint32(170).fork()).join();
-        break;
       case "ptyOpen":
         PtyOpenResponse.encode(message.result.ptyOpen, writer.uint32(178).fork()).join();
         break;
@@ -16821,14 +16212,6 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           }
 
           message.result = { $case: "fsRemove", fsRemove: FsRemoveResponse.decode(reader, reader.uint32()) };
-          continue;
-        }
-        case 21: {
-          if (tag !== 170) {
-            break;
-          }
-
-          message.result = { $case: "git", git: GitResponse.decode(reader, reader.uint32()) };
           continue;
         }
         case 22: {
@@ -17067,8 +16450,6 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         ? { $case: "fsRemove", fsRemove: FsRemoveResponse.fromJSON(object.fsRemove) }
         : isSet(object.fs_remove)
         ? { $case: "fsRemove", fsRemove: FsRemoveResponse.fromJSON(object.fs_remove) }
-        : isSet(object.git)
-        ? { $case: "git", git: GitResponse.fromJSON(object.git) }
         : isSet(object.ptyOpen)
         ? { $case: "ptyOpen", ptyOpen: PtyOpenResponse.fromJSON(object.ptyOpen) }
         : isSet(object.pty_open)
@@ -17211,8 +16592,6 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       obj.fsStat = FsStatResponse.toJSON(message.result.fsStat);
     } else if (message.result?.$case === "fsRemove") {
       obj.fsRemove = FsRemoveResponse.toJSON(message.result.fsRemove);
-    } else if (message.result?.$case === "git") {
-      obj.git = GitResponse.toJSON(message.result.git);
     } else if (message.result?.$case === "ptyOpen") {
       obj.ptyOpen = PtyOpenResponse.toJSON(message.result.ptyOpen);
     } else if (message.result?.$case === "ptyWrite") {
@@ -17349,12 +16728,6 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             $case: "fsRemove",
             fsRemove: FsRemoveResponse.fromPartial<DeepPartial<FsRemoveResponse>>(object.result.fsRemove),
           };
-        }
-        break;
-      }
-      case "git": {
-        if (object.result?.git !== undefined && object.result?.git !== null) {
-          message.result = { $case: "git", git: GitResponse.fromPartial<DeepPartial<GitResponse>>(object.result.git) };
         }
         break;
       }

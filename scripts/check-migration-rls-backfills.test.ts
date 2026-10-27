@@ -321,6 +321,17 @@ END $patch$;`;
         patch.replace("EXECUTE definition;", "EXECUTE 'DELETE FROM widgets'; EXECUTE definition;"),
       ),
     ).toHaveLength(1);
+    // Dollar-quoted fragments may hold unbalanced parentheses and semicolons.
+    const fragments = patch
+      .replace(
+        "'anchor one', 'DELETE FROM widgets;'",
+        "$a$f(x$a$, $b$f(g(x, (SELECT 1 FROM widgets);$b$",
+      )
+      .replace("'anchor two', 'UPDATE widgets SET id = id;'", "$c$) y$c$, $c$) z FROM widgets$c$");
+    expect(analyze(fragments)).toHaveLength(0);
+    expect(
+      analyze(fragments.replace("EXECUTE definition;", "EXECUTE definition; DELETE FROM widgets;")),
+    ).toHaveLength(1);
   });
   test("treats pg_catalog-qualified routine patch built-ins like their bare forms", () => {
     // Comment stripping keeps literals whole but still strips code comments.

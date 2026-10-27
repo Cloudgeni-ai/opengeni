@@ -447,6 +447,14 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "cpuProfileBusyMs",
   "cpuProfileLongestBlockMs",
   "cpuProfileBlocksOver100Ms",
+  // Database password rotation events (packages/db database-credentials.ts):
+  // candidate positions, counts and whether a refusal was stale. Never a
+  // password or file contents.
+  "credentialIndex",
+  "credentialFromIndex",
+  "credentialToIndex",
+  "credentialCandidates",
+  "credentialStale",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
@@ -497,6 +505,11 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // method called on it.
   ["opengeni.client", /^[a-z][a-z0-9_]{0,31}$/],
   ["opengeni.client.operation", /^[A-Za-z][A-Za-z0-9_]{0,63}$/],
+  // Database password rotation events: the code-chosen pool name, which
+  // password file could not be read, and its errno code.
+  ["databasePool", /^[a-z][a-z0-9-]{0,63}$/],
+  ["credentialFile", /^(?:current|previous)$/],
+  ["credentialFileErrorCode", /^[A-Z][A-Z0-9_]{0,31}$/],
 ]);
 
 /**

@@ -25,12 +25,10 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const { workspaces } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
-  const liveTranscript = settings.liveTranscript === true;
   return (
     <ContentPage width="standard" className="pt-6">
       <MeetingsListPage
         workspaceId={workspaceId}
-        liveTranscriptDefault={liveTranscript}
         defaultLanguage={settings.language ?? null}
         viewerName={meetingViewerName(context)}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}

@@ -88,8 +88,8 @@ pub use exec_handover::{
     discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
 };
 pub use native::{
-    adopt_workspace_working_directory, assemble_git_response, resolve_workspace_root,
-    spawn_contained, ContainedExec, NativePlatform,
+    adopt_workspace_working_directory, resolve_workspace_root, spawn_contained, ContainedExec,
+    NativePlatform,
 };
 pub use pty::{spawn_pty, PtyProcess};
 
@@ -328,50 +328,6 @@ pub trait Platform: Send + Sync {
         ContainedExec::adopt(handover, None)
     }
 
-    /// Spawns the git invocation described by a `GitRequest` inside the shared
-    /// containment primitive WITHOUT waiting or assembling a reply — the
-    /// engine-job path for git. Same argv construction and cwd resolution as
-    /// [`Platform::git`] (which is implemented over this on the native
-    /// platform), so git children get the process-group kill AND the per-op
-    /// OOM cgroup leaf (#351's flagged git-boundary follow-up: a clone's page
-    /// cache bills to the op, not the runner).
-    ///
-    /// # Errors
-    ///
-    /// The spawn IO failure mapped to a typed [`PlatformError`], or
-    /// `Unsupported` from the default impl.
-    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
-        let _ = req;
-        Err(PlatformError::Unsupported(
-            "streaming git is not supported by this platform".to_string(),
-        ))
-    }
-
-    /// Policy-aware git spawn. As with exec, an explicit policy is never silently
-    /// dropped by a platform implementation that has not opted into enforcement.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PlatformError::Unsupported`] when a non-empty policy is supplied
-    /// to the default implementation; otherwise forwards [`Platform::spawn_git`]
-    /// errors.
-    fn spawn_git_with_policy(
-        &self,
-        req: &v1::GitRequest,
-        policy: Option<&v1::OperationResourcePolicy>,
-    ) -> PlatformResult<ContainedExec> {
-        if policy.is_some_and(|policy| {
-            policy.memory_max_bytes.is_some()
-                || policy.memory_high_bytes.is_some()
-                || policy.cpu_max_millicores.is_some()
-        }) {
-            return Err(PlatformError::Unsupported(
-                "operation resource policy is not supported by this platform".to_string(),
-            ));
-        }
-        self.spawn_git(req)
-    }
-
     // --- Channel-A: filesystem -------------------------------------------
 
     /// Reads a file, optionally a byte range. Returns the read bytes plus the
@@ -422,13 +378,6 @@ pub trait Platform: Send + Sync {
 
     /// Removes a path (optionally recursively for directories).
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse>;
-
-    // --- Channel-A: git ---------------------------------------------------
-
-    /// Runs a git operation against the repo rooted at the request's `cwd` (or
-    /// the workspace root). Returns structured status for `GIT_OP_STATUS`,
-    /// otherwise raw stdout/stderr.
-    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse>;
 
     // --- M8: terminal + desktop streams -----------------------------------
     //

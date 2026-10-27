@@ -2,6 +2,21 @@ import { Link } from "../../lib/navigation";
 import { PanelsTopLeftIcon } from "lucide-react";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
 import type { RailSession as Session } from "../../lib/session-list-entry";
+import { DropdownMenuItem } from "../../../ui/dropdown-menu";
+
+function siteOriginTarget(session: Session) {
+  const origin = sessionSiteOrigin(session);
+  if (!origin) return null;
+  return {
+    origin,
+    link: {
+      to: "/workspaces/$workspaceId/sites/$siteId",
+      params: { workspaceId: session.workspaceId, siteId: origin.siteId },
+      search: session.parentSessionId === null ? { conversation: session.id } : undefined,
+    },
+  } as const;
+}
+
 /** Where a session came from: opens its Site view with this conversation selected. */
 export function SiteOriginLink({
   session,
@@ -10,13 +25,12 @@ export function SiteOriginLink({
   session: Session;
   compact?: boolean | undefined;
 }) {
-  const origin = sessionSiteOrigin(session);
-  if (!origin) return null;
+  const target = siteOriginTarget(session);
+  if (!target) return null;
+  const { origin, link } = target;
   return (
     <Link
-      to="/workspaces/$workspaceId/sites/$siteId"
-      params={{ workspaceId: session.workspaceId, siteId: origin.siteId }}
-      search={session.parentSessionId === null ? { conversation: session.id } : undefined}
+      {...link}
       title={`Created through ${origin.title}`}
       aria-label={`Created through ${origin.title}. Open Site`}
       className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-1 text-xs text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent"
@@ -29,5 +43,19 @@ export function SiteOriginLink({
         </span>
       )}
     </Link>
+  );
+}
+
+/** The same link as a menu item, for a header with no room for it. */
+export function SiteOriginMenuItem({ session }: { session: Session }) {
+  const target = siteOriginTarget(session);
+  if (!target) return null;
+  return (
+    <DropdownMenuItem asChild>
+      <Link {...target.link} aria-label={`Created through ${target.origin.title}. Open Site`}>
+        <PanelsTopLeftIcon aria-hidden="true" />
+        <span className="min-w-0 truncate">{target.origin.title}</span>
+      </Link>
+    </DropdownMenuItem>
   );
 }

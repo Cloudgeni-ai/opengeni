@@ -1,5 +1,10 @@
 import { ACTION_CATALOG } from "./app-action-catalog.gen";
 import type { ActionCatalogEntry } from "./app-action-catalog-types";
+import {
+  presentedAppActionId,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  type PresentedAppActionPage,
+} from "./session-history";
 
 /* ----------------------------------------------------------------------------
    App actions: every public API action, the same ones the organization MCP
@@ -61,6 +66,47 @@ export function appActionCallChangesState(args: unknown): boolean {
   if (typeof id !== "string") return true;
   const entry = findAppAction(id);
   return entry === undefined || appActionChangesState(entry);
+}
+
+/**
+ * Actions that only open a payment page (Stripe Checkout or the billing
+ * portal); the chat shows the page as a button. See
+ * {@link appActionNeedsConfirmation} for which of them still ask first.
+ */
+export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set(
+  Object.keys(SESSION_EVENT_PRESENTED_APP_ACTIONS),
+);
+
+/** The payment page the action opens (see {@link PAYMENT_PAGE_ACTIONS}), if it opens one. */
+export function appActionPaymentPage(
+  entry: ActionCatalogEntry,
+): PresentedAppActionPage | undefined {
+  const id = presentedAppActionId(entry.id);
+  return id ? SESSION_EVENT_PRESENTED_APP_ACTIONS[id].page : undefined;
+}
+
+/**
+ * Whether running the action needs the person's confirmation in the chat
+ * first, and so can't run where the chat can only read: every change, except
+ * opening a checkout page. A checkout charges nothing until the person pays
+ * on it, so the page is its own confirmation. A billing portal link is
+ * different: whoever holds it can change the payment method or cancel the
+ * plan, so it keeps the confirmation.
+ */
+export function appActionNeedsConfirmation(entry: ActionCatalogEntry): boolean {
+  const page = appActionPaymentPage(entry);
+  return appActionChangesState(entry) && page !== "credits" && page !== "subscription";
+}
+
+/**
+ * The same, for an admin_action_call's arguments: also true for anything that
+ * can't be recognised (unknown action, bad input).
+ */
+export function appActionCallNeedsConfirmation(args: unknown): boolean {
+  const id = callArguments(args)?.id;
+  if (typeof id !== "string") return true;
+  const entry = findAppAction(id);
+  return entry === undefined || appActionNeedsConfirmation(entry);
 }
 
 /**
@@ -167,6 +213,9 @@ export function appActionConfirmationTitle(
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":
       return "Change your organization's default models?";
+    case "createBillingPortalSession":
+    case "createSubscriptionPortalSession":
+      return "Open your billing page? It can change your payment method or plan.";
     case "updateConnectorToolPermissions":
       return `${toolApprovalQuestion(body, "this integration's")} in ${workspace}?`;
     case "updateSessionMcpToolPermissions":

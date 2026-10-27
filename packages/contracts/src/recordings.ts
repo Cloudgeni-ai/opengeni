@@ -267,7 +267,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
@@ -885,6 +886,11 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
      * recording names another; null detects it. Absent from older servers.
      */
     language: z.string().nullable().optional(),
+    /**
+     * Whether this workspace's recorders start with the live transcript on
+     * (its `recordings.liveTranscript` setting). Absent from older servers.
+     */
+    liveTranscript: z.boolean().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;

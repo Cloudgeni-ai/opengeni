@@ -256,15 +256,19 @@ export function registerRecordingRoutes(
 
   /**
    * A dictation is transcribed by the workspace's voice input: its preferred
-   * provider, else the first ready one, as text without speakers. The
-   * version records the provider and the model it runs; the worker may
-   * still fall over to another provider that refused before hearing it.
+   * provider, else the first ready one, as text without speakers, in the
+   * language the dictation was started in (detected when none). The version
+   * records the provider and the model it runs; the worker may still fall
+   * over to another provider that refused before hearing it.
    */
-  async function dictationChoice(actor: {
-    workspaceId: string;
-    accountId: string;
-    subjectId: string;
-  }): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+  async function dictationChoice(
+    actor: {
+      workspaceId: string;
+      accountId: string;
+      subjectId: string;
+    },
+    recording: Recording,
+  ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
     const voiceInput = await dictationPolicy(actor.workspaceId);
     const service = deps.transcription!;
     const providerId = service.selectProvider
@@ -280,7 +284,8 @@ export function registerRecordingRoutes(
     const model =
       dictationProviders(deployment).find((provider) => provider.id === providerId)?.model.model ??
       "voice-input";
-    return { providerId, model, options: {} };
+    const language = recording.transcription?.language;
+    return { providerId, model, options: language ? { language } : {} };
   }
 
   /** The workspace's voice input settings, refusing when voice input can't run. */
@@ -327,7 +332,7 @@ export function registerRecordingRoutes(
   ) {
     const choice =
       recording.purpose === "dictation"
-        ? await dictationChoice(actor)
+        ? await dictationChoice(actor, recording)
         : await transcriptionChoice(actor, requested);
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
@@ -472,7 +477,14 @@ export function registerRecordingRoutes(
       if (body.tracks.length !== 1 || body.tracks[0]!.source !== "microphone") {
         throw invalid("A dictation has exactly one microphone track");
       }
-      if (body.transcription) throw invalid("A dictation uses the workspace's voice input model");
+      // The workspace's voice input picks the model; the dictation names only
+      // the language it is spoken in, or none to detect it.
+      const { language, ...other } = body.transcription ?? {};
+      if (Object.keys(other).length > 0) {
+        throw invalid(
+          "A dictation uses the workspace's voice input model; only its language can be set",
+        );
+      }
       const result = await guard(() =>
         createRecording(db, {
           ...actor,
@@ -484,6 +496,7 @@ export function registerRecordingRoutes(
           externalRef: body.externalRef,
           metadata: body.metadata,
           tracks: body.tracks,
+          ...(language ? { transcription: { language } } : {}),
         }),
       );
       if (result.recording.purpose !== "dictation") {
@@ -976,11 +989,12 @@ export function registerRecordingRoutes(
   app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
-    const defaults = await meetingModelFor(
-      deployment,
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
-      { accountId: actor.accountId, workspaceId: actor.workspaceId, subjectId: actor.subjectId },
-    );
+    const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+    });
     const pinned = deployment.pinned;
     const liveDefault = deployment.liveDefault;
     const offered = pinned
@@ -1064,7 +1078,8 @@ export function registerRecordingRoutes(
       default: defaults,
       dictationDefault,
       pinned: !!deployment.pinned,
-      language: resolveWorkspaceRecordingSettings(workspace?.settings).language ?? null,
+      language: recordingSettings.language ?? null,
+      liveTranscript: recordingSettings.liveTranscript === true,
     });
   });
 
