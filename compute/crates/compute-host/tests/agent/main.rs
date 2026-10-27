@@ -180,6 +180,9 @@ struct World {
     started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each time a VM was told its drives grew: which VM, how long its
+    /// writable drives' files were then, and whether it was paused.
+    drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
     /// While set, a guest asked to write its disks out answers only once
@@ -1028,6 +1031,26 @@ impl Engine for Fake {
         Ok(())
     }
 
+    fn resize_drives(
+        &self,
+        vm: &FakeVm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let lengths = spec
+            .drives
+            .iter()
+            .filter(|drive| !drive.read_only)
+            .map(|drive| std::fs::metadata(&drive.path).map_or(0, |found| found.len()))
+            .collect();
+        let paused = *vm.paused.lock().unwrap();
+        self.world
+            .drives_resized
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), lengths, paused));
+        ready(Ok(()))
+    }
+
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
         if self.world.unreadable_cpu.load(Ordering::SeqCst) {
             return Err(EngineError::new(
@@ -1240,6 +1263,8 @@ impl Lab {
 
     async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,

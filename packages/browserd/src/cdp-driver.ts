@@ -363,17 +363,23 @@ function classifyActionFailure(error: unknown, command: BrowserActionCommandValu
  * render (hidden, or drawn by the browser rather than the page) has no box to
  * scroll to or point at. Null for any other reply. */
 export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
-  if (/no node with given id|node is detached/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "locator_not_found",
-      "browser element is no longer present",
-    );
-  if (/does not have a layout object/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "invalid_action",
-      "browser element has no box on the page to act on; it is hidden or not rendered",
-    );
+  if (/no node with given id|node is detached/iu.test(message)) return elementGone();
+  if (/does not have a layout object/iu.test(message)) return elementUnrendered();
   return null;
+}
+
+function elementGone(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "locator_not_found",
+    "browser element is no longer present",
+  );
+}
+
+function elementUnrendered(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "invalid_action",
+    "browser element has no box on the page to act on; it is hidden or not rendered",
+  );
 }
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
@@ -5706,7 +5712,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser drag between different cross-origin frames is unsupported; use pointer drag coordinates",
           );
         }
-        await this.dragNodes(state, from.backendDOMNodeId, to.backendDOMNodeId);
+        await this.dragNodes(
+          state,
+          from.backendDOMNodeId,
+          to.backendDOMNodeId,
+          from.frameId ?? state.frame.id,
+          to.frameId ?? state.frame.id,
+        );
         return;
       }
       case "pointer":
@@ -6790,10 +6802,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const blocked = await this.settleHitTargetGuard(state, guard, count);
     if (blocked !== null) {
       // The pointer did move there, so whatever its arrival did stands, and
-      // the refusal is reported as an unknown outcome.
+      // the refusal is reported as an unknown outcome. A press that fell
+      // outside the target's own box found it moved away (the page was still
+      // reacting to a scroll, or to the pointer's arrival), not covered.
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        `browser element is covered by ${coverName(blocked)} at its center; the click was not delivered`,
+        blocked.moved
+          ? `browser element moved as the click was sent, so the press fell on ${coverName(blocked.name)}; the click was not delivered; click it again`
+          : `browser element is covered by ${coverName(blocked.name)} at its center; the click was not delivered`,
         true,
       );
     }
@@ -6824,7 +6840,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const reportSession = this.commandSession(state, "Runtime.addBinding");
     const token = randomUUID();
-    const verdicts: Array<string | null> = [];
+    const verdicts: Array<HitTargetVerdict | null> = [];
     let stopReports: () => void = () => undefined;
     let executionContextId: number | undefined;
     if (frameId !== undefined) {
@@ -6855,7 +6871,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             return;
           }
           if (!isRecord(report) || report.token !== token) return;
-          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+          verdicts.push(hitTargetVerdict(report.blocked));
         },
         reportSession,
       );
@@ -6923,7 +6939,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     guard: HitTargetGuard,
     presses: number,
-  ): Promise<string | null> {
+  ): Promise<HitTargetVerdict | null> {
     const unknown = () =>
       new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
@@ -6964,10 +6980,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
-    if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
+    const verdict = hitTargetVerdict(value);
+    if (settled.exceptionDetails || (value !== null && verdict === null)) {
       throw unknown();
     }
-    return value === null || value === "" ? null : value;
+    return verdict === null || verdict.name === "" ? null : verdict;
   }
 
   /** Removes guards an interrupted click left armed, so they cannot hold back
@@ -7033,6 +7050,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     requireHit: boolean,
     frameId?: string,
+    /** The node's frame, for a caller that passes no frameId (a drag): only
+     * the wait after a scroll runs in that frame's isolated world. */
+    settleFrameId?: string,
   ): Promise<{ x: number; y: number }> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -7044,6 +7064,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    // Where scroll offsets cannot be read (a child frame), whether the
+    // target moved tells whether anything scrolled.
+    const boxBefore =
+      scrollBefore === null
+        ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
+        : null;
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
     const effectsBeforeElementScroll = state.actionEffectCount;
@@ -7058,12 +7084,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeElementScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    if (
-      scrollBefore !== null &&
-      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-    )
-      state.actionEffectCount = effectsBeforeScroll;
-    let point = await this.centerPoint(state, backendDOMNodeId);
+    const boxAfter =
+      boxBefore === null ? null : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+    const unscrolled =
+      scrollBefore !== null
+        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+        : boxBefore !== null &&
+          boxAfter !== null &&
+          Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
+    if (unscrolled && scrollBefore !== null) state.actionEffectCount = effectsBeforeScroll;
+    // The page reacts to a scroll on its next frames (a sticky header that
+    // shrinks once the page scrolls, and the content it moves), so after one
+    // the target is measured only once it has stopped moving.
+    if (!unscrolled)
+      await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
+      throw (
+        (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
+        error
+      );
+    });
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
@@ -7093,6 +7133,65 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       point = revealed;
     }
     return point;
+  }
+
+  /**
+   * The definite refusal for a target Chromium could not measure: the page
+   * removed or replaced it (a list that renders its rows anew as it scrolls,
+   * possibly while the driver waited for the scroll to settle), or it is no
+   * longer rendered. Null for any other failure, which stays as it is.
+   */
+  private async unmeasuredRefusal(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    error: unknown,
+  ): Promise<InteractionDefiniteDriverError | null> {
+    // -32001: the tab's session is gone, which is not about this element.
+    if (!(error instanceof CdpProtocolError) || error.code === -32_001) return null;
+    const known = scrollRefusal(error.message);
+    if (known || !/could not compute box model/iu.test(error.message)) return known;
+    // Read in an isolated world where there is one, out of reach of page
+    // scripts that redefine isConnected.
+    const connected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      "function () { return this.isConnected; }",
+      [],
+      frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+    ).catch(() => false);
+    return connected === true ? elementUnrendered() : elementGone();
+  }
+
+  /**
+   * Waits, briefly and best effort, for the target to stop moving after the
+   * driver scrolled it into view: until its box has not changed for
+   * SCROLL_QUIET_MS of drawn frames, SCROLL_SETTLE_LIMIT_MS while it keeps
+   * moving, or SCROLL_SETTLE_MAX_MS by the driver's own clock. It runs in an
+   * isolated world, out of reach of page scripts that replace their timers
+   * or frame callbacks; without a frame to hold that world, and in a hidden
+   * tab or an engine without frames, there is no wait.
+   */
+  private async settleAfterScroll(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<void> {
+    if (this.engine === "lightpanda" || frameId === undefined) return;
+    await Promise.race([
+      this.callOnNode(
+        state,
+        backendDOMNodeId,
+        STEADY_BOX_FUNCTION,
+        [
+          { value: SCROLL_QUIET_MS },
+          { value: SCROLL_SETTLE_LIMIT_MS },
+          { value: SCROLL_SETTLE_MAX_MS },
+        ],
+        { isolatedFrameId: frameId },
+      ).catch(() => undefined),
+      delay(SCROLL_SETTLE_MAX_MS + SCROLL_SETTLE_SLACK_MS),
+    ]);
   }
 
   private async centerPoint(
@@ -7814,12 +7913,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     fromBackendNodeId: number | null,
     toBackendNodeId: number | null,
+    fromFrameId: string,
+    toFrameId: string,
   ): Promise<void> {
-    const from = await this.actionPoint(state, fromBackendNodeId, true);
+    const from = await this.actionPoint(state, fromBackendNodeId, true, undefined, fromFrameId);
     await this.dragPoints(
       state,
       from,
-      () => this.actionPoint(state, toBackendNodeId, false),
+      () => this.actionPoint(state, toBackendNodeId, false, undefined, toFrameId),
       "left",
     );
   }
@@ -10240,14 +10341,27 @@ const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
- * for each press as it happened (null: the press reached the target; text:
- * what it landed on instead). `reported` is false when the guard runs where
- * it cannot report (no isolated world), so only its readback counts. */
+ * for each press as it happened (null: the press reached the target; else
+ * what it landed on instead, and whether it fell outside the target's own
+ * box). `reported` is false when the guard runs where it cannot report (no
+ * isolated world), so only its readback counts. */
 interface HitTargetGuard {
   objectId: string;
   reported: boolean;
-  verdicts: Array<string | null>;
+  verdicts: Array<HitTargetVerdict | null>;
   stopReports: () => void;
+}
+
+/** A press the guard held back: what took it, and whether the target had
+ * moved away from the press point (rather than being covered there). */
+interface HitTargetVerdict {
+  name: string;
+  moved: boolean;
+}
+
+function hitTargetVerdict(value: unknown): HitTargetVerdict | null {
+  if (!isRecord(value) || typeof value.name !== "string") return null;
+  return { name: value.name, moved: value.moved === true };
 }
 
 const HIT_TARGET_GUARD_FUNCTION = `function(token) {
@@ -10291,6 +10405,20 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   };
   const presses = ["pointerdown", "mousedown"];
   const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  // Whether a press at the event's point fell outside every box of the
+  // target as laid out now. A target that is gone (re-rendered, removed or
+  // hidden) has no box to judge by, so it does not count as moved.
+  const movedAway = (event) => {
+    if (!element.isConnected) return false;
+    const rects = element.getClientRects();
+    if (rects.length === 0) return false;
+    const x = event.clientX;
+    const y = event.clientY;
+    for (const rect of rects) {
+      if (x >= rect.left - 1 && x <= rect.right + 1 && y >= rect.top - 1 && y <= rect.bottom + 1) return false;
+    }
+    return true;
+  };
   const types = [...presses, ...followers];
   const guard = { blocked: null };
   const expiresAt = Date.now() + 5000;
@@ -10308,7 +10436,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
       // lands where the first one's effect left the page (a row the first
       // click turned into an editor), as a person's does.
       const onTarget = pointerDowns > 1 || reaches(hit);
-      const verdict = onTarget ? null : describe(hit);
+      // A press outside the target's own box means the target moved away
+      // from the point it was aimed at; inside it, something covers it.
+      const verdict = onTarget ? null : { name: describe(hit), moved: movedAway(event) };
       // One report per physical press, before any page listener after this
       // one can replace the document.
       if (event.type === "pointerdown" && typeof report === "function") {
@@ -10343,6 +10473,59 @@ const SETTLE_FRAMES_FUNCTION = `function() {
       clearTimeout(timer);
       resolve(true);
     }));
+  });
+}`;
+
+/** After the driver's own scroll, a pointer action's target counts as
+ * settled once its box has not changed for this long: the page's scroll
+ * listeners, the frame callbacks and short timers they schedule (a header
+ * that shrinks once the page scrolls, often debounced), have run. */
+const SCROLL_QUIET_MS = 150;
+/** The longest that wait lasts while the page draws frames and the target
+ * keeps moving (an endless animation). */
+const SCROLL_SETTLE_LIMIT_MS = 600;
+/** The longest it lasts in all: a busy browser can take this long to draw
+ * the two frames after the scroll in which the page reacts to it. Both are
+ * within the action's dispatch allowance. */
+const SCROLL_SETTLE_MAX_MS = 1_500;
+/** How much longer the driver waits for the page's own answer at that limit
+ * before it goes on regardless. */
+const SCROLL_SETTLE_SLACK_MS = 100;
+
+// Resolves true once the target's box has stayed the same for quietMs over
+// at least two drawn frames, and false while it still moves at limitMs. The
+// quiet time counts from the first frame, which is when the page's scroll
+// listeners run, and the wait sees at least two frames (the listeners' own,
+// and the next, for what they deferred to it) unless maxMs passes first, so
+// a busy browser's slow frames do not count as quiet. A hidden page, which
+// draws no frames, resolves true at once.
+const STEADY_BOX_FUNCTION = `function(quietMs, limitMs, maxMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return true;
+  if (document.visibilityState === "hidden") return true;
+  const box = () => {
+    const rect = element.getBoundingClientRect();
+    return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 4)).join();
+  };
+  return new Promise((resolve) => {
+    const start = performance.now();
+    let last = box();
+    let changedAt = null;
+    let frames = 0;
+    setTimeout(() => frames >= 2 && resolve(false), limitMs);
+    setTimeout(() => resolve(false), maxMs);
+    const next = () =>
+      requestAnimationFrame(() => {
+        const now = performance.now();
+        const current = box();
+        if (changedAt === null || current !== last) changedAt = now;
+        last = current;
+        frames += 1;
+        if (frames >= 2 && now - changedAt >= quietMs) resolve(true);
+        else if ((frames >= 2 && now - start >= limitMs) || now - start >= maxMs) resolve(false);
+        else next();
+      });
+    next();
   });
 }`;
 

@@ -1,5 +1,39 @@
 # @opengeni/observability
 
+## 5.4.2
+
+### Patch Changes
+
+- 51915c3: Organization Codex accounts show their usage again on the Models page and the account page. Since API request tracing wraps the global `fetch`, every organization Codex live usage check refused to run, and each account row said "Usage unavailable" even though the account had a saved reading. Usage reads now accept the native `fetch` behind request tracing (`tracedFetchTarget` in `@opengeni/observability` unwraps it), and they still refuse a custom transport that cannot be awaited after an abort. When a live check does fail, the list row now shows the last saved reading, as the account page does, and says "Usage unavailable" only for an account that has never been read.
+- 7a02989: Hand off retained commands with unavailable foreground observations before exposing their background command IDs, so finished turns can clean up without waiting for an unavailable observer. Preserve physical writer and capture fences, classify forgotten Modal exec state as uncertainty, and retain bounded probe diagnostics. Identify outstanding writer kinds during finalization and label deliberate worker containment even when Temporal masks its force-stop exception.
+- Updated dependencies [931325b]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [a8b429e]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [30b9cd2]
+  - @opengeni/contracts@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

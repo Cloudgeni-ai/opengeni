@@ -15475,6 +15475,7 @@
         "$.metadata{}|3[]": "ref(__schema0)",
         "$.metadata{}|4": "object",
         "$.metadata{}|4{}": "ref(__schema0)",
+        "$.ownerName": "string?",
         "$.purpose": "ref(RecordingCapturePurpose)?",
         "$.recordingId": "string!",
         "$.startedAt": "string?",
@@ -38142,7 +38143,8 @@
       "UseVoiceInputResult": "type",
       "versionSummary": "value",
       "VoiceInputRecordingsClient": "type",
-      "VoiceInputStatus": "type"
+      "VoiceInputStatus": "type",
+      "withoutLiveMicrophoneEchoes": "value"
     },
     "@opengeni/react/responsive.css": {
       "default": "value"
