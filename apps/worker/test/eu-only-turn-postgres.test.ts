@@ -124,9 +124,11 @@ test("EU-only turned on after the claim stops the turn once with region_restrict
       const inputs = await loadInputs(db, input);
       claimReads.push(inputs.euOnly);
       if (claimReads.length === 1) {
-        await shared.admin`insert into organization_inference_residency (account_id, eu_only, version)
-          values (${ctx.accountId}, true, 1)
-          on conflict (account_id) do update set eu_only = true, version = organization_inference_residency.version + 1`;
+        await shared.admin`insert into organization_inference_residency
+            (account_id, eu_only, version, updated_by_subject_id)
+          values (${ctx.accountId}, true, 1, ${ctx.subjectId})
+          on conflict (account_id) do update
+            set eu_only = true, version = organization_inference_residency.version + 1`;
       }
       return inputs;
     },
