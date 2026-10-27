@@ -36,7 +36,7 @@ function lsRefs(...tags: string[]) {
   return `${tags.map((tag) => pkt(`${"a".repeat(40)} refs/tags/${tag}\n`)).join("")}0000`;
 }
 
-type Answer = string[] | number | Error;
+type Answer = string[] | number | Error | { raw: string };
 
 /** GitHub's Git endpoint and REST API, each answering from its own queue. */
 function fakeGitHub(git: Answer[], api: Answer[] = []) {
@@ -49,6 +49,7 @@ function fakeGitHub(git: Answer[], api: Answer[] = []) {
     const answer = (fromGit ? git : api).shift() ?? 500;
     if (answer instanceof Error) throw answer;
     if (typeof answer === "number") return new Response("no", { status: answer });
+    if ("raw" in answer) return new Response(answer.raw);
     return fromGit
       ? new Response(lsRefs(...answer))
       : Response.json(answer.map((tag) => ({ ref: `refs/tags/${tag}` })));
@@ -119,6 +120,22 @@ describe("desktop release files", () => {
     );
     expect(() => refsFromLsRefs("<html>rate limited</html>")).toThrow("Malformed");
     expect(() => refsFromLsRefs("00ffshort")).toThrow("Truncated");
+    expect(() => refsFromLsRefs(pkt("ERR\n"))).toThrow("Git ls-refs failed");
+    // A complete answer ends with a flush packet; a cut-off list is refused.
+    expect(() => refsFromLsRefs("")).toThrow("Truncated");
+    expect(() => refsFromLsRefs(pkt(`${"a".repeat(40)} refs/tags/desktop-v0.1.9\n`))).toThrow(
+      "Truncated",
+    );
+  });
+
+  test("packet lengths count bytes, not characters", () => {
+    const line = `${"a".repeat(40)} refs/tags/desktop-v0.1.0-é\n`;
+    const bytes = new TextEncoder().encode(line).length + 4;
+    const body = `${bytes.toString(16).padStart(4, "0")}${line}${lsRefs("desktop-v0.1.1")}`;
+    expect(refsFromLsRefs(body)).toEqual([
+      "refs/tags/desktop-v0.1.0-é",
+      "refs/tags/desktop-v0.1.1",
+    ]);
   });
 
   test("only GitHub release pages name a repository", () => {
@@ -225,6 +242,18 @@ describe("desktop version resolver", () => {
     });
     expect(await resolve()).toBe("0.1.31");
     expect(github.calls).toEqual([GIT_URL]);
+  });
+
+  test("an unreadable Git answer falls back to the REST API", async () => {
+    for (const raw of ["<html>Too many requests</html>", ""]) {
+      const github = fakeGitHub([{ raw }], [["desktop-v0.1.31"]]);
+      const resolve = createDesktopVersionResolver({
+        releasesBase: RELEASES,
+        fetchImpl: github.fetchImpl,
+      });
+      expect(await resolve()).toBe("0.1.31");
+      expect(github.calls).toEqual([GIT_URL, API_URL]);
+    }
   });
 
   test("a release host other than GitHub needs a pin", async () => {

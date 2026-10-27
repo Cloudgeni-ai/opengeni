@@ -79,26 +79,36 @@ const LS_REFS_REQUEST = `${pktLine("command=ls-refs\n")}0001${pktLine(
   `ref-prefix refs/tags/${TAG_PREFIX}\n`,
 )}0000`;
 
-/** The ref names in a Git protocol v2 ls-refs response. */
-export function refsFromLsRefs(body: string): string[] {
+/**
+ * The ref names in a Git protocol v2 ls-refs response. Packet lengths count
+ * bytes, and a complete answer ends with a flush packet (0000); anything else
+ * throws so the caller falls back instead of serving a partial tag list.
+ */
+export function refsFromLsRefs(response: Uint8Array | string): string[] {
+  const body = typeof response === "string" ? new TextEncoder().encode(response) : response;
+  const ascii = new TextDecoder("latin1");
+  const utf8 = new TextDecoder();
   const refs: string[] = [];
   let offset = 0;
   while (offset < body.length) {
-    const header = body.slice(offset, offset + 4);
+    const header = ascii.decode(body.subarray(offset, offset + 4));
     if (!/^[0-9a-f]{4}$/iu.test(header)) throw new Error("Malformed Git ls-refs response");
     const length = Number.parseInt(header, 16);
+    if (length === 0) return refs;
     if (length < 4) {
       offset += 4;
       continue;
     }
     if (offset + length > body.length) throw new Error("Truncated Git ls-refs response");
-    const line = body.slice(offset + 4, offset + length).trimEnd();
+    const line = utf8.decode(body.subarray(offset + 4, offset + length)).trimEnd();
     offset += length;
-    if (line.startsWith("ERR ")) throw new Error(`Git ls-refs failed: ${line.slice(4)}`);
+    if (line === "ERR" || line.startsWith("ERR ")) {
+      throw new Error(`Git ls-refs failed: ${line.slice(4)}`);
+    }
     const ref = line.split(" ")[1];
     if (ref) refs.push(ref);
   }
-  return refs;
+  throw new Error("Truncated Git ls-refs response");
 }
 
 export interface DesktopVersionResolverOptions {
@@ -137,7 +147,7 @@ export function createDesktopVersionResolver(
   let nextLookupAt = 0;
   let inFlight: Promise<void> | null = null;
 
-  async function tagRefsFromGit(): Promise<string[]> {
+  async function tagRefsFromGit(deadline: AbortSignal): Promise<string[]> {
     const response = await fetchImpl(`https://github.com/${repository}.git/git-upload-pack`, {
       method: "POST",
       headers: {
@@ -147,18 +157,19 @@ export function createDesktopVersionResolver(
         "user-agent": "git/opengeni-api",
       },
       body: LS_REFS_REQUEST,
-      signal: AbortSignal.timeout(5_000),
+      // Leave part of the lookup's time for the REST fallback.
+      signal: AbortSignal.any([deadline, AbortSignal.timeout(3_000)]),
     });
     if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
-    return refsFromLsRefs(await response.text());
+    return refsFromLsRefs(new Uint8Array(await response.arrayBuffer()));
   }
 
-  async function tagRefsFromApi(): Promise<string[]> {
+  async function tagRefsFromApi(deadline: AbortSignal): Promise<string[]> {
     const response = await fetchImpl(
       `https://api.github.com/repos/${repository}/git/matching-refs/tags/${TAG_PREFIX}`,
       {
         headers: { accept: "application/vnd.github+json", "user-agent": "opengeni-api" },
-        signal: AbortSignal.timeout(5_000),
+        signal: deadline,
       },
     );
     if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
@@ -167,11 +178,13 @@ export function createDesktopVersionResolver(
   }
 
   async function newestTaggedVersion(): Promise<string | null> {
+    // One budget for both sources, so a cold request waits at most 5 seconds.
+    const deadline = AbortSignal.timeout(5_000);
     let refs: string[];
     try {
-      refs = await tagRefsFromGit();
+      refs = await tagRefsFromGit(deadline);
     } catch {
-      refs = await tagRefsFromApi();
+      refs = await tagRefsFromApi(deadline);
     }
     return newestDesktopVersion(
       refs.flatMap((ref) => (ref.startsWith("refs/tags/") ? [ref.slice("refs/tags/".length)] : [])),
