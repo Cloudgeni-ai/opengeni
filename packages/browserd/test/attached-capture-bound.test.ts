@@ -162,13 +162,34 @@ test("a slow capture of the tab in front of its window is not cut short", async 
   expect(elapsed).toBeGreaterThanOrEqual(SLOW_CAPTURE_MS - 50);
 }, 20_000);
 
-test("a capture of a tab behind another one stops plainly after 3 s", async () => {
-  const { outcome, elapsed } = await capture({ inFront: false, captureMs: () => SLOW_CAPTURE_MS });
+test("a capture of a tab behind another one that Chrome leaves unanswered is asked again", async () => {
+  // Chrome can hold the first capture of such a tab for a redraw it never
+  // shows, and answer the next request at once.
+  const { outcome, elapsed, captures, capturesLater } = await capture({
+    inFront: false,
+    captureMs: (number) => (number === 1 ? 60_000 : 30),
+  });
+  expect(outcome).toMatchObject({ targetId: "7", width: 1, height: 1 });
+  expect(elapsed).toBeGreaterThanOrEqual(1_000);
+  expect(elapsed).toBeLessThan(2_000);
+  expect(captures).toBe(2);
+  expect(capturesLater).toBe(captures);
+}, 20_000);
+
+test("a capture of a tab behind another one stops plainly after 5 s", async () => {
+  const { outcome, elapsed, captures, capturesLater } = await capture({
+    inFront: false,
+    captureMs: () => 6_000,
+  });
   expect(outcome).toMatchObject({ code: "timeout", retryable: true });
-  expect((outcome as Error).message).toStartWith(
-    "browser screenshot stalled: Chrome did not draw this tab within 3 s",
+  expect((outcome as Error).message).toBe(
+    "browser screenshot stalled: Chrome did not draw this tab within 5 s, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.",
   );
-  expect(elapsed).toBeLessThan(SLOW_CAPTURE_MS);
+  expect(elapsed).toBeGreaterThanOrEqual(4_950);
+  expect(elapsed).toBeLessThan(5_500);
+  // Asked once a second while none answered, and not after giving up.
+  expect(captures).toBe(5);
+  expect(capturesLater).toBe(captures);
 }, 20_000);
 
 test("a capture of a shown tab Chrome never draws ends at the capture deadline", async () => {
@@ -193,11 +214,11 @@ test("refused captures are not asked again once the capture has given up", async
   // stall bound, and every later one at once.
   const { outcome, elapsed, captures, capturesLater } = await capture({
     inFront: false,
-    captureMs: (number) => (number === 1 ? 2_900 : 0),
+    captureMs: (number) => (number === 1 ? 4_900 : 0),
     refuses: () => true,
   });
   expect(outcome).toMatchObject({ retryable: true });
-  expect(elapsed).toBeLessThan(3_300);
+  expect(elapsed).toBeLessThan(5_300);
   expect(capturesLater).toBe(captures);
 }, 20_000);
 
@@ -233,7 +254,7 @@ test("a capture Chrome keeps refusing fails with a plain reason at the deadline"
     code: "resource_unavailable",
     retryable: true,
     message:
-      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe",
+      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe.",
   });
   expect(elapsed).toBeGreaterThan(9_500);
   expect(elapsed).toBeLessThan(10_500);

@@ -211,9 +211,10 @@ async function withConnectedChrome(
 }
 
 // A person's own Chrome runs without the managed launch switch. Its captures of
-// a tab behind another one either work or stop at once with a plain reason.
+// a tab behind another one work; one that rarely still stalls stops with a
+// plain reason, and the capture asked for again works.
 e2e(
-  "a connected Chrome capture of a background tab completes or stops plainly",
+  "a connected Chrome capture of a background tab completes",
   async () => {
     await withConnectedChrome(async ({ driver, origin, methods, show }) => {
       show((await driver.start(`${origin}/front`)).target.id);
@@ -221,27 +222,37 @@ e2e(
       const captured = methods.length;
       const outcomes: string[] = [];
       for (let round = 0; round < 8; round += 1) {
-        const started = performance.now();
-        let outcome = "ok";
-        try {
-          await driver.captureScreenshot(background.target.id);
-        } catch (error) {
-          expect((error as Error).message).toStartWith(
-            "browser screenshot stalled: Chrome did not draw this tab within 3 s",
-          );
-          expect(error).toMatchObject({ code: "timeout", retryable: true });
-          outcome = "stalled";
+        for (const attempt of ["first", "again"]) {
+          const started = performance.now();
+          let outcome = "ok";
+          try {
+            const frame = await driver.captureScreenshot(background.target.id);
+            expect(frame.targetId).toBe(background.target.id);
+          } catch (error) {
+            expect((error as Error).message).toStartWith(
+              "browser screenshot stalled: Chrome did not draw this tab within 5 s",
+            );
+            expect(error).toMatchObject({ code: "timeout", retryable: true });
+            outcome = "stalled";
+          }
+          const elapsed = Math.round(performance.now() - started);
+          outcomes.push(`${attempt}:${outcome}:${elapsed}`);
+          // Before, a stalled capture waited out the 10 s capture deadline.
+          expect(elapsed).toBeLessThan(6_000);
+          if (outcome === "ok") break;
+          // A capture asked for again after a stall works.
+          expect(attempt).toBe("first");
         }
-        const elapsed = Math.round(performance.now() - started);
-        outcomes.push(`${outcome}:${elapsed}`);
-        // Before, a stalled capture waited out the 10 s capture deadline.
-        expect(elapsed).toBeLessThan(5_000);
+        // Let the tab go undrawn again before the next round.
+        await Bun.sleep(1_500);
       }
       console.log(`connected Chrome background captures: ${outcomes.join(" ")}`);
+      // Stalls are rare: before, one capture of each round could stall.
+      expect(outcomes.filter((outcome) => outcome.includes(":stalled:")).length).toBeLessThan(2);
       expect(methods.slice(captured).filter((method) => FOREGROUNDING.has(method))).toEqual([]);
     });
   },
-  120_000,
+  180_000,
 );
 
 e2e(

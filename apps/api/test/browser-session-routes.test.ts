@@ -1269,9 +1269,9 @@ describe("BrowserSession route discipline", () => {
       managedAuth: null,
     });
     const undrawn =
-      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe";
+      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe.";
     const stalled =
-      "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
+      "browser screenshot stalled: Chrome did not draw this tab within 5 s, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
     const cases = [
       [503, "resource_unavailable", undrawn],
       [504, "timeout", stalled],

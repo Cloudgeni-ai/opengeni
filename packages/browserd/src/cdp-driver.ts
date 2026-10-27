@@ -207,23 +207,26 @@ const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 /** A person's own Chrome cannot take the managed launch switch that copies a
  * fresh surface, so a capture of a tab another tab covers in its window waits
- * for a redraw Chrome never shows. Viewport captures of a tab the connection
- * reports as not in front give up after this long with a plain reason instead
- * of the whole capture deadline; a capture of a tab shown, or not known to be
+ * for a redraw Chrome may never show, while Chrome answers the next capture
+ * request at once. Viewport captures of a tab the connection reports as not
+ * in front ask again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS while none
+ * has answered, and give up after this long with a plain reason instead of
+ * the whole capture deadline; a capture of a tab shown, or not known to be
  * hidden, has the whole capture deadline. */
-const CONNECTED_CHROME_CAPTURE_STALL_MS = 3_000;
+const CONNECTED_CHROME_CAPTURE_STALL_MS = 5_000;
+const CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS = 1_000;
 /** Longest a capture waits to learn whether its tab is shown; past it the tab
  * counts as shown. */
 const TAB_SHOWN_TIMEOUT_MS = 1_000;
 const CONNECTED_CHROME_CAPTURE_STALLED =
-  "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
+  "browser screenshot stalled: Chrome did not draw this tab within 5 s, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
 /** Chromium's own reply when it has no drawn surface to capture. */
 const CAPTURE_REFUSED_BY_CHROMIUM = "Unable to capture screenshot";
 /** Longest pause between captures Chromium refuses; pauses start at 25 ms
  * and double up to this until the attempt's bound. */
 const CAPTURE_REFUSAL_MAX_PAUSE_MS = 200;
 const CAPTURE_REFUSED =
-  "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe";
+  "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe.";
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -2119,12 +2122,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                       Date.now() + (bounded ? CONNECTED_CHROME_CAPTURE_STALL_MS : timeoutMs);
                     for (let refused = 0; ; refused += 1) {
                       try {
-                        return await this.sendTarget<{ data?: unknown }>(
-                          state,
-                          "Page.captureScreenshot",
-                          capture,
-                          { timeoutMs: Math.max(1, until - Date.now()) },
-                        );
+                        return stallable
+                          ? await this.captureAskingAgain(state, capture, until)
+                          : await this.sendTarget<{ data?: unknown }>(
+                              state,
+                              "Page.captureScreenshot",
+                              capture,
+                              { timeoutMs: Math.max(1, until - Date.now()) },
+                            );
                       } catch (error) {
                         if (bounded && error instanceof CdpCommandTimeoutError) {
                           throw new InteractionControllerError(
@@ -5698,6 +5703,42 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch {
       return false;
     }
+  }
+
+  /** One capture of a tab behind another in its window. Chrome can leave such
+   * a request unanswered while it answers the next one at once, so it is
+   * asked again every CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS while none has
+   * answered. The first answer, image or error, is the result; every request
+   * ends by `until`, and none is sent after the result. */
+  private async captureAskingAgain(
+    state: TargetState,
+    capture: Readonly<Record<string, unknown>>,
+    until: number,
+  ): Promise<{ data?: unknown }> {
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let again: ReturnType<typeof setTimeout> | undefined;
+      const settle = (finish: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(again);
+        finish();
+      };
+      const ask = () => {
+        this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+          timeoutMs: Math.max(1, until - Date.now()),
+        }).then(
+          (reply) => settle(() => resolve(reply)),
+          (error: unknown) => settle(() => reject(error)),
+        );
+        if (Date.now() + CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS < until) {
+          again = setTimeout(() => {
+            if (!settled) ask();
+          }, CONNECTED_CHROME_CAPTURE_ASK_AGAIN_MS);
+        }
+      };
+      ask();
+    });
   }
 
   private async screenshotRead<T>(
