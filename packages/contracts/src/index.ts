@@ -58,6 +58,8 @@ export * from "./skills";
 export * from "./agent-config";
 export * from "./first-party-tool-authorization";
 export * from "./model-availability";
+export * from "./model-residency";
+import { ClientModelResidencyV1 } from "./model-residency";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -22446,6 +22448,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     /** Transient health/readiness hint; membership in config models determines admission. */
     availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: primitives.string.regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+    residency: ClientModelResidencyV1.optional(),
   }),
 );
 export type ClientModel = z.infer<typeof ClientModel>;
