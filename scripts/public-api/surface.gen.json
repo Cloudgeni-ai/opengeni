@@ -14472,6 +14472,7 @@
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
         "$.offScreen": "const?=[\"true\"]",
+        "$.personInputSecondsAgo": "integer?",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"
@@ -37694,6 +37695,21 @@
       "useDesktopStream": "value",
       "UseDesktopStreamOptions": "type",
       "UseDesktopStreamResult": "type"
+    },
+    "@opengeni/react/desktop-dictation": {
+      "acceleratorFromKey": "value",
+      "DesktopDictationClient": "type",
+      "DesktopDictationHost": "value",
+      "DesktopDictationHostProps": "type",
+      "DesktopDictationSettings": "value",
+      "DesktopDictationSettingsProps": "type",
+      "desktopShortcutLabel": "value",
+      "dictationErrorMessage": "value",
+      "modifierName": "value",
+      "profileName": "value",
+      "sameDesktopShortcut": "value",
+      "useDesktopDictation": "value",
+      "UseDesktopDictationResult": "type"
     },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",

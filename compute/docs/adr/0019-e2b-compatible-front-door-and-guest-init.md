@@ -147,20 +147,43 @@ an init system of its own.
 - **Images that follow releases.** The service can be told the OCI image,
   pinned by digest, that a release's sandboxes of an image name start
   from (`--image-source name=<ref@sha256:…>`). When no stored image was
-  recorded as built from it, a replica asks a live host to build one
+  recorded as built from it with the fleet's guest programs, a replica
+  asks a live host with those programs to build one
   (`prepare`): the host answers at once, builds in the background, one
   image at a time, and answers the image's id to every later ask, so no
   call stays open through a build of minutes. The replica records it,
-  keyed by the OCI image; builds differ byte for byte, so the first
-  recorded is the one every replica, and every later rollout of the same
-  release, uses. New creates of the name then start from it. Until then
-  they start from the image recorded under the name last (the release
-  before's), or the one `--stored-image` names. Each name that uses a
-  source is recorded with it, also when two names share one, so each
-  keeps its own image to start from while its next is built. A rollback
-  finds its release's image recorded already. Existing sandboxes keep the image they
-  were created from; their agent follows agent releases on its own
+  keyed by the OCI image and the digest of the guest programs it was
+  built with (`<ref> guest-sha256:<hex>`, as a host's base image is
+  named); builds differ byte for byte, so the first recorded is the one
+  every replica, and every later rollout of the same release, uses. New
+  creates of the name then start from it. Until then they start from the
+  first image built from the OCI image with any programs (a rollback's),
+  or else the image recorded under the name last (the release before's),
+  or the one `--stored-image` names. Each name that uses a source is
+  recorded with it, also when two names share one, so each keeps its own
+  image to start from while its next is built. A rollback finds its
+  release's image recorded already. Existing sandboxes keep the image
+  they were created from; their agent follows agent releases on its own
   (ADR 21).
+- **Images follow the hosts' guest programs too.** `compute-guest`, envd
+  and bash come from the host bundle that builds the image, so a bundle
+  with other guest programs would otherwise reach new sandboxes only once
+  an app release changed its OCI image. Each host tells, with what it can
+  take on on every renewal (an agent upgraded in place keeps its
+  registration), the SHA-256 of its bundle's guest files, and each build
+  is answered with the digest it was built with. A replica keeps
+  following for as long as it runs: the programs most live hosts say
+  (the lowest digest for a tie) are the fleet's, and once they change it
+  has the release's images built again with them, on a host that has
+  them. Only such an upgrade rebuilds: bundles with the same guest
+  programs share their images. Asks for different OCI images start at
+  different hosts (by a hash of the reference), so a release's images,
+  or all of them again after an upgrade, build on several hosts at once.
+  A host of an earlier release tells no digest; with no live host that
+  tells one, images are recorded and looked up by the OCI image alone,
+  as before. The first build of an OCI image is also recorded under the
+  OCI image alone, which replicas of earlier releases read, so the
+  service rolls forward and back across this without a schema change.
 - **What every image gets, for the SDK to work.** The SDK runs commands
   as `/bin/bash -l -c` and starts PTYs with bash, and envd looks users up
   in the image's account files. So the build adds a static bash at

@@ -93,15 +93,5 @@ export const LEGACY_CLAUDE_RUNTIME: LegacySubscriptionRetirement = {
       reason:
         "Declarative deployed-schema RLS and privilege inventory, not provider decision queries.",
     },
-    "packages/db/src/claude-subscription-pool-migration.ts": {
-      declarations: ["LegacyCredential", "migrateClaudeSubscriptionPoolCredentials"],
-      reason:
-        "0598 codec stage: moves legacy Claude model connections into the pool and blanks them; runs only inside its migration.",
-    },
-    "packages/db/src/claude-subscription-core-cutover.ts": {
-      declarations: ["migrateClaudeSubscriptionCoreCredentials", "moveClaudeCredentials"],
-      reason:
-        "0720 codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
-    },
   },
 };

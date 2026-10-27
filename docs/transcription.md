@@ -294,7 +294,7 @@ available independently when a provider is ready.
 | Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
-| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
+| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/src/transcription-recordings.ts` |
 | Deprecated API routes and the ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
 | Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |

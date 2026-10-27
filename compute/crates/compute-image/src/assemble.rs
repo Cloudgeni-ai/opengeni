@@ -3,11 +3,13 @@
 
 use std::fs;
 use std::io::{self, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use compute_guest::config::{self, ImageConfig};
 use compute_guest::users;
+use sha2::{Digest as _, Sha256};
 
 use crate::registry::RunConfig;
 use crate::rootpath::{self, clean, resolve, resolve_all};
@@ -16,6 +18,62 @@ use crate::rootpath::{self, clean, resolve, resolve_all};
 pub const GUEST_INIT: &str = "compute-guest";
 pub const GUEST_ENVD: &str = "envd";
 pub const GUEST_BASH: &str = "bash";
+
+/// The digest of the guest programs in the directory `guest`, as
+/// `sha256:<hex>`, which tells images built with them from images built
+/// with others. It is the digest `deploy/host/install.sh` names a host's
+/// base image by: the SHA-256 of what `sha256sum` writes for every
+/// regular file under `guest` (symlinks and directories are not hashed,
+/// nor followed), named `./<path>` and in the byte order of those names.
+///
+/// # Errors
+///
+/// When the directory cannot be read, or a file's name has a backslash or
+/// a line break, which `sha256sum` would write escaped.
+pub fn guest_digest(guest: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    regular_files(guest, Path::new("."), &mut files)
+        .with_context(|| format!("reading the guest programs in {}", guest.display()))?;
+    files.sort_by(|a, b| a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes()));
+    let mut lines = Sha256::new();
+    for file in files {
+        let name = file.as_os_str().as_bytes();
+        anyhow::ensure!(
+            !name
+                .iter()
+                .any(|byte| matches!(byte, b'\\' | b'\n' | b'\r')),
+            "the guest program {} has a backslash or a line break in its name",
+            file.display()
+        );
+        let mut content = Sha256::new();
+        let path = guest.join(&file);
+        io::copy(
+            &mut fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?,
+            &mut content,
+        )
+        .with_context(|| format!("reading {}", path.display()))?;
+        lines.update(format!("{:x}  ", content.finalize()));
+        lines.update(name);
+        lines.update(b"\n");
+    }
+    Ok(format!("sha256:{:x}", lines.finalize()))
+}
+
+/// Adds every regular file under `dir`, the directory `name` names from
+/// where the walk started, to `files`, by its name from there.
+fn regular_files(dir: &Path, name: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let named = name.join(entry.file_name());
+        if kind.is_dir() {
+            regular_files(&entry.path(), &named, files)?;
+        } else if kind.is_file() {
+            files.push(named);
+        }
+    }
+    Ok(())
+}
 
 /// E2B's default user, added when an image has no account of that name.
 const USER_LINE: &str = "user:x:1000:1000::/home/user:/bin/bash";
@@ -284,6 +342,21 @@ mod tests {
             fs::write(dir.path().join(name), name).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn the_guest_digest_changes_with_a_program_and_only_then() {
+        let guest = guest();
+        let first = guest_digest(guest.path()).unwrap();
+        symlink(GUEST_ENVD, guest.path().join("alias")).unwrap();
+        fs::create_dir(guest.path().join("empty")).unwrap();
+        assert_eq!(
+            guest_digest(guest.path()).unwrap(),
+            first,
+            "symlinks and directories are not programs"
+        );
+        fs::write(guest.path().join(GUEST_ENVD), "another envd").unwrap();
+        assert_ne!(guest_digest(guest.path()).unwrap(), first);
     }
 
     #[test]
