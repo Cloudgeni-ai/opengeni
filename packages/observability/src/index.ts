@@ -71,7 +71,7 @@ export {
   type SpanKind,
   type TraceContext,
 } from "./trace-context";
-export { traceClientCalls, traceFetch } from "./client-spans";
+export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
 export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,
@@ -545,6 +545,7 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "browser.download.save",
   "browser.recording.save",
   "browser.attach",
+  "browser.hold",
   "computer.create",
   "computer.end",
   "computer.read",

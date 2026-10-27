@@ -32,6 +32,8 @@ export const eventSources = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     kind: text("kind").notNull(),
     adapter: text("adapter"),
+    // Migration 0987: how a custom webhook reads its app's deliveries.
+    webhookFormat: jsonb("webhook_format"),
     name: text("name").notNull(),
     ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("private"),

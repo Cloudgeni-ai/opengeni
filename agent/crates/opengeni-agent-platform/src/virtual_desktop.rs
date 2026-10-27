@@ -16,6 +16,10 @@
 
 use crate::error::{PlatformError, PlatformResult};
 
+/// Set beside `DISPLAY` when the agent runs its own virtual desktop, so the
+/// agent and the helpers it starts use that display alone.
+pub const VIRTUAL_DISPLAY_ENV: &str = "OPENGENI_VIRTUAL_DISPLAY";
+
 /// A spawned Xvfb virtual framebuffer. Holds the child process; dropping it kills
 /// the server. The chosen `$DISPLAY` is published into the process environment so
 /// the X11 desktop backend connects to it.
@@ -80,6 +84,9 @@ impl VirtualXvfb {
         // Only publish DISPLAY once the server is confirmed ready, so the X11 backend
         // and any child processes (terminal, GUI apps) never point at a dead display.
         std::env::set_var("DISPLAY", display);
+        // Marks DISPLAY as this agent's own, so neither the agent nor its
+        // helpers fall back to a person's screen if the server goes away.
+        std::env::set_var(VIRTUAL_DISPLAY_ENV, display);
 
         Ok(Self {
             display: display.to_string(),

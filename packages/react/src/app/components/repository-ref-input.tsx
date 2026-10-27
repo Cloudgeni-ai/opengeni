@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { Input } from "../../ui/input";
 import { cn } from "../lib/utils";
 import type { GitHubRepositoryBranch } from "../types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function RepositoryRefInput(props: {
   value: string;
@@ -35,7 +36,7 @@ export function RepositoryRefInput(props: {
       setBranches(await props.loadBranches());
       setLoaded(true);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(errorMessage(caught));
     } finally {
       setLoading(false);
     }

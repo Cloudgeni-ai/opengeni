@@ -87,6 +87,7 @@ const mcpSource: EventSource = {
   workspaceId: WORKSPACE_ID,
   kind: "mcp",
   adapter: null,
+  format: null,
   name: "Orders",
   ownerSubjectId: "viewer",
   visibility: "private",

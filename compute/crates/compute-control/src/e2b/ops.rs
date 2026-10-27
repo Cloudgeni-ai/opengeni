@@ -153,10 +153,13 @@ pub async fn create<S: Store>(
         image: template.image.clone(),
         // E2B's running sandbox sleeps and checkpoints like any other
         // fleet sandbox whose create says nothing.
-        config: SandboxConfig::new(
-            template.vcpus,
-            template.memory_mib,
-            front.service.settings().sleep,
+        config: template.disk.into_iter().fold(
+            SandboxConfig::new(
+                template.vcpus,
+                template.memory_mib,
+                front.service.settings().sleep,
+            ),
+            SandboxConfig::with_disk_mib,
         ),
         agent: None,
     };

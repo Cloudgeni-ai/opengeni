@@ -81,3 +81,28 @@ test("missing historical failure class cannot use an unrelated red base as clear
     }),
   ).toBeNull();
 });
+test("a Batch-attested base inherits green source and unit classes from its identical-tree Batch", () => {
+  const attested = (stepConclusion = "success") => [
+    {
+      ...job(1, "Batch CI attestation"),
+      steps: [
+        { name: "Reuse identical-tree Batch CI", status: "completed", conclusion: stepConclusion },
+      ],
+    },
+    job(2, "Source and type contracts", "skipped"),
+    job(3, "Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})", "skipped"),
+    job(4, "Workload image builds", "failure"),
+  ];
+  const unitRun = { failedClasses: ["units"] } as Run;
+  expect(baseJobClasses(attested(), 12)).toEqual({ source: "green", units: "green" });
+  expect(failedBaseHold(unitRun, sha, evidence(baseJobClasses(attested(), 12)))).toBeNull();
+  // Before the fan-out exists the lanes are absent; the attestation alone decides.
+  expect(baseJobClasses(attested().slice(0, 1), 12)).toEqual({ source: "green", units: "green" });
+  // An unverified attestation or any lane that actually ran is ordinary evidence.
+  expect(baseJobClasses(attested("skipped"), 12)).toEqual({ source: "unknown", units: "unknown" });
+  const ran = attested();
+  ran[1] = job(2, "Source and type contracts", "failure");
+  expect(baseJobClasses(ran, 12).source).toBe("red");
+  // Row identity validation still runs first.
+  expect(baseJobClasses(attested(), 99)).toEqual({ source: "unknown", units: "unknown" });
+});

@@ -32,6 +32,7 @@ import {
   secretValueAtDispatch,
 } from "@opengeni/contracts";
 import { ApiHttpError } from "./http/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type AttemptSecretPrincipal = Extract<SecretPrincipal, { kind: "attempt" }>;
 
@@ -49,11 +50,13 @@ export interface InteractionPasskeyStore {
     principal: AttemptSecretPrincipal,
     input: { credential: BrowserPasskeyCredentialMaterial; origin: string | null },
   ): Promise<{ itemId: string }>;
-  /** Monotonic write-back (`greatest(existing, new)`). */
+  /** Monotonic write-back (`greatest(existing, new)`). `credentialId` names
+   * the passkey when the item is a connected login that may hold several. */
   updateSignCount(
     principal: AttemptSecretPrincipal,
     itemId: string,
     signCount: number,
+    credentialId?: string,
   ): Promise<void>;
   release(holder: string): Promise<void>;
 }
@@ -387,7 +390,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
         } else {
           const itemId = event.itemId ?? itemByCredential.get(event.credentialId) ?? null;
           if (itemId !== null) {
-            await store.updateSignCount(principal, itemId, event.signCount);
+            await store.updateSignCount(principal, itemId, event.signCount, event.credentialId);
             asserted += 1;
           } else {
             input.log?.("browser.passkey.assertion_unmatched", { rpId: event.rpId });
@@ -397,7 +400,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       } catch (error) {
         input.log?.("browser.passkey.event_failed", {
           type: event.type,
-          message: error instanceof Error ? error.message : String(error),
+          message: errorMessage(error),
         });
       }
     }
@@ -410,7 +413,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     return { saved, asserted };
   } catch (error) {
     input.log?.("browser.passkey.sync_failed", {
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
     });
     return null;
   }

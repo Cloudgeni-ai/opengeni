@@ -19,6 +19,7 @@ import {
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { ScreenshotValidationError, validateRetainableSessionImage } from "./retained-screenshots";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 const GENERATED_IMAGE_MARKER = "generated_image";
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
@@ -382,7 +383,7 @@ export async function retainGeneratedImage(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
     throw error;
   }
@@ -598,29 +599,6 @@ function compactGeneratedImageRunStateItems(
   return serializedReceipt ? serialized : compacted;
 }
 
-export function collectGeneratedImageRunStateArtifactReceipts(
-  serialized: string,
-  target: Map<string, GeneratedImageReceipt> = new Map(),
-): Map<string, GeneratedImageReceipt> {
-  try {
-    const value: unknown = JSON.parse(serialized);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return target;
-    visitRunStateProtocolItems(value as Record<string, unknown>, (items) => {
-      collectGeneratedImageArtifactReceipts(items, target);
-    });
-    visitRunStateItemWrappers(value as Record<string, unknown>, (wrappers) => {
-      for (const wrapper of wrappers) {
-        if (isRecord(wrapper) && isRecord(wrapper.rawItem)) {
-          collectGeneratedImageArtifactReceipts([wrapper.rawItem], target);
-        }
-      }
-    });
-  } catch {
-    // A provider-owned or legacy state format is opaque to this collector.
-  }
-  return target;
-}
-
 export function generatedImageReceiptFromUnknown(value: unknown): GeneratedImageReceipt | null {
   if (typeof value === "string" && value.length <= 4_096) {
     try {
@@ -734,10 +712,6 @@ function parseRunState(serialized: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export function retainedGeneratedImageFromArtifact(

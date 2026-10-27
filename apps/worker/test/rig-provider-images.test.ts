@@ -17,7 +17,7 @@ import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
-} from "../src/activities/sandbox-images";
+} from "@opengeni/core";
 import {
   rigPlatformChecksForSettings,
   rigProviderImageContentMarkerCommand,

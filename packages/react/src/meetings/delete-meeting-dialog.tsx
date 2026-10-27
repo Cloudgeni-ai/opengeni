@@ -1,11 +1,12 @@
+import type { ComponentProps } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import { toast } from "sonner";
 import type { Recording } from "@opengeni/contracts";
 
 import { ConfirmDialog } from "../ui/confirm-dialog";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
-/** "Delete 'Weekly sync'?": removes the audio, every transcript and the speaker names. */
-export function DeleteMeetingDialog({
+function DeleteMeetingDialogContent({
   recording,
   onClose,
   onDelete,
@@ -45,5 +46,14 @@ export function DeleteMeetingDialog({
         onDeleted();
       }}
     />
+  );
+}
+
+/** "Delete 'Weekly sync'?": removes the audio, every transcript and the speaker names. */
+export function DeleteMeetingDialog(props: ComponentProps<typeof DeleteMeetingDialogContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <DeleteMeetingDialogContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

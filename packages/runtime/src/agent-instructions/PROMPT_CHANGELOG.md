@@ -1,5 +1,90 @@
 # Modular prompt changelog
 
+Settings that block a tool are changed in the chat. When the app-action tools
+may exist (capability `workspaceAdmin` on and neither `admin_actions_search`
+nor `admin_action_call` proven absent), the Autonomy and persistence rule for
+user-fixable blockers adds "setting" to its examples and a middle step: make
+the change with those tools when an app action makes it, which the user
+confirms in the chat unless the session has full access. Before, the prompt
+never mentioned app actions, so an agent whose Site could not send email
+because the integration's tool was set to Ask told the person which settings
+page to open (staging session 12f7f50d, 2026-10-26 09:05 UTC). It reached the
+same app action only after the person asked for something in the chat. The
+`admin_actions_search` description now names integration tool approvals among
+the settings it reaches, and the `sites` Skill says a tool set to Ask can't run
+from a Site's own tool calls, so the agent offers to set it to Allow in the
+chat. The tool approval confirmation names the tools and the approval, for
+example "Let send_message run without asking in this workspace?". The legacy
+prompt is unchanged.
+
+When the agent mentions another session to the user in chat, it now links it
+as `[its title](session:<sessionId>)`, and is told these links work only in
+the chat, never in email, Slack, GitHub or other messages sent elsewhere.
+Before, agents either named a session by its raw id or pasted a full console
+URL, which only works on one deployment and, in the desktop app, opened a
+separate browser tab. Each app now opens a `session:` link its own way: the web
+console navigates to the chat in place (⌘/Ctrl-click opens a new tab), the
+desktop app opens it in the app (⌘-click opens the external browser), and the
+phone app opens its chat screen. The one sentence follows the session-management
+paragraph in Session coordination and renders only for the Opengeni renderer;
+the plain-Markdown renderer module adds `session:` to the links it forbids. Both
+compositions change identically; legacy prompt digests are refreshed for this
+reviewed change.
+
+Several connected accounts. No prompt or tool description text changes for
+the common case. When the person has more than one connected account (for
+example Gmail and Outlook Mail) that serve the same need, the first
+`tool_search` result in a turn that shows the model a tool reaching one of
+them, but not all, now names the others, in a new `connectedAccounts` field
+(a developer message right after the result on native search routes, joined
+with any `notConnected` notice):
+`These tools reach Gmail. Also connected: Outlook Mail. If the request could
+mean those accounts too (the person's email, calendar or files), check each
+that fits, or say which account you checked and offer the others.` That text
+is 200 bytes plus the account labels (217 bytes in that example), at most ten
+named and the rest counted, once per turn and only in that one search result.
+"The same need" means another account of the same connector, or a connector
+with the same catalog category (such as communication or files; the broad
+"integrations" category, the "custom" one every custom server gets and a
+reviewed definition's fallback category never count), so Linear plus Slack,
+Gmail and GitHub says nothing for a Linear search, and two unrelated custom
+servers never name each other. An account whose tools failed to load this
+turn is reported as an unavailable source and is not named. Before, "Have I
+got any new emails?" loaded only Gmail's search tool and the answer silently
+covered Gmail alone. People with one connected account, accounts of unrelated
+kinds, or searches that load only first-party tools see exactly what they did
+before; loads by exact name never carry it. API integration routes (Outlook
+Mail and other Microsoft 365 or OpenAPI integrations) are now labelled like
+connector routes, so with two or more accounts of one integration their tool
+descriptions gain the existing `Account: … Use only this account…` first line.
+That can happen from the next turn after a second account is connected in the
+middle of a session, as it already does for connectors; frozen disclosures
+(earlier search results and messages) are unchanged.
+
+Connect cards in fewer calls. No prompt or tool description text changes.
+`tool_search` now also covers integrations the person could connect: when no
+installed tool clearly matches a query, it looks the query up in the
+integration catalog, and when the query contains the whole name of an
+integration whose next step is a Connect card the person completes (one of the
+catalog's top three matches; not items a workspace admin must enable, and not
+a one-word name the ranker reads as an operation, such as "Send" or "Make"),
+the result loads `capability_authorization_request` after its normal
+matches and says, in a new `notConnected` field (a developer message right
+after the result on native search routes): `Not connected yet: Gmail
+(capabilityId "…"). If the task needs it, call capability_authorization_request
+with that capabilityId and a short rationale to show the person its Connect
+card.` With several names it reads "If the task needs one, call
+capability_authorization_request with its capabilityId". That text is 178
+bytes with one name's wrapper (194 for Gmail), plus about 25 to 80 bytes per
+further name, and the card schema about 1.5 KB, only in that one search
+result. The catalog read runs alongside ranking and any decision model. The two setup
+tools (`capability_catalog_search`, `capability_authorization_request`) also
+load together when either is chosen. Before, "check my gmail" loaded an
+unrelated tool or nothing, and the agent listed tool groups and searched twice
+more before the card: 4 to 6 calls and a mean 15.3 s on five staging runs.
+Searches an installed tool clearly matches never look anything up and load
+exactly what they did before; earlier requests are unchanged.
+
 Prompt-cache stability. Workspace governance (instruction policies, learning
 settings, organization profile) no longer composes into the system prompt: it
 differs by who starts a turn and changes when a policy is edited, and every
@@ -270,6 +355,15 @@ Headings that moved or were added (layout only, not diffed):
 
 ## Sentence edits (modular "all" vs legacy)
 
+Settings in the chat. The blocked-tool rule offers the app action that makes a
+blocking setting change, confirmed in the chat, before giving a next step (see
+the first entry above).
+
+```diff
+- When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed.
+```
+
 Tool discovery and media. Deferred schemas must remain behind the existing
 search router, while modular agents need to distinguish missing disclosure
 from missing execution authority. Runtime mechanics explains ranked discovery
@@ -529,6 +623,9 @@ When a named tool is proven absent, only the clauses naming it change:
   an inline image source."
 - Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
   their tools.
+- Autonomy and persistence: the blocked-tool rule names `admin_actions_search`
+  and `admin_action_call` only with `workspaceAdmin` on and neither tool
+  proven absent; otherwise it keeps the legacy sentence.
 - Secrets: the `secret_search` sentence and the Skill pointer need
   `secret_search`; the 2FA-enrollment and account-creation rungs of the login
   ladder need `secret_save`; the push-approval and hardware-key handoff line

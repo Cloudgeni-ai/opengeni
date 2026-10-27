@@ -26,9 +26,12 @@ export function ComposerStackPreviewRoute() {
   const session = useMemo(() => previewSession(state), [state]);
   const goal = useMemo(() => previewGoal(state), [state]);
   const queue = useMemo(() => galleryQueue(), []);
-  const composer = useMemo<ComposerState>(() => idleComposer(), []);
-  const attachments = useMemo(() => previewAttachments(state === "all"), [state]);
   const running = session.status === "running";
+  // As on the session route: Pause, Queue and Steer while the agent works,
+  // and Pause also while a timed wait can wake the chat.
+  const composer = useMemo<ComposerState>(() => idleComposer({ working: running }), [running]);
+  const attachments = useMemo(() => previewAttachments(state === "all"), [state]);
+  const pendingWake = session.status === "idle" && session.inputWait != null;
   const events = useMemo(
     () => labScenarios().find((entry) => entry.id === (running ? "working" : "long"))!.events,
     [running],
@@ -66,7 +69,7 @@ export function ComposerStackPreviewRoute() {
             composer={composer}
             session={session}
             attachments={attachments}
-            running={running}
+            running={running || pendingWake}
           />
         </div>
       </div>

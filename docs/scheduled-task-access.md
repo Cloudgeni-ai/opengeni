@@ -202,7 +202,7 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
   frozen permission is kept only while the refreshing person holds it, and the
   only permissions added are the ones the newly added tools need
-  (`FIRST_PARTY_TOOL_AUTHORIZATION` in `apps/api/src/mcp/first-party-tool-permissions.ts`),
+  (`FIRST_PARTY_TOOL_AUTHORIZATION` in `packages/contracts/src/first-party-tool-authorization.ts`),
   within the default worker set and that person's grant. A refresh therefore
   never lifts a deliberately narrowed permission boundary (for example a
   read-only operator session that created the task) for tools the task already

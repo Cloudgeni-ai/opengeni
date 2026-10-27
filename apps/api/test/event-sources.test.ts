@@ -700,6 +700,177 @@ describe("event sources", () => {
       actor: { kind: "person", name: "Ada" },
     });
   });
+
+  test("a custom webhook reads any app's deliveries as its format says; each event in a list arrives", async () => {
+    const f = await fixture({ enabled: true });
+    const tailscaleSecret = "tskey-webhook-0123456789abcdef";
+    // Tailscale's preset: a `t=…,v1=…` signature over `<t>.<body>`, and a JSON
+    // list of events whose type, time and details sit at these paths.
+    const format = {
+      preset: "tailscale",
+      signature: { scheme: "timestamped_hmac_sha256", header: "Tailscale-Webhook-Signature" },
+      batch: {},
+      type: { path: "type" },
+      occurredAt: "timestamp",
+      summary: "message",
+      subject: "data.deviceName",
+      url: "data.url",
+      actor: "data.actor",
+    };
+    // Only a custom webhook takes a format, and it needs one.
+    for (const body of [
+      { kind: "webhook", adapter: "custom", name: "No format" },
+      { kind: "webhook", adapter: "linear", name: "Linear", format },
+    ]) {
+      const refused = await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify(body),
+      });
+      expect(refused.status).toBe(400);
+    }
+    const waiting = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "webhook", adapter: "custom", name: "Tailnet", format }),
+    });
+    expect(waiting.status).toBe(201);
+    const pending = (await f.json(waiting)).source;
+    expect(pending).toMatchObject({
+      adapter: "custom",
+      status: "blocked",
+      awaitingSigningSecret: true,
+      format: {
+        preset: "tailscale",
+        signature: { scheme: "timestamped_hmac_sha256", toleranceSeconds: 300 },
+      },
+    });
+    expect(pending.statusReason).toContain("Paste the webhook's signing secret");
+    // The preset names the app's documented event types before any arrive.
+    const presetTypes = await f.json(
+      await f.app.request(`${f.sources}/${pending.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(presetTypes.eventTypes.map((entry: any) => entry.type)).toContain("nodeNeedsApproval");
+    const pasted = await f.app.request(`${f.sources}/${pending.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ signingSecret: tailscaleSecret }),
+    });
+    expect(pasted.status).toBe(200);
+    expect(await f.json(pasted)).toMatchObject({ status: "active", awaitingSigningSecret: false });
+    // A Standard Webhooks format can't be set over a secret that could never verify it.
+    const mismatched = await f.app.request(`${f.sources}/${pending.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ format: { ...format, signature: { scheme: "standard_webhooks" } } }),
+    });
+    expect(mismatched.status).toBe(422);
+
+    const now = new Date().toISOString();
+    const body = JSON.stringify([
+      {
+        timestamp: now,
+        version: 1,
+        type: "nodeNeedsApproval",
+        tailnet: "example.com",
+        message: "Node laptop.example.ts.net needs approval",
+        data: {
+          nodeID: "nAbC123",
+          deviceName: "laptop.example.ts.net",
+          managedBy: "ada@example.com",
+          actor: "ada@example.com",
+          url: "https://login.tailscale.com/admin/machines/100.64.0.7",
+        },
+      },
+      {
+        timestamp: now,
+        version: 1,
+        type: "policyUpdate",
+        tailnet: "example.com",
+        message: "Tailnet policy file updated",
+        data: { actor: "bo@example.com", url: "https://login.tailscale.com/admin/acls" },
+      },
+    ]);
+    const signature = (secret: string) => {
+      const t = Math.floor(Date.now() / 1000);
+      return `t=${t},v1=${createHmac("sha256", secret).update(`${t}.${body}`).digest("hex")}`;
+    };
+    const path = new URL(pending.webhookUrl).pathname;
+    const forged = await f.app.request(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "tailscale-webhook-signature": signature("tskey-webhook-someone-else"),
+      },
+      body,
+    });
+    expect(forged.status).toBe(401);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // Tailscale retries with the same body; the second is a duplicate.
+      const delivered = await f.app.request(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "tailscale-webhook-signature": signature(tailscaleSecret),
+        },
+        body,
+      });
+      expect(delivered.status).toBe(200);
+    }
+    const { events } = await f.json(
+      await f.app.request(`${f.sources}/${pending.id}/events`, { headers: f.owner.headers }),
+    );
+    expect(events).toHaveLength(2);
+    expect(
+      events.find((event: { type: string }) => event.type === "nodeNeedsApproval"),
+    ).toMatchObject({
+      subject: "laptop.example.ts.net",
+      summary: "Node laptop.example.ts.net needs approval",
+      url: "https://login.tailscale.com/admin/machines/100.64.0.7",
+      actor: { kind: "unknown", name: "ada@example.com" },
+    });
+    expect(events.find((event: { type: string }) => event.type === "policyUpdate")).toMatchObject({
+      summary: "Tailnet policy file updated",
+      actor: { kind: "unknown", name: "bo@example.com" },
+    });
+
+    // The format can change: here to an app that signs the body with a plain
+    // HMAC and names the event type in a header.
+    const reformatted = await f.app.request(`${f.sources}/${pending.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({
+        format: {
+          signature: { scheme: "hmac_sha256", header: "X-Hub-Signature-256", prefix: "sha256=" },
+          type: { header: "X-Event" },
+          deliveryId: { header: "X-Delivery" },
+          summary: "title",
+        },
+      }),
+    });
+    expect(reformatted.status).toBe(200);
+    expect((await f.json(reformatted)).format).toMatchObject({
+      signature: { scheme: "hmac_sha256", encoding: "hex", prefix: "sha256=" },
+    });
+    const single = JSON.stringify({ title: "Build 12 passed" });
+    const hmacDelivery = await f.app.request(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-event": "build.passed",
+        "x-delivery": "d-1",
+        "x-hub-signature-256": `sha256=${createHmac("sha256", tailscaleSecret).update(single).digest("hex")}`,
+      },
+      body: single,
+    });
+    expect(hmacDelivery.status).toBe(200);
+    const after = await f.json(
+      await f.app.request(`${f.sources}/${pending.id}/events`, { headers: f.owner.headers }),
+    );
+    expect(
+      after.events.find((event: { type: string }) => event.type === "build.passed"),
+    ).toMatchObject({ summary: "Build 12 passed" });
+  });
 });
 
 describe("agent tools", () => {

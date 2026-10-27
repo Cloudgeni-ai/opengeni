@@ -9,14 +9,20 @@ import {
 } from "@opengeni/contracts";
 import type { ConnectOwnership, PreparedMcpSetup } from "@opengeni/contracts/connect";
 import type { Settings } from "@opengeni/config";
-import { getCapabilityCatalogItem, type Database } from "@opengeni/db";
+import {
+  getCapabilityCatalogItem,
+  setWorkspaceCapabilityCatalogItemLogo,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import {
   createCatalogItem,
   prepareCapabilityEnable,
   validateMcpCapabilityConnection,
+  workspaceMcpServerLogo,
   type McpCapabilityProbe,
 } from "../domain/capabilities";
+import type { McpServerLogoStorage } from "../domain/mcp-server-logo";
 
 /** Initialize/list tools before committing anything. Secret headers stay in this
  * invocation; the installation contains only an ordinary native connection ref.
@@ -29,6 +35,8 @@ export async function prepareMcpConnectionActivation(input: {
   ownership: ConnectOwnership;
   headers: Record<string, string>;
   probe?: McpCapabilityProbe;
+  /** Where the server's advertised icon is stored as the connection's logo. */
+  logoStorage?: McpServerLogoStorage | null;
 }) {
   const { grant, settings, ownership } = input;
   const setup = structuredClone(input.setup);
@@ -48,11 +56,22 @@ export async function prepareMcpConnectionActivation(input: {
     runtime: { available: true, mcpServerId: `custom-${key}` },
     metadata: { mcpServerId: `custom-${key}` },
   });
+  let serverInfo: unknown;
   const connectivity = await validateMcpCapabilityConnection(
     item,
     input.probe,
     { ...input.headers },
     settings,
+    (info) => {
+      serverInfo = info;
+    },
+  );
+  // Stored before the Connect transaction; the object is digest-keyed, so a
+  // retry or a rolled-back commit leaves at most an unreferenced copy.
+  const logoAssetPath = await workspaceMcpServerLogo(
+    { settings, mcpServerLogoStorage: input.logoStorage },
+    item,
+    serverInfo,
   );
   return {
     capabilityId,
@@ -76,6 +95,13 @@ export async function prepareMcpConnectionActivation(input: {
             tags: [],
             metadata: item.metadata,
           },
+        });
+      if (logoAssetPath)
+        await setWorkspaceCapabilityCatalogItemLogo(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          id: capabilityId,
+          logoAssetPath,
         });
       const connectionRef: McpServerConnectionRef = {
         providerDomain: new URL(endpoint).hostname,

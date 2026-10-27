@@ -59,6 +59,18 @@ export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./d
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";
 export {
+  NativeAuthNeededRow,
+  NativeConnectSetup,
+  NativeIntegrationCapabilityCard,
+  NativeMcpCapabilityCard,
+  NativePreparedMcpSetupCard,
+  nativeConnectWindowHost,
+  useNativeInChatConnect,
+  type NativeConnectBrowser,
+  type NativeInChatConnectOptions,
+} from "./in-chat-connect";
+export { SecureValueInput, type SecureValueInputProps } from "./secret-field";
+export {
   NativeInboxList,
   isNeedsYouKind,
   nativeInboxAttentionCount,

@@ -1,12 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isBlankTabUrl } from "./cdp-driver";
 
 /**
- * Why a managed browser's tabs got new IDs. The browser process stopped and a
- * new one reopened the same pages, so every tab ID an agent still holds names
- * a tab that no longer exists:
+ * Why a managed browser was relaunched. The browser process stopped and a new
+ * one reopened the same pages; each reopened tab keeps the ID its page had, and
+ * a tab ID no reopened tab took over names a tab that no longer exists:
  * - idle_release: the supervisor stopped it after it went unused for the idle
  *   release time; the session's next call relaunched it;
  * - controller_restart: its controller shut down (an agent update or
@@ -21,8 +21,9 @@ export type BrowserRelaunchReason =
   | "browser_lost"
   | "state_capture";
 
-/** The tabs a browser had when it stopped, mapped to the tabs its successor
- * reopened. A null replacement means no reopened tab shows the same page. */
+/** The tabs a browser had when it stopped, mapped to the browser's own IDs for
+ * the tabs its successor reopened; each reopened tab keeps the stopped tab's ID.
+ * A null replacement means no reopened tab shows the same page. */
 export type BrowserRelaunchedTabs = {
   reason: BrowserRelaunchReason;
   /** The idle release time, for idle_release. */
@@ -45,8 +46,8 @@ export function tabUrlHash(url: string): string | null {
 /**
  * The tabs a managed browser had when its controller stopped it or let it go,
  * kept in the session directory until the next launch on the profile. A
- * relaunch reads it to tell an agent still holding an old tab ID why that tab
- * is gone and which reopened tab shows its page.
+ * relaunch reads it so each reopened tab keeps its earlier ID, and an agent
+ * holding the ID of a tab that did not reopen learns why it is gone.
  */
 export type StoppedBrowserTabsRecord = {
   version: 2;
@@ -66,7 +67,7 @@ export async function writeStoppedBrowserTabs(
   record: StoppedBrowserTabsRecord,
 ): Promise<void> {
   const path = join(sessionDirectory, RECORD_NAME);
-  const temporary = `${path}.${process.pid}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const bounded = { ...record, tabs: record.tabs.slice(0, MAX_STOPPED_BROWSER_TABS) };
   await writeFile(temporary, JSON.stringify(bounded), { mode: 0o600 });
   await rename(temporary, path);
@@ -121,9 +122,11 @@ function parseStoppedBrowserTabs(value: unknown): StoppedBrowserTabsRecord | nul
 
 /**
  * Pair each tab of the stopped browser with the reopened tab showing the same
- * page. Tabs are matched by exact URL, each reopened tab at most once, the
- * previously selected tab first so it gets the reopened selected tab when
- * several show the same page. Blank tabs never match. A stopped tab whose ID
+ * page, by exact URL. A pair decides which tab an ID names from then on, so it
+ * is made only when exactly one stopped tab and exactly one reopened tab show
+ * that URL: tabs sharing a URL can't be told apart (the browser reopens them in
+ * its own order, and its selected tab need not be the one the agent selected),
+ * so none of them is paired. Blank tabs never match. A stopped tab whose ID
  * still exists is the same tab (the browser kept running) and is left out.
  */
 export function matchReopenedTabs(
@@ -134,27 +137,88 @@ export function matchReopenedTabs(
     .filter((target) => target.kind === "page" || target.kind === "popup")
     .map((target) => ({ ...target, urlHash: tabUrlHash(target.url) }));
   const live = new Set(pages.map((target) => target.id));
-  const used = new Set<string>();
-  const ordered = [
-    ...stopped.filter((tab) => tab.selected),
-    ...stopped.filter((tab) => !tab.selected),
-  ];
-  const matches = new Map<string, string | null>();
-  for (const tab of ordered) {
-    if (live.has(tab.targetId) || matches.has(tab.targetId)) continue;
-    const candidates = pages.filter(
-      (target) =>
-        tab.urlHash !== null &&
-        target.urlHash === tab.urlHash &&
-        !used.has(target.id) &&
-        !stopped.some((s) => s.targetId === target.id),
-    );
-    const match =
-      candidates.find((target) => target.selected === tab.selected) ?? candidates[0] ?? null;
-    if (match) used.add(match.id);
-    matches.set(tab.targetId, match?.id ?? null);
+  const stoppedIds = new Set(stopped.map((tab) => tab.targetId));
+  const gone: StoppedBrowserTab[] = [];
+  for (const tab of stopped) {
+    if (!live.has(tab.targetId) && !gone.some((seen) => seen.targetId === tab.targetId))
+      gone.push(tab);
   }
-  return stopped
-    .filter((tab) => matches.has(tab.targetId))
-    .map((tab) => ({ targetId: tab.targetId, replacementId: matches.get(tab.targetId) ?? null }));
+  const reopenedPages = pages.filter((target) => !stoppedIds.has(target.id));
+  return gone.map((tab) => {
+    if (tab.urlHash === null) return { targetId: tab.targetId, replacementId: null };
+    const sameStopped = gone.filter((other) => other.urlHash === tab.urlHash);
+    const sameReopened = reopenedPages.filter((target) => target.urlHash === tab.urlHash);
+    return {
+      targetId: tab.targetId,
+      replacementId:
+        sameStopped.length === 1 && sameReopened.length === 1 ? sameReopened[0]!.id : null,
+    };
+  });
+}
+
+/** A tab ID callers hold and the browser's own ID for the open tab it names. */
+export type BrowserTabIdPair = { tabId: string; browserTargetId: string };
+
+/**
+ * The tab IDs a running managed browser's tabs have that differ from the
+ * browser's own IDs for them (tabs a relaunched browser reopened keep their
+ * earlier IDs). Kept in the session directory while that browser runs, so a
+ * controller that reattaches to it after a restart gives its tabs the same
+ * IDs. A relaunch replaces it.
+ */
+type BrowserTabIdsRecord = { version: 1; tabs: BrowserTabIdPair[] };
+
+const TAB_IDS_NAME = "browser-tab-ids.json";
+const MAX_TAB_ID_LENGTH = 256;
+
+export async function writeBrowserTabIds(
+  sessionDirectory: string,
+  tabs: readonly BrowserTabIdPair[],
+): Promise<void> {
+  const path = join(sessionDirectory, TAB_IDS_NAME);
+  if (tabs.length === 0) {
+    await rm(path, { force: true });
+    return;
+  }
+  const record: BrowserTabIdsRecord = {
+    version: 1,
+    tabs: tabs.slice(0, MAX_STOPPED_BROWSER_TABS).map(({ tabId, browserTargetId }) => ({
+      tabId,
+      browserTargetId,
+    })),
+  };
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(record), { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+/** The recorded tab IDs; empty when there are none or they cannot be read. */
+export async function readBrowserTabIds(sessionDirectory: string): Promise<BrowserTabIdPair[]> {
+  let text: string;
+  try {
+    text = await readFile(join(sessionDirectory, TAB_IDS_NAME), "utf8");
+  } catch {
+    return [];
+  }
+  if (Buffer.byteLength(text) > MAX_RECORD_BYTES) return [];
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (typeof value !== "object" || value === null) return [];
+    const record = value as Record<string, unknown>;
+    if (record.version !== 1 || !Array.isArray(record.tabs)) return [];
+    const tabs: BrowserTabIdPair[] = [];
+    for (const tab of record.tabs.slice(0, MAX_STOPPED_BROWSER_TABS)) {
+      if (typeof tab !== "object" || tab === null) return [];
+      const { tabId, browserTargetId } = tab as Record<string, unknown>;
+      if (!isTabId(tabId) || !isTabId(browserTargetId)) return [];
+      tabs.push({ tabId, browserTargetId });
+    }
+    return tabs;
+  } catch {
+    return [];
+  }
+}
+
+function isTabId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_TAB_ID_LENGTH;
 }

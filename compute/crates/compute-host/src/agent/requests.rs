@@ -465,7 +465,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         match self.sleep_policy(config) {
             Err(error) => Some(Err(HostError::Invalid(error))),
-            Ok(_) => self.needs_absent_store(&config.sleep).map(Err),
+            Ok(_) => self
+                .needs_absent_store(&config.sleep)
+                .or_else(|| self.unoffered(config))
+                .map(Err),
         }
     }
 
@@ -482,6 +485,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         })
     }
 
+    /// The refusal of a sandbox of `config` that asks to reach what this
+    /// host does not offer.
+    fn unoffered(&self, config: &SandboxConfig) -> Option<HostError> {
+        let offered = |name: &String| self.net.as_ref().is_some_and(|net| net.offers(name));
+        config.reach.iter().find(|name| !offered(name)).map(|name| {
+            HostError::Invalid(format!(
+                "this host does not offer {name:?}, which the sandbox asks to reach"
+            ))
+        })
+    }
+
     /// Refuses a new sandbox `id` of `config` that cannot be created here,
     /// or not woken at once as `size`; adopted with `remote`, its first
     /// wake fetches it. Otherwise says whether it fits now or only the
@@ -495,6 +509,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<Room, HostError> {
         self.sleep_policy(config).map_err(HostError::Invalid)?;
         if let Some(refused) = self.needs_absent_store(&config.sleep) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.unoffered(config) {
             return Err(refused);
         }
         self.room_for(id, size, remote, DiskSpace::default())
@@ -689,11 +706,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Makes the files of the new sandbox `record` describes in the
-    /// background, from `template` if it has one, then records it;
-    /// [`Event::Prepared`] says how it went.
+    /// background, from `template` if it has one, its disk as long as it
+    /// asks for, then records it; [`Event::Prepared`] says how it went.
     fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
         let image = record.config.image;
+        let sized = record.config.clone();
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
@@ -736,7 +754,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok((start, std::fs::metadata(&paths.disk)?.len()))
+                // A copy of a template is as long as the template's, which
+                // its memory image says the guest's disk is: the first wake
+                // tells the guest it grew (see `Step::restore`).
+                let copied = std::fs::metadata(&paths.disk)?.len();
+                let length = super::disk::lengthen(&paths.disk, sized.disk_bytes(copied))?;
+                Ok((start, length))
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));

@@ -173,6 +173,7 @@ import {
   resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
+  getSessionModelGate,
   getInitializedSessionCreateReplay,
   getSessionGoal,
   getSessionAuthorityProjection,
@@ -225,7 +226,12 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  hasPermission,
+  requirePermission,
+  workspaceSettingsAuthorized,
+  type AccessGrantAuthorization,
+} from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -2114,7 +2120,8 @@ export async function postUserMessageTurn(
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const sessionForModelGate = await getSessionModelGate(db, workspaceId, sessionId);
+  if (!sessionForModelGate) throw new Error(`Session not found: ${sessionId}`);
   // Acceptance already froze this policy before resource/credential validation.
   // A different turn starting meanwhile must not change the model we gate here.
   const effectiveModelForGate =
@@ -2645,12 +2652,15 @@ async function createSessionForRequestInFileScope(
     });
   }
   // What the first message may do through app actions, frozen with its turn.
-  // A pure function of the request's own grant, computed once it is valid.
+  // Computed from the request's own grant once it is valid.
   const initialAppActionGrant = turnAppActionGrant({
     grant,
     authorization,
     delegatedSignInChangesEnabled:
       unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+    workspaceSettings:
+      authorization !== undefined &&
+      (await workspaceSettingsAuthorized(unresolvedDeps, authorization, workspaceId)),
   });
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
@@ -3357,11 +3367,15 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
-      const ownerContext = authorization
-        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-        : grant.principalKind === "agent_attempt"
-          ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-          : undefined;
+      // The outer creation scope already established the caller's file actor.
+      // Only attached files need a second live ownership read at validation.
+      const ownerContext = !resources.some((resource) => resource.kind === "file")
+        ? undefined
+        : authorization
+          ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+          : grant.principalKind === "agent_attempt"
+            ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+            : undefined;
       await validateFileResources(
         db,
         grant.accountId,
@@ -3674,9 +3688,6 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
-  const atlassianEnabled =
-    firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-    (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -3699,7 +3710,6 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
-        atlassianEnabled,
       }),
     );
   if (effectiveGoal) {
@@ -4708,10 +4718,6 @@ async function acceptSessionUserMessageInFileScope(
         resources: [...existingSession.resources, ...requestedResources],
         source: connectionDelegationSource,
         targetSessionId: sessionId,
-        atlassianEnabled:
-          existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-          (!existingSession.firstPartyMcpPermissions?.length ||
-            existingSession.firstPartyMcpPermissions.includes("connections:read")),
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
       });
 
@@ -4726,6 +4732,9 @@ async function acceptSessionUserMessageInFileScope(
       grant,
       authorization: input.authorization,
       delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
+      workspaceSettings:
+        input.authorization !== undefined &&
+        (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
     });
     const {
       accepted,

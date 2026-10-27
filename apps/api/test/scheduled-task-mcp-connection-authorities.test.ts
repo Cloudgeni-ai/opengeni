@@ -853,7 +853,7 @@ describe("first-party MCP scheduled task pinned accounts", () => {
         targetSessionId: session.id,
         variableSetId: null,
         rigId: null,
-        overlapPolicy: "buffer_one",
+        overlapPolicy: "steer",
       });
       expect(task!.agentConfig.model).toBeUndefined();
       expect(task!.agentConfig.agent).toBeUndefined();

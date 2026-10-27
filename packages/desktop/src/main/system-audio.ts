@@ -11,7 +11,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { release } from "node:os";
 
-import type { DesktopSystemAudioError, DesktopSystemAudioErrorCode } from "../contract";
+import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
+
+import {
+  DESKTOP_IPC,
+  type DesktopSystemAudioError,
+  type DesktopSystemAudioErrorCode,
+} from "../contract";
 
 /** How often samples go to the page: a tenth of a second. */
 const BATCHES_PER_SECOND = 10;
@@ -38,11 +44,14 @@ export interface SystemAudioOptions {
   excludePid: number;
   /** macOS: leave out processes whose bundle id starts with this (the app's helpers). */
   excludeBundlePrefix: string;
-  channels: SystemAudioChannels;
+  /** Where samples and ends go; by default the channels the preload helper listens on. */
+  channels?: SystemAudioChannels;
   platform?: NodeJS.Platform;
   /** The OS kernel release, for the platform version check. */
   osRelease?: string;
   spawnProcess?: typeof spawn;
+  /** How long the helper may take to start when nobody is being asked; for tests. */
+  startTimeoutMs?: number;
 }
 
 /** Whether this OS version can record other apps' audio. */
@@ -98,8 +107,14 @@ interface Capture {
 
 export class SystemAudioCaptures {
   private readonly captures = new Map<string, Capture>();
+  private readonly channels: SystemAudioChannels;
 
-  constructor(private readonly options: SystemAudioOptions) {}
+  constructor(private readonly options: SystemAudioOptions) {
+    this.channels = options.channels ?? {
+      samples: DESKTOP_IPC.systemAudioSamples,
+      ended: DESKTOP_IPC.systemAudioEnded,
+    };
+  }
 
   /** Whether the app can offer recording other apps' audio here. */
   available(): boolean {
@@ -161,7 +176,7 @@ export class SystemAudioCaptures {
       };
       const timer = setTimeout(
         () => settle(captureError("capture_failed", "The helper did not start in time.")),
-        START_TIMEOUT_MS,
+        this.options.startTimeoutMs ?? START_TIMEOUT_MS,
       );
       let lines = "";
       child.stderr?.setEncoding("utf8");
@@ -188,6 +203,10 @@ export class SystemAudioCaptures {
             capture.sampleRate = event.sampleRate;
             if (capture.pendingBytes > 0) this.flush(capture);
             settle(null);
+          } else if (event.event === "awaiting_permission") {
+            // macOS is asking the person (the first time only). Wait for their
+            // answer however long it takes, as the microphone prompt does.
+            clearTimeout(timer);
           } else if (event.event === "error") {
             lastError = captureError(event.code, event.message);
             settle(lastError);
@@ -257,7 +276,7 @@ export class SystemAudioCaptures {
     capture.pending = rest.length > 0 ? [Buffer.from(rest)] : [];
     capture.pendingBytes = rest.length;
     if (!capture.target.isDestroyed()) {
-      capture.target.send(this.options.channels.samples, capture.id, samples);
+      capture.target.send(this.channels.samples, capture.id, samples);
     }
   }
 
@@ -267,7 +286,47 @@ export class SystemAudioCaptures {
     this.flush(capture);
     this.captures.delete(capture.id);
     if (!capture.target.isDestroyed()) {
-      capture.target.send(this.options.channels.ended, capture.id, error);
+      capture.target.send(this.channels.ended, capture.id, error);
     }
   }
+}
+
+/** The helper's file name on this platform, as the desktop release ships it. */
+export function systemAudioHelperName(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "opengeni-audio-capture.exe" : "opengeni-audio-capture";
+}
+
+/**
+ * Answer the preload's system audio calls (`@opengeni/desktop/preload/system-audio`)
+ * with these captures. `allow` throws for a sender that may not record, such
+ * as a page on another origin or a subframe. A page's capture ends when it
+ * navigates away or closes.
+ */
+export function handleSystemAudioIpc(input: {
+  ipcMain: Pick<IpcMain, "handle">;
+  captures: SystemAudioCaptures;
+  allow(event: IpcMainInvokeEvent): void;
+}): void {
+  const pages = new WeakSet<WebContents>();
+  input.ipcMain.handle(DESKTOP_IPC.systemAudioStart, async (event) => {
+    input.allow(event);
+    const page = event.sender;
+    if (!pages.has(page)) {
+      pages.add(page);
+      const end = () => input.captures.stopFor(page);
+      page.once("destroyed", end);
+      page.on("did-start-navigation", (details) => {
+        if (details.isMainFrame && !details.isSameDocument) end();
+      });
+    }
+    try {
+      return { ok: true as const, ...(await input.captures.start(page)) };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  });
+  input.ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
+    input.allow(event);
+    if (typeof captureId === "string") input.captures.stop(captureId, event.sender);
+  });
 }

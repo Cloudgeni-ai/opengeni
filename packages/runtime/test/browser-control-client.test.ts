@@ -568,7 +568,7 @@ describe("BrowserControlClient", () => {
       expect(await browser.action(command())).not.toHaveProperty("targets");
       expect(requests).toEqual(
         Array(2).fill(
-          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=2`,
         ),
       );
     } finally {
@@ -624,6 +624,32 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("controller image"),
         },
       });
+      // An option added after the controller's release is named, with what to do instead.
+      await expect(
+        browser.action({
+          ...command,
+          operationId: randomUUID(),
+          action: {
+            type: "batch" as const,
+            actions: [
+              {
+                type: "click" as const,
+                locator: { kind: "text" as const, text: "Save", exact: true },
+              },
+            ],
+          },
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message:
+            "This browser's controller image is older than this server and does not accept " +
+            '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
+            "the element by its ref. Updating the controller image adds support.",
+        },
+      });
       rejected = { status: 404, code: "resource_not_found", message: "route not found" };
       await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
         status: 409,
@@ -633,7 +659,7 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("focused DOM reads"),
         },
       });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       for (const error of [
         { status: 404, code: "target_not_found", message: "browser target not found" },
         { status: 404, code: "resource_not_found", message: "browser session not found" },
@@ -659,7 +685,7 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("browser recording"),
         },
       });
-      expect(requests).toHaveLength(7);
+      expect(requests).toHaveLength(8);
     } finally {
       server.stop(true);
     }
@@ -712,6 +738,49 @@ describe("BrowserControlClient", () => {
       expect(
         await browser.uploadRecording({ recordingId, upload, waitMs: 1_000, replace: true }),
       ).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("tells the controller about a wait's deadline, and treats a controller without holds as not holding", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const until = new Date("2030-01-01T00:30:00.000Z");
+    const bodies: unknown[] = [];
+    let reply: Response | null = null;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`,
+        );
+        expect(request.headers.get("authorization")).toBe(`Bearer ${adminToken}`);
+        bodies.push(await request.json());
+        return reply ?? success({ held: true });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+        exec: async () => {
+          throw new Error("must preserve the existing controller");
+        },
+      },
+      { adminToken },
+    );
+    try {
+      expect(await client.holdForWait(reference, until)).toBe(true);
+      expect(bodies).toEqual([
+        { controllerGeneration: "controller-1", until: "2030-01-01T00:30:00.000Z" },
+      ]);
+      reply = success({ held: false });
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      // An older controller has no such route; it keeps its plain idle release.
+      reply = failure(404, "resource_not_found", "route not found");
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      reply = failure(403, "permission_denied", "admin token rejected");
+      await expect(client.holdForWait(reference, until)).rejects.toMatchObject({ status: 403 });
     } finally {
       server.stop(true);
     }
@@ -1265,6 +1334,54 @@ describe("BrowserControlClient", () => {
         },
       });
       expect(JSON.stringify(created)).not.toContain("browserbase-private-key");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("returns the display the controller launched a headed browser with, dropping unknown values", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const observation = browserObservation(browserTarget(browserSessionId, controllerGeneration));
+    let display: unknown;
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        return success(
+          {
+            browserSessionId,
+            controllerGeneration,
+            observation,
+            ...(display === undefined ? {} : { display }),
+          },
+          201,
+        );
+      },
+    });
+    const placement = await localPlacement({ placementPrivateWrites: true });
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const create = async () =>
+        await client.createSession({
+          browserSessionId,
+          controllerGeneration,
+          tokenGeneration: 1,
+          controlToken,
+          viewToken,
+          headed: true,
+        });
+      display = "offscreen";
+      expect((await create()).display).toBe("offscreen");
+      display = "window";
+      expect((await create()).display).toBe("window");
+      // An older controller reports nothing; anything else is not trusted.
+      for (const value of [undefined, "headless", 1, null]) {
+        display = value;
+        expect("display" in (await create())).toBe(false);
+      }
     } finally {
       server.stop(true);
     }
@@ -2453,6 +2570,86 @@ function failure(status: number, code: string, message: string): Response {
     { status },
   );
 }
+
+test("an older agent's controller refusal names the newer option without replaying", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+  let calls = 0;
+  let rejected = { status: 400, code: "invalid_action", message: "browser action is invalid" };
+  const session: BrowserControlPlacementSession = {
+    async exec() {
+      throw new Error("the native transport must not start a process");
+    },
+    async execWithInput() {
+      throw new Error("the native transport must not start a process");
+    },
+    async ensureBrowserControl() {
+      return { port: 9, sidecarGeneration: "sidecar-1" };
+    },
+    async browserControlHttp() {
+      calls += 1;
+      return {
+        kind: "response",
+        status: rejected.status,
+        headers: new Map([["content-type", "application/json"]]),
+        body: new TextEncoder().encode(
+          JSON.stringify({
+            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+            ok: false,
+            error: { code: rejected.code, message: rejected.message, retryable: false },
+          }),
+        ),
+      };
+    },
+  };
+  const client = new BrowserControlClient(session, {
+    adminToken,
+    nativeAuthority: { scopeId: randomUUID(), scopeGeneration: "connection-1" },
+  });
+  const browser = client.sessionClient({ reference, controlToken, viewToken });
+  expect(client.controllerRunsInAgent()).toBe(true);
+  await expect(
+    browser.action({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system", subjectId: "test" },
+      action: { type: "click", locator: { kind: "text", text: "Save", exact: true } },
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    error: {
+      code: "unsupported",
+      retryable: false,
+      message:
+        "This browser's controller runs in an older Opengeni agent that does not accept " +
+        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
+        "the element by its ref. Updating the agent adds support.",
+    },
+  });
+  rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+  await expect(
+    browser.readDom("target-1", {
+      kind: "element",
+      locator: { kind: "css", selector: "#name" },
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    error: {
+      code: "unsupported",
+      message:
+        "browser controller does not support focused DOM reads; it runs in an older Opengeni " +
+        "agent, and updating the agent adds support",
+    },
+  });
+  expect(calls).toBe(2);
+});
 
 test("serializes only explicit internal directory recovery and refuses navigation/restore combinations before I/O", async () => {
   const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-recovery" };

@@ -1,5 +1,8 @@
 export * from "./application";
-export * from "./errors";
+export {
+  EditableArtifactLiveError,
+  type EditableArtifactLiveErrorCode,
+} from "@opengeni/contracts/editable-artifact-live";
 export * from "./outbox-dispatcher";
 export * from "./ports";
 export * from "./server";

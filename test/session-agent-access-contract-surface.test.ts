@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionAuthorizationOperationForHttp } from "../apps/api/src/routes/sessions";
-import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-tool-permissions";
+import { FIRST_PARTY_TOOL_AUTHORIZATION } from "@opengeni/contracts";
 import { withFirstPartyToolClient } from "../apps/api/test/helpers/first-party-tool-client";
 
 // ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       "requireAccessGrantAuthorization(",
       '"sessions:read"',
       "requireSessionAuthorizationListScope(",
-      "SessionMessageSearchRequest.safeParse(",
+      "parseRequestQuery(\n      SessionMessageSearchRequest,",
       "searchSessionMessagesForSubject(",
       "subjectId: grant.subjectId",
       "authorizationScope",

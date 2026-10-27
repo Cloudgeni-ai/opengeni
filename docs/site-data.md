@@ -457,10 +457,13 @@ query's audience:
 
 The Site's managers (outside a Site frame) may run every query.
 
-`:viewer` (the viewer's stable principal, such as `user:<id>` or
-`guest:<visitor>`), `:viewer_kind` and `:viewer_signed_in` (1 or 0) are bound
-by the API from the verified caller. A request that supplies one is refused
-with `validation`, so a Site cannot impersonate another viewer:
+`:viewer` (the viewer's stable, opaque principal: for a person, `user:`
+followed by their subject id, such as
+`user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or `guest:<visitor>`; the
+same string as a Site Data record's `owner`), `:viewer_kind` and
+`:viewer_signed_in` (1 or 0) are bound by the API from the verified caller. A
+request that supplies one is refused with `validation`, so a Site cannot
+impersonate another viewer:
 
 ```sql
 -- define with site_sql_define_query, audience signed_in

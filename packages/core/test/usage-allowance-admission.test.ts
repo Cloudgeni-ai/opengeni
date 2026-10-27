@@ -32,13 +32,13 @@ const input = {
 
 describe("core usage allowance admission", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
-  let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
+  let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getSpendableCreditBalance">>;
   let codex: ReturnType<typeof spyOn<typeof opengeniDb, "isCodexBilledTurn">>;
   let route: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
 
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
-    balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+    balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: ACCOUNT,
       balanceMicros: 1,
       currency: "usd",
@@ -71,6 +71,7 @@ describe("core usage allowance admission", () => {
       };
       allowance.mockResolvedValue(refusal);
       expect(await checkLimit(deps, input)).toEqual({ allowed: false, ...refusal });
+      expect(balance).toHaveBeenCalledWith(deps.db, ACCOUNT, input.model);
       try {
         await requireLimit(deps, input);
         throw new Error("expected allowance refusal");
@@ -117,28 +118,22 @@ describe("core usage allowance admission", () => {
   test("accepted Codex funding passes the exact turn and needs no deployment credit balance", async () => {
     codex.mockResolvedValue(true);
     const acceptedTurn = { sessionId: crypto.randomUUID(), turnId: crypto.randomUUID() };
-    const spendable = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
-      balanceMicros: 0,
-    } as never);
-    try {
-      expect(
-        await checkLimit(
-          {
-            ...deps,
-            settings: testSettings({
-              billingMode: "stripe",
-              usageLimitsMode: "managed",
-              codexSubscriptionEnabled: true,
-            }),
-          },
-          { ...input, model: "codex/gpt-5.5", acceptedTurn },
-        ),
-      ).toEqual({ allowed: true });
-      expect(codex.mock.calls.at(-1)?.[0].acceptedTurn).toEqual(acceptedTurn);
-      expect(spendable).not.toHaveBeenCalled();
-    } finally {
-      spendable.mockRestore();
-    }
+    balance.mockResolvedValue({ balanceMicros: 0 } as never);
+    expect(
+      await checkLimit(
+        {
+          ...deps,
+          settings: testSettings({
+            billingMode: "stripe",
+            usageLimitsMode: "managed",
+            codexSubscriptionEnabled: true,
+          }),
+        },
+        { ...input, model: "codex/gpt-5.5", acceptedTurn },
+      ),
+    ).toEqual({ allowed: true });
+    expect(codex.mock.calls.at(-1)?.[0].acceptedTurn).toEqual(acceptedTurn);
+    expect(balance).not.toHaveBeenCalled();
   });
 
   test.each([HUMAN, null])(

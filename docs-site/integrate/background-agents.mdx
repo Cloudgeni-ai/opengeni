@@ -44,17 +44,26 @@ await og.updateScheduledTask(workspaceId, task.id, {
 
 Each run uses that chat's own model and tools and runs as the schedule owner. Updates keep fields you omit; `expectedExecutionDigest` rejects a conflicting edit. If moving `targetSessionId` would change the run's settings, the API returns a conflict; repeat with `adoptSessionSettings: true` to accept.
 
+`overlapPolicy` decides what a run into a chat does when the chat is still busy:
+
+- `steer` (the default): if the busy turn is this task's own earlier run, the new run reaches it at its next model step, like a person's Steer. The tool calls of that step finish, and the agent then reads the new run together with the work so far, so a burst of events is handled as one conversation instead of a queue of separate replies. A turn anyone else started still finishes first, and the run follows it.
+- `buffer_one` (`allow_concurrent` is the same in a chat): the run waits and starts when the current turn finishes.
+- `skip`: the run is dropped, and the next one runs as normal.
+
+Runs in a new chat (`new_session_per_run`) never wait, so the choice only matters for tasks that continue a chat.
+
 ## From your product's events
 
 A scheduled task can also run when something happens: give it `events`, and each event that matches one of its triggers starts a run. Events come from an **event source**:
 
-| Source                                               | Events come from                                                                                                                      |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `{ kind: "mcp", serverId }`                          | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens. |
-| `{ kind: "webhook", adapter: "standard" }`           | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                       |
-| `{ kind: "webhook", adapter: "linear" \| "sentry" }` | Linear or Sentry, with the URL and signing secret pasted in once.                                                                     |
-| `{ kind: "github" }`, `{ kind: "slack" }`            | The deployment's GitHub App or Slack bot, set up automatically.                                                                       |
-| `{ kind: "gmail" }`                                  | A person's Gmail connection, read while an automation listens.                                                                        |
+| Source                                               | Events come from                                                                                                                                   |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ kind: "mcp", serverId }`                          | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens.              |
+| `{ kind: "webhook", adapter: "standard" }`           | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                                    |
+| `{ kind: "webhook", adapter: "linear" \| "sentry" }` | Linear or Sentry, with the URL and signing secret pasted in once.                                                                                  |
+| `{ kind: "webhook", adapter: "custom", format }`     | Any other app's webhooks, read as `format` describes: how they are signed, where the event type is, and whether one delivery holds several events. |
+| `{ kind: "github" }`, `{ kind: "slack" }`            | The deployment's GitHub App or Slack bot, set up automatically.                                                                                    |
+| `{ kind: "gmail" }`                                  | A person's Gmail connection, read while an automation listens.                                                                                     |
 
 Event triggers are on when `clientConfig.eventTriggers.enabled` is true (`OPENGENI_EVENT_TRIGGERS_ENABLED` on the deployment).
 
@@ -85,6 +94,29 @@ await og.createScheduledTask(workspaceId, {
 ```
 
 Your backend sends `{ "type": "ticket.created", "timestamp": "…", "data": { … } }` with the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers; any Standard Webhooks library signs it. Each run gets the events that started it. Redelivered events (same `webhook-id`) are ignored, and the agent treats event data as untrusted input.
+
+An app with its own webhook format needs no code: describe the format on a `custom` source and paste the app's secret. `signature.scheme` is `standard_webhooks`, `hmac_sha256` (the body's HMAC in a header, hex or base64, after an optional prefix), `timestamped_hmac_sha256` (`t=<unix seconds>,v1=<hex>` over `"<t>.<body>"`), or `token` (a shared secret in a header). The other fields are dot paths into each event, or headers. Tailscale, for example:
+
+```ts
+const { source } = await og.createEventSource(workspaceId, {
+  kind: "webhook",
+  adapter: "custom",
+  name: "Tailnet",
+  format: {
+    preset: "tailscale",
+    signature: { scheme: "timestamped_hmac_sha256", header: "Tailscale-Webhook-Signature" },
+    batch: {}, // the body is a JSON list of events
+    type: { path: "type" },
+    occurredAt: "timestamp",
+    summary: "message",
+    subject: "data.deviceName",
+    url: "data.url",
+    actor: "data.actor",
+  },
+});
+// Paste source.webhookUrl into the app, then its secret:
+await og.updateEventSource(workspaceId, source.id, { signingSecret: tailscaleWebhookSecret });
+```
 
 - `events.once: true` finishes the task after its first run, for "tell me when this happens". A once-task that continues a chat belongs to it: archiving that chat with Pause removes the task if it has not run yet.
 - `events.maxRunsPerHour` (default 30) holds back a burst; held events are batched into the next run, and the owner is told once.

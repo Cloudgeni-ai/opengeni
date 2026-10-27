@@ -815,6 +815,14 @@ wrappers remain the recommended path. Concurrent catalog reads are deduplicated
 per client and workspace, and successful results are reused for a short bounded
 window so embedded controls can remount without refetching.
 
+Until the catalog arrives, the model list holds Codex Live alone as a
+placeholder. Pass `useRealtimeModelSelection().loadState` as the control's
+`loadState` (the wrappers do this) so a not-yet-loaded or failed catalog reads as
+"Checking voice" or "Voice couldn't load" rather than a setup step. The control
+also checks the microphone before offering voice: where the page may not use it
+(an embedded frame without microphone permission) or the person blocked it for
+the site, it explains that instead of starting a call that would fail.
+
 Voice models that hold a conversation in one fixed language (catalog entries
 with `languages`, such as Eleven Realtime) listen and reply in the person's
 language. By default that is the `OpenGeniProvider` locale, else the browser's
@@ -1055,6 +1063,8 @@ function CustomComposer({ sessionComposer, attachments, effectiveControl }) {
               <Composer.Controls>
                 <Composer.AttachButton />
                 <InsertTranscript />
+                {/* Keeps Pause's room while nothing is working, so the row never jumps. */}
+                <Composer.PauseButtonSlot />
               </Composer.Controls>
               <Composer.Actions>
                 <Composer.PauseButton />

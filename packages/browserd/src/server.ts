@@ -8,10 +8,12 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
+  BROWSER_ACTION_NOTE_KIND_VERSIONS,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
@@ -44,6 +46,7 @@ import {
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
+  CdpResponseRefusedError,
   CdpSessionDetachedError,
   CdpTransportError,
 } from "./cdp";
@@ -80,6 +83,7 @@ import {
   type BrowserSupervisorSessionOptions,
 } from "./supervisor";
 import { RfbClientFilter } from "./rfb-client-filter";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -555,6 +559,27 @@ export class BrowserControlServer {
       }
       return await this.endSession(browserSessionId, request);
     }
+    if (segments.length === 4 && segments[3] === "wait-hold") {
+      this.requireAdmin(request);
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const body = await readJsonObject(request);
+      assertOnlyKeys(body, ["controllerGeneration", "until"]);
+      const controllerGeneration = requireGeneration(body.controllerGeneration);
+      const until = Date.parse(requireString(body.until, "until", 64));
+      if (!Number.isFinite(until)) {
+        throw new ProtocolError("invalid_action", "until must be an ISO timestamp", 400);
+      }
+      // Advisory and idempotent: it never launches, recovers or uses the
+      // browser, so no lifecycle lock is needed.
+      return success({
+        held: await this.supervisor.holdForWait(
+          { browserSessionId, controllerGeneration },
+          { until },
+        ),
+      });
+    }
     if (segments.length === 4 && segments[3] === "view-grants") {
       this.requireAdmin(request);
       if (request.method !== "POST") {
@@ -663,18 +688,20 @@ export class BrowserControlServer {
         async () => await this.supervisor.action(command),
       );
       // Older clients parse receipts strictly. Return resolved targets and
-      // per-action notes only to a caller that asked for them.
+      // per-action notes only to a caller that asked for them, and only the
+      // note kinds its version of the receipt knows.
       const { targets, notes, ...base } = receipt;
+      const notesVersion = Number(url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER));
+      const knownNotes = notes?.filter(
+        (note) => BROWSER_ACTION_NOTE_KIND_VERSIONS[note.kind] <= notesVersion,
+      );
       return success({
         ...base,
         ...(targets !== undefined &&
         url.searchParams.get(BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER) === "1"
           ? { targets }
           : {}),
-        ...(notes !== undefined &&
-        url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER) === "1"
-          ? { notes }
-          : {}),
+        ...(knownNotes !== undefined && knownNotes.length > 0 ? { notes: knownNotes } : {}),
       });
     }
     if (
@@ -875,14 +902,18 @@ export class BrowserControlServer {
       );
     }
     if (operation === "state" && request.method === "GET") {
-      return success(await this.supervisor.targetState(reference, targetId));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.targetState(reference, targetId),
+      );
     }
     if (operation === "dom-read" && request.method === "POST") {
       const parsed = BrowserDomReadRequest.safeParse(await readJson(request));
       if (!parsed.success) {
         throw new ProtocolError("invalid_action", "browser DOM read request is invalid", 400);
       }
-      return success(await this.supervisor.readDom(reference, targetId, parsed.data));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.readDom(reference, targetId, parsed.data),
+      );
     }
     if (operation === "diagnostics" && request.method === "GET") {
       return success(
@@ -1022,12 +1053,20 @@ export class BrowserControlServer {
         request,
         async () => await supervisor.action(command),
       );
-      // Older clients parse receipts strictly. Return role stand-ins only to
-      // a caller that asked for them.
-      if (url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1")
-        return success(receipt);
-      const { roleStandIns: _roleStandIns, ...withoutStandIns } = receipt;
-      return success(withoutStandIns);
+      // Older clients parse receipts strictly. Return role stand-ins and
+      // unconfirmed input only to a caller that asked for each.
+      const { roleStandIns, unconfirmedInput, ...plain } = receipt;
+      return success({
+        ...plain,
+        ...(roleStandIns &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1"
+          ? { roleStandIns }
+          : {}),
+        ...(unconfirmedInput &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER) === "1"
+          ? { unconfirmedInput }
+          : {}),
+      });
     }
     if (segments.length === 4 && segments[3] === "heartbeat") {
       if (request.method !== "POST") {
@@ -2049,7 +2088,7 @@ export class BrowserControlServer {
           event: "browser.frame.socket.failed",
           browserSessionId: data.reference.browserSessionId,
           targetId: data.targetId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
           at: new Date().toISOString(),
         }),
       );
@@ -2365,6 +2404,18 @@ function protocolResponse(
   // browser connection ended) says so, so the caller checks before retrying.
   if (error instanceof InteractionOutcomeUnknownDriverError) {
     return fail(error.code, error.message, error.retryable, interactionStatus(error.code));
+  }
+  // One reply the browser connection refused (too large, or not JSON) failed
+  // only this request; the same request would fail again, a smaller one not.
+  if (error instanceof CdpResponseRefusedError) {
+    return fail(
+      "invalid_action",
+      error.method === "Page.captureScreenshot"
+        ? "the page's screenshot is too large to transfer; capture the viewport instead of the full page, or use JPEG"
+        : "the page's reply is too large to transfer; read a smaller part of the page",
+      false,
+      interactionStatus("invalid_action"),
+    );
   }
   return fail("driver_failed", "interaction controller request failed", false, 500);
 }
@@ -3141,10 +3192,6 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
   if (Object.keys(value).some((key) => !allowedSet.has(key))) {
     throw new ProtocolError("invalid_action", "request contains unknown fields", 400);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeOrigin(value: string): string {

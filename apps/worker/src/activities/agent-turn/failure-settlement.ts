@@ -72,6 +72,7 @@ import {
   providerRecoveryCode,
   providerRecoveryLimit,
   PROVIDER_OVERLOAD_RECOVERY_CODE,
+  modelSocketFallbackRecoveryLimit,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
@@ -110,6 +111,7 @@ import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-cor
 import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -704,6 +706,16 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const coreClaude = billingState.isClaudeTurn
     ? (providerTurn.claudeSubscriptionCore ?? null)
     : null;
+  // A stream reader that stops on an error event (an overload, a server
+  // error) cancels the response without waiting, so the error can arrive
+  // here while the transport is still recording that request's outcome.
+  // Join this attempt's started settlements before reading any lane: an
+  // overload refused before any content, or this attempt's own interrupted
+  // request, otherwise looks unsettled and fails the turn for good instead
+  // of recovering it.
+  await Promise.all(
+    [coreCodex, coreXai, coreClaude].map((core) => core?.requests?.settlementsRecorded?.()),
+  );
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
   //
@@ -1061,10 +1073,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   if (usageLimit && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
-    const failurePayload = codexUsageLimitFailurePayload(
-      usageLimit,
-      error instanceof Error ? error.message : String(error),
-    );
+    const failurePayload = codexUsageLimitFailurePayload(usageLimit, errorMessage(error));
     if (
       !(await eventing.settle!({
         events: [
@@ -1261,11 +1270,19 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
   // Call-scoped proof that an in-flight exec_command never dispatched its
-  // command. Those calls settle as not started (replay safe), never unknown,
-  // whether this turn recovers or fails.
+  // command: the provider's typed pre-dispatch refusal in the error, or a call
+  // whose every operation was still waiting for (or had failed in) sandbox
+  // resolution, which settling closes so it never dispatches later. Those
+  // calls settle as not started (replay safe), never unknown, whether this
+  // turn recovers or fails.
   const notStartedToolCallIds = isRoutingMutationOutcomeUnknownError(error)
     ? []
-    : toolCallCommandNotStartedCallIds(error);
+    : [
+        ...new Set([
+          ...toolCallCommandNotStartedCallIds(error),
+          ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
+        ]),
+      ];
   // Custody decides whether replay is safe, not what caused the failure. Keep
   // the existing diagnostic in the permission-controlled terminal event;
   // never copy it into logs or use its retry classification for admission.
@@ -1366,7 +1383,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         recovery: recoveryResult,
         httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
         nextRecoveryCount: nextProviderRecoveryCount,
-        recoveryLimit: providerRecoveryLimit(recoveryCode) ?? Infinity,
+        recoveryLimit: modelSocketFallbackRecoveryLimit(recoveryCode),
       })
     ) {
       providerTurn.persistentModelTransportHttpOnly = true;
@@ -1451,7 +1468,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;
-        const recoveryCause = providerRecoveryCause(failure.code);
+        const recoveryCause = providerRecoveryCause(recoveryCode);
         if (recoveryCause) {
           recordProviderRecoveryOutcome(observability, {
             route: attempt.modelMetricRoute,
@@ -1463,7 +1480,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      const recoveryCause = providerRecoveryCause(failure.code);
+      const recoveryCause = providerRecoveryCause(recoveryCode);
       if (recoveryCause) {
         recordProviderRecoveryOutcome(observability, {
           route: attempt.modelMetricRoute,

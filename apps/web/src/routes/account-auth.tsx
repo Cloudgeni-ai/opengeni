@@ -1,3 +1,5 @@
+import { Switch } from "@opengeni/react/ui/switch";
+import { SignupChallenge } from "@/components/signup-challenge";
 import { BrowserAccountsApiError, createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -39,6 +41,7 @@ export function AccountAuthRoute({
   } | null>(null);
   const socialStartAttempt = useRef<{
     provider: ManagedSocialProvider;
+    signupChallengeToken?: string;
     operationId: string;
     expectedGeneration: string;
   } | null>(null);
@@ -48,6 +51,12 @@ export function AccountAuthRoute({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const [challengeSiteKey, setChallengeSiteKey] = useState<string>();
+  const [signupIntent, setSignupIntent] = useState(
+    () => new URLSearchParams(window.location.search).get("error") === "signup_challenge_required",
+  );
+  const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
+  const [challengeReset, setChallengeReset] = useState(0);
   const [socialProviders, setSocialProviders] = useState<ManagedSocialProvider[]>([]);
   const [error, setError] = useState<string | null>(
     socialOutcome === "error"
@@ -116,6 +125,7 @@ export function AccountAuthRoute({
       .then((config) => {
         if (!active || config.auth.mode !== "managedSession") return;
         setSocialProviders(config.auth.socialProviders ?? []);
+        setChallengeSiteKey(config.auth.signupChallengeSiteKey);
       })
       .catch(() => undefined);
     return () => {
@@ -167,6 +177,10 @@ export function AccountAuthRoute({
 
   async function submitSocial(provider: ManagedSocialProvider) {
     if (!validTransactionId) return;
+    if (signupIntent && challengeSiteKey && !signupChallengeToken) {
+      setError("Complete the signup verification.");
+      return;
+    }
     setSocialBusy(provider);
     setError(null);
     try {
@@ -177,6 +191,7 @@ export function AccountAuthRoute({
           ? existing
           : {
               provider,
+              ...(signupIntent && signupChallengeToken ? { signupChallengeToken } : {}),
               operationId: crypto.randomUUID(),
               expectedGeneration: projection.generation,
             };
@@ -189,6 +204,9 @@ export function AccountAuthRoute({
         expectedGeneration: attempt.expectedGeneration,
         transactionId: validTransactionId,
         provider,
+        ...(attempt.signupChallengeToken
+          ? { signupChallengeToken: attempt.signupChallengeToken }
+          : {}),
         ...(attribution ? { attribution } : {}),
       });
       socialStartAttempt.current = null;
@@ -198,6 +216,8 @@ export function AccountAuthRoute({
         !(caught instanceof BrowserAccountsApiError && caught.code === "operation_outcome_unknown")
       ) {
         socialStartAttempt.current = null;
+        setSignupChallengeToken(undefined);
+        setChallengeReset((value) => value + 1);
       }
       setError(caught instanceof Error ? caught.message : "Authentication failed");
       setSocialBusy(null);
@@ -251,6 +271,25 @@ export function AccountAuthRoute({
         </div>
         {!invitation ? (
           <>
+            {challengeSiteKey ? (
+              <div className="mb-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <Switch
+                    checked={signupIntent}
+                    onCheckedChange={setSignupIntent}
+                    aria-label="Create a new account"
+                  />
+                  Create a new account
+                </label>
+                {signupIntent ? (
+                  <SignupChallenge
+                    siteKey={challengeSiteKey}
+                    onToken={setSignupChallengeToken}
+                    resetKey={challengeReset}
+                  />
+                ) : null}
+              </div>
+            ) : null}
             <ManagedSocialAuthButtons
               providers={socialProviders}
               busyProvider={socialBusy}

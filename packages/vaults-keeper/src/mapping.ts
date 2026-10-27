@@ -11,6 +11,7 @@ import {
   parseTotpInput,
 } from "./contract";
 import { nameKey, safeFieldName, safeSecretName, totpUri, uniqueName } from "./naming";
+import { keeperPasskeyMetas } from "./passkeys";
 import type { KeeperFile, KeeperRecord } from "./sdk";
 import { standardVaultFieldName, vaultItemCategoryToken } from "@opengeni/contracts";
 import {
@@ -242,10 +243,6 @@ export function itemKindForRecordType(type: string | undefined): {
   const known = RECORD_KINDS.find(([recordType]) => recordType === type);
   if (known) return { type: known[1], category: known[2] };
   return { type: "note", category: type ? vaultItemCategoryToken(type) : null };
-}
-
-export function itemTypeForRecordType(type: string | undefined): VaultItemType {
-  return itemKindForRecordType(type).type;
 }
 
 /**
@@ -547,6 +544,7 @@ export function mapRecord(record: KeeperRecord): MappedKeeperRecord {
       })),
       version: Number.isFinite(record.revision) ? String(record.revision) : null,
       updatedAt: null,
+      passkeys: keeperPasskeyMetas(record),
     },
     fields: collector.fields,
   };

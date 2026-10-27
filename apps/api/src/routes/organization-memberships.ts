@@ -94,6 +94,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { agentActingAsPerson, organizationSettingsPermission } from "../http/acting-person";
 
 import {
@@ -325,7 +326,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
             trialCreditModelIds: signupCreditModelIds(deps.settings),
             trialCreditsEnabled:
@@ -348,7 +349,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateAdditionalOrganizationResponse.parse(
           await createAdditionalManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
           }),
         ),
@@ -802,6 +803,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
+    // placeholder of an account without an email address.
+    if (payload.email.trim().toLowerCase().endsWith(".invalid")) {
+      throw new HTTPException(422, { message: "That email address can't receive invitations" });
+    }
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {

@@ -21,7 +21,7 @@ import {
 } from "@opengeni/github";
 import { commitGitHubLensConnect, requireGitHubLensConnect } from "./github-lens-connect";
 import { eventRouteSecret, type ApiRouteDeps, type PreparedConnectOperation } from "@opengeni/core";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { claimOAuthAcquisition, finishOAuthAcquisition, integrationBaseUrl } from "./oauth-client";
 import {
   isConsistentGitHubBindingCandidates,

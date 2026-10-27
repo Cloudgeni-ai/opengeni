@@ -2,7 +2,7 @@ import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organizatio
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { personalGitHubOAuthCallbackUrl, type Settings } from "@opengeni/config";
 import {
   PERSONAL_GITHUB_AUTHORIZATION_URL,
@@ -42,7 +42,6 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
-  personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
 } from "../connection-ownership";
@@ -820,6 +819,3 @@ function numberValue(value: unknown): number | null {
 function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
-
-export const PERSONAL_GITHUB_CONNECTION_PRINCIPAL_MESSAGE =
-  personalOnlyConnectionPrincipalMessage("My GitHub account");

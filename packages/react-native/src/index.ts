@@ -107,3 +107,8 @@ export {
   type NativeAgentCallProviderProps,
   type NativeOutsideCallContext,
 } from "./realtime/agent-call";
+export {
+  WakePhraseGuide,
+  wakePhraseSetupAvailable,
+  type WakePhraseGuideProps,
+} from "./realtime/wake-phrase-guide";

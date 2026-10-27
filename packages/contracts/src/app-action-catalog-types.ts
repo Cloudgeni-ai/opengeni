@@ -29,4 +29,11 @@ export type ActionCatalogEntry = {
    * the catalog generator. Without full access a chat leaves it to the app.
    */
   secretFields?: string[];
+  /**
+   * The workspace permission the route checks before anything else, from its
+   * handler's first access check. Set only when the handler shows one; the
+   * route's own checks still decide. Lets a caller leave out actions a person
+   * can never run.
+   */
+  permission?: string;
 };

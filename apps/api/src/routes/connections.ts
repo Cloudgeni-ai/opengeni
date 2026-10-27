@@ -180,7 +180,7 @@ import {
   startFikenOAuth,
   prepareFikenTokenInstall,
 } from "../integrations/fiken";
-import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,

@@ -186,6 +186,10 @@ export async function runIdentityBackfill(args: string[], env: NodeJS.ProcessEnv
   const sql = postgres(env.OPENGENI_MAINTENANCE_DATABASE_URL, {
     max: 1,
     prepare: false,
+    // This connection owns a session advisory lock for the entire run. Do not
+    // rotate it on the driver's default lifetime or during a pacing interval.
+    max_lifetime: 0,
+    idle_timeout: 0,
     connection: {
       application_name: "opengeni-event-identity-backfill",
       row_security: "off",

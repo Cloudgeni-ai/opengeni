@@ -11,6 +11,8 @@
 export type ConnectorLogoSource = {
   providerDomain?: string | null | undefined;
   mcpUrl?: string | null | undefined;
+  /** A workspace's own MCP server keeps its address here instead of `mcpUrl`. */
+  endpointUrl?: string | null | undefined;
   connectionRef?: { providerDomain?: string | null | undefined } | null | undefined;
   logoAssetPath?: string | null | undefined;
 };
@@ -56,6 +58,7 @@ export function connectorLogoIndex(
     claim(item.connectionRef?.providerDomain, url);
     claim(urlHost(item.mcpUrl), url);
   }
+  for (const { item, url } of entries) claim(urlHost(item.endpointUrl), url);
   return logos;
 }
 

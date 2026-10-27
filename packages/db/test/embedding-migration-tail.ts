@@ -398,6 +398,15 @@ export const embeddingMigrationTail = [
   "0961_secret_use_approval_host_cards.sql",
   // Extends 0961's containment update kinds by exact anchor; replay after it.
   "0972_capability_setup_continuations.sql",
+  // Wraps the withheld subscription-plan eligibility and credit-allocation
+  // routines; detector evaluation also depends on the session-tenancy fence.
+  "0981_promotion_funding_decisions.sql",
+  "0982_promotion_abuse_detection.sql",
+  // Calls 0345's tenancy fence routines on connected commands; replay after it.
+  "0984_connected_commands_rearm_on_runner_report.sql",
+  // Patches the membership command withheld 0299 creates, by exact anchor;
+  // replay after it.
+  "0995_membership_same_role_keeps_authority.sql",
   // Rewrites keys on the withheld Knowledge tables by name; replay last.
   ...workspaceDeletionMigrationTail,
   // Builds on withheld 0275, 0345 and 0761; replay after all of them.

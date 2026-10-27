@@ -122,6 +122,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/github-personal/oauth/callback" ||
     path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
+    // The sign-in popup's static last page; it reads nothing.
+    (c.req.method === "GET" && path === "/v1/integrations/connect/finished") ||
     path === "/v1/integrations/slack/callback" ||
     path === "/v1/integrations/teams/messages" ||
     path === "/v1/integrations/slack/events" ||

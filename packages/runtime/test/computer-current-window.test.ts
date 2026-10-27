@@ -459,6 +459,71 @@ describe("computer tools without identifiers", () => {
     expect(listed).toEqual([computerSessionId]);
   });
 
+  test("a computer whose screen is locked opens with no targets and says why", async () => {
+    const reason =
+      "This Mac's screen is locked, so nothing on it can be read or clicked. Ask a person to unlock it, then try again.";
+    const locked = () =>
+      new OpenGeniApiError(
+        423,
+        JSON.stringify({ error: { code: "machine_locked", message: reason } }),
+      );
+    let captures = 0;
+    const tools = definitions({
+      getComputerSession: async () =>
+        ({
+          ...computerSession(),
+          controller: {
+            controllerId: "opengeni-browserd",
+            controllerGeneration: "controller-1",
+            placementInstanceId: "placement-1",
+          },
+          platform: "macos",
+          adapter: "opengeni.cua.macos.v1",
+          seatId: "seat-1",
+          displayId: "aqua",
+          capabilities: {
+            semanticObservation: true,
+            appDiscovery: true,
+            appLaunch: true,
+            windowCapture: true,
+            screenCapture: false,
+            semanticActions: true,
+            pointerInput: true,
+            keyboardInput: true,
+            clipboard: false,
+            backgroundActions: true,
+            backgroundInput: true,
+            parallelApps: true,
+          },
+        }) as never,
+      listComputerTargets: async () => {
+        throw locked();
+      },
+      captureComputerTarget: async () => {
+        captures++;
+        throw new Error("nothing to capture");
+      },
+    });
+    const opened = await tools.computer_open!.execute(
+      { computerSessionId, includeScreenshot: true },
+      { operationId: randomUUID(), caller: model },
+    );
+    expect(opened.isError).not.toBe(true);
+    expect(opened.structuredContent).toMatchObject({ targets: [] });
+    expect(opened.content.map((item) => (item.type === "text" ? item.text : item.type))).toEqual([
+      `ComputerSession ${computerSessionId} (active): macos on the managed sandbox, adapter opengeni.cua.macos.v1, display aqua\nNot available: screen screenshots, clipboard\nPointer and keyboard input stay in the background.\nNo apps, windows or screens are available.`,
+      reason,
+    ]);
+    expect(captures).toBe(0);
+    // Every later call gives the same reason.
+    const listed = await tools.computer_targets!.execute(
+      {},
+      { operationId: randomUUID(), caller: model },
+    );
+    expect(listed.isError).toBe(true);
+    expect(JSON.stringify(listed.content)).toContain("screen is locked");
+  });
+
   test("computer_targets uses the computer computer_open returned", async () => {
     const listed: string[] = [];
     const other = randomUUID();

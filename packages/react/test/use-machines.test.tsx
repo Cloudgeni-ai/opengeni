@@ -321,6 +321,41 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  // A refusal another try cannot fix says what to do instead of "Try again."
+  for (const [code, message] of [
+    [
+      "workspace_root_unavailable",
+      "That machine hasn't reported its workspace folder. Update the agent on it and reconnect, then try again.",
+    ],
+    [
+      "invalid_working_directory",
+      "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
+    ],
+  ] as const) {
+    test(`attach explains a ${code} refusal`, async () => {
+      const machinesClient: MachinesClientLike = {
+        listMachines: async () => response,
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: null,
+          activeEpoch: 3,
+          code,
+          reason: "server reason for the agent",
+        }),
+      };
+      const hook = await renderHook(
+        () =>
+          useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient, sessionId: "sess-1" }),
+        undefined,
+      );
+      await flush();
+      expect(await actRun(() => hook.result.current.attach("sh-1"))).toBe(false);
+      await flush();
+      expect(hook.result.current.mutationError?.message).toBe(message);
+      await hook.unmount();
+    });
+  }
+
   test("a host-supplied attachMachine adapter wins over swapActiveSandbox", async () => {
     const attachedTo: Array<{ sessionId: string; sandboxId: string }> = [];
     let current = response;

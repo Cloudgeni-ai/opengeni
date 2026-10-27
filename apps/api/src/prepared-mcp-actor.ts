@@ -23,7 +23,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { requireConnectOwnerAuthority } from "./integrations/connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   isPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerSubject,

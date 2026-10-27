@@ -152,7 +152,9 @@ export function runVaultProviderContractSuite(
           true,
         );
       }
-      expect(subject.provider.capabilities().passkeys).toBe(false);
+      // A provider that reports passkeys must be able to hand them out.
+      if (subject.provider.capabilities().passkeys)
+        expect(typeof subject.provider.readPasskeys).toBe("function");
     });
 
     test("mirrors item metadata without values and reads values live (including TOTP)", async () => {

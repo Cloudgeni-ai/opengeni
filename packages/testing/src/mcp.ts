@@ -64,6 +64,13 @@ export function startTestMcpServer(
     richToolMetadata?: boolean;
     /** Tool `_meta` advertised in tools/list, keyed by the base tool name. */
     toolMeta?: Record<string, Record<string, unknown>>;
+    /** `serverInfo.icons` sent in the `initialize` result (MCP 2025-11-25). */
+    serverIcons?: Array<{
+      src: string;
+      mimeType?: string;
+      sizes?: string[];
+      theme?: "light" | "dark";
+    }>;
     /** Fixed loopback port (dev fixtures); tests use a random free port. */
     port?: number;
   } = {},
@@ -170,6 +177,7 @@ export function startTestMcpServer(
         options.toolResultMeta,
         options.richToolMetadata,
         options.toolMeta,
+        options.serverIcons,
       );
       await mcp.connect(transport);
       return await transport.handleRequest(request);
@@ -236,10 +244,17 @@ function buildServer(
   toolResultMeta?: Record<string, unknown>,
   richToolMetadata?: boolean,
   toolMeta?: Record<string, Record<string, unknown>>,
+  serverIcons?: Array<{
+    src: string;
+    mimeType?: string;
+    sizes?: string[];
+    theme?: "light" | "dark";
+  }>,
 ): McpServer {
   const server = new McpServer({
     name: "test-document-search",
     version: "1.0.0",
+    ...(serverIcons ? { icons: serverIcons } : {}),
   });
   server.registerTool(
     "search_documents",

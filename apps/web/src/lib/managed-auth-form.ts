@@ -57,6 +57,9 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
   }
 
   if (error instanceof AuthApiError) {
+    if (error.code?.startsWith("SIGNUP_CHALLENGE_")) {
+      return { fields: {}, message: error.message, switchTo: null, canResendVerification: false };
+    }
     if (error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE) {
       return {
         fields: {},

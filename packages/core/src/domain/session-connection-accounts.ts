@@ -9,7 +9,7 @@ import type {
 } from "@opengeni/contracts";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
-import { resolveSessionFirstPartyMcpTools, type Settings } from "@opengeni/config";
+import { type Settings } from "@opengeni/config";
 import {
   requireSession,
   requireWorkspace,
@@ -62,11 +62,6 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
       workspace.settings,
     ),
   });
-  const effectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
-    settings,
-    session,
-    workspace.settings,
-  );
   return await freezeConnectionAccounts({
     db,
     settings: runtimeSettings,
@@ -76,10 +71,6 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
     resources: session.resources,
     source: personalConnectionDelegationSourceForGrant(grant),
     targetSessionId: sessionId,
-    atlassianEnabled:
-      effectiveFirstPartyTools.some((tool) => tool.startsWith("atlassian_")) &&
-      (!session.firstPartyMcpPermissions?.length ||
-        session.firstPartyMcpPermissions.includes("connections:read")),
   });
 }
 
@@ -149,15 +140,6 @@ export async function resolveContinuedConnectionAccounts(input: {
       workspace.settings,
     ),
   });
-  const effectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
-    settings,
-    session,
-    workspace.settings,
-  );
-  const atlassianEnabled =
-    effectiveFirstPartyTools.some((tool) => tool.startsWith("atlassian_")) &&
-    (!session.firstPartyMcpPermissions?.length ||
-      session.firstPartyMcpPermissions.includes("connections:read"));
   const withoutPersonalRepositories = (from: ResourceRef[]) => {
     const personal = new Set<ResourceRef>(personalGitHubRepositoryResources(from));
     return from.filter((resource) => !personal.has(resource));
@@ -189,7 +171,6 @@ export async function resolveContinuedConnectionAccounts(input: {
           ? { kind: "subject", subjectId: principalSubjectId, accountId }
           : { kind: "none" },
         targetSessionId: sessionId,
-        atlassianEnabled,
         authoritySelections: selections,
       });
       return {

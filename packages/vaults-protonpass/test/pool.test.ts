@@ -225,6 +225,7 @@ function stubProvider(gate: Promise<void>, onClose: () => void): ProtonPassVault
     },
     listItems: refuse,
     readFields: refuse,
+    readPasskeys: refuse,
     writeItem: refuse,
     archiveItem: refuse,
     close: async () => onClose(),

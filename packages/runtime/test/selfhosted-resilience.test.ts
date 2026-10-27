@@ -44,6 +44,16 @@ function controlError(code: ErrorCode): SelfhostedControlError {
 }
 const drainingError = () => controlError(ErrorCode.ERROR_CODE_DRAINING);
 const timeoutError = () => controlError(ErrorCode.ERROR_CODE_TIMEOUT);
+/** What an agent answers for a delivery token it did not issue (it restarted
+ *  after the token was fetched) or that expired. */
+const deliveryExpiredDetail = { failure_code: "control_delivery_expired", outcome_unknown: "true" };
+const deliveryExpiredError = () =>
+  agentErrorToControlError({
+    code: ErrorCode.ERROR_CODE_PROTOCOL,
+    message: "The machine's control delivery receipt expired or is unavailable.",
+    retryable: false,
+    detail: deliveryExpiredDetail,
+  });
 
 const MUTATING_OPS = [
   "exec",
@@ -210,6 +220,55 @@ describe("decideSelfhostedRetry — the pure retry matrix", () => {
     }
   });
 
+  test("a refused delivery token is re-issued once for a read, never for a mutation", () => {
+    for (const opKind of READONLY_OPS) {
+      expect(
+        decideSelfhostedRetry({
+          opKind,
+          error: deliveryExpiredError(),
+          drainingRetries: 0,
+          timeoutRetries: 0,
+          jitter: 0,
+        }).action,
+      ).toBe("retry");
+      expect(
+        decideSelfhostedRetry({
+          opKind,
+          error: deliveryExpiredError(),
+          drainingRetries: 0,
+          timeoutRetries: SELFHOSTED_TIMEOUT_MAX_RETRIES,
+          jitter: 0,
+        }).action,
+      ).toBe("fail");
+    }
+    for (const opKind of MUTATING_OPS) {
+      expect(
+        decideSelfhostedRetry({
+          opKind,
+          error: deliveryExpiredError(),
+          drainingRetries: 0,
+          timeoutRetries: 0,
+          jitter: 0,
+        }).action,
+      ).toBe("fail");
+    }
+    // Any other protocol refusal still surfaces.
+    expect(
+      decideSelfhostedRetry({
+        opKind: "fsRead",
+        error: agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          message: "conflict",
+          retryable: false,
+          detail: { failure_code: "control_delivery_conflict", outcome_unknown: "true" },
+        }),
+        drainingRetries: 0,
+        timeoutRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("fail");
+  });
+
   test("draining and timeout budgets are SEPARATE (a read keeps its timeout retry after backpressure)", () => {
     const decision = decideSelfhostedRetry({
       opKind: "fsStat",
@@ -303,6 +362,18 @@ function fsStatOkStep(req: ControlRequest): ControlResponse {
     requestId: req.requestId,
     error: undefined,
     result: { $case: "fsStat", fsStat: { exists: true, entry: undefined } },
+  };
+}
+function deliveryExpiredStep(req: ControlRequest): ControlResponse {
+  return {
+    requestId: req.requestId,
+    error: {
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      message: "The machine's control delivery receipt expired or is unavailable.",
+      retryable: false,
+      detail: deliveryExpiredDetail,
+    },
+    result: undefined,
   };
 }
 
@@ -461,6 +532,29 @@ describe("SelfhostedSession control and op-stream retry boundaries", () => {
     expect((err as SelfhostedControlError).reason).toBe("agent_reconnecting");
     // 1 initial + 1 retry.
     expect(rpc.requests).toHaveLength(SELFHOSTED_TIMEOUT_MAX_RETRIES + 1);
+  });
+
+  test("a read whose token the restarted agent refuses is read again with a fresh one", async () => {
+    const rpc = new ScriptedRpc([deliveryExpiredStep, fsStatOkStep]);
+    const { clock } = fakeClock(0.5);
+    const res = await sessionWith(rpc, { clock }).statFile({ path: "/tmp/x" });
+    expect(res.exists).toBe(true);
+    expect(rpc.requests).toHaveLength(2);
+    expect(rpc.requests[0]!.requestId).not.toBe(rpc.requests[1]!.requestId);
+  });
+
+  test("a mutation whose token is refused surfaces its unknown outcome without a re-issue", async () => {
+    const rpc = new ScriptedRpc([deliveryExpiredStep]);
+    const { clock } = fakeClock();
+    let err: unknown;
+    try {
+      await sessionWith(rpc, { clock }).writeFile({ path: "/tmp/x", content: "x" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SelfhostedControlError);
+    expect((err as SelfhostedControlError).detail.failure_code).toBe("control_delivery_expired");
+    expect(rpc.requests).toHaveLength(1);
   });
 });
 

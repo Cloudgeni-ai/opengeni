@@ -187,7 +187,7 @@ impl<S: Store> Service<S> {
                 Some(host) => self.view.target(host).ok_or_else(|| {
                     Failure::Unavailable("the host asked for was given up on".into())
                 })?,
-                None => self.place(&demand, &exclude)?,
+                None => self.place(&demand, &row.spec.config.reach, &exclude)?,
             };
             row.ownership = row.ownership.give(target.host).set;
             row.sends.send(row.ownership.epoch, target.seq);

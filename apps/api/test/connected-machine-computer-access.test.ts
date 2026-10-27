@@ -49,6 +49,39 @@ describe("connected-machine computer access", () => {
     );
   });
 
+  test("a Linux machine's own reason keeps the hint that it may not be the person's computer", () => {
+    const reason =
+      "No one is signed in to a desktop on this machine as the user the agent runs as. " +
+      "It works once that user signs in to an X11 desktop session on the machine's screen.";
+    expect(
+      connectedMachineComputerAccessError(
+        {
+          hasDisplay: false,
+          desktopUnavailableReason: reason,
+          allowScreenControl: true,
+          os: "linux",
+        },
+        false,
+        "build-server",
+      )?.message,
+    ).toBe(
+      `Connected Machine desktop is unavailable on "build-server". ${reason} ` +
+        "This is the machine the session is working on, which may not be the person's own computer: " +
+        "if they mean another computer, find it with sandboxes_list, sandbox_swap to it, and open the screen there.",
+    );
+    expect(
+      connectedMachineComputerAccessError(
+        {
+          hasDisplay: false,
+          desktopUnavailableReason: reason,
+          allowScreenControl: true,
+          os: "macos",
+        },
+        false,
+      )?.message,
+    ).not.toContain("sandbox_swap");
+  });
+
   test("a desktop computer without a reason is asleep or signed out, not headless", () => {
     const message = connectedMachineComputerAccessError(
       { hasDisplay: false, desktopUnavailableReason: null, allowScreenControl: true, os: "macos" },

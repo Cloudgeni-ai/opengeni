@@ -98,10 +98,6 @@ async function ownerStillBelongsToWorkspace(
   return await namedSubjectHasLiveWorkspaceAuthority(db, input);
 }
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
-export type AuthorizedAtlassianConnection = {
-  connection: ConnectionMetadata;
-  subjectId: string | null;
-};
 
 export function directPersonalConnectionSubjectId(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
@@ -284,14 +280,6 @@ export async function authorizedSocialConnectionsForGrant(input: {
   return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
 }
 
-/** Historical native Atlassian grants no longer authorize API execution. */
-export async function authorizedAtlassianConnectionsForGrant(_input: {
-  db: Database;
-  grant: AccessGrant;
-}): Promise<AuthorizedAtlassianConnection[]> {
-  return [];
-}
-
 export function selectedPersonalConnectionServers(
   settings: Pick<Settings, "mcpServers">,
   tools: ToolRef[],
@@ -456,23 +444,6 @@ export function personalConnectionDelegationsFromParent(input: {
     throw new Error("agent-created personal GitHub repository authority is unavailable");
   }
   return inherited;
-}
-
-/** Historical native Drive credentials never become new publication authority. */
-export function googleDrivePublicationDelegationFromVisibleConnections(_input: {
-  subjectId: string;
-  connections: ConnectionMetadata[];
-  authoritySelection?: McpConnectionAccountSelection;
-}): McpPersonalConnectionDelegation | null {
-  return null;
-}
-
-/** Native Atlassian credentials remain stored but are not new turn authority. */
-export function personalAtlassianDelegationsFromVisibleConnections(_input: {
-  subjectId: string;
-  connections: ConnectionMetadata[];
-}): McpPersonalConnectionDelegation[] {
-  return [];
 }
 
 async function personalGitHubDelegationFromVisibleConnections(input: {
@@ -925,10 +896,6 @@ export async function freezePersonalConnectionDelegations(input: {
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAccountSelection[];
-  /** @deprecated Native Drive publishing is retired; this flag grants no authority. */
-  googleDrivePublicationEnabled?: boolean;
-  /** Exact first-party Atlassian tool + permission gate. */
-  atlassianEnabled?: boolean;
   /** Exact target for successor-mode projection (`session` never crosses it). */
   targetSessionId?: string;
 }): Promise<McpPersonalConnectionDelegation[]> {
@@ -1016,12 +983,10 @@ export async function freezePersonalConnectionDelegations(input: {
     return [];
   }
   // Social accounts have their own reader below. Native connection metadata
-  // is used only by MCP, personal repositories and enabled Atlassian tools.
+  // is used only by MCP and personal repositories.
   // The live membership check above remains mandatory for every personal path.
   const visibleConnections =
-    servers.length > 0 ||
-    personalGitHubResources.length > 0 ||
-    (includeFirstPartyConnections && input.atlassianEnabled)
+    servers.length > 0 || personalGitHubResources.length > 0
       ? await listOwnConnectionMetadata(input.db, {
           accountId: input.source.accountId,
           workspaceId: input.workspaceId,
@@ -1088,12 +1053,6 @@ export async function freezePersonalConnectionDelegations(input: {
     if (!prior || connection.updatedAt > prior.updatedAt)
       latest.set(connection.provider, connection);
   }
-  const personalAtlassian = input.atlassianEnabled
-    ? personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: ownerSubjectId,
-        connections: visibleConnections,
-      })
-    : [];
   return [
     ...mcp,
     ...(personalGitHub ? [personalGitHub] : []),
@@ -1105,6 +1064,5 @@ export async function freezePersonalConnectionDelegations(input: {
       kind: "oauth2" as const,
       connectionType: "social" as const,
     })),
-    ...personalAtlassian,
   ];
 }

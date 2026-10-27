@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { dequal } from "dequal";
 import { ChevronLeftIcon, ChevronRightIcon, ShieldCheckIcon } from "lucide-react";
-import {
-  OpenGeniApiError,
-  toolReviewAction,
-  toolReviewFields,
-  toolReviewDetails,
-  type ToolActionReview,
-} from "@opengeni/sdk";
+import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
-import { toolDisplayName } from "../timeline/tool-display-name";
-import { builtInToolStep } from "../timeline/tool-steps";
+import {
+  approvalAnswerLabels,
+  approvalToolName,
+  formatApprovalToolName,
+  pendingApprovalReview,
+} from "../approval-review-model";
 import {
   ToolActionReviewCard,
   ToolActionReviewDetails,
@@ -41,18 +39,10 @@ export const defaultApprovalSurfaceMessages = (t: OpenGeniText): ApprovalSurface
   reject: t("approvalSurface.decline"),
   approving: t("approvalSurface.approving"),
   rejecting: t("approvalSurface.declining"),
-  formatToolName: (name) =>
-    name.includes("__") || /^[a-f0-9]{64}$/.test(name) || builtInToolStep(name)
-      ? toolDisplayName(t, name, undefined, "running")
-      : humanToolName(name.replaceAll("_", " ").replaceAll(".", " › ")),
+  formatToolName: (name) => formatApprovalToolName(t, name),
   showDetails: t("approvalSurface.viewFullDetails"),
   hideDetails: t("approvalSurface.backToReview"),
 });
-/** "batch modify messages" → "Modify messages": how a call is grouped is not what it does. */
-function humanToolName(name: string): string {
-  const phrase = name.replace(/^batch\s+/i, "").trim();
-  return phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name;
-}
 export type ApprovalSurfaceProps = {
   approvals: PendingApproval[];
   onApprove: (approval: PendingApproval) => void | Promise<void>;
@@ -70,17 +60,6 @@ export type ApprovalSurfaceProps = {
   className?: string | undefined;
 };
 export type ApprovalField = { key: string; label: string; value: string };
-/** @deprecated Prefer the versioned server review; retained for small custom renderers. */
-export function approvalArgumentFields(value: unknown): ApprovalField[] | null {
-  const projected = toolReviewFields(value);
-  return projected.fields.length
-    ? projected.fields.map((field) => ({
-        key: field.path.slice(1),
-        label: field.label,
-        value: field.preview,
-      }))
-    : null;
-}
 
 /** Hosts provide decisions; this surface never mutates the approved payload. */
 export function ApprovalSurface({
@@ -293,37 +272,12 @@ function ApprovalRequest({
   }, [request]);
   const stableApproval = request.approval;
   const { formatToolName, approve: approveLabel } = messages;
-  const toolName = stableApproval.display?.toolName ?? stableApproval.name;
-  // An app action's card asks the person a plain question ("Invite … to your
-  // organization?"), so its buttons answer it, in the host's language.
-  const appAction = toolName === "admin_action_call";
-  const answer = appAction
-    ? { approve: t("approvalSurface.allow"), reject: t("approvalSurface.cancel") }
-    : null;
-  const fallback = useMemo<ToolActionReview>(() => {
-    const action = toolReviewAction(toolName, stableApproval.arguments, {
-      kind: "generic",
-      title: stableApproval.display?.title ?? formatToolName(toolName),
-    });
-    return {
-      version: 1,
-      id: stableApproval.id,
-      actionDigest: "",
-      revision: "legacy",
-      status: "pending",
-      ...action,
-      ...(stableApproval.display?.accountLabel
-        ? { accountLabel: stableApproval.display.accountLabel }
-        : {}),
-      ...toolReviewFields(stableApproval.arguments, undefined, toolName),
-      reason: "",
-      createdAt: "",
-      updatedAt: "",
-      approveLabel,
-      availableActions: stableApproval.arguments === undefined ? [] : ["approve", "reject"],
-      detailsAvailable: stableApproval.arguments !== undefined,
-    };
-  }, [stableApproval, toolName, formatToolName, approveLabel]);
+  const toolName = approvalToolName(stableApproval);
+  const answer = approvalAnswerLabels(t, toolName);
+  const fallback = useMemo<ToolActionReview>(
+    () => pendingApprovalReview(stableApproval, { formatToolName, approveLabel }),
+    [stableApproval, formatToolName, approveLabel],
+  );
   const loadLegacyDetails = useCallback<ToolReviewDetailsLoader>(
     async (value, path, offset) => ({
       version: 1,

@@ -17,6 +17,7 @@ import {
   type PromotionalCreditScope,
 } from "@opengeni/contracts";
 import { OrganizationModelUsageQuery } from "@opengeni/contracts/organization-model-usage";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { configuredEntitlements, promotionalCreditScope } from "@opengeni/config";
 import { creditScopeMetadata, creditScopeFromMetadata } from "../credit-promotion-snapshot";
 import {
@@ -50,6 +51,7 @@ import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
 import { serializedStripeCustomer } from "../billing-stripe-customer";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionRoutes(app, deps);
@@ -357,7 +359,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ received: true });
     } catch (error) {
       throw new HTTPException(500, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });
@@ -1281,5 +1283,7 @@ function paymentIntentId(value: string | Stripe.PaymentIntent | null | undefined
 }
 
 function looksLikeEmail(value: string | undefined): value is string {
+  // An account without an email address has a placeholder no mail reaches.
+  if (!accountContactEmail(value)) return false;
   return Boolean(value && value.includes("@"));
 }

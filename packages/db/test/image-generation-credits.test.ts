@@ -15,6 +15,7 @@ import {
   markImageGenerationOperationOutcomeUnknown,
   prepareGeneratedImageArtifact,
   prepareImageGenerationOperation,
+  resetImageGenerationOperationBeforeProviderDispatch,
   setWorkspaceAllowance,
   settleGeneratedImageArtifactReady,
   type DbClient,
@@ -413,5 +414,25 @@ describe("Opengeni-credit funded image generation", () => {
       error: "provider timed out",
     });
     expect((await begin(value, second)).started).toBe(true);
+  }, 60_000);
+
+  test("an image the provider refused outright is never charged and stops holding at once", async () => {
+    if (!available) return;
+    const value = await fixture(400_000);
+    const refused = await preparePriced(value, "call-refused-image");
+    const next = await preparePriced(value, "call-after-refusal");
+    expect((await begin(value, refused)).started).toBe(true);
+    await expect(begin(value, next)).rejects.toMatchObject({ code: "insufficient_credits" });
+
+    // The image provider answered 402 (its own account is out of credit).
+    const reset = await resetImageGenerationOperationBeforeProviderDispatch(client.db, {
+      ...scope(value, refused),
+      error: "AI Gateway image generation failed (402): Insufficient funds.",
+    });
+    expect(reset).toMatchObject({ status: "prepared", creditState: "pending" });
+    expect((await getBillingBalance(client.db, value.grant.accountId)).balanceMicros).toBe(400_000);
+    expect(await imageLedger(value)).toEqual([]);
+    expect(await imageUsage(value)).toEqual([]);
+    expect((await begin(value, next)).started).toBe(true);
   }, 60_000);
 });

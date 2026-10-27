@@ -887,6 +887,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Notes, knowledge and instructions
   checkNotes: "brain",
   checkMeetings: "record",
+  saveMeetingNotes: "record",
   saveNote: "brain",
   archiveNote: "brain",
   proposeUpdate: "brain",
@@ -988,11 +989,6 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   checkSite: "site",
   updateSite: "site",
 };
-
-/** A built-in step's icon. */
-export function toolStepIconKind(step: ToolStepId): ToolIconKind {
-  return TOOL_STEP_ICONS[step];
-}
 
 /**
  * The icon for a tool by name: a built-in tool draws its step's icon; other

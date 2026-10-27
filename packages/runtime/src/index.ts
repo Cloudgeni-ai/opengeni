@@ -178,6 +178,7 @@ import {
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
+  type VideoGenerationUnavailableResult,
   IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS,
   firstPartyToolFamily,
   integrationToolFamily,
@@ -211,10 +212,12 @@ import {
 } from "./mcp-network";
 import {
   LazyToolModelProvider,
+  catalogConnectableIntegrationLookup,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   restoreDirectDeferredCallArgumentTypes,
+  type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { createToolSelector } from "./tool-discovery-decision";
@@ -610,6 +613,7 @@ import type {
   SerializedHumanInputInterruption,
   SerializedInteractionInterventionInterruption,
 } from "./run-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -824,6 +828,7 @@ export {
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
+  RETAINED_REPLY_TURN_FIELD,
   hasOpaqueProviderArtifact,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -851,7 +856,9 @@ export {
 
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
+  PROVIDER_QUOTA_RETRY_HINT_MS,
   classifyProviderQuotaError,
+  providerMessageRetryHintMs,
   providerQuotaExhaustedMessage,
   type ProviderQuotaExhaustion,
   type ProviderQuotaScope,
@@ -872,7 +879,10 @@ export {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   buildCompactionPromptInput,
+  buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  type CompactionReplacement,
+  type CompactionTurnContext,
   compactionAttachmentFileIds,
   type AttachmentUploadTimes,
   compactionReplacementFingerprint,
@@ -881,6 +891,7 @@ export {
   decideCompaction,
   buildSummaryItem,
   buildRemoteCompactionV2PromptInput,
+  buildRemoteV2Replacement,
   buildRemoteV2ReplacementHistory,
   extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
@@ -909,6 +920,7 @@ export {
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  RETAINED_REPLY_MAX_TOKENS,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
@@ -2291,9 +2303,13 @@ export type BuildAgentOptions = {
           context: { toolCallId: string },
         ) => Promise<unknown>;
       };
-  /** Host-owned durable asynchronous video-generation boundary for this turn. */
+  /**
+   * Host-owned durable asynchronous video-generation boundary for this turn.
+   * Both calls read the workspace's live state, so a turn can turn video on
+   * and use it; while video can't run they return an `unavailable` result.
+   */
   videoGeneration?: {
-    capabilities: () => Promise<VideoGenerationCapabilities>;
+    capabilities: () => Promise<VideoGenerationCapabilities | VideoGenerationUnavailableResult>;
     execute: (
       input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },
@@ -3424,7 +3440,6 @@ export function buildOpenGeniAgent(
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
-  const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
     baseInstructions: sandboxBaseInstructions(),
@@ -3442,7 +3457,6 @@ export function buildOpenGeniAgent(
     ),
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
-    ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.authorizeAttemptExecution
         ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
@@ -3595,6 +3609,9 @@ function maybeInstallLazyToolTransport(
       .filter((server) => mcpServerDefersModelSchemas(server))
       .map((server) => mcpServerRegistryId(server)),
   );
+  const harnessControlServer = mcpServers.find(
+    (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
+  );
   installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
@@ -3637,6 +3654,26 @@ function maybeInstallLazyToolTransport(
       ? createToolSelector(options.toolSearchDecisionModel)
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
+    harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
+    () => {
+      // A labelled account route is a connected account: its connector, the
+      // account when the connector has several, and the kind of need it serves.
+      const accounts = new Map<string, ConnectedToolAccount>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        const route = server.connectedAccountRoute();
+        if (!route) continue;
+        const account: ConnectedToolAccount = {
+          source: server.registryId,
+          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          connector: route.connector,
+          ...(route.kind ? { kind: route.kind } : {}),
+        };
+        for (const name of server.modelToolNames()) accounts.set(name, account);
+      }
+      return accounts;
+    },
   );
 }
 
@@ -3729,6 +3766,73 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 
 /** First-party tools that move this chat to another machine. */
 const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap", "sandbox_attach"]);
+/** First-party tools that move this chat only when a call names a Connected
+ * Machine placement (one the chat may not be on); other calls stay parallel. */
+const PLACEMENT_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
+  "computer_open",
+  "browser_open",
+]);
+/** Browser tools whose calls act on one tab; the other browser tools (tabs,
+ * open, lifecycle and so on) act on the whole BrowserSession. */
+const BROWSER_TAB_TOOL_FAMILIES: ReadonlySet<string> = new Set([
+  "browser_act",
+  "browser_observe",
+  "browser_screenshot",
+  "browser_read",
+]);
+
+function stringArgument(args: unknown, name: string): string | undefined {
+  const value =
+    args && typeof args === "object" ? (args as Record<string, unknown>)[name] : undefined;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The ordering keys of one computer or browser call: the ComputerSession it
+ * names (`computer:<id>`), or for the browser the BrowserSession and, for a
+ * tool that acts on one tab, that tab (`browser:<id>:<tab>`). A call that
+ * names no session acts on the chat's current one, which may be any of them,
+ * so its key is the bare `computer` or `browser`, ordered with every call of
+ * that kind. An open that names no session starts or finds one of its own and
+ * has no key, so several opens of one response still run together. Undefined
+ * for the other tools, whose calls are never ordered by key.
+ */
+export function interactionOrderKeys(
+  family: string,
+): ((toolCall: { arguments: string }) => string[]) | undefined {
+  const computer = family.startsWith("computer_");
+  if (!computer && !family.startsWith("browser_")) return undefined;
+  const opens = PLACEMENT_MOVING_TOOL_FAMILIES.has(family);
+  return (toolCall) => {
+    let args: unknown;
+    try {
+      args = JSON.parse(toolCall.arguments);
+    } catch {
+      args = undefined;
+    }
+    if (computer) {
+      const session = stringArgument(args, "computerSessionId");
+      if (session) return [`computer:${session}`];
+      return opens ? [] : ["computer"];
+    }
+    const session = stringArgument(args, "browserSessionId");
+    if (!session) return opens ? [] : ["browser"];
+    const tab = BROWSER_TAB_TOOL_FAMILIES.has(family)
+      ? stringArgument(args, "targetId")
+      : undefined;
+    return [tab ? `browser:${session}:${tab}` : `browser:${session}`];
+  };
+}
+
+/** Whether one call's arguments name a Connected Machine placement. */
+export function callNamesConnectedMachine(toolCall: { arguments: string }): boolean {
+  try {
+    const parsed = JSON.parse(toolCall.arguments) as { placement?: { kind?: unknown } } | null;
+    return parsed?.placement?.kind === "connected_machine";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Run the tools that move this chat to another machine in model order. A
@@ -3737,22 +3841,39 @@ const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap",
  * but calls of one response otherwise start together: the later call would
  * read the chat's route before the swap committed and act on, or be refused
  * by, the machine the chat was leaving. Earlier calls of the response finish
- * on the old machine first; later ones start after the move. Reinstalled on
+ * on the old machine first; later ones start after the move. computer_open
+ * and browser_open are ordered the same way only for a call that names a
+ * Connected Machine placement, the only kind that can move the chat; an open
+ * without one stays parallel with the response's other calls. Reinstalled on
  * every clone like the other MCP projections. A `tool_invoke` of a swap is
  * rewritten to the swap's own call before the runner orders the response, so
  * it is ordered the same way. A swap inside a Code Mode program is one step of
  * that program's single call and is not ordered against the response's other
  * calls.
+ *
+ * Computer and browser calls that use the same ComputerSession, or the same
+ * BrowserSession tab, also run in model order among themselves (see
+ * interactionOrderKeys). A model that writes an action and then an
+ * observation in one response means the state after the action; started
+ * together, the read could be served first and show the window as it was, or
+ * land between an unfenced action's own fresh read and its dispatch and
+ * replace the reading the action was fenced on. Calls on other sessions or
+ * tabs, and every other tool, stay parallel with them. Native CUA tools are
+ * of the computer_act family, so they are ordered the same way.
  */
 export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) =>
-    (await listMcpTools(resolutionContext)).map((tool) =>
-      tool.type === "function" &&
-      ROUTE_MOVING_TOOL_FAMILIES.has(toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "")
-        ? { ...tool, exclusiveExecution: true }
-        : tool,
-    );
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function") return tool;
+      const family = toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "";
+      if (ROUTE_MOVING_TOOL_FAMILIES.has(family)) return { ...tool, exclusiveExecution: true };
+      const executionOrderKeys = interactionOrderKeys(family);
+      const ordered = executionOrderKeys ? { ...tool, executionOrderKeys } : tool;
+      if (PLACEMENT_MOVING_TOOL_FAMILIES.has(family))
+        return { ...ordered, exclusiveExecution: callNamesConnectedMachine };
+      return ordered;
+    });
   const clone = agent.clone?.bind(agent);
   if (clone) {
     agent.clone = (config: unknown) => {
@@ -4329,10 +4450,13 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
-        );
+        // A server without a connector row is always approved under its synthetic
+        // session-MCP identity, exactly as the attempt gateway and saved tool
+        // permission rules derive it. A local registration's own connection
+        // identity is for its adapter, never a substitute for that identity.
+        return server.connectionRef
+          ? resolvedMcpConnectionId(server, resolvedMcpConnectionIds)
+          : sessionMcpApprovalConnectionId(server.id, server.url);
       };
       return {
         prefix: prefixedMcpToolName(server.id, ""),
@@ -4811,10 +4935,6 @@ function buildAgentCapabilitiesFromComposition(
   return caps;
 }
 
-export function sandboxRunAs(_settings: Settings): string | undefined {
-  return undefined;
-}
-
 export type PreparedAgentTools = {
   /** Shared by eager/deferred MCP, Codemode, and this attempt's Agent. */
   inputWaitYield?: InputWaitYield;
@@ -4863,7 +4983,11 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
-  /** Exact connection identity frozen while constructing the local adapter. */
+  /**
+   * Exact connection identity frozen while constructing the local adapter. It is
+   * the approval identity only for a connector-backed (`connectionRef`) server;
+   * a server without one is approved under its synthetic session-MCP identity.
+   */
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
@@ -5003,12 +5127,14 @@ export type PrepareToolsOptions = {
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
     resolveApproval?: ToolGatewayApprovalResolver;
+    /** Applied to every definition before `filterDefinition`. */
     mapDefinition?: (definition: ToolGatewayDefinition) => ToolGatewayDefinition;
     requireApproval?: (
       entry: ToolGatewayCatalogEntry,
       caller: ToolGatewayCaller,
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
+    /** Receives the `mapDefinition` result, so it sees the effective approval. */
     filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
     /** Viewer-authority secret resolution for Site and workspace HTTP calls. */
     resolveArguments?: ToolGatewayArgumentResolver;
@@ -5262,6 +5388,11 @@ class DeferredPreparedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.preparedTarget?.toolDisplayMetadata(name);
+  }
+
+  /** The connected account this server reaches, once prepared. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.preparedTarget?.connectedAccountRoute();
   }
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
@@ -6534,12 +6665,14 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const admittedDefinitions = options.workspaceToolGateway.filterDefinition
-    ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
+  // Map before filtering: the filter must see each tool's effective approval
+  // (a saved Allow over a recommended Ask), not only the provider default.
+  const mappedDefinitions = options.workspaceToolGateway.mapDefinition
+    ? prepared.definitions.map(options.workspaceToolGateway.mapDefinition)
     : prepared.definitions;
-  const definitions = options.workspaceToolGateway.mapDefinition
-    ? admittedDefinitions.map(options.workspaceToolGateway.mapDefinition)
-    : admittedDefinitions;
+  const definitions = options.workspaceToolGateway.filterDefinition
+    ? mappedDefinitions.filter(options.workspaceToolGateway.filterDefinition)
+    : mappedDefinitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -7557,7 +7690,7 @@ function boundedMcpToolResult(result: AttemptToolResultValue): AttemptToolResult
 
 function exactErrorMessage(error: unknown): string {
   try {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   } catch {
     return "MCP tool call failed";
   }
@@ -8802,6 +8935,11 @@ export class PrefixedMcpServer implements MCPServer {
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
   }
+
+  /** The connected account this server reaches, when it is an account route. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.accountLabel;
+  }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {
     return this.originalToolNames.keys();
@@ -10009,14 +10147,12 @@ async function runAgentStreamInternal(
       }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
-    const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
     const resourceClient =
       fileDownloads.length > 0
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
             sandboxBackend: agentActiveSandboxBackend.get(agent),
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-            ...(runAs ? { runAs } : {}),
             ...(overrides.turnToolCancellationFence
               ? {
                   commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
@@ -10053,7 +10189,6 @@ async function runAgentStreamInternal(
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
@@ -10186,14 +10321,12 @@ async function runAgentStreamInternal(
         },
       )
     : undefined;
-  const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
   const resourceClient =
     refreshedClient && fileDownloads.length > 0
       ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
           sandboxBackend: agentActiveSandboxBackend.get(agent),
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-          ...(runAs ? { runAs } : {}),
         })
       : refreshedClient;
   const credentialClient =
@@ -10242,7 +10375,6 @@ async function runAgentStreamInternal(
         {
           environment,
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-          ...(runAs ? { runAs } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
@@ -10576,7 +10708,7 @@ export type {
   ToolDecisionCandidate,
 } from "./tool-discovery-decision";
 
-export { MaxTurnsExceededError } from "@openai/agents";
+export { MaxTurnsExceededError, ToolCallError } from "@openai/agents";
 
 /**
  * Detects the agents SDK per-segment turn cap. The cap is a pacing valve, not
@@ -10873,7 +11005,6 @@ export async function runOwnedSandboxSetup(
   await pinProvidedSessionManifestEnvironment(agent, session, {
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
   });
-  const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
   // TOKEN-BROKER (B1): per-turn provider token seeds, forwarded OFF-MANIFEST so
   // the repository-clone hook writes provider token files before the clone. The
@@ -10905,7 +11036,6 @@ export async function runOwnedSandboxSetup(
     environment,
     ...(opts.measureSetup ? { measureSetup: opts.measureSetup } : {}),
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-    ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
@@ -10962,7 +11092,6 @@ export async function runOwnedSandboxSetup(
     const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
       sandboxBackend: agentActiveSandboxBackend.get(agent),
       ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
       ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
     });
     if (opts.preparedInput) {
@@ -11281,7 +11410,7 @@ function sandboxFileDownloadFailure(
     fileId: download.fileId,
     filename: download.filename,
     path: targetPath,
-    reason: error instanceof Error ? error.message : String(error),
+    reason: errorMessage(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
   };
@@ -14087,7 +14216,7 @@ export async function runRigSetupHook(
       result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
       payload: {
@@ -14341,7 +14470,7 @@ export async function runRepositoryCloneHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;
@@ -14445,7 +14574,7 @@ export async function runAzureCliLoginHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;

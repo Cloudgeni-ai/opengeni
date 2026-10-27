@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import type { CodexFetch } from "@opengeni/codex";
+import { CODEX_WHAM_BASE, type CodexFetch } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
+import { traceFetch } from "@opengeni/observability";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import type { Database } from "../src/database";
@@ -30,7 +31,7 @@ afterEach(() => {
   while (restores.length) restores.pop()!();
 });
 
-function coreFixture() {
+function coreFixture(reader: typeof readOrganizationCodexUsage = readOrganizationCodexUsage) {
   const key = Buffer.alloc(32, 46);
   const organizationId = crypto.randomUUID();
   const credentialId = crypto.randomUUID();
@@ -135,7 +136,7 @@ function coreFixture() {
       maintenance = true;
     },
     read: (fetch: CodexFetch, options: { requestTimeoutMs?: number; signal?: AbortSignal } = {}) =>
-      readOrganizationCodexUsage(
+      reader(
         db,
         { environmentsEncryptionKey: key.toString("base64") } as Settings,
         { organizationId, credentialId, mode: "core", ...options },
@@ -153,6 +154,52 @@ describe("organization core usage bounded request lock", () => {
     expect((await f.read(fetch)).status).toBe("error");
     expect(fetch).not.toHaveBeenCalled();
     expect(f.canonical).not.toHaveBeenCalled();
+    expect(f.queries).toEqual([]);
+  });
+
+  test("native fetch behind the API's request tracing reads usage", async () => {
+    // The API process loads this module, capturing native fetch, and then wraps
+    // globalThis.fetch for request tracing; its routes pass that global. A fresh
+    // module instance repeats that order with a stand-in for the network.
+    const requests: string[] = [];
+    const network = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return Response.json({
+        plan_type: "pro",
+        rate_limit: {
+          secondary_window: {
+            used_percent: 3,
+            limit_window_seconds: 604_800,
+            reset_after_seconds: 3600,
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+    const original = globalThis.fetch;
+    let reader: typeof readOrganizationCodexUsage;
+    globalThis.fetch = network;
+    try {
+      // The query makes a separate module instance that captures `network`.
+      const fresh = "../src/organization-codex-usage.ts?traced-native-fetch";
+      ({ readOrganizationCodexUsage: reader } = (await import(
+        fresh
+      )) as typeof import("../src/organization-codex-usage"));
+    } finally {
+      globalThis.fetch = original;
+    }
+    const f = coreFixture(reader);
+    const usage = await f.read(traceFetch(network));
+    expect(requests).toEqual([`${CODEX_WHAM_BASE}/wham/usage`]);
+    expect(usage.status).toBe("ok");
+    expect(usage.weekly?.percent).toBe(3);
+    expect(f.isLocked()).toBe(false);
+  });
+
+  test("tracing does not admit a custom transport without its join", async () => {
+    const f = coreFixture();
+    const fetch = mock(async () => new Response("{}"));
+    expect((await f.read(traceFetch(fetch))).status).toBe("error");
+    expect(fetch).not.toHaveBeenCalled();
     expect(f.queries).toEqual([]);
   });
 

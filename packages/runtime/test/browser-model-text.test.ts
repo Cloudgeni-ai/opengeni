@@ -83,6 +83,25 @@ describe("browser model text", () => {
     expect(browserObservationText(observation)).toContain('- generic "Menu" [e00000010]');
   });
 
+  test("a scrolling panel shows its ref and the directions it can scroll", () => {
+    const observation = formObservation();
+    observation.agentView = {
+      sourceKind: "snapshot",
+      nodes: [
+        {
+          ref: "e00000011",
+          role: "generic",
+          depth: 0,
+          states: ["focusable", "scrollable=up,down"],
+          actions: ["scroll"],
+        },
+      ],
+    };
+    expect(browserObservationText(observation)).toContain(
+      "- generic [e00000011] scrollable=up,down",
+    );
+  });
+
   test("reports dialogs, diagnostics, diffs, redaction and removals", () => {
     const text = browserObservationText({
       target: { ...target, kind: "popup" },
@@ -133,10 +152,59 @@ describe("browser model text", () => {
     );
   });
 
+  test("a clipped name, value or text keeps its ref, its full length and the way to read it", () => {
+    const text = browserObservationText({
+      target,
+      agentView: {
+        sourceKind: "snapshot",
+        nodes: [
+          {
+            ref: "e0000000c",
+            role: "textbox",
+            depth: 0,
+            name: "Policy",
+            value: `${"a".repeat(179)}…`,
+            valueChars: 3_299,
+            states: ["readonly"],
+          },
+          {
+            ref: "e0000000d",
+            role: "text",
+            depth: 0,
+            name: `${"b".repeat(179)}…`,
+            nameChars: 1_240,
+          },
+          { ref: "e0000000e", role: "text", depth: 0, name: "Short" },
+        ],
+        clippedFieldCount: 2,
+      },
+    });
+    expect(text.split("\n").slice(1)).toEqual([
+      `- textbox "Policy" [e0000000c] value=${JSON.stringify(`${"a".repeat(179)}…`)} valueChars=3299 readonly`,
+      `- text ${JSON.stringify(`${"b".repeat(179)}…`)} nameChars=1240 [e0000000d]`,
+      '- text "Short"',
+      "(2 long fields clipped; browser_read mode=dom with an element's ref reads it in full)",
+    ]);
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
     ).toContain("No accessibility view is available for this tab.");
+  });
+
+  test("says when a page was too large to read whole, only then", () => {
+    const nodes = [{ ref: "e00000010", role: "button", depth: 0, name: "Create" }];
+    const partial = browserObservationText({
+      target,
+      agentView: { sourceKind: "snapshot", nodes, unreadNodeCount: 5_900 },
+    });
+    expect(partial.split("\n").at(-1)).toBe(
+      "Partial outline: the page is too large to read whole, and at least 5900 elements were not read. It lists the page's structure and the part on screen; scroll to bring other parts into it.",
+    );
+    expect(
+      browserObservationText({ target, agentView: { sourceKind: "snapshot", nodes } }),
+    ).not.toContain("Partial outline");
   });
 
   test("an action receipt names the outcome, the resolved elements and the page after", () => {
@@ -267,6 +335,19 @@ describe("browser model text", () => {
       }),
     ).toBe(
       "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headless on a Connected Machine\nThis browser uses the machine's network directly.\nNo tabs are open.",
+    );
+    // A headed browser is reported as its controller launched it: one shown
+    // offscreen says it has no window, one in a window (or from a controller
+    // that does not report it) keeps the plain headed line.
+    const headed = { ...session, headless: false };
+    expect(browserOpenText({ session: { ...headed, display: "offscreen" }, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed, offscreen with no window, on a Connected Machine\nNo tabs are open.",
+    );
+    expect(browserOpenText({ session: { ...headed, display: "window" }, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed on a Connected Machine\nNo tabs are open.",
+    );
+    expect(browserOpenText({ session: headed, targets: [] })).toBe(
+      "BrowserSession 11111111-1111-4111-8111-111111111111 (ready): chromium headed on a Connected Machine\nNo tabs are open.",
     );
     expect(browserTabsText({ browserSessionId: session.id, targets: [target] })).toBe(
       `BrowserSession ${session.id} has 1 tab:\nTab T1 selected: "Checkout" https://shop.example/checkout`,

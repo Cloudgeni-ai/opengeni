@@ -1,9 +1,18 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { PencilIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
+import {
+  COMPANY_PROFILE_SCALAR_MAX_CHARS,
+  type CompanyProfileContent,
+  type CompanyProfileHead,
+} from "@opengeni/sdk";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextArea } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
@@ -14,8 +23,10 @@ import {
   LEARNING_MODE_LABEL,
 } from "@opengeni/react/app/lib/agent-learning-vocabulary";
 import {
+  apiErrorFacts,
   apiErrorDetails,
   isPermissionDenied,
+  userFacingError,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
@@ -96,6 +107,158 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+const IDENTITY_LIMIT = COMPANY_PROFILE_SCALAR_MAX_CHARS.toLocaleString("en-US");
+
+/** One field's text as the profile stores it: trimmed, and empty means unset. */
+function profileText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * An owner writes the identity and mission by hand. The older compatibility
+ * details are kept as they are; only the two fields change.
+ */
+export function EditIdentityDialog({
+  open,
+  onOpenChange,
+  workspaceId,
+  profile,
+  head,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  workspaceId: string;
+  /** The active profile, or null before the first one. */
+  profile: CompanyProfileContent | null;
+  /** The active revision the edit replaces, or null before the first one. */
+  head: CompanyProfileHead | null;
+  /** Reloads the identity after a save or after it changed underneath. */
+  onSaved: () => Promise<void>;
+}) {
+  const client = useAppContext().client;
+  const [identity, setIdentity] = useState("");
+  const [mission, setMission] = useState("");
+  // One logical save per text: retrying after an unclear outcome reuses the
+  // operation, so the server applies it at most once.
+  const operation = useRef<{ key: string; id: string } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setIdentity(profile?.identity ?? "");
+    setMission(profile?.mission ?? "");
+    operation.current = null;
+    // Seed once per opening; a reload while open keeps what the owner typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const nextIdentity = profileText(identity);
+  const nextMission = profileText(mission);
+  const unchanged =
+    nextIdentity === (profile?.identity ?? null) && nextMission === (profile?.mission ?? null);
+  const hasOtherDetails = profile
+    ? profile.products.length +
+        profile.customers.length +
+        profile.goals.length +
+        profile.constraints.length >
+      0
+    : false;
+  const empty = nextIdentity === null && nextMission === null && !hasOtherDetails;
+  const identityTooLong = identity.trim().length > COMPANY_PROFILE_SCALAR_MAX_CHARS;
+  const missionTooLong = mission.trim().length > COMPANY_PROFILE_SCALAR_MAX_CHARS;
+  const tooLongText = `Keep it under ${IDENTITY_LIMIT} characters.`;
+
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={
+        profile?.identity || profile?.mission
+          ? "Edit identity and mission"
+          : "Write identity and mission"
+      }
+      description="Every top-level agent reads this in every chat, so keep each to a few sentences."
+      submitLabel="Save"
+      pendingLabel="Saving…"
+      submitDisabled={unchanged || empty || identityTooLong || missionTooLong}
+      onSubmit={async () => {
+        const next: CompanyProfileContent = {
+          identity: nextIdentity,
+          mission: nextMission,
+          products: profile?.products ?? [],
+          customers: profile?.customers ?? [],
+          goals: profile?.goals ?? [],
+          constraints: profile?.constraints ?? [],
+        };
+        const key = JSON.stringify([head?.revisionId ?? null, next.identity, next.mission]);
+        if (operation.current?.key !== key) {
+          operation.current = { key, id: crypto.randomUUID() };
+        }
+        try {
+          await client.updateCompanyProfile(workspaceId, {
+            operationId: operation.current.id,
+            profile: next,
+            expectedCurrentRevisionId: head?.revisionId ?? null,
+            expectedActivationVersion: head?.activationVersion ?? 0,
+            reason: "Edited in organization settings",
+          });
+        } catch (error) {
+          if (apiErrorFacts(error).status === 409) {
+            // Someone saved first. Load their version so Save replaces it on purpose.
+            await onSaved();
+            throw userFacingError(
+              error,
+              "The identity changed while you were editing. Your text is still here. Save again to replace the new version.",
+            );
+          }
+          throw error;
+        }
+        await onSaved();
+        toast.success("Saved. New chats use the updated identity.");
+        return true;
+      }}
+      onSubmitted={() => onOpenChange(false)}
+    >
+      <FieldStack>
+        <Field
+          label="Who we are"
+          error={identityTooLong ? tooLongText : undefined}
+          aside={
+            identityTooLong
+              ? `${identity.trim().length.toLocaleString("en-US")} / ${IDENTITY_LIMIT}`
+              : undefined
+          }
+        >
+          <TextArea
+            name="organization-identity"
+            rows={4}
+            value={identity}
+            placeholder="For example: a small team building tools for independent bakeries."
+            onChange={(event) => setIdentity(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="Why we exist"
+          error={missionTooLong ? tooLongText : undefined}
+          aside={
+            missionTooLong
+              ? `${mission.trim().length.toLocaleString("en-US")} / ${IDENTITY_LIMIT}`
+              : undefined
+          }
+        >
+          <TextArea
+            name="organization-mission"
+            rows={4}
+            value={mission}
+            placeholder="For example: so good local bakeries can compete with the chains."
+            onChange={(event) => setMission(event.target.value)}
+          />
+        </Field>
+      </FieldStack>
+    </FormDialog>
+  );
+}
+
 function CurrentIdentitySection({
   workspaceId,
   canManage,
@@ -105,6 +268,7 @@ function CurrentIdentitySection({
 }) {
   const client = useAppContext().client;
   const inventory = useCompanyProfileInventory(client, workspaceId);
+  const [editOpen, setEditOpen] = useState(false);
   const storedProfile = inventory.response?.activeRevision?.profile ?? null;
   const profile = storedProfile?.identity || storedProfile?.mission ? storedProfile : null;
   const legacyDetailCount = storedProfile
@@ -146,7 +310,7 @@ function CurrentIdentitySection({
         title="No identity yet."
         description={
           canManage
-            ? "Describe the organization below and Opengeni drafts a short version for you to check."
+            ? "Write it yourself, or describe the organization below and Opengeni drafts a short version for you to check."
             : "An organization owner can add one."
         }
       />
@@ -174,6 +338,14 @@ function CurrentIdentitySection({
     <Section
       title="Identity and mission"
       description="Every top-level agent knows this, so keep it short and stable."
+      action={
+        canManage && inventory.response ? (
+          <RowButton onClick={() => setEditOpen(true)}>
+            <PencilIcon aria-hidden="true" />
+            {profile ? "Edit" : "Write it yourself"}
+          </RowButton>
+        ) : undefined
+      }
     >
       <div className="mt-1 flex min-w-0 flex-col gap-3">
         {body}
@@ -197,6 +369,16 @@ function CurrentIdentitySection({
           </ErrorMessage>
         ) : null}
       </div>
+      {canManage && inventory.response ? (
+        <EditIdentityDialog
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          workspaceId={workspaceId}
+          profile={storedProfile}
+          head={inventory.response.current}
+          onSaved={inventory.reload}
+        />
+      ) : null}
     </Section>
   );
 }

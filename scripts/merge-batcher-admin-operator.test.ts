@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test as bunTest } from "bun:test";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,6 +9,20 @@ import manifest from "../docs/merge-batcher-admin/app-manifest.json";
 import { bindStop, verifyStop } from "../docs/merge-batcher-admin/off";
 
 const directory = resolve(import.meta.dir, "../docs/merge-batcher-admin");
+// The harness() tests drive the real stage.sh/off.ts operator against fake
+// gh/curl/sleep executables: hundreds of short-lived bun/bash/jq processes per
+// test (about 700 for "two activations in one plan"), with no real waits.
+// That is deterministic work whose wall time scales with CPU contention,
+// so it must not rely on bun's implicit 5 s per-test default: the two-activation
+// test takes about 2.3 s idle and about 4.9 s on a contended host, and a timeout
+// kills its in-flight resumeOff child (exit 143), which then surfaces as an
+// unhandled error in a later test. Every test in this file declares the budget
+// CI unit shards already pass with --timeout=30000, so focused local runs
+// behave like CI.
+const FIXTURE_TEST_TIMEOUT_MS = 30_000;
+function test(name: string, body: () => void | Promise<void>) {
+  bunTest(name, body, FIXTURE_TEST_TIMEOUT_MS);
+}
 const stopped = {
   command: "stop",
   disabled: true,

@@ -1,6 +1,28 @@
 # $preImage: the release-image-validation gate runs before any image job, so
 # it must not see image results and checks every other lane exactly as the
 # final aggregate does.
+#
+# $attested (optional, default false): a main push whose exact tree already
+# passed a trusted Batch CI attempt (docs/merge-batcher.md "Main-push Batch CI
+# attestation"). Every test lane must be skipped, never partially run, and
+# only full-mode pushes that build workload images qualify; deployment,
+# artifact runtime and images keep their ordinary requirements.
+($ARGS.named.attested // false) as $attested |
+if $attested then
+.plan.result == "success" and
+$event == "push" and $mode == "full" and $bakeImages and
+."source-contracts".result == "skipped" and
+."unit-shards".result == "skipped" and
+."integration-shards".result == "skipped" and
+."e2e-shards".result == "skipped" and
+."test-suite".result == "skipped" and
+."browser-acceptance".result == "skipped" and
+."browserd-real-e2e".result == "skipped" and
+."package-contracts".result == "skipped" and
+(if $artifactRuntime then ."artifact-runtime".result == "success" else ."artifact-runtime".result == "skipped" end) and
+.deployment.result == "success" and
+(if $preImage then (has("images") | not) else .images.result == "success" end)
+else
 .plan.result == "success" and
 ."source-contracts".result == "success" and
 (if $unit == 0 then ."unit-shards".result == "skipped" else ."unit-shards".result == "success" end) and
@@ -23,3 +45,4 @@
     elif $bakeImages then .images.result == "success"
     else .images.result == "skipped" end)
  end)
+end

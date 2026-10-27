@@ -284,7 +284,8 @@ export async function beginImageGenerationOperation(
  * Return a paid-operation row to its retryable prepared state when a durable
  * provider-dispatch fence rejected before any provider request was admitted.
  * This is intentionally narrower than outcome reconciliation: a caller must
- * prove the provider boundary was never crossed before using this transition.
+ * prove the provider boundary was never crossed, or that the provider refused
+ * the request outright without doing paid work, before using this transition.
  */
 export async function resetImageGenerationOperationBeforeProviderDispatch(
   db: Database,
@@ -1052,7 +1053,7 @@ async function debitImageGenerationCredits(
   // general credit, exactly as a settled chat response.
   const allocations = operation.creditUsageModelId
     ? planPostUseCreditAllocations(
-        await getBillingBalance(tx, operation.accountId, undefined, settledAt),
+        await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
         operation.pricedCostMicros,
         operation.creditUsageModelId,
       )

@@ -18,6 +18,7 @@ describe("GitHub App webhook advertising guard", () => {
   const manifestFile = "packages/github/src/index.ts";
   const receiverPath = ["/v1", "webhooks", "github"].join("/");
   const manifest = `manifest.hook_attributes = { url: \`\${base}${receiverPath}\`, active: true };`;
+  const baseVariable = `\${base}`;
   const receiver = 'headers.get("x-hub-signature-256"); headers.get("x-github-delivery");';
   const run = (file: string, text: string, receiverText: string): Finding[] => {
     const findings: Finding[] = [];
@@ -27,12 +28,22 @@ describe("GitHub App webhook advertising guard", () => {
 
   test("allows the manifest to advertise the signed, idempotent receiver", () => {
     expect(run(manifestFile, manifest, receiver)).toEqual([]);
+    expect(run(manifestFile, manifest.replace(baseVariable, `\${webhookBase}`), receiver)).toEqual(
+      [],
+    );
     expect(run(manifestFile, "const manifest = {};", "")).toEqual([]);
   });
 
   test("refuses a webhook URL other than the receiver, or a receiver that stops verifying", () => {
     expect(
       run(manifestFile, manifest.replace(receiverPath, "/v1/github/webhook"), receiver),
+    ).toHaveLength(1);
+    expect(
+      run(
+        manifestFile,
+        manifest.replace(baseVariable, `https://elsewhere.example${baseVariable}`),
+        receiver,
+      ),
     ).toHaveLength(1);
     expect(run(manifestFile, manifest, 'headers.get("x-github-delivery");')).toHaveLength(1);
     expect(run(manifestFile, manifest, 'headers.get("x-hub-signature-256");')).toHaveLength(1);

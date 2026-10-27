@@ -1,9 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import {
-  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
-  autoApprovalForbidden,
-  type IntegrationDefinition,
-} from "@opengeni/capabilities";
 import type { AccessGrant, InstallApiIntegrationRequest } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { validatedIntegrationInstallInput } from "../src/routes/api-integrations";
@@ -64,23 +59,5 @@ describe("autoApprovedTools governance", () => {
         resolved("workspace"),
       ),
     ).toThrow(HTTPException);
-  });
-
-  test("legacy curated governance cannot override user preferences", () => {
-    const governed: IntegrationDefinition = {
-      ...GOOGLE_DRIVE_INTEGRATION_DEFINITION,
-      autoApproval: { forbiddenOperationKeys: ["drive.files.update"] },
-    };
-    expect(autoApprovalForbidden(governed, "drive.files.update")).toBe(false);
-    expect(autoApprovalForbidden(governed, "drive.files.delete")).toBe(false);
-    expect(
-      autoApprovalForbidden(
-        { ...governed, autoApproval: { forbiddenOperationKeys: "all" } },
-        "anything",
-      ),
-    ).toBe(false);
-    expect(autoApprovalForbidden(GOOGLE_DRIVE_INTEGRATION_DEFINITION, "drive.files.update")).toBe(
-      false,
-    );
   });
 });

@@ -9,6 +9,7 @@ import {
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
 import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
+import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -65,6 +66,7 @@ import {
   listSocialConnections,
   mcpServerIdForCapability,
   upsertCapabilityCatalogItem,
+  setWorkspaceCapabilityCatalogItemLogo,
   type Database,
   type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
@@ -81,6 +83,7 @@ import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -376,6 +379,8 @@ type EnableCapabilityInput = {
   personalSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
+  /** Where a workspace MCP server's advertised icon is stored as its catalog logo. */
+  mcpServerLogoStorage?: McpServerLogoStorage | null;
   /** Server-owned receipt from a just-verified native Connect credential.
    * Never projected into EnableCapabilityRequest or accepted from a client. */
   verifiedConnection?: {
@@ -486,6 +491,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
+  let mcpServerLogoAssetPath: string | null = null;
   if (item.kind === "mcp") {
     if (
       [
@@ -543,6 +549,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
     if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
+    let serverInfo: unknown;
     installationMetadata = {
       ...installationMetadata,
       ...(input.verifiedConnection
@@ -554,8 +561,12 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
               input.probeMcpServer,
               headers ?? undefined,
               input.settings,
+              (info) => {
+                serverInfo = info;
+              },
             )),
     };
+    mcpServerLogoAssetPath = await workspaceMcpServerLogo(input, item, serverInfo);
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
     }
@@ -575,22 +586,55 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     metadata: installationMetadata,
     ...(input.payload.onlyIfUninstalled ? { onlyIfUninstalled: true } : {}),
   };
+  const withServerLogo = async (tx: Database, enabled: CapabilityInstallation) => {
+    if (mcpServerLogoAssetPath)
+      await setWorkspaceCapabilityCatalogItemLogo(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        id: item.id,
+        logoAssetPath: mcpServerLogoAssetPath,
+      });
+    return enabled;
+  };
   return {
     commit: (db: Database) =>
       item.kind === "mcp" && input.personalSetup
         ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
             assertPersonalIntegrationSetupAllowed(policy);
             assertOrganizationIntegrationAllowed(policy, "custom:mcp");
-            return enableCapabilityInstallation(tx, installation);
+            return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
           })
         : item.kind === "mcp"
           ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
               if (input.verifiedConnection)
                 await validateVerifiedMcpConnection({ ...input, db: tx }, item);
-              return enableCapabilityInstallation(tx, installation);
+              return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
             })
           : enableCapabilityInstallation(db, installation),
   };
+}
+
+/**
+ * The stored logo for a workspace's own MCP server, from the icon it just
+ * advertised during verification. Shared registry entries keep their curated
+ * catalog logo.
+ */
+export async function workspaceMcpServerLogo(
+  input: { settings: Settings; mcpServerLogoStorage?: McpServerLogoStorage | null | undefined },
+  item: Pick<CapabilityCatalogItem, "source" | "endpointUrl">,
+  serverInfo: unknown,
+): Promise<string | null> {
+  if (item.source !== "manual" || !item.endpointUrl || serverInfo === undefined) return null;
+  return await storeMcpServerLogo({
+    serverInfo,
+    endpointUrl: item.endpointUrl,
+    objectStorage: input.mcpServerLogoStorage,
+    fetch: (url, init) =>
+      pinnedFetch(url, init, input.settings, {
+        label: "MCP server icon",
+        requireHttpsOutsideLocalTest: true,
+      }),
+  });
 }
 
 async function validateVerifiedMcpConnection(
@@ -923,6 +967,8 @@ export type McpCapabilityProbeInput = {
 
 export type McpCapabilityProbeResult = {
   toolCount: number;
+  /** The server's `initialize` Implementation (serverInfo), when the probe saw it. */
+  serverInfo?: unknown;
 };
 
 export type McpCapabilityProbe = (
@@ -934,6 +980,7 @@ export async function validateMcpCapabilityConnection(
   probe: McpCapabilityProbe = probeStreamableHttpMcpServer,
   headers?: Record<string, string>,
   settings?: Settings,
+  onServerInfo?: (serverInfo: unknown) => void,
 ): Promise<Record<string, unknown>> {
   if (item.kind !== "mcp") {
     return {};
@@ -952,6 +999,7 @@ export async function validateMcpCapabilityConnection(
       ...(headers ? { headers } : {}),
       ...(settings ? { settings } : {}),
     });
+    if (result.serverInfo !== undefined) onServerInfo?.(result.serverInfo);
     return {
       mcpConnectivity: {
         status: "ok",
@@ -999,7 +1047,7 @@ async function probeStreamableHttpMcpServer(
           .catch((error: unknown) => {
             throw legacyMcpClientError(error);
           });
-        return { toolCount: tools.tools.length };
+        return { toolCount: tools.tools.length, serverInfo: client.getServerVersion() };
       },
     );
   } finally {
@@ -1008,7 +1056,7 @@ async function probeStreamableHttpMcpServer(
 }
 
 function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const normalized = message.replace(/\s+/g, " ").trim();
   const endpoint = safeEndpointLabel(endpointUrl);
   if (
@@ -1537,7 +1585,7 @@ async function fetchMcpRegistryPage(
       });
     }
     throw new HTTPException(502, {
-      message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `MCP registry request failed: ${errorMessage(error)}`,
     });
   } finally {
     clearTimeout(timeout);
@@ -1997,6 +2045,14 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
 };
 
 /**
+ * The catalog category chosen for a reviewed integration definition, if one
+ * was. Its catalog entry shows "productivity" when none was chosen.
+ */
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
+}
+
+/**
  * Agent-facing entries for the reviewed API integration definitions this
  * deployment can connect. Like the GitHub App and Connected Machine entries,
  * these are recommendations for the native Connect flow, not rows in the
@@ -2016,7 +2072,7 @@ export function integrationDefinitionCapabilityRecommendations(
       source: "built_in",
       name: definition.name,
       description: discovery?.description ?? definition.summary,
-      category: discovery?.category ?? "productivity",
+      category: integrationDefinitionCategory(definition.id) ?? "productivity",
       tags: [...(discovery?.tags ?? [definition.provider.id])],
       homepageUrl: null,
       providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",

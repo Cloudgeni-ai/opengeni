@@ -1,5 +1,16 @@
-import { EventTypeName, type EventActorKind, type WebhookEventAdapter } from "@opengeni/contracts";
-import { verifyHexBodyHmac, verifyStandardWebhook } from "./webhook-signatures";
+import {
+  EventTypeName,
+  type EventActorKind,
+  type WebhookEventAdapter,
+  type WebhookFormat,
+} from "@opengeni/contracts";
+import {
+  verifyBodyHmac,
+  verifyHeaderToken,
+  verifyHexBodyHmac,
+  verifyStandardWebhook,
+  verifyTimestampedHmac,
+} from "./webhook-signatures";
 import {
   firstText,
   oneLine,
@@ -38,16 +49,19 @@ export class WebhookBodyError extends Error {
 }
 
 function parseJsonObject(body: Uint8Array): Record<string, unknown> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
-  } catch {
-    throw new WebhookBodyError("The body is not JSON");
-  }
+  const parsed = parseJson(body);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new WebhookBodyError("The body is not a JSON object");
   }
   return parsed as Record<string, unknown>;
+}
+
+function parseJson(body: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  } catch {
+    throw new WebhookBodyError("The body is not JSON");
+  }
 }
 
 function eventType(value: string): string {
@@ -256,23 +270,185 @@ const sentryAdapter: WebhookAdapterDefinition = {
   },
 };
 
-const WEBHOOK_ADAPTERS: Record<WebhookEventAdapter, WebhookAdapterDefinition> = {
+/** One custom delivery may hold at most this many events. */
+export const CUSTOM_WEBHOOK_EVENTS_MAX = 100;
+
+/** A text value at a path: a non-empty string or a number. */
+function textAt(value: unknown, path: string | undefined): string | null {
+  return path === undefined ? null : firstText(value, [path]);
+}
+
+/**
+ * Any app's webhooks, read as the source's format describes: its signature
+ * scheme, where the event type and ids are, and whether one delivery holds a
+ * list of events.
+ */
+function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
+  const headerNames = [format.type, format.deliveryId].flatMap((source) =>
+    source && "header" in source ? [source.header.toLowerCase()] : [],
+  );
+  return {
+    retainedHeaders: [...new Set(headerNames)],
+    verify({ secret, headers, body, nowSeconds }) {
+      const signature = format.signature;
+      let deliveryKey: string | null = null;
+      if (signature.scheme === "standard_webhooks") {
+        const verified = verifyStandardWebhook({
+          secret,
+          headers,
+          body,
+          ...(nowSeconds !== undefined ? { nowSeconds } : {}),
+        });
+        if (!verified.ok) return verified;
+        deliveryKey = `webhook-id:${verified.webhookId}`;
+      } else {
+        const value = headers.get(signature.header);
+        const verified =
+          signature.scheme === "hmac_sha256"
+            ? verifyBodyHmac({
+                secret,
+                header: signature.header,
+                value,
+                body,
+                encoding: signature.encoding,
+                prefix: signature.prefix,
+              })
+            : signature.scheme === "timestamped_hmac_sha256"
+              ? verifyTimestampedHmac({
+                  secret,
+                  header: signature.header,
+                  value,
+                  body,
+                  toleranceSeconds: signature.toleranceSeconds,
+                  ...(nowSeconds !== undefined ? { nowSeconds } : {}),
+                })
+              : verifyHeaderToken({
+                  secret,
+                  header: signature.header,
+                  value,
+                  prefix: signature.prefix,
+                });
+        if (!verified.ok) return verified;
+      }
+      // The app's own delivery id keeps a retried delivery once; without one,
+      // the body's hash does.
+      const id = format.deliveryId
+        ? "header" in format.deliveryId
+          ? headers.get(format.deliveryId.header)?.trim() || null
+          : textAt(parseJsonOrNull(body), format.deliveryId.path)
+        : null;
+      return { ok: true, deliveryKey: id ? `delivery-id:${id.slice(0, 200)}` : deliveryKey };
+    },
+    read({ headers, body, receivedAt }) {
+      const payload = parseJson(body);
+      const batchPath = format.batch?.path;
+      const items = format.batch
+        ? batchPath === undefined
+          ? payload
+          : readPath(payload, batchPath)
+        : [payload];
+      if (!Array.isArray(items)) {
+        throw new WebhookBodyError(
+          batchPath === undefined
+            ? "The body is not a JSON list of events"
+            : `The body has no list of events at "${batchPath}"`,
+        );
+      }
+      if (items.length === 0) return { kind: "ignored", reason: "The delivery holds no events" };
+      if (items.length > CUSTOM_WEBHOOK_EVENTS_MAX) {
+        throw new WebhookBodyError(
+          `The delivery holds ${items.length} events; at most ${CUSTOM_WEBHOOK_EVENTS_MAX} are read`,
+        );
+      }
+      return {
+        kind: "events",
+        events: items.map((item) => customEvent(format, item, headers, receivedAt)),
+      };
+    },
+  };
+}
+
+function parseJsonOrNull(body: Uint8Array): unknown {
+  try {
+    return parseJson(body);
+  } catch {
+    return null;
+  }
+}
+
+function customEvent(
+  format: WebhookFormat,
+  item: unknown,
+  headers: Headers,
+  receivedAt: Date,
+): NormalizedEventInput {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) {
+    throw new WebhookBodyError(
+      format.batch ? "An event in the list is not a JSON object" : "The body is not a JSON object",
+    );
+  }
+  const source = format.type;
+  const typeText =
+    "value" in source
+      ? source.value
+      : "header" in source
+        ? headers.get(source.header)?.trim() || null
+        : textAt(item, source.path);
+  if (!typeText) {
+    throw new WebhookBodyError(
+      "header" in source
+        ? `The delivery has no ${source.header} header for its event type`
+        : `An event has no "${"path" in source ? source.path : ""}" for its type`,
+    );
+  }
+  const type = eventType(typeText);
+  const occurredAt = format.occurredAt ? readPath(item, format.occurredAt) : undefined;
+  return {
+    externalId: textAt(item, format.eventId)?.slice(0, 200) ?? null,
+    type,
+    occurredAt: parseEventTime(occurredAt) ?? receivedAt,
+    subject: textAt(item, format.subject),
+    summary: textAt(item, format.summary) ?? type,
+    url: textAt(item, format.url),
+    // A custom app's actor field is a name; it doesn't say whether it is a
+    // person or a bot.
+    actor: { kind: "unknown", name: textAt(item, format.actor) },
+    data: item,
+  };
+}
+
+const NAMED_ADAPTERS: Record<Exclude<WebhookEventAdapter, "custom">, WebhookAdapterDefinition> = {
   standard: standardAdapter,
   linear: linearAdapter,
   sentry: sentryAdapter,
 };
 
-export function webhookAdapter(adapter: WebhookEventAdapter): WebhookAdapterDefinition {
-  return WEBHOOK_ADAPTERS[adapter];
+/** A custom source stored without its format: every delivery is refused. */
+const unformattedAdapter: WebhookAdapterDefinition = {
+  retainedHeaders: [],
+  verify: () => ({ ok: false, reason: "This custom webhook has no format yet" }),
+  read: () => {
+    throw new WebhookBodyError("This custom webhook has no format yet");
+  },
+};
+
+/** How a webhook source verifies and reads deliveries: its adapter, with its format when custom. */
+export function webhookAdapterFor(source: {
+  adapter: WebhookEventAdapter | null;
+  format: WebhookFormat | null;
+}): WebhookAdapterDefinition {
+  const adapter = source.adapter ?? "standard";
+  if (adapter !== "custom") return NAMED_ADAPTERS[adapter];
+  return source.format ? customAdapter(source.format) : unformattedAdapter;
 }
 
 /** The retained headers of a delivery, lower-cased, for replay. */
 export function retainedWebhookHeaders(
-  adapter: WebhookEventAdapter,
+  adapter: WebhookAdapterDefinition,
   headers: Headers,
 ): Record<string, string> {
   const kept: Record<string, string> = {};
-  for (const name of webhookAdapter(adapter).retainedHeaders) {
+  for (const name of adapter.retainedHeaders) {
     const value = headers.get(name);
     if (value !== null) kept[name] = value.slice(0, 512);
   }

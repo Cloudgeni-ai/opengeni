@@ -6,7 +6,7 @@ use std::time::Duration;
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::{Value, json};
 
-use super::support::{Act, Fleet, OPERATOR_KEY, id};
+use super::support::{Act, Fleet, OPERATOR_KEY, counted, given_up, id, until};
 
 async fn operator(fleet: &Fleet, method: reqwest::Method, path: &str) -> (u16, Value) {
     fleet.call(method, path, Some(OPERATOR_KEY), None).await
@@ -201,6 +201,73 @@ async fn a_draining_host_hands_its_sandboxes_off_and_gets_nothing_new_until_undr
             let (_, hosts) = operator(&fleet, reqwest::Method::GET, "/v1/hosts").await;
             state(&hosts, "host-a.example") == Some(json!("live"))
         },
+    )
+    .await;
+}
+
+/// A drained host whose lease lapses, given up on and registering again,
+/// comes back draining: a host on its way out takes nothing new until an
+/// operator undrains it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drained_host_given_up_on_comes_back_draining_until_undrained() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let b = fleet.host("host-b.example").await;
+    let (status, drained) = operator(
+        &fleet,
+        reqwest::Method::POST,
+        "/v1/hosts/host-a.example/drain",
+    )
+    .await;
+    assert_eq!(status, 200, "{drained}");
+    let listed = async || {
+        let (_, hosts) = operator(&fleet, reqwest::Method::GET, "/v1/hosts").await;
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|host| host["name"] == "host-a.example")
+            .map(|host| host["state"].clone())
+    };
+
+    // Its lease lapses (a network break, or a fence that reset it), and it
+    // registers again.
+    let old = a.epoch();
+    a.renewing(false);
+    given_up(&fleet, &a).await;
+    until(
+        Duration::from_secs(5),
+        "the view sees it lost",
+        async || listed().await == Some(json!("lost")),
+    )
+    .await;
+    a.renewing(true);
+    until(Duration::from_secs(5), "it registers again", async || {
+        a.epoch() > old && counted(&fleet, &a).await
+    })
+    .await;
+    until(
+        Duration::from_secs(5),
+        "the view sees it back",
+        async || listed().await == Some(json!("draining")),
+    )
+    .await;
+    for _ in 0..4 {
+        let created = fleet.create(json!({})).await;
+        assert!(b.holds(id(&created)).is_some(), "placed on the live host");
+    }
+
+    let (status, _) = operator(
+        &fleet,
+        reqwest::Method::POST,
+        "/v1/hosts/host-a.example/undrain",
+    )
+    .await;
+    assert_eq!(status, 204);
+    until(
+        Duration::from_secs(5),
+        "the view sees it live",
+        async || listed().await == Some(json!("live")),
     )
     .await;
 }

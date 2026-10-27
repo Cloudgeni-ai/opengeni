@@ -172,6 +172,11 @@ function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse):
       return t("hooks.useMachines.theMachineSOwnerHas");
     case "personal_machine_not_permitted":
       return t("hooks.useMachines.onlyTheMachineSOwner");
+    // Neither is fixed by trying again: say what to do instead.
+    case "workspace_root_unavailable":
+      return t("hooks.useMachines.thatMachineHasntReported");
+    case "invalid_working_directory":
+      return t("hooks.useMachines.thisChatSWorkingFolder");
     default:
       return t("hooks.useMachines.tryAgain");
   }

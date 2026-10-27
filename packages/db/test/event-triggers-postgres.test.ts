@@ -280,6 +280,81 @@ describe("event sources", () => {
     expect(second).toEqual({ source: first.source, created: false });
   });
 
+  test("a custom webhook keeps its format and waits, blocked, for its secret", async () => {
+    const space = await workspace();
+    const format = {
+      preset: "tailscale",
+      signature: {
+        scheme: "timestamped_hmac_sha256" as const,
+        header: "Tailscale-Webhook-Signature",
+        toleranceSeconds: 300,
+      },
+      batch: {},
+      type: { path: "type" },
+      occurredAt: "timestamp",
+      summary: "message",
+    };
+    const { source } = await createEventSource(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: space.subjectId,
+      kind: "webhook",
+      adapter: "custom",
+      format,
+      name: "Tailnet",
+      ownerSubjectId: space.subjectId,
+      visibility: "private",
+      status: "blocked",
+      statusReason: { code: "awaiting_secret", text: "Paste the signing secret" },
+    });
+    expect(source).toMatchObject({ adapter: "custom", status: "blocked", format });
+    expect(source.routeId).toBeTruthy();
+    // An active custom source needs its secret.
+    await expect(
+      createEventSource(client.db, {
+        accountId: space.accountId,
+        workspaceId: space.workspaceId,
+        createdBySubjectId: space.subjectId,
+        kind: "webhook",
+        adapter: "custom",
+        format,
+        name: "Tailnet",
+        ownerSubjectId: space.subjectId,
+        visibility: "private",
+      }),
+    ).rejects.toThrow();
+    // A custom source needs a format, and only a custom source has one.
+    await expect(
+      createEventSource(client.db, {
+        accountId: space.accountId,
+        workspaceId: space.workspaceId,
+        createdBySubjectId: space.subjectId,
+        kind: "webhook",
+        adapter: "custom",
+        name: "No format",
+        ownerSubjectId: space.subjectId,
+        visibility: "private",
+        status: "blocked",
+        statusReason: { code: "awaiting_secret", text: "Paste the signing secret" },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      createEventSource(client.db, {
+        accountId: space.accountId,
+        workspaceId: space.workspaceId,
+        createdBySubjectId: space.subjectId,
+        kind: "webhook",
+        adapter: "linear",
+        format,
+        name: "Linear with a format",
+        ownerSubjectId: space.subjectId,
+        visibility: "private",
+        status: "blocked",
+        statusReason: { code: "awaiting_secret", text: "Paste the signing secret" },
+      }),
+    ).rejects.toThrow();
+  });
+
   test("the route table keeps no provider identity", async () => {
     const space = await workspace();
     const routeSecret = new Uint8Array(32).fill(7);

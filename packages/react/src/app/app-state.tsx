@@ -155,6 +155,7 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Transport and sign-in functions the app state calls. Pass one stable object
@@ -181,9 +182,24 @@ export type AppStateHost = Readonly<{
     password: string;
     rememberMe?: boolean;
   }) => Promise<unknown>;
-  signUpEmail: (input: { name: string; email: string; password: string }) => Promise<unknown>;
+  signUpEmail: (input: {
+    name: string;
+    email: string;
+    password: string;
+    signupChallengeToken?: string;
+  }) => Promise<unknown>;
   signOutManaged: () => Promise<unknown>;
-  startManagedSocialSignIn: (provider: "google" | "github") => Promise<void>;
+  startManagedSocialSignIn: (
+    provider: "google" | "github",
+    signupChallengeToken?: string,
+  ) => Promise<void>;
+  /**
+   * Passkey sign-in and passkey-only sign-up. Both run the browser's WebAuthn
+   * ceremony and leave the managed session cookie set; absent: the app offers
+   * no passkeys even where the server would.
+   */
+  signInPasskey?: () => Promise<unknown>;
+  signUpPasskey?: (input: { name: string; signupChallengeToken?: string }) => Promise<unknown>;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -311,6 +327,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     signOutManaged,
     signUpEmail,
     startManagedSocialSignIn,
+    signInPasskey,
+    signUpPasskey,
     slackLink,
   } = host;
   const [session, setSessionState] = useState<Session | null>(null);
@@ -457,6 +475,15 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       : true;
   const managedSocialProviders =
     clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
+  const managedPasskeySignIn =
+    clientConfig?.auth.mode === "managedSession" &&
+    clientConfig.auth.passkeySignIn === true &&
+    signInPasskey !== undefined;
+  const managedPasskeySignUp =
+    managedPasskeySignIn &&
+    clientConfig?.auth.mode === "managedSession" &&
+    clientConfig.auth.passkeySignUp === true &&
+    signUpPasskey !== undefined;
   // An older API omits the field; only an explicit false pauses account creation.
   const managedNewSignupsEnabled =
     clientConfig?.auth.mode === "managedSession"
@@ -1004,7 +1031,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     } catch (error) {
       return {
         resources: lastValidResources.current,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
     }
   }, [
@@ -2128,7 +2155,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
 
   async function handleManagedAuth(
     mode: "signin" | "signup",
-    input: { name: string; email: string; password: string },
+    input: { name: string; email: string; password: string; signupChallengeToken?: string },
   ) {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth(mode, slackLink.phase()),
@@ -2174,6 +2201,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSessionSetSignup(input: {
+    signupChallengeToken?: string;
     name: string;
     email: string;
     password: string;
@@ -2192,12 +2220,51 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     });
   }
 
-  async function handleManagedSocialAuth(provider: "google" | "github") {
+  async function handleManagedSocialAuth(
+    provider: "google" | "github",
+    signupChallengeToken?: string,
+  ) {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth("signin", slackLink.phase()),
     });
     beginSocialLoginAnalytics(provider);
-    await startManagedSocialSignIn(provider);
+    await startManagedSocialSignIn(provider, signupChallengeToken);
+  }
+
+  async function handleManagedPasskeyAuth(
+    mode: "signin" | "signup",
+    input?: { name: string; signupChallengeToken?: string },
+  ) {
+    if (!signInPasskey || (mode === "signup" && (!signUpPasskey || !input))) {
+      throw new Error("Passkeys aren't available here");
+    }
+    invalidatePrincipalWorkspaceState({
+      preservePendingSlackLink: preserveSlackLinkForManagedAuth(mode, slackLink.phase()),
+    });
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const ownsInvocation = () =>
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
+    const ceremony = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: async () =>
+        mode === "signup" ? await signUpPasskey!(input!) : await signInPasskey(),
+    });
+    if (ceremony.status === "stale") return;
+    if (mode === "signup") {
+      captureProductEvent("signup_submitted", { method: "passkey", verification_required: false });
+    }
+    const sessionRead = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: fetchAuthSession,
+    });
+    if (sessionRead.status === "stale") return;
+    const nextSession = sessionRead.value;
+    if (!nextSession) throw new ManagedAuthSessionUnavailableError(mode);
+    authPrincipalIdRef.current = nextSession.user.id;
+    if (mode === "signin") noteSuccessfulLogin(nextSession.user.id, "passkey");
+    else captureProductEvent("signup_completed", { method: "passkey", is_new_user: true });
+    setAuthSession(nextSession);
+    setAccessKeyVersion((version) => version + 1);
   }
 
   async function handleManagedSignOut() {
@@ -2643,11 +2710,14 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     managedEmailVerificationRequired,
     managedNewSignupsEnabled,
     managedSocialProviders,
+    managedPasskeySignIn,
+    managedPasskeySignUp,
     browserAccountsConfigured,
     browserAccountsEnabled,
     handleManagedAuth,
     handleManagedSessionSetSignup,
     handleManagedSocialAuth,
+    handleManagedPasskeyAuth,
     handleManagedSignOut: contextHandleManagedSignOut,
     handleBrowserActorTransition: contextHandleBrowserActorTransition,
     completeOrganizationOnboarding,

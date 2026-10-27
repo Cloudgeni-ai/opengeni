@@ -3,6 +3,7 @@ import {
   INTERACTION_MAX_SEMANTIC_NODES,
   type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
+import { isRecord } from "@opengeni/contracts/values";
 
 type CdpAxValue = {
   value?: unknown;
@@ -44,7 +45,19 @@ export type CdpAccessibilitySnapshot = {
   entriesByNodeId: Map<string, CdpAccessibilityEntry>;
   /** Raw parent links, including ignored nodes that have no entry. */
   rawParentByNodeId?: ReadonlyMap<string, string>;
+  /** Set when the tree was read within a node budget (a page too large to
+   * read whole): the listed nodes are real, and at least unreadCount more
+   * were left unread. */
+  incomplete?: { reason: "node_budget"; unreadCount: number };
 };
+
+/** A whole accessibility tree larger than one observation may hold. */
+export class CdpAccessibilityTreeTooLargeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CdpAccessibilityTreeTooLargeError";
+  }
+}
 
 /** AX ids and their relationships are scoped to one frame tree. Prefix them
  * before combining independently fetched frame trees into one observation. */
@@ -74,9 +87,13 @@ export function normalizeCdpAccessibilityTree(options: {
   controllerGeneration: string;
   targetId: string;
   documentGeneration: string;
+  /** Nodes known to exist but left unread by a bounded read. */
+  unreadCount?: number;
 }): CdpAccessibilitySnapshot {
   if (options.nodes.length > INTERACTION_MAX_SEMANTIC_NODES * 4) {
-    throw new Error("CDP accessibility tree exceeds its bounded input envelope");
+    throw new CdpAccessibilityTreeTooLargeError(
+      "CDP accessibility tree exceeds its bounded input envelope",
+    );
   }
   const rawById = new Map<string, CdpAxNode>();
   for (const node of options.nodes) {
@@ -202,7 +219,9 @@ export function normalizeCdpAccessibilityTree(options: {
     emitted.add(nodeId);
     nodeCount += 1;
     if (nodeCount > INTERACTION_MAX_SEMANTIC_NODES) {
-      throw new Error("CDP accessibility tree exceeds its semantic-node bound");
+      throw new CdpAccessibilityTreeTooLargeError(
+        "CDP accessibility tree exceeds its semantic-node bound",
+      );
     }
     // Children are visited first. Chromium marks the document AND its focused
     // control focused; a later ancestor must not replace that exact control.
@@ -232,6 +251,7 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const nodeId of rawById.keys()) roots.push(...visit(nodeId));
 
   const entries = [...entriesByNodeId.values()].filter((entry) => !suppressed.has(entry.nodeId));
+  const unreadCount = Math.min(options.unreadCount ?? 0, 1_000_000);
   return {
     roots,
     nodeCount,
@@ -244,6 +264,7 @@ export function normalizeCdpAccessibilityTree(options: {
         typeof node.parentId === "string" ? [[nodeId, node.parentId] as const] : [],
       ),
     ),
+    ...(unreadCount > 0 ? { incomplete: { reason: "node_budget" as const, unreadCount } } : {}),
   };
 }
 
@@ -472,8 +493,4 @@ function childIds(node: CdpAxNode): string[] {
 
 function finitePositiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

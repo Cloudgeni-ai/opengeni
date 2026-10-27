@@ -8,6 +8,7 @@ import {
 } from "@opengeni/db";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { z } from "zod";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const scopeSchema = z.object({
   accountId: z.uuid(),
@@ -108,6 +109,6 @@ export async function main(): Promise<void> {
 
 if (import.meta.main)
   main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(errorMessage(error));
     process.exitCode = 1;
   });

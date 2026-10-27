@@ -21,7 +21,6 @@ import {
   builtinAutomationTemplates,
   automationCadenceIssue,
   automationCadenceRepeats,
-  automationCadenceWords,
   automationNextRun,
   automationRunEventsLabel,
   automationScheduleSpec,
@@ -64,6 +63,7 @@ import type {
   ScheduledTaskScheduleSpec,
   Session,
 } from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { hasEventTriggers, isFinishedOnce, viewerTimeZone };
 
@@ -105,10 +105,6 @@ export interface ScheduleWords {
 
 export function scheduleWords(schedule: ScheduledTaskScheduleSpec, now: Date): ScheduleWords {
   return automationScheduleWords(t, schedule, now);
-}
-
-export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
-  return automationCadenceWords(t, cadence, now);
 }
 
 /** The next run, or null when paused, on demand, or no runs are left. */
@@ -378,7 +374,7 @@ function eventsForCreate(draft: Pick<ScheduleDraft, "events">) {
 export function overlapPolicyForCreate(
   draft: Pick<ScheduleDraft, "runMode" | "overlapPolicy">,
 ): ScheduleDraft["overlapPolicy"] {
-  return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
+  return draft.runMode === "new_session_per_run" ? "steer" : draft.overlapPolicy;
 }
 
 /** Existing chats, including one already created for a schedule, own their settings. */
@@ -610,7 +606,7 @@ export function updateRequestFromDraft(
  * or the request reference (that belongs in Technical details).
  */
 export function scheduleErrorText(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
+  const raw = errorMessage(error);
   const clean = raw
     .replace(/\s*Reference:\s*[\w-]+\.?\s*$/i, "")
     .replace(/^(?:Opengeni|OpenGeni) API \d+:\s*/i, "")

@@ -114,6 +114,7 @@ export function installOpenGeniReactNativeEnvironment(
       documentTarget.removeEventListener(type, listener),
   };
   Reflect.set(globals, "document", nativeDocument);
+  installAbortSignalCompat();
 
   const unsubscribe = adapters.lifecycle.subscribe((next) => {
     const wasActive = lifecycleState === "active";
@@ -142,6 +143,44 @@ function restoreGlobal(
   if (Reflect.get(target, key) !== installedValue) return;
   if (previousValue === undefined) Reflect.deleteProperty(target, key);
   else Reflect.set(target, key, previousValue);
+}
+
+function abortError(): Error {
+  if (typeof DOMException === "function") return new DOMException("Aborted", "AbortError");
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+/**
+ * React Native's AbortController drops `abort(reason)` and has no
+ * `signal.throwIfAborted()`. Connect flows and the client tell "the person
+ * closed the sign-in window" from a failure by the abort reason. Both only add
+ * standard behaviour, so they are installed once, when missing, and kept.
+ */
+function installAbortSignalCompat(): void {
+  const Controller = globalThis.AbortController;
+  if (typeof Controller !== "function") return;
+  const marker = new Error("probe");
+  const probe = new Controller();
+  const signalPrototype = Object.getPrototypeOf(probe.signal) as object | null;
+  probe.abort(marker);
+  if (probe.signal.reason !== marker) {
+    const abort = Reflect.get(Controller.prototype, "abort") as (this: AbortController) => void;
+    Reflect.set(Controller.prototype, "abort", function (this: AbortController, reason?: unknown) {
+      if (!this.signal.aborted)
+        Object.defineProperty(this.signal, "reason", {
+          configurable: true,
+          value: reason === undefined ? abortError() : reason,
+        });
+      abort.call(this);
+    });
+  }
+  if (signalPrototype && typeof Reflect.get(signalPrototype, "throwIfAborted") !== "function") {
+    Reflect.set(signalPrototype, "throwIfAborted", function (this: AbortSignal) {
+      if (this.aborted) throw this.reason ?? abortError();
+    });
+  }
 }
 
 function isObject(value: unknown): value is object {

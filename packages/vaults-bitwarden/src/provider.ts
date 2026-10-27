@@ -48,12 +48,14 @@ import {
   ATTACHMENT_FIELD_PREFIX,
   WriteRefused,
   archivedDateOf,
+  cipherPasskeys,
   createRequest,
   fieldValue,
   isProtected,
   itemKey,
   json,
   mapCipher,
+  passkeyCounterRequest,
   revisionOf,
   updateRequest,
   type Json,
@@ -850,7 +852,8 @@ export function createBitwardenVaultProvider(
         // The legacy flag means file writes; reads are declared in operations.
         files: true,
         groupGrants: false,
-        passkeys: false,
+        // Logins can hold passkeys (`login.fido2Credentials`); see readPasskeys.
+        passkeys: true,
         operations: {
           ...BITWARDEN_OPERATIONS,
           createItemTypes: [...BITWARDEN_OPERATIONS.createItemTypes],
@@ -874,7 +877,9 @@ export function createBitwardenVaultProvider(
         ? undefined
         : { ...BITWARDEN_OPERATIONS, archiveKind: "trash" };
       const fingerprint = (vault: string, name: string) => {
-        const hash = createHash("sha256").update(name);
+        // The salt changes when the mapping reports more about unchanged
+        // items (v1: passkeys), so mirrors list them again once.
+        const hash = createHash("sha256").update("passkeys-v1\n").update(name);
         let count = 0;
         const entries = snap.ciphers
           .filter((cipher) => inVault(cipher, vault))
@@ -1005,6 +1010,59 @@ export function createBitwardenVaultProvider(
         }
       }
       return values;
+    },
+
+    async readPasskeys(ctx, externalVaultId, externalItemId) {
+      const vault = vaultOf(externalVaultId);
+      ctx.budget.take("read");
+      const cipher = await liveCipher(ctx, vault, externalItemId);
+      // A hide-passwords collection lets the account use the item, not see its secrets.
+      if (cipher.viewPassword === false) {
+        throw new VaultProviderError(
+          "provider_permission_denied",
+          "This account may not use the item's passkeys in Bitwarden (the collection hides passwords)",
+        );
+      }
+      try {
+        return cipherPasskeys(cipher, await keyFor(ctx, cipher));
+      } catch (error) {
+        cryptoFailure(error, "This Bitwarden item's passkeys");
+      }
+    },
+
+    async updatePasskeySignCount(ctx, externalVaultId, externalItemId, update) {
+      const vault = vaultOf(externalVaultId);
+      ctx.budget.take("write");
+      const cipher = await liveCipher(ctx, vault, externalItemId);
+      if (cipher.edit === false || cipher.viewPassword === false) {
+        throw new VaultProviderError(
+          "provider_permission_denied",
+          "This Bitwarden item is read-only for this account",
+        );
+      }
+      let body: Json | null;
+      try {
+        body = passkeyCounterRequest(
+          cipher,
+          await keyFor(ctx, cipher),
+          update.credentialId,
+          update.signCount,
+          (await account(ctx)).userId,
+        );
+      } catch (error) {
+        if (error instanceof VaultProviderError) throw error;
+        cryptoFailure(error, "This Bitwarden item's passkeys");
+      }
+      if (!body) return;
+      await requestJson(
+        ctx,
+        "PUT",
+        `/ciphers/${lower(cipher.id)}`,
+        body,
+        "saving the passkey's counter",
+        { write: true },
+      );
+      forget(ctx);
     },
 
     async writeItem(ctx, externalVaultId, item): Promise<ProviderItemMeta> {

@@ -13,7 +13,7 @@ import {
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
   permissionsRequiredByFirstPartyTools,
-} from "../src/mcp/first-party-tool-permissions";
+} from "@opengeni/contracts";
 
 describe("permissionsRequiredByFirstPartyTools", () => {
   test("derives the union of every selected tool's registration permissions", () => {

@@ -1,4 +1,4 @@
-import { CircleAlertIcon } from "lucide-react";
+import { CircleAlertIcon, KeyRoundIcon } from "lucide-react";
 import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
@@ -24,6 +24,12 @@ export type SignInMethodsViewProps = {
   methods: SignInMethodView[];
   hasPassword: boolean;
   passwordAvailable: boolean;
+  /** False for an account without an email address, which can't have a password. */
+  showPassword?: boolean;
+  /** The account's passkeys; null where this deployment has no passkey sign-in. */
+  passkeys?: PasskeysView | null;
+  onAddPasskey?: () => void;
+  onRemovePasskey?: (passkeyId: string) => Promise<boolean>;
   busy: boolean;
   mutationLocked?: boolean;
   recentAuthRequired: boolean;
@@ -38,6 +44,44 @@ export type SignInMethodsViewProps = {
   onDisconnect: (provider: ManagedSocialProvider) => Promise<boolean>;
   onPassword: (password: string, currentPassword?: string) => Promise<boolean>;
 };
+
+export type PasskeysView = {
+  items: Array<{
+    id: string;
+    name: string;
+    createdAt: string;
+    lastUsedAt: string | null;
+    backedUp: boolean;
+  }>;
+  /** This deployment lets people add passkeys and sign in with them. */
+  available: boolean;
+  /** This browser can create a passkey. */
+  supported: boolean;
+  /** False while removing any one passkey would leave no way to sign in. */
+  canRemove: boolean;
+  /** Passkeys are this account's only way to sign in (it has no email address). */
+  onlyMethod: boolean;
+};
+
+const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+function shortDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : dateFormat.format(date);
+}
+
+function passkeyDescription(passkey: PasskeysView["items"][number]): ReactNode {
+  const added = shortDate(passkey.createdAt);
+  const used = passkey.lastUsedAt ? shortDate(passkey.lastUsedAt) : null;
+  return (
+    <>
+      <span className="block">
+        {passkey.backedUp ? "Synced passkey" : "On one device or security key"}
+        {added ? ` · Added ${added}` : ""}
+        {used ? ` · Last used ${used}` : " · Not used yet"}
+      </span>
+    </>
+  );
+}
 
 export function providerLabel(provider: ManagedSocialProvider): string {
   return provider === "google" ? "Google" : "GitHub";
@@ -115,14 +159,19 @@ function methodDescription(method: SignInMethodView): ReactNode {
 /** Presentation model is separate from the browser-cookie API and its actor fence. */
 export function SignInMethodsView(props: SignInMethodsViewProps) {
   const [disconnect, setDisconnect] = useState<ManagedSocialProvider | null>(null);
+  const [removePasskey, setRemovePasskey] = useState<{ id: string; name: string } | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
   const disconnectTrigger = useRef<HTMLButtonElement | null>(null);
+  const removePasskeyTrigger = useRef<HTMLButtonElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const locked = props.busy || props.recentAuthRequired || props.mutationLocked;
+  const showPassword = props.showPassword ?? true;
+  const passkeys = props.passkeys ?? null;
+  const showMethods = props.methods.length > 0 || showPassword;
 
   async function savePassword() {
     setValidation(null);
@@ -187,6 +236,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
                   setConfirmation("");
                   setPasswordOpen(false);
                   setDisconnect(null);
+                  setRemovePasskey(null);
                   props.onReauthenticate();
                 }}
               >
@@ -207,151 +257,227 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
       <SecurityPageBody>
         {feedback}
         <SectionStack>
-          <Section
-            title={SIGN_IN_METHODS_TITLE}
-            description={SIGN_IN_METHODS_DESCRIPTION}
-            action={props.sectionAction}
-          >
-            {props.methods.map((method) => (
-              <SettingRow
-                key={method.provider}
-                label={providerLabel(method.provider)}
-                description={methodDescription(method)}
-                control={
-                  method.connected ? (
-                    <RowButton
-                      disabled={locked || !method.canDisconnect}
-                      aria-label={`Disconnect ${providerLabel(method.provider)}`}
-                      onClick={(event) => {
-                        disconnectTrigger.current = event.currentTarget;
-                        setDisconnect(method.provider);
-                      }}
-                    >
-                      Disconnect
-                    </RowButton>
-                  ) : (
-                    <RowButton
-                      disabled={locked || !method.available}
-                      aria-label={`${method.reconnectRequired ? "Reconnect" : "Connect"} ${providerLabel(method.provider)}`}
-                      onClick={() => props.onConnect(method.provider)}
-                    >
-                      {method.reconnectRequired ? "Reconnect" : "Connect"}
-                    </RowButton>
-                  )
-                }
-              />
-            ))}
-            <SettingRow
-              label="Password"
+          {passkeys ? (
+            <Section
+              title="Passkeys"
               description={
-                <>
-                  <span className="block">
-                    {props.hasPassword
-                      ? "A password is set for email sign-in."
-                      : "No password set. Add one to sign in with your email."}
-                  </span>
-                  {props.passwordAvailable ? null : (
-                    <span className="block">
-                      Password sign-in is unavailable on this deployment.
-                    </span>
-                  )}
-                </>
+                passkeys.onlyMethod
+                  ? "Your account has no email address or password, so these passkeys are how you sign in. Keep at least two in case you lose a device."
+                  : "Sign in with your fingerprint, face, device PIN or a security key instead of a password."
               }
-              control={
-                passwordOpen ? undefined : (
-                  <RowButton
-                    disabled={locked || !props.passwordAvailable}
-                    onClick={() => {
-                      setPasswordOpen(true);
-                      setValidation(null);
-                    }}
-                  >
-                    {props.hasPassword ? "Change password" : "Set password"}
-                  </RowButton>
-                )
-              }
-            />
-            {passwordOpen ? (
-              <form
-                aria-label={props.hasPassword ? "Change password" : "Set password"}
-                className="py-4"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!locked) void savePassword();
-                }}
-              >
-                <FieldStack className="max-w-md gap-5">
-                  {props.hasPassword ? (
-                    <Field label="Current password" id="signin-current-password" required>
-                      <TextInput
-                        type="password"
-                        autoComplete="current-password"
-                        required
-                        disabled={locked}
-                        value={currentPassword}
-                        onChange={(event) => setCurrentPassword(event.target.value)}
-                      />
-                    </Field>
-                  ) : null}
-                  <Field
-                    label="New password"
-                    id="signin-new-password"
-                    required
-                    hint="Use at least 8 characters. A unique password keeps your account safer."
-                  >
-                    <TextInput
-                      type="password"
-                      autoComplete="new-password"
-                      minLength={8}
-                      maxLength={128}
-                      required
-                      disabled={locked}
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      aria-invalid={Boolean(validation) || undefined}
-                    />
-                  </Field>
-                  <Field label="Confirm new password" id="signin-confirm-password" required>
-                    <TextInput
-                      type="password"
-                      autoComplete="new-password"
-                      required
-                      disabled={locked}
-                      value={confirmation}
-                      onChange={(event) => setConfirmation(event.target.value)}
-                      aria-invalid={Boolean(validation) || undefined}
-                      aria-describedby={validation ? "signin-password-validation" : undefined}
-                    />
-                  </Field>
-                </FieldStack>
-                {validation ? (
-                  <p
-                    id="signin-password-validation"
-                    role="alert"
-                    className="mt-3 flex items-start gap-1.5 text-xs leading-4.5 text-danger"
-                  >
-                    <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-                    <span className="min-w-0">{validation}</span>
-                  </p>
-                ) : null}
-                <div className="mt-5 flex flex-wrap gap-2">
-                  <Button type="submit" size="sm" className="pointer-coarse:h-11" disabled={locked}>
-                    {props.busy ? "Saving…" : "Save password"}
-                  </Button>
+              action={
+                passkeys.available ? (
                   <Button
-                    type="button"
                     variant="ghost"
                     size="sm"
                     className="pointer-coarse:h-11"
-                    disabled={props.busy}
-                    onClick={closePassword}
+                    disabled={locked || !passkeys.supported}
+                    onClick={() => props.onAddPasskey?.()}
                   >
-                    Cancel
+                    <KeyRoundIcon aria-hidden="true" />
+                    Add passkey
                   </Button>
-                </div>
-              </form>
-            ) : null}
-          </Section>
+                ) : undefined
+              }
+            >
+              {passkeys.items.length === 0 ? (
+                <SettingRow
+                  label="No passkeys yet"
+                  description={
+                    passkeys.supported
+                      ? "Add one to sign in without typing a password. Your password manager or device keeps it."
+                      : "This browser can't create passkeys. Open Opengeni in a current browser to add one."
+                  }
+                />
+              ) : (
+                passkeys.items.map((passkey) => (
+                  <SettingRow
+                    key={passkey.id}
+                    label={passkey.name}
+                    description={passkeyDescription(passkey)}
+                    control={
+                      <RowButton
+                        disabled={locked || !passkeys.canRemove}
+                        aria-label={`Remove passkey ${passkey.name}`}
+                        onClick={(event) => {
+                          removePasskeyTrigger.current = event.currentTarget;
+                          setRemovePasskey({ id: passkey.id, name: passkey.name });
+                        }}
+                      >
+                        Remove
+                      </RowButton>
+                    }
+                  />
+                ))
+              )}
+              {passkeys.items.length > 0 && !passkeys.canRemove ? (
+                <p className="py-3 text-xs leading-4.5 text-fg-muted">
+                  {passkeys.onlyMethod
+                    ? "Add another passkey before removing this one, so you can still sign in."
+                    : "This is your last usable sign-in method. Add another passkey or method before removing it."}
+                </p>
+              ) : null}
+              {passkeys.available ? null : (
+                <p className="py-3 text-xs leading-4.5 text-fg-muted">
+                  Passkey sign-in is unavailable on this deployment.
+                </p>
+              )}
+            </Section>
+          ) : null}
+          {showMethods ? (
+            <Section
+              title={SIGN_IN_METHODS_TITLE}
+              description={SIGN_IN_METHODS_DESCRIPTION}
+              action={props.sectionAction}
+            >
+              {props.methods.map((method) => (
+                <SettingRow
+                  key={method.provider}
+                  label={providerLabel(method.provider)}
+                  description={methodDescription(method)}
+                  control={
+                    method.connected ? (
+                      <RowButton
+                        disabled={locked || !method.canDisconnect}
+                        aria-label={`Disconnect ${providerLabel(method.provider)}`}
+                        onClick={(event) => {
+                          disconnectTrigger.current = event.currentTarget;
+                          setDisconnect(method.provider);
+                        }}
+                      >
+                        Disconnect
+                      </RowButton>
+                    ) : (
+                      <RowButton
+                        disabled={locked || !method.available}
+                        aria-label={`${method.reconnectRequired ? "Reconnect" : "Connect"} ${providerLabel(method.provider)}`}
+                        onClick={() => props.onConnect(method.provider)}
+                      >
+                        {method.reconnectRequired ? "Reconnect" : "Connect"}
+                      </RowButton>
+                    )
+                  }
+                />
+              ))}
+              {showPassword ? (
+                <SettingRow
+                  label="Password"
+                  description={
+                    <>
+                      <span className="block">
+                        {props.hasPassword
+                          ? "A password is set for email sign-in."
+                          : "No password set. Add one to sign in with your email."}
+                      </span>
+                      {props.passwordAvailable ? null : (
+                        <span className="block">
+                          Password sign-in is unavailable on this deployment.
+                        </span>
+                      )}
+                    </>
+                  }
+                  control={
+                    passwordOpen ? undefined : (
+                      <RowButton
+                        disabled={locked || !props.passwordAvailable}
+                        onClick={() => {
+                          setPasswordOpen(true);
+                          setValidation(null);
+                        }}
+                      >
+                        {props.hasPassword ? "Change password" : "Set password"}
+                      </RowButton>
+                    )
+                  }
+                />
+              ) : null}
+              {passwordOpen ? (
+                <form
+                  aria-label={props.hasPassword ? "Change password" : "Set password"}
+                  className="py-4"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!locked) void savePassword();
+                  }}
+                >
+                  <FieldStack className="max-w-md gap-5">
+                    {props.hasPassword ? (
+                      <Field label="Current password" id="signin-current-password" required>
+                        <TextInput
+                          type="password"
+                          autoComplete="current-password"
+                          required
+                          disabled={locked}
+                          value={currentPassword}
+                          onChange={(event) => setCurrentPassword(event.target.value)}
+                        />
+                      </Field>
+                    ) : null}
+                    <Field
+                      label="New password"
+                      id="signin-new-password"
+                      required
+                      hint="Use at least 8 characters. A unique password keeps your account safer."
+                    >
+                      <TextInput
+                        type="password"
+                        autoComplete="new-password"
+                        minLength={8}
+                        maxLength={128}
+                        required
+                        disabled={locked}
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        aria-invalid={Boolean(validation) || undefined}
+                      />
+                    </Field>
+                    <Field label="Confirm new password" id="signin-confirm-password" required>
+                      <TextInput
+                        type="password"
+                        autoComplete="new-password"
+                        required
+                        disabled={locked}
+                        value={confirmation}
+                        onChange={(event) => setConfirmation(event.target.value)}
+                        aria-invalid={Boolean(validation) || undefined}
+                        aria-describedby={validation ? "signin-password-validation" : undefined}
+                      />
+                    </Field>
+                  </FieldStack>
+                  {validation ? (
+                    <p
+                      id="signin-password-validation"
+                      role="alert"
+                      className="mt-3 flex items-start gap-1.5 text-xs leading-4.5 text-danger"
+                    >
+                      <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+                      <span className="min-w-0">{validation}</span>
+                    </p>
+                  ) : null}
+                  <div className="mt-5 flex flex-wrap gap-2">
+                    <Button
+                      type="submit"
+                      size="sm"
+                      className="pointer-coarse:h-11"
+                      disabled={locked}
+                    >
+                      {props.busy ? "Saving…" : "Save password"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="pointer-coarse:h-11"
+                      disabled={props.busy}
+                      onClick={closePassword}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              ) : null}
+            </Section>
+          ) : null}
         </SectionStack>
         <p className="mt-3 text-xs leading-4.5 text-fg-muted">
           These methods only sign you in to Opengeni. Repository access, Gmail, and Google Drive are
@@ -371,6 +497,29 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
         restoreFocusRef={disconnectTrigger}
         restoreFocusFallbackRef={headingRef}
         onConfirm={async () => (disconnect && !locked ? props.onDisconnect(disconnect) : false)}
+      >
+        {props.error ? (
+          <p role="alert" className="text-sm text-status-failed">
+            {props.error}
+          </p>
+        ) : null}
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={removePasskey !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemovePasskey(null);
+        }}
+        title={`Remove ${removePasskey?.name ?? "this passkey"}?`}
+        description="It can no longer sign in to your account, and you'll be signed out everywhere, including here. The passkey may still be listed in your password manager or device; you can delete it there."
+        confirmLabel="Remove passkey"
+        cancelAutoFocus
+        restoreFocusRef={removePasskeyTrigger}
+        restoreFocusFallbackRef={headingRef}
+        onConfirm={async () =>
+          removePasskey && !locked && props.onRemovePasskey
+            ? props.onRemovePasskey(removePasskey.id)
+            : false
+        }
       >
         {props.error ? (
           <p role="alert" className="text-sm text-status-failed">

@@ -12,6 +12,7 @@ import type { ToolActionReview, ToolReviewDetailsPage, ToolReviewStatus } from "
 import { cn } from "../lib/cn";
 import { SecretRefText } from "./secret-ref-chip";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { reviewFacts } from "../approval-review-model";
 
 export type ToolReviewDetailsLoader = (
   review: ToolActionReview,
@@ -68,19 +69,8 @@ const toneText: Record<Tone, string> = {
   failed: "text-og-status-failed",
   muted: "text-og-fg-muted",
 };
-/** Fields that only identify the selection; the count, examples and details cover them. */
-const selectionPaths = new Set([
-  "/messageIds",
-  "/messageId",
-  "/threadId",
-  "/addLabelIds",
-  "/removeLabelIds",
-  "/labelIds",
-]);
 /** Shown when an older request's saved values are gone: approval is impossible, decline is not. */
 export const UNRECOVERABLE_TEXT = (t: OpenGeniText) => t("toolActionReview.theDetailsOfThisOlder");
-/** Long argument lists stay readable; the full set is one click away in details. */
-const VISIBLE_FIELDS = 6;
 
 function StatusIcon({ status, busy }: { status: ToolReviewStatus; busy?: boolean }) {
   const className = "size-4";
@@ -209,21 +199,7 @@ function ReviewFacts({
 }) {
   const t = useOpenGeniText();
   const canOpen = Boolean(onViewDetails && review.detailsAvailable);
-  const selection =
-    review.selectionCount === undefined
-      ? undefined
-      : review.fields.find((field) =>
-          ["/messageIds", "/messageId", "/threadId"].includes(field.path),
-        );
-  const fields = selection
-    ? review.fields.filter((field) => !selectionPaths.has(field.path))
-    : review.fields;
-  const shown = fields.slice(0, VISIBLE_FIELDS);
-  const hiddenFields = fields.length - shown.length + review.moreFields;
-  // The title already names the main effect; list only the remaining ones.
-  const effects = review.effects.filter(
-    (effect) => effect !== review.approveLabel && !review.title.startsWith(effect),
-  );
+  const { selection, shown, hiddenFields, effects } = reviewFacts(review);
   const note =
     (showStatusDetail
       ? review.status === "blocked"

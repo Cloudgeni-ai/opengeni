@@ -11,7 +11,8 @@ export type LabScenarioId =
   | "failure"
   | "long"
   | "media"
-  | "previewing";
+  | "previewing"
+  | "math";
 
 export interface LabScenario {
   id: LabScenarioId;
@@ -390,6 +391,33 @@ function previewing(): LabScenario {
   return { id: "previewing", title: "Writing a preview", events: r.events, running: true };
 }
 
+/** Math in every delimiter an agent uses, next to prices and code that must stay text. */
+function math(): LabScenario {
+  const r = recorder("lab-math");
+  const t = "turn-math";
+  r.push("user.message", { text: "What is the impedance of the RC circuit at 1 kHz?" }, t);
+  r.push("turn.started", {}, t, 400);
+  const text = [
+    "For a resistor \\(R\\) in series with a capacitor \\(C\\), the impedance is",
+    "",
+    "\\[",
+    "Z = R - \\frac{j}{\\omega C}, \\qquad |Z| = \\sqrt{R^2 + \\left(\\frac{1}{\\omega C}\\right)^2}",
+    "\\]",
+    "",
+    "With $R = 1\\,\\mathrm{k}\\Omega$, $C = 100\\,\\mathrm{nF}$ and $\\omega = 2\\pi f$:",
+    "",
+    "$$",
+    "\\boxed{|Z| \\approx 1.88\\,\\mathrm{k}\\Omega}",
+    "$$",
+    "",
+    "The parts cost $5 and $10, and `echo $HOME` stays code.",
+  ].join("\n");
+  r.push("agent.message.delta", { text }, t, 2_500);
+  r.push("agent.message.completed", { text }, t, 300);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "math", title: "Math", events: r.events, running: false };
+}
+
 export function labScenarios(): LabScenario[] {
   return [
     answer(),
@@ -400,5 +428,6 @@ export function labScenarios(): LabScenario[] {
     longContent(),
     media(),
     previewing(),
+    math(),
   ];
 }

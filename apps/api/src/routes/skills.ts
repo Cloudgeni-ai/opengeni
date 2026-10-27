@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 
-import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
+import { createGitHubSkillSourceClient } from "@opengeni/core";
 import { registerSkillContentRoutes } from "./skill-content";
 import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
 import { parseRequestJson } from "../http/request-body";

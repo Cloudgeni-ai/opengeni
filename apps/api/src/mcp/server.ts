@@ -166,6 +166,8 @@ import {
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
+  getWorkspaceGrant,
+  readTurnSenderAccess,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -197,8 +199,13 @@ import {
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
+  scheduledTaskOverlapPolicyToolInput,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
+import {
+  exactAgentAttemptClaims,
+  sessionFleetContextForCaller,
+} from "../sandbox/agent-fleet-context";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
@@ -215,7 +222,7 @@ import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
   type FirstPartyToolAuthorization,
-} from "./first-party-tool-permissions";
+} from "@opengeni/contracts";
 import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
@@ -275,7 +282,7 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   eventTriggersEnabled,
   manualScheduledTaskTriggerUsageKey,
@@ -320,7 +327,6 @@ import {
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
-  buildFleetContextForSession,
   fleetAgentNotice,
   listFleet,
   provisionSandbox,
@@ -398,6 +404,7 @@ import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -425,6 +432,7 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -711,6 +719,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
         schedule: scheduledTaskScheduleToolInput().optional(),
+        overlapPolicy: scheduledTaskOverlapPolicyToolInput(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
@@ -1076,6 +1085,48 @@ export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
   return method.startsWith("notifications/") && !("id" in message);
 }
 
+/**
+ * The grant of the person an in-chat setup card is for, as their chat sees it.
+ * For an agent, that is the human it acts for, with what their sign-in could
+ * do when they sent this turn's message, or their latest message in this chat
+ * for a turn the platform started for them (frozen with each message: an
+ * embed's token narrows it, and their own workspace counts without a
+ * membership). Without such a message it falls back to their membership. Any
+ * other caller is the person, with this request's own (already effective)
+ * grant.
+ */
+async function connectingPersonGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<{
+  permissions: readonly string[];
+  permissionMode?: "legacy" | "explicit" | undefined;
+} | null> {
+  const claims = exactAgentAttemptClaims(grant);
+  if (!claims) {
+    return {
+      permissions: grant.permissions,
+      ...(grant.permissionMode ? { permissionMode: grant.permissionMode } : {}),
+    };
+  }
+  const { initiatingHumanSubjectId } = await requireLiveAgentAttemptAuthorization(
+    db,
+    grant,
+    sessionId,
+  );
+  if (!initiatingHumanSubjectId) return null;
+  const sent = await readTurnSenderAccess(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    turnId: claims.turnId,
+    subjectId: initiatingHumanSubjectId,
+  });
+  if (sent) return { permissions: sent.permissions, permissionMode: "explicit" };
+  return await getWorkspaceGrant(db, initiatingHumanSubjectId, grant.workspaceId);
+}
+
 export function buildOpenGeniMcpServer(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1246,6 +1297,7 @@ export function buildOpenGeniMcpServer(
       server,
       deps,
       grant,
+      sessionId,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -2112,7 +2164,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
@@ -2208,7 +2260,7 @@ export function buildOpenGeniMcpServer(
         if (existing.status === "paused") {
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const adminPause =
           viewer.admin &&
           (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
@@ -2236,7 +2288,7 @@ export function buildOpenGeniMcpServer(
         if (existing.status === "active") {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const update = await validatedScheduledTaskUpdate({
           settings: deps.settings,
           db: deps.db,
@@ -3973,33 +4025,6 @@ function registerWorkspaceArtifactTools(
   );
 }
 
-function exactAgentAttemptClaims(grant: AccessGrant): {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-} | null {
-  if (grant.principalKind !== "agent_attempt") return null;
-  const metadata = grant.metadata ?? {};
-  if (
-    typeof metadata["sessionId"] !== "string" ||
-    typeof metadata["turnId"] !== "string" ||
-    typeof metadata["attemptId"] !== "string" ||
-    typeof metadata["executionGeneration"] !== "number" ||
-    !Number.isSafeInteger(metadata["executionGeneration"]) ||
-    metadata["executionGeneration"] < 1 ||
-    metadata["executionGeneration"] > 2_147_483_647
-  ) {
-    return null;
-  }
-  return {
-    sessionId: metadata["sessionId"],
-    turnId: metadata["turnId"],
-    attemptId: metadata["attemptId"],
-    executionGeneration: metadata["executionGeneration"],
-  };
-}
-
 function registerTaskNoteTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -4449,35 +4474,7 @@ function registerFleetTools(
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
   const fleetContext = async (): Promise<FleetContext> => {
-    const claims = exactAgentAttemptClaims(grant);
-    const actor = claims
-      ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
-      : null;
-    return await buildFleetContextForSession(deps, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId,
-      ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
-      ...(actor && claims
-        ? {
-            commandAttempt: {
-              turnId: claims.turnId,
-              attemptId: claims.attemptId,
-              executionGeneration: claims.executionGeneration,
-            },
-          }
-        : {}),
-      ...(actor?.initiatingHumanSubjectId && claims
-        ? {
-            attemptAuthority: {
-              turnId: claims.turnId,
-              attemptId: claims.attemptId,
-              executionGeneration: claims.executionGeneration,
-              initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-            },
-          }
-        : {}),
-    });
+    return await sessionFleetContextForCaller(deps, grant, sessionId);
   };
 
   const oneOffCodemodeEnvironment = async (
@@ -5341,7 +5338,7 @@ function registerWorkspaceOrchestrationTools(
       });
     } catch (error) {
       deps.observability?.warn("Failed to record a consumed child answer", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };
@@ -7242,6 +7239,17 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
+      // The card offers only what the person's own grant can finish, by the
+      // same rule. When it says they can't connect here, the agent must not
+      // send them to it. The person is the human this agent acts for, with
+      // the access their chat has: what their sign-in could do when they sent
+      // this turn's message, or their latest one here for a turn the platform
+      // started (an embed's token narrows it, and their own workspace counts
+      // without a membership), else their membership. Without either there is
+      // nothing to say beyond the card.
+      const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const personCannotConnect =
+        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",
@@ -7268,8 +7276,9 @@ function registerCapabilityDiscoveryTools(
         status: "authorization_requested",
         action: setup.action,
         eventId,
-        message:
-          item.id === CONNECTED_MACHINE_CAPABILITY_ID
+        message: personCannotConnect
+          ? `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
+          : item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."

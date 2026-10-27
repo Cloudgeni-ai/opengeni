@@ -21,7 +21,11 @@ import {
   CONNECTED_COMMAND_CLASSIFY_LIMIT,
 } from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/operation-inventory";
@@ -41,6 +45,9 @@ beforeAll(async () => {
   const db = await acquireSharedTestDatabase("operation-inventory");
   if (!db) throw new Error("PostgreSQL required");
   shared = db;
+  // 0984 withholds the re-arm's runtime grant for one release; run as the
+  // runtime will once it is granted.
+  await grantDeferredRuntimeAccess(db.admin);
   client = createDb(db.appUrl);
 }, 180_000);
 
@@ -307,6 +314,61 @@ test("a plain reconnect of the same process keeps its generation, so nothing it 
   expect(await claim(machine, instance)).toBe(1);
   await report(machine, bus, instance, [[opId, 1]]);
   expect(answers(sent).map((answer) => answer.endOpIds)).toEqual([[]]);
+});
+
+test("a returning runner's report makes the running commands it did not answer for due again, and only those", async () => {
+  // While the machine was offline the reconciler's recovery request went
+  // unanswered, and the commands were left to the runner. The runner lists
+  // only operations it knows, so one whose start never reached it would
+  // never complete. Its report makes them due, for the reconciler to ask once more.
+  const machine = await seedMachine();
+  const { bus } = answerChannel();
+  const instance = crypto.randomUUID();
+  expect(await claim(machine, instance)).toBe(1);
+  const unknown = `never-started-${crypto.randomUUID()}`;
+  const known = `running-${crypto.randomUUID()}`;
+  const answeredBefore = `answered-${crypto.randomUUID()}`;
+  const exited = `exited-${crypto.randomUUID()}`;
+  for (const opId of [unknown, known, answeredBefore]) await insertCommand(machine, instance, opId);
+  await insertCommand(machine, instance, exited, "exited");
+  const later = new Date(Date.now() + 86_400_000);
+  await shared.admin`update session_background_commands
+    set last_reconcile_outcome = 'provider_unanswered', reconcile_after = ${later}
+    where op_id in (${unknown}, ${known}, ${exited})`;
+  await shared.admin`update session_background_commands
+    set last_reconcile_outcome = 'provider_running', reconcile_after = ${later}
+    where op_id = ${answeredBefore}`;
+  await report(machine, bus, instance, [[known, 1]]);
+  const rows = new Map(
+    (await commandRows(machine)).map((row) => [
+      row.op_id as string,
+      {
+        outcome: row.last_reconcile_outcome,
+        due: (row.reconcile_after as Date).getTime() <= Date.now(),
+      },
+    ]),
+  );
+  expect(rows.get(unknown)).toEqual({ outcome: "runner_reported", due: true });
+  expect(rows.get(known)).toEqual({ outcome: "runner_reported", due: true });
+  expect(rows.get(answeredBefore)).toEqual({ outcome: "provider_running", due: false });
+  expect(rows.get(exited)).toEqual({ outcome: "provider_unanswered", due: false });
+  // The reconciler now claims them to ask the runner.
+  const claims = await claimConnectedMachineSessionBackgroundCommands(client.db, {
+    claimId: crypto.randomUUID(),
+    limit: 100,
+    claimTtlMs: 60_000,
+  });
+  expect(
+    claims
+      .filter((claimed) => claimed.enrollmentId === machine.enrollment.id)
+      .map((claimed) => [claimed.opId, claimed.proof])
+      .sort(),
+  ).toEqual(
+    [
+      [known, null],
+      [unknown, null],
+    ].sort(),
+  );
 });
 
 test("a foreground op's output that nobody released is kept while its generation is current, however long ago it completed", async () => {

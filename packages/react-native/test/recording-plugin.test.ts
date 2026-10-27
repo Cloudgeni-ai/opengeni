@@ -26,6 +26,7 @@ describe("recording config plugin", () => {
       "android.permission.RECORD_AUDIO",
       "android.permission.FOREGROUND_SERVICE",
       "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+      "android.permission.POST_NOTIFICATIONS",
     ]);
     expect(result.application[0]!.service).toEqual([
       {

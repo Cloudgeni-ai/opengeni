@@ -1587,6 +1587,39 @@ describe("web API auth helpers", () => {
     );
   });
 
+  test("preserves signup verification codes and messages from API admission envelopes", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      for (const [status, code, message] of [
+        [403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the signup verification."],
+        [503, "SIGNUP_CHALLENGE_UNAVAILABLE", "Verification is unavailable. Please try again."],
+      ] as const) {
+        globalThis.fetch = (async () =>
+          Response.json(
+            {
+              error: {
+                status,
+                code: status === 503 ? "upstream_unavailable" : "forbidden",
+                message,
+                retryable: status === 503,
+                details: { managedAuthCode: code },
+              },
+            },
+            { status },
+          )) as unknown as typeof fetch;
+        await expect(
+          signUpEmail({
+            name: "Human",
+            email: "human@example.test",
+            password: "long-password-123",
+          }),
+        ).rejects.toMatchObject({ status, code, message, field: null });
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("parses Better Auth failures into structured errors without raw JSON prefixes", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>

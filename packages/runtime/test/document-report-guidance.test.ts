@@ -39,30 +39,84 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
 });
 
 test("Office file Skills claim preinstalled only the Python packages the managed images install", async () => {
-  const pythonPackages = async (dockerfile: string) => {
-    const text = await Bun.file(new URL(`../../../docker/${dockerfile}`, import.meta.url)).text();
+  const dockerfiles = await Promise.all(
+    ["sandbox.Dockerfile", "desktop.Dockerfile"].map((dockerfile) =>
+      Bun.file(new URL(`../../../docker/${dockerfile}`, import.meta.url)).text(),
+    ),
+  );
+  const images = dockerfiles.map((text) => {
     const list = /^ARG OPENGENI_PYTHON_PACKAGES="([^"]+)"$/m.exec(text)?.[1];
     expect(list).toBeDefined();
     return new Set(list!.split(/\s+/).map((pin) => pin.split("==")[0]));
-  };
-  const images = await Promise.all([
-    pythonPackages("sandbox.Dockerfile"),
-    pythonPackages("desktop.Dockerfile"),
-  ]);
-  for (const [skill, expected] of [
-    ["documents", "python-docx"],
-    ["presentations", "python-pptx"],
-    ["spreadsheets", "openpyxl"],
+  });
+  for (const [skill, expected, alsoClaimed] of [
+    ["documents", "python-docx", " and Chromium, and no LibreOffice, pandoc or PDF library"],
+    ["presentations", "python-pptx", " and no slide renderer"],
+    ["spreadsheets", "openpyxl", ""],
   ] as const) {
     const prose = (
       await Bun.file(
         new URL(`../src/bundled_artifact_skills/${skill}/SKILL.md`, import.meta.url),
       ).text()
     ).replace(/\s+/g, " ");
-    const claims = [...prose.matchAll(/Managed sandboxes already include ([^,;.]+)/g)].map(
-      (match) => match[1],
-    );
-    expect(claims).toEqual([expected]);
+    const claims = [
+      ...prose.matchAll(/Managed sandboxes already include (.+?),? so do not check/g),
+    ].map((match) => match[1]);
+    expect(claims).toEqual([`${expected}${alsoClaimed}`]);
     for (const image of images) expect(image.has(expected)).toBe(true);
   }
+  // The documents Skill prints PDFs with the `chromium` command: the sandbox
+  // image installs Debian Chromium, the desktop image aliases that name to its
+  // browser wrapper.
+  expect(dockerfiles[0]).toContain('"chromium=${OPENGENI_CHROMIUM_VERSION}"');
+  expect(dockerfiles[0]).toContain("chromium --version");
+  expect(dockerfiles[1]).toMatch(/for alias_name in [^;]*\bchromium\b[^;]*; do \\\s+ln -sf/);
+  for (const text of dockerfiles) {
+    // Both Skills say these are absent, so agents neither probe for nor expect them.
+    expect(text).not.toMatch(/libreoffice|pandoc|poppler/i);
+  }
+});
+
+test("Office file Skills give the managed-sandbox fast path without probing", async () => {
+  const prose = async (skill: string) =>
+    (
+      await Bun.file(
+        new URL(`../src/bundled_artifact_skills/${skill}/SKILL.md`, import.meta.url),
+      ).text()
+    ).replace(/\s+/g, " ");
+  const documents = await prose("documents");
+  const presentations = await prose("presentations");
+  for (const text of [documents, presentations]) {
+    expect(text).toContain(
+      "Making the file is one reply of work: do not set a goal for it, explore the sandbox, or search for tools other than `sandbox_file_publish`.",
+    );
+    expect(text).toContain(
+      "Publish the file with `sandbox_file_publish` and reply with a short summary and its link. If that tool is not loaded yet, load it with `tool_search` in the same batch as your first command.",
+    );
+    expect(text).toContain("unless an export tool already in your context lists that format");
+    expect(text).not.toContain("is unavailable or does not list that format");
+  }
+  expect(documents).toContain(
+    "chromium --headless --no-sandbox --log-level=3 --user-data-dir=/tmp/pdf-profile --no-pdf-header-footer --print-to-pdf=out.pdf in.html",
+  );
+  expect(documents).toContain(
+    "chromium --headless --no-sandbox --log-level=3 --user-data-dir=/tmp/pdf-profile --hide-scrollbars --window-size=658,986 --screenshot=page.png in.html",
+  );
+  expect(documents).not.toContain("soffice");
+  // The template's placeholder layouts are 4:3; a 16:9 deck uses the blank
+  // layout with its own boxes and a fit rule instead of a render.
+  expect(presentations).toContain("build every slide on the blank layout (`slide_layouts[6]`)");
+  expect(presentations).toContain(
+    "the title is one line of at most 45 characters at 36 pt and the body is at most six lines of at most 60 characters at 28 pt",
+  );
+  for (const text of [documents, presentations]) {
+    expect(text).toContain("a sent or requested file (below) does not need it.");
+  }
+  // The renderer is an explicit, narrow install, never assumed to be present.
+  expect(
+    presentations.indexOf("apt-get install -y --no-install-recommends libreoffice-impress"),
+  ).toBeLessThan(presentations.indexOf("soffice"));
+  expect(presentations).toContain(
+    "This gate applies to native deck work, not to a PowerPoint file made under the procedure above.",
+  );
 });

@@ -67,13 +67,7 @@ async function scheduledTaskFullViewerForGrant(
   db: Database,
   grant: AccessGrant,
 ): Promise<ScheduledTaskViewer> {
-  const creator = creationInitiatorForGrant(grant);
-  const subjectId = await scheduledTaskViewerSubject(db, {
-    workspaceId: grant.workspaceId,
-    ...(creator.initiator ? { createdBy: creator.initiator } : {}),
-    ...(creator.context ? { createdByContext: creator.context } : {}),
-    createdByActor: creator.actor ?? null,
-  });
+  const subjectId = await scheduledTaskViewerSubjectForGrant(db, grant);
   return { subjectId, admin: false, seesPrivateSummaries: false };
 }
 
@@ -82,7 +76,22 @@ export async function scheduledTaskViewerSubjectForGrant(
   db: Database,
   grant: AccessGrant,
 ): Promise<string | null> {
-  return (await scheduledTaskFullViewerForGrant(db, grant)).subjectId;
+  const creator = creationInitiatorForGrant(grant);
+  if (!creator.actor) {
+    // This is a projection of the already authenticated grant, not resource
+    // authorization. The non-agent DB path only copied this immutable initiator;
+    // actual Site/schedule reads still enforce their ordinary tenant boundary.
+    const subject = creator.initiator?.kind === "subject" ? creator.initiator.subjectId : null;
+    return subject && !subject.startsWith("api_key:") ? subject : null;
+  }
+  // An agent's audience comes from its live durable attempt: retain the exact
+  // verification and ownership locks, never infer its human from token claims.
+  return scheduledTaskViewerSubject(db, {
+    workspaceId: grant.workspaceId,
+    ...(creator.initiator ? { createdBy: creator.initiator } : {}),
+    ...(creator.context ? { createdByContext: creator.context } : {}),
+    createdByActor: creator.actor,
+  });
 }
 
 export function scheduledTaskAccess(

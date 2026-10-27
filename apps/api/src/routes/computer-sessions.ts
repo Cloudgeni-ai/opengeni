@@ -157,6 +157,7 @@ import {
 } from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
+  activeRouteUnavailableError,
   wrongInteractionPlacementMessage,
   wrongPlacementInsteadOfOffline,
 } from "./interaction-placement-message";
@@ -2401,6 +2402,8 @@ function computerRouteError(error: unknown): HTTPException {
   if (actionDeadline) return actionDeadline;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
+  const routeUnavailable = activeRouteUnavailableError(error);
+  if (routeUnavailable) return routeUnavailable;
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });

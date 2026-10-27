@@ -1,4 +1,4 @@
-import type { BaseCiEvidence, Run } from "./model";
+import { attestedMainRun, type BaseCiEvidence, type Run } from "./model";
 
 /** Static job-class mapping, not an identical assertion/fingerprint claim. */
 export function baseJobClasses(
@@ -24,6 +24,10 @@ export function baseJobClasses(
     ids.add(Number(job.id));
     jobs.push({ name: job.name, status: job.status, conclusion: job.conclusion });
   }
+  // A Batch-attested main push skips its source and unit lanes because a
+  // trusted Batch CI attempt passed both on this exact tree; that verdict is
+  // the base's source and unit class. Any non-skipped lane is not attested.
+  if (attestedMainRun(rows)) return { source: "green", units: "green" };
   const verdict = (selected: typeof jobs): "green" | "red" | "unknown" => {
     if (
       !selected.length ||

@@ -91,7 +91,7 @@ import {
 } from "@opengeni/vaults";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { parseRequestJson } from "../http/request-body";
-import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   loadOnePasswordModule,
   loadOnePasswordVaultProvider,

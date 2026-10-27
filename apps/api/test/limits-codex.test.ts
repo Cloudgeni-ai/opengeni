@@ -23,8 +23,10 @@ function deps(settings: Settings): ApiRouteDeps {
   return { settings, db: {} as opengeniDb.Database } as ApiRouteDeps;
 }
 
+// These admission tests mock the canonical spendable-balance boundary. Its
+// tenant-scoped abuse evaluation and ledger projection run in the PostgreSQL suites.
 function mockZeroBalance(): () => void {
-  const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+  const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ACCOUNT,
     balanceMicros: 0,
     currency: "usd",
@@ -310,7 +312,7 @@ describe("API edge credit gate — codex bypass", () => {
   });
 
   test("(c2) a normal model with a positive balance is allowed (control: gate logic intact)", async () => {
-    const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+    const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: ACCOUNT,
       balanceMicros: 1_000_000,
       currency: "usd",
@@ -462,7 +464,7 @@ describe("API edge credit gate — codex bypass", () => {
 
   test("infra cap (workspace:create) never reads codex credential and is unaffected", async () => {
     const restoreBal = mockZeroBalance();
-    // workspace:create is a non-costly action with no workspaceId/model: getBillingBalance
+    // workspace:create is a non-costly action with no workspaceId/model: getSpendableCreditBalance
     // is never even consulted (not costly), so 0 credits does not block it.
     try {
       const decision = await checkLimit(deps(billedSettings()), {

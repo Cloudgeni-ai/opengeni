@@ -17,13 +17,14 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RECORDING_TIMELINE_FILTER } from "./recording-audio";
 import { readTail, trackRecordingProcesses } from "./recording-usage";
 
 export type RecordingSpeakersConfig = {
   binaryPath: string;
   modelsDir: string;
   ffmpegPath: string;
-  /** CPU threads; the executable uses every available core when omitted. */
+  /** CPU threads; when omitted, speaker detection uses up to 4 and alignment every core. */
   threads?: number | undefined;
   tempRoot?: string | undefined;
 };
@@ -111,6 +112,9 @@ async function runSpeakers(
         "error",
         "-i",
         input,
+        // The track's own timeline, so turns and words line up with playback.
+        "-af",
+        RECORDING_TIMELINE_FILTER,
         "-f",
         "f32le",
         "-ac",

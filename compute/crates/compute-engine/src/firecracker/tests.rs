@@ -1,6 +1,6 @@
 use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
-use crate::spec::Network;
+use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -152,26 +152,6 @@ fn a_launch_leaves_its_runtime_for_a_later_agent() {
 
 /// A trim that measured the previous launch's log and punches it out late
 /// reaches only that file, never what the next launch has begun to write.
-#[test]
-fn a_late_trim_of_the_last_log_spares_the_new_one() {
-    use std::io::Write;
-    use std::os::unix::fs::FileExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("vmm.log");
-    fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
-    // The trimmer opens and measures the old log...
-    let trimming = File::options().write(true).open(&path).unwrap();
-    let measured = trimming.metadata().unwrap().len();
-    // ...a new launch starts its log meanwhile...
-    let mut fresh = fresh_log(&path).unwrap();
-    fresh.write_all(b"new launch\n").unwrap();
-    // ...and the trim lands on what it measured.
-    let zeros = vec![0; usize::try_from(measured).unwrap()];
-    trimming.write_all_at(&zeros, 0).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
-}
-
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
@@ -273,6 +253,101 @@ async fn a_run_state_change_fails_only_when_nothing_changed() {
     // Never sent: nothing changed.
     let gone = Api::new(std::env::temp_dir().join("compute-engine-no-such-vmm.sock"));
     assert_eq!(resume(&gone, true).await, Err(ErrorKind::Transient));
+}
+
+/// A VMM frozen with every other VM, by the guard while the host's lease
+/// has run out, cannot answer: its request waits for the thaw instead of
+/// failing, then has its own time again, however long the freeze lasted.
+#[tokio::test]
+async fn time_a_vmm_spends_frozen_does_not_count_toward_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = (dir.path().join("vms"), dir.path().join("vms/vm"));
+    fs::create_dir_all(&own).unwrap();
+    let freeze = |value: &str| fs::write(vms.join("cgroup.freeze"), value).unwrap();
+    freeze("1");
+    fs::write(own.join("cgroup.freeze"), "0").unwrap();
+    // Asked of the group above, with this VM's process ending or not yet
+    // frozen: held all the same.
+    fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(Cgroup::at(&own));
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // Many times its 200 ms deadline.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(!call.is_finished(), "a frozen VMM's request kept waiting");
+    freeze("0");
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_050) && took < Duration::from_secs(3),
+        "after the thaw it had its own time, then failed: {took:?}"
+    );
+
+    // One never frozen fails at its deadline, as before.
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(Cgroup::at(&own));
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        api.call("GET", "/", None).await,
+        Err(ApiError::Timeout(_))
+    ));
+    assert!(started.elapsed() < Duration::from_millis(600));
+}
+
+/// A VM's group under one that holds every VM, with nothing frozen yet:
+/// the outer group, whose `cgroup.freeze` the test writes, and the VM's.
+fn vms_group(dir: &Path) -> (PathBuf, Cgroup) {
+    let (vms, own) = (dir.join("vms"), dir.join("vms/vm"));
+    fs::create_dir_all(&own).unwrap();
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    fs::write(own.join("cgroup.freeze"), "0").unwrap();
+    fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    (vms, Cgroup::at(own))
+}
+
+/// A freeze that comes just before a request's deadline holds it too: the
+/// deadline is only found passed by a look that finds the VMM running.
+#[tokio::test]
+async fn a_freeze_just_before_the_deadline_holds_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = vms_group(dir.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // 150 ms of its 200 ms, then frozen for longer than all of it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    fs::write(vms.join("cgroup.freeze"), "1").unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!call.is_finished(), "the request waited out the freeze");
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    assert!(started.elapsed() >= Duration::from_millis(750));
+}
+
+/// Time a frozen VMM's request goes unlooked at, because the host's
+/// executor is busy, is frozen time all the same.
+#[tokio::test]
+async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = vms_group(dir.path());
+    fs::write(vms.join("cgroup.freeze"), "1").unwrap();
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    // Nothing else runs on this test's one thread meanwhile, twice.
+    std::thread::sleep(Duration::from_millis(350));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    std::thread::sleep(Duration::from_millis(350));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!call.is_finished(), "the frozen VMM's request kept waiting");
+    fs::write(vms.join("cgroup.freeze"), "0").unwrap();
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
 }
 
 #[test]
@@ -383,6 +458,33 @@ fn spec() -> VmSpec {
         network: None,
         free_page_reporting: true,
     }
+}
+
+/// The host gets back what the guest frees on a disk it may write; a
+/// read-only drive takes no discard, which Firecracker refuses for one.
+#[test]
+fn writable_drives_take_the_guests_discards() {
+    let mut drive = Drive {
+        id: "rootfs".into(),
+        path: "/lab/vm/firecracker/a/root/rootfs.ext4".into(),
+        root: true,
+        read_only: false,
+    };
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(
+        config,
+        json!({
+            "drive_id": "rootfs",
+            "path_on_host": "/rootfs.ext4",
+            "is_root_device": true,
+            "is_read_only": false,
+            "discard": true,
+        })
+    );
+    drive.read_only = true;
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(config["is_read_only"], true);
+    assert_eq!(config["discard"], false);
 }
 
 #[test]

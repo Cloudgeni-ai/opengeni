@@ -509,6 +509,43 @@ describe("query-independent tool discovery", () => {
     );
   });
 
+  test("a short name several servers share loads one tool and suggests the others", async () => {
+    const own = firstPartyTool("opengeni__search", "Search the workspace");
+    const mail = firstPartyTool("mail__search", "Search mail");
+    const agent = new Agent({ name: "shared", tools: [mail, own], model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "search",
+          name: "tool_search",
+          arguments: '{"query":"","names":["search"]}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    const searched = (model.requests[1]!.input as { type?: string; output?: unknown }[]).find(
+      (item) => item.type === "function_call_result",
+    ) as { output: { text?: string } | string };
+    const text = typeof searched.output === "string" ? searched.output : searched.output.text!;
+    const output = JSON.parse(text) as {
+      tools: Array<{ name: string }>;
+      suggestions?: Array<{ name: string }>;
+      unavailable: string[];
+    };
+    expect(output.tools.map((entry) => entry.name)).toEqual(["opengeni__search"]);
+    expect(output.unavailable).toEqual([]);
+    expect(output.suggestions?.map((entry) => entry.name)).toEqual(["mail__search"]);
+    // A full name loads exactly that tool and suggests nothing.
+    const exact = JSON.parse(
+      runtime.genericSearchOutput({ query: "", names: ["mail__search"] }),
+    ) as { tools: Array<{ name: string }>; suggestions?: unknown };
+    expect(exact.tools.map((entry) => entry.name)).toEqual(["mail__search"]);
+    expect(exact).not.toHaveProperty("suggestions");
+  });
+
   test("listing pages are compact, lexical, scoped, and reject stale cursors", async () => {
     const catalog = ["c", "a", "b"].map((name) =>
       firstPartyTool(`records__${name}`, "文".repeat(1000)),
@@ -2389,6 +2426,42 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(
         runtime.search({ query: "run a shell command" }).map((candidate) => candidate.name),
       ).not.toContain("exec_command");
+    }
+  });
+
+  test("attaching the video tools leaves the first request byte-identical on every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const firstRequest = async (withVideo: boolean) => {
+        const agent = new Agent({
+          name: "lazy-test",
+          instructions: "Use tools.",
+          model: "scripted",
+          tools: [
+            ...(withVideo
+              ? [
+                  firstPartyTool(
+                    "get_video_generation_capabilities",
+                    "Return the video-generation models currently enabled",
+                  ),
+                  firstPartyTool(
+                    "generate_video",
+                    "Start one durable asynchronous video generation",
+                  ),
+                ]
+              : []),
+            firstPartyTool("exec_command", "Run a shell command in the sandbox"),
+          ],
+        });
+        const runtime = installLazyToolRuntime(agent, transport, new Set());
+        const visible = await agent.getAllTools(undefined as never);
+        const inner = new CapturingModel();
+        const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel(
+          "test",
+        );
+        await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+        return JSON.stringify(inner.requests[0]);
+      };
+      expect(await firstRequest(true)).toBe(await firstRequest(false));
     }
   });
 

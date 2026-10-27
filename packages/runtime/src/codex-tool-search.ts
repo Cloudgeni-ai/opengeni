@@ -8,8 +8,6 @@ import {
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
-/** The prefix Opengeni's PrefixedMcpServer stamps on codex_apps connector tools. */
-export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;
 
@@ -133,12 +131,39 @@ function interactionToolName(name: string): string | null {
 const CUA_TOOL_PREFIX = "cua_";
 const CUA_WORKING_SET: readonly string[] = ["cua_get_window_state", "cua_run_steps"];
 
+/**
+ * Connecting a missing integration always takes both catalog steps: find it,
+ * then show its Connect card with the returned ID. They load together, so the
+ * card is never one more search away. Only the first-party server's tools.
+ */
+const INTEGRATION_SETUP_FAMILY: readonly string[] = [
+  "capability_catalog_search",
+  "capability_authorization_request",
+].map((name) => `${HARNESS_CONTROL_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${name}`);
+
+/** The tool that shows an integration's Connect card. */
+export const INTEGRATION_CARD_TOOL_NAME = INTEGRATION_SETUP_FAMILY[1]!;
+/** The tool that searches the integration catalog. */
+export const INTEGRATION_CATALOG_TOOL_NAME = INTEGRATION_SETUP_FAMILY[0]!;
+
+/** The integration setup tools present in this authorized pool, in family order. */
+export function integrationSetupToolNames(pool: readonly Tool[]): string[] {
+  return INTEGRATION_SETUP_FAMILY.filter((name) =>
+    pool.some((tool) => tool.type === "function" && (tool as { name?: unknown }).name === name),
+  );
+}
+
+/** True for either integration setup tool. */
+export function isIntegrationSetupToolName(name: string): boolean {
+  return INTEGRATION_SETUP_FAMILY.includes(name);
+}
+
 /** The other members of every family a disclosed tool belongs to, in family order. */
 function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
   const disclosedShort = new Set(
     disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
   );
-  const wanted = [
+  const wantedShort = [
     ...INTERACTION_TOOL_FAMILIES.filter((family) =>
       family.some((member) => disclosedShort.has(member)),
     ).flat(),
@@ -146,10 +171,19 @@ function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], poo
       ? CUA_WORKING_SET
       : []),
   ];
+  const disclosedNames = new Set(disclosed.map((tool) => tool.name));
+  const wanted = [
+    ...wantedShort
+      .filter((member) => !disclosedShort.has(member))
+      .map((member) => `${INTERACTION_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${member}`),
+    ...(INTEGRATION_SETUP_FAMILY.some((name) => disclosedNames.has(name))
+      ? INTEGRATION_SETUP_FAMILY
+      : []),
+  ];
   const companions: T[] = [];
-  for (const member of wanted) {
-    if (disclosedShort.has(member)) continue;
-    const tool = pool.find((candidate) => interactionToolName(candidate.name) === member);
+  for (const name of wanted) {
+    if (disclosedNames.has(name)) continue;
+    const tool = pool.find((candidate) => candidate.name === name);
     if (tool && !companions.includes(tool)) companions.push(tool);
   }
   return companions;
@@ -295,6 +329,63 @@ export function parseSearchArgs(raw: unknown): { query: string; limit: number; n
   };
 }
 
+/** The part of a model tool name after its last "__" server separator. */
+function toolShortName(name: string): string {
+  const separator = name.lastIndexOf(MCP_TOOL_NAME_SEPARATOR);
+  return separator >= 0 ? name.slice(separator + MCP_TOOL_NAME_SEPARATOR.length) : name;
+}
+
+/** The server prefix of Opengeni's own tools, preferred among same-named tools. */
+const FIRST_PARTY_TOOL_PREFIX = "opengeni__";
+
+/** Every tool whose name after its server separator is exactly `name`, first-party first. */
+function toolsWithShortName<T extends Tool & { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T[] {
+  const matches = tools.filter((tool) => toolShortName(tool.name) === name);
+  return [
+    ...matches.filter((tool) => tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
+    ...matches.filter((tool) => !tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
+  ];
+}
+
+/**
+ * The tools one exact-name lookup entry names: the tool with that full model
+ * name, or else one tool whose name after its server separator is exactly
+ * that name. Agents often load a tool by the name it has in a description or
+ * another tool's result (`sandboxes_list` for `opengeni__sandboxes_list`),
+ * and a lookup that matched only full names returned nothing for it. When
+ * several servers share the short name, Opengeni's own tool (else the first)
+ * is the one loaded; shortNameAlternatives names the others.
+ */
+export function toolsWithExactName<T extends Tool & { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T[] {
+  const full = tools.filter((tool) => tool.name === name);
+  if (full.length > 0 || name.includes(MCP_TOOL_NAME_SEPARATOR)) return full;
+  return toolsWithShortName(tools, name).slice(0, 1);
+}
+
+/** The other tools sharing a short exact-name lookup entry with the one it loads. */
+export function shortNameAlternatives<T extends Tool & { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T[] {
+  if (name.includes(MCP_TOOL_NAME_SEPARATOR) || tools.some((tool) => tool.name === name)) return [];
+  return toolsWithShortName(tools, name).slice(1);
+}
+
+/** Exact-name lookup entries no tool in the pool answers. */
+export function unresolvedToolNames(tools: readonly Tool[], names: readonly string[]): string[] {
+  const named = tools.filter(
+    (tool): tool is Tool & { name: string } =>
+      typeof (tool as { name?: unknown }).name === "string",
+  );
+  return names.filter((name) => toolsWithExactName(named, name).length === 0);
+}
+
 /**
  * Rank and byte-bound an already-authorized tool pool.
  * Callers classify the pool first: production native and generic search pass
@@ -321,8 +412,10 @@ export function rankToolPool(
   if (names) {
     // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
     // search or another executor registry. Keep the SDK's original references.
-    ranked = [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name));
-    limit = names.length;
+    ranked = [
+      ...new Set([...new Set(names)].flatMap((name) => toolsWithExactName(searchable, name))),
+    ];
+    limit = ranked.length;
   } else {
     // Every tool the query names comes first, even beyond the requested limit;
     // BM25 fills any remaining places.
@@ -353,7 +446,7 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
   // definition cannot displace later candidates that fit.
   const named = names ? [] : toolsNamedInQuery(searchable, query);
   const ranked = names
-    ? [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name))
+    ? [...new Set([...new Set(names)].flatMap((name) => toolsWithExactName(searchable, name)))]
     : [
         ...named,
         ...new ToolSearchIndex(searchable)
@@ -361,7 +454,7 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
           .filter((tool) => !named.includes(tool as Tool & { name: string })),
       ];
   const limit = names
-    ? names.length
+    ? ranked.length
     : Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
   const bounded: Tool[] = [];
   let disclosedBytes = 0;

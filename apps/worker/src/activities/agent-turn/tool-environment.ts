@@ -35,6 +35,7 @@ import {
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
   accountRouteAuthNeededPayload,
+  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../mcp-account-routes";
@@ -84,7 +85,6 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -184,6 +184,7 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
+  capabilityServerCategories?: ClaimTurnOk["capabilityServerCategories"];
   codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
@@ -309,6 +310,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
+    capabilityServerCategories,
     codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
@@ -334,6 +336,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: canonicalRunSettings,
     tools: canonicalTurnTools,
     bindings: turn.mcpAccountBindings,
+    ...(capabilityServerCategories ? { categories: capabilityServerCategories } : {}),
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
@@ -543,8 +546,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // These reads only feed the Skill index. Disabled Skills need neither the
   // descriptors nor bundled files; agent build still rechecks live video policy.
   // Enabled reads remain independent and finish before executable preparation.
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  // A policy cannot affect the bundled index when this Skill was explicitly omitted.
+  // Agent build still performs its independent live policy read and validation.
+  const videoSkillSelected =
+    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
   const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false
+    toolFamilies.skills === false || !videoSkillSelected
       ? Promise.resolve(null)
       : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
     toolFamilies.skills === false
@@ -561,10 +572,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : loadConfiguredBundledSkills({
           // Rows that could not freeze the "none" default at create (scheduled
           // generated sessions, pre-existing rows) get the same rule here.
-          bundledSkillIds: bundledSkillSelectionForAgentConfig(
-            session.bundledSkillIds,
-            session.agent,
-          ),
+          bundledSkillIds,
           firstPartyTools: selectedFirstPartyMcpTools,
           videoGenerationEnabled:
             skillConfiguration !== null &&
@@ -632,7 +640,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "Skill checkout/publish requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-      const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
         commandRunner: async (commandSession, args) => {
@@ -649,7 +656,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         emit: async (events) => {
           await eventing.publish?.(events, true);
         },
-        ...(runAs ? { runAs } : {}),
       });
       return guardSkillFilesystem(channel, {
         assertActive: () => {
@@ -776,14 +782,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "code_search requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-      const runAs = sandboxRunAs(runSettings);
       return codeSearchWorkspaceFromChannel(
         new SandboxChannelAService({
           session: access.session,
           workspaceRoot: machineRoot ?? "/workspace",
           ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
           leaseEpoch: access.leaseEpoch,
-          ...(runAs ? { runAs } : {}),
         }),
       );
     },
@@ -945,7 +949,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
     const sandbox = sandboxAccess.sandbox;
     const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-    const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
       workspaceRoot: machineRoot ?? "/workspace",
@@ -954,7 +957,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       emit: async (events) => {
         await eventing.publish?.(events, true);
       },
-      ...(runAs ? { runAs } : {}),
     });
     return await materializeConnectorAttachmentsInChannel(channel, request, {
       runMutation: async (mutation) => {
@@ -1002,7 +1004,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(credentialRestriction ? { credentialRestriction } : {}),
         inputWaitReplyGuard: async (request) =>
           (await eventing.inputWaitReplyGuard?.(request)) ?? null,
-        mcpAccountLabels: accountRoutes.accountLabels,
+        // Integration routes are labelled like connector routes, so every
+        // connected account names its connector to the model and in reviews.
+        mcpAccountLabels: new Map([
+          ...accountRoutes.accountLabels,
+          ...apiIntegrationAccountLabels({
+            integrations: installedApiIntegrations,
+            bindings: turn.mcpAccountBindings,
+            tools: turnTools,
+          }),
+        ]),
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1079,14 +1090,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             media.sdkOwnedSandboxSession,
             "Gmail attachment filesystem is unavailable",
           );
-          const runAs = sandboxRunAs(runSettings);
           const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
           const channel = new SandboxChannelAService({
             session: access.session,
             workspaceRoot: machineRoot ?? "/workspace",
             ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
             leaseEpoch: access.leaseEpoch,
-            ...(runAs ? { runAs } : {}),
           });
           return await readGmailFileFromChannel(channel, request);
         },

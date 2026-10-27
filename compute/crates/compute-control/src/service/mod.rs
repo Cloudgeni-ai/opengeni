@@ -13,13 +13,13 @@ mod moves;
 mod reach;
 mod requests;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_fleet::{
-    Demand, HostId, LeaseTerms, Next, Op, Outcome, OwnerEpoch, Ownership, Prefer, SandboxId,
-    answered,
+    Demand, HostId, LeaseTerms, Next, Offers, Op, Outcome, OwnerEpoch, Ownership, Prefer,
+    SandboxId, answered,
 };
 use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request, SandboxConfig, SleepConfig};
 use compute_storage::store::ChunkStore;
@@ -27,7 +27,7 @@ use compute_storage::store::ChunkStore;
 use crate::hosts::{Answered, Hosts};
 use crate::link::Links;
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
-use crate::view::{Target, View, shape_key};
+use crate::view::{Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
 pub use moves::Drained;
@@ -99,12 +99,31 @@ fn host_failure(answered: &Answered) -> Failure {
     }
 }
 
+/// What placing nothing means to a caller: a fleet without room, or a
+/// replica that cannot read its hosts and so cannot tell.
+fn unplaced(unplaced: Unplaced) -> Failure {
+    match unplaced {
+        Unplaced::NoRoom => Failure::NoCapacity,
+        Unplaced::Blind(None) => {
+            Failure::Unavailable("this replica has not read its hosts from the store yet".into())
+        }
+        Unplaced::Blind(Some(since)) => Failure::Unavailable(format!(
+            "this replica has not read its hosts from the store for {} s",
+            since.as_secs()
+        )),
+        Unplaced::Unoffered(name) => {
+            Failure::Unavailable(format!("no host offers {name:?}, which it asks to reach"))
+        }
+    }
+}
+
 /// How the service runs.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// The lease terms hosts are told.
     pub terms: LeaseTerms,
-    /// Disk in MiB each sandbox is booked for where it is placed.
+    /// Disk in MiB each sandbox is booked for where it is placed, or the
+    /// disk it asks for if that is longer.
     pub disk_mib: u64,
     /// How long a wake or connect may take in all.
     pub wake_within: Duration,
@@ -130,6 +149,10 @@ pub struct Settings {
     /// gone, is given up on as soon as its lease allows. Never shorter
     /// than the lease's term and margin, which keep it safe.
     pub give_up_after: Duration,
+    /// What each team's sandboxes may ask to reach of what hosts offer
+    /// ([`SandboxConfig::reach`]), by team: a team not here may ask for
+    /// none.
+    pub reach: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Settings {
@@ -140,6 +163,25 @@ impl Settings {
         match self.images.get(name) {
             Some(image) => Some(image),
             None => (name == self.image).then_some(None),
+        }
+    }
+
+    /// Refuses `team` a sandbox that reaches `reach`, unless it may reach
+    /// every one.
+    ///
+    /// # Errors
+    ///
+    /// The first it may not reach.
+    pub fn may_reach(&self, team: &str, reach: &[String]) -> Result<(), Failure> {
+        let granted = self.reach.get(team);
+        match reach
+            .iter()
+            .find(|name| !granted.is_some_and(|granted| granted.contains(*name)))
+        {
+            Some(name) => Err(Failure::Invalid(format!(
+                "this team's sandboxes may not reach {name:?}"
+            ))),
+            None => Ok(()),
         }
     }
 }
@@ -155,6 +197,7 @@ impl Default for Settings {
             images: crate::images::Images::default(),
             links: None,
             give_up_after: Duration::from_secs(120),
+            reach: BTreeMap::new(),
         }
     }
 }
@@ -245,12 +288,19 @@ impl<S: Store> Service<S> {
         &self.settings
     }
 
+    /// What a sandbox of `config` asks of the host it is placed on, but
+    /// for what it reaches, which is numbered as it is placed
+    /// ([`Service::place`]).
     fn demand(&self, config: &SandboxConfig, prefer: Prefer) -> Demand {
         Demand {
             memory_mib: u64::from(config.memory_request()),
             memory_max_mib: u64::from(config.memory_mib),
             cpu_millis: u64::from(config.cpu_request()),
-            disk_mib: self.settings.disk_mib,
+            disk_mib: self
+                .settings
+                .disk_mib
+                .max(config.disk_mib.map_or(0, u64::from)),
+            reach: Offers::NONE,
             prefer,
         }
     }
@@ -281,12 +331,15 @@ impl<S: Store> Service<S> {
         config
     }
 
-    /// Places `demand` on a host not in `exclude`.
-    fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
-        let placement = self
-            .view
-            .place(demand, exclude)
-            .ok_or(Failure::NoCapacity)?;
+    /// Places `demand`, reaching the offers named `reach`, on a host not
+    /// in `exclude`.
+    fn place(
+        &self,
+        demand: &Demand,
+        reach: &[String],
+        exclude: &HashSet<HostId>,
+    ) -> Result<Target, Failure> {
+        let placement = self.view.place(demand, reach, exclude).map_err(unplaced)?;
         self.view.target(placement.host).ok_or(Failure::NoCapacity)
     }
 
@@ -400,7 +453,7 @@ impl<S: Store> Service<S> {
         // Every host placement can find is tried once: one that refuses
         // holds nothing of it, and refuses before making anything.
         loop {
-            let target = match self.place(&demand, &exclude) {
+            let target = match self.place(&demand, &row.spec.config.reach, &exclude) {
                 Ok(target) => target,
                 Err(failure) => {
                     self.forget_if_refused(&row, refused.as_ref()).await?;
@@ -482,6 +535,8 @@ impl<S: Store> Service<S> {
         metadata: BTreeMap<String, String>,
     ) -> Result<(SandboxRow, Demand), Failure> {
         spec.config.validate().map_err(Failure::Invalid)?;
+        // What hosts offer to reach is the operator's to give, per team.
+        self.settings.may_reach(team, &spec.config.reach)?;
         // Only the service names a link, per host and owner epoch.
         spec.config.link = None;
         if let Some(agent) = &spec.agent {
@@ -655,5 +710,58 @@ impl<S: Store> Service<S> {
             .store
             .delete_retiring(row.id, row.version, now_ms())
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blind_replica_is_unavailable_and_a_full_fleet_has_no_capacity() {
+        assert!(matches!(unplaced(Unplaced::NoRoom), Failure::NoCapacity));
+        let blind = unplaced(Unplaced::Blind(Some(Duration::from_secs(12))));
+        assert!(
+            matches!(&blind, Failure::Unavailable(why) if why.contains("for 12 s")),
+            "{blind}"
+        );
+        assert!(matches!(
+            unplaced(Unplaced::Blind(None)),
+            Failure::Unavailable(_)
+        ));
+        let unoffered = unplaced(Unplaced::Unoffered("previews".into()));
+        assert!(
+            matches!(&unoffered, Failure::Unavailable(why) if why.contains("\"previews\"")),
+            "{unoffered}"
+        );
+    }
+
+    #[test]
+    fn a_team_may_reach_only_what_it_was_given() {
+        let settings = Settings {
+            reach: BTreeMap::from([(
+                "team-a".to_owned(),
+                BTreeSet::from(["builds".to_owned(), "previews".to_owned()]),
+            )]),
+            ..Settings::default()
+        };
+        let names = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        assert!(settings.may_reach("team-a", &[]).is_ok());
+        assert!(settings.may_reach("team-b", &[]).is_ok());
+        assert!(
+            settings
+                .may_reach("team-a", &names(&["builds", "previews"]))
+                .is_ok()
+        );
+        let refused = settings
+            .may_reach("team-a", &names(&["builds", "other"]))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, Failure::Invalid(why) if why.contains("\"other\"")),
+            "{refused}"
+        );
+        assert!(settings.may_reach("team-b", &names(&["previews"])).is_err());
     }
 }

@@ -25,6 +25,7 @@ import { SESSION_USAGE_LIMIT_SEGMENT } from "@opengeni/contracts/session-usage-l
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export class WorkspaceHumanInputDisabledError extends Error {
   constructor(kind: "resume" | "interruption") {
@@ -376,7 +377,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       // Durable history remains authoritative when the SDK state cannot serialize.
     }
     throw new BudgetExhaustedError(
-      limitError instanceof Error ? limitError.message : String(limitError),
+      errorMessage(limitError),
       serializedRunState,
       limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
       limitError instanceof SessionUsageLimitReachedError ? limitError.refusal : null,

@@ -24,7 +24,7 @@ import {
   requireWorkspace,
 } from "@opengeni/db";
 import { SessionSkills } from "@opengeni/contracts";
-import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import type {
   ControlActivityServices,
   DispatchAutomationRunInput,

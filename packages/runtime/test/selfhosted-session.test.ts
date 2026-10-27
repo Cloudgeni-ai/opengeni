@@ -10,7 +10,6 @@ import {
   SelfhostedSession,
   agentErrorToControlError,
   isProviderSandboxNotFoundError,
-  isSelfhostedProviderNotFoundError,
   offlineControlResponse,
   parseExecBannerExitCode,
   stripExecBanner,
@@ -751,8 +750,6 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(missingPathError).toBeInstanceOf(SelfhostedControlError);
     expect((missingPathError as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_NOT_FOUND);
     expect((missingPathError as SelfhostedControlError).osNotFound).toBe(true);
-    // crucially: an OS NotFound does NOT flip the provider-NotFound discriminator.
-    expect(isSelfhostedProviderNotFoundError(missingPathError)).toBe(false);
   });
 
   test("resolveExposedPort returns the relay URL shape + the M8b channel-key routing query", async () => {

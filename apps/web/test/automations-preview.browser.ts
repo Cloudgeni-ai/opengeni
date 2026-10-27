@@ -42,6 +42,8 @@ if (output) await mkdir(output, { recursive: true });
 const workspace = "/workspaces/11111111-1111-4111-8111-111111111111";
 const github = "5ce00000-0000-4000-8000-000000000001";
 const linear = "5ce00000-0000-4000-8000-000000000003";
+const tailnet = "5ce00000-0000-4000-8000-000000000007";
+const builds = "5ce00000-0000-4000-8000-000000000008";
 const prReview = "00000000-0000-4000-8000-000000000001";
 const releaseNotesTemplate = "7e3a0000-0000-4000-8000-000000000001";
 const finishedOnce = "00000000-0000-4000-8000-000000000004";
@@ -246,10 +248,30 @@ const pages: Array<{
     },
   },
   {
+    // A custom webhook made with Tailscale's preset reads as Tailscale.
+    name: "source-tailscale-awaiting-secret",
+    path: `${workspace}/automations/sources/${tailnet}`,
+    query: "custom=1",
+    check: async (page) => {
+      await expect(page.getByText("Tailscale webhook").first()).toBeVisible();
+      await expect(page.getByText("webhook secret").first()).toBeVisible();
+    },
+  },
+  {
+    // Any other app's custom webhook gets the same steps, in that app's settings.
+    name: "source-custom-awaiting-secret",
+    path: `${workspace}/automations/sources/${builds}`,
+    query: "custom=1",
+    check: async (page) => {
+      await expect(page.getByText("the app's signing secret").first()).toBeVisible();
+    },
+  },
+  {
     name: "source-new",
     path: `${workspace}/automations/sources/new`,
     check: async (page) => {
       await expect(page.getByText("Your own app")).toBeVisible();
+      await expect(page.getByText("Tailscale").first()).toBeVisible();
     },
   },
   {

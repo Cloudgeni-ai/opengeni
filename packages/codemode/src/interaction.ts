@@ -175,6 +175,20 @@ export type CodemodeBrowserScreenshot = CodemodeLocalImage &
     metadata: CodemodeBrowserScreenshotMetadata;
   }>;
 
+export type CodemodeComputerScreenshotOptions = {
+  /** Only this rectangle of the target's last full screenshot, in that screenshot's pixels. */
+  region?: { x: number; y: number; width: number; height: number } | undefined;
+  /** Save the image at this exact path. Existing files are never overwritten. */
+  saveTo?: string | undefined;
+};
+
+export type CodemodeComputerScreenshot = CodemodeLocalImage &
+  Readonly<{
+    /** The observation read with the image: its frameId and capturedFrame size
+     * address pointer actions on it. Pixel bytes stay in the local image file. */
+    observation: ComputerObservation;
+  }>;
+
 export type CodemodeBrowserAgentNode = Readonly<{
   ref: string;
   role: string;
@@ -182,6 +196,11 @@ export type CodemodeBrowserAgentNode = Readonly<{
   name?: string;
   description?: string;
   value?: string | { redacted: true; reason: string };
+  /** Full length of a name, description or value the outline clipped; read
+   * the rest with a dom read of this ref. Absent when nothing was clipped. */
+  nameChars?: number;
+  descriptionChars?: number;
+  valueChars?: number;
   /** Omitted when empty. */
   states?: readonly string[];
   /** Omitted when empty. */
@@ -197,6 +216,9 @@ export type CodemodeBrowserAgentView = Readonly<{
   omittedRegions?: readonly Readonly<{ role: string; name?: string; count: number }>[];
   removedRefCount?: number;
   clippedFieldCount?: number;
+  /** The page was too large to read whole: at least this many elements were
+   * left unread. The view keeps the page's structure and the part on screen. */
+  unreadNodeCount?: number;
 }>;
 
 /** A tab with the identity, page, selection and fences a next call needs. */
@@ -270,6 +292,7 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
           locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
+          offset?: number;
         }
       | { kind: "count"; selector: string };
   }>;
@@ -297,7 +320,11 @@ export type CodemodeBrowserAxReadResult = Readonly<{
 
 export type CodemodeBrowserReadResult =
   | CodemodeBrowserAxReadResult
-  | (BrowserDomReadResponse & { source: "dom" });
+  | (BrowserDomReadResponse & {
+      source: "dom";
+      /** Offset of the next page when the text or value was cut. */
+      nextOffset?: number;
+    });
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;
@@ -1396,6 +1423,39 @@ export class CodemodeComputerTarget {
       { computerSessionId: this.computerSessionId, targetId: this.id },
       callOptions,
     );
+  }
+
+  /** Observe the window or screen and write its screenshot to a local file
+   * (`saveTo`, or a private temporary file), like a browser tab's screenshot. */
+  async screenshot(
+    options: CodemodeComputerScreenshotOptions = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeComputerScreenshot> {
+    const result = await (
+      await this.client()
+    ).callPath(
+      PATH.computerObserve,
+      {
+        computerSessionId: this.computerSessionId,
+        targetId: this.id,
+        ...(options.region === undefined ? {} : { region: options.region }),
+      },
+      callOptions,
+    );
+    if (result.isError) throw new CodemodeToolExecutionError(result);
+    if (!result.structuredContent) {
+      throw new Error("Codemode tool interaction.computer.observe returned no structured content");
+    }
+    if (!result.content.some((content) => content.type === "image")) {
+      throw new Error(
+        `${this.id} returned no screenshot: an app target has only its accessibility tree, so take the screenshot of one of its windows or of the screen`,
+      );
+    }
+    const [image] = await materializeCodemodeImages(result, {
+      ...(options.saveTo === undefined ? {} : { saveTo: options.saveTo }),
+      requireOne: true,
+    });
+    return { ...image!, observation: result.structuredContent as ComputerObservation };
   }
 
   async act(

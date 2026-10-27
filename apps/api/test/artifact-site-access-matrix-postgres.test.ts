@@ -857,8 +857,10 @@ test("personal workspace: the owner and their agent create, share, publish and u
       ws,
       actor,
       "Site AI turn (public Site)",
-      "202 turn starts",
-      await m.aiTurn(ws, host, viewer),
+      // People outside the workspace have no human the personal workspace
+      // knows; their follow-ups are admitted like their first turn.
+      "202 turn starts, follow-up 202",
+      await m.aiTurn(ws, host, viewer, { followUp: true }),
     );
   }
 

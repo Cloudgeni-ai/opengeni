@@ -8,11 +8,7 @@
  * is the authority; these helpers only label what a person picks.
  */
 
-import {
-  isReadOnlyPermissionSet,
-  organizationAccessPresetPermissions,
-  type Permission,
-} from "@opengeni/contracts";
+import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
 import type {
   OrganizationAccessPolicy,
   OrganizationAccessPreset,
@@ -65,11 +61,6 @@ export function presetFor(permissions: readonly string[]): OrganizationAccessPre
   return "custom";
 }
 
-/** True when nothing in the set can start, change or delete anything. Secret reads count as reads. */
-export function isReadOnly(permissions: readonly string[]): boolean {
-  return isReadOnlyPermissionSet(permissions as Permission[]);
-}
-
 export const ACCESS_PRESET_COPY: Record<
   OrganizationAccessPreset,
   { label: string; description: string }
@@ -91,13 +82,6 @@ export const ACCESS_PRESET_COPY: Record<
 
 export function countLabel(count: number): string {
   return `${count} ${count === 1 ? "permission" : "permissions"}`;
-}
-
-/** "Full access", "Read only" or "Custom · 6 permissions". */
-export function accessSummary(permissions: readonly string[]): string {
-  const preset = presetFor(permissions);
-  if (preset === "custom") return `Custom · ${countLabel(permissions.length)}`;
-  return ACCESS_PRESET_COPY[preset].label;
 }
 
 /** The saved choice in words; a preset stays its name even when capped by a person's access. */

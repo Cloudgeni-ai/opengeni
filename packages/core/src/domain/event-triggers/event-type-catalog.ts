@@ -58,9 +58,98 @@ const SENTRY_TYPES: CatalogEntry[] = [
   { type: "comment.created", description: "Someone commented on an issue" },
 ];
 
+const TAILSCALE_DEVICE_FIELDS: Array<[string, string]> = [
+  ["data.deviceName", "The device's name, such as laptop.example.ts.net"],
+  ["data.nodeID", "The device's node ID"],
+  ["data.managedBy", "Who the device belongs to"],
+  ["data.actor", "Who made the change"],
+];
+
+const TAILSCALE_KEY_FIELDS: Array<[string, string]> = [
+  ...TAILSCALE_DEVICE_FIELDS,
+  ["data.expiration", "When the device's key expires"],
+];
+
+const TAILSCALE_TYPES: CatalogEntry[] = [
+  {
+    type: "nodeCreated",
+    description: "A device was added to the tailnet",
+    fields: TAILSCALE_DEVICE_FIELDS,
+  },
+  {
+    type: "nodeNeedsApproval",
+    description: "A device is waiting for an admin to approve it",
+    fields: TAILSCALE_DEVICE_FIELDS,
+  },
+  { type: "nodeApproved", description: "A device was approved", fields: TAILSCALE_DEVICE_FIELDS },
+  {
+    type: "nodeDeleted",
+    description: "A device was removed, including ephemeral devices removed automatically",
+    fields: TAILSCALE_DEVICE_FIELDS,
+  },
+  {
+    type: "nodeKeyExpiringInOneDay",
+    description: "A device's key expires in less than a day",
+    fields: TAILSCALE_KEY_FIELDS,
+  },
+  { type: "nodeKeyExpired", description: "A device's key expired", fields: TAILSCALE_KEY_FIELDS },
+  {
+    type: "nodeNeedsSignature",
+    description: "A device needs a signature from a trusted device (Tailnet Lock)",
+    fields: TAILSCALE_DEVICE_FIELDS,
+  },
+  {
+    type: "nodeSigned",
+    description: "A trusted device signed a device (Tailnet Lock)",
+    fields: TAILSCALE_DEVICE_FIELDS,
+  },
+  {
+    type: "policyUpdate",
+    description: "The tailnet policy file changed",
+    fields: [
+      ["data.actor", "Who changed it"],
+      ["data.newPolicy", "The new policy file"],
+      ["data.oldPolicy", "The policy file before the change"],
+    ],
+  },
+  { type: "userCreated", description: "A user was added to the tailnet" },
+  { type: "userNeedsApproval", description: "A user is waiting for an admin to approve them" },
+  { type: "userApproved", description: "A user was approved" },
+  {
+    type: "userRoleUpdated",
+    description: "A user's role changed",
+    fields: [
+      ["data.user", "The user, by login name"],
+      ["data.actor", "Who changed the role"],
+      ["data.oldRoles", "The roles before, such as Member"],
+      ["data.newRoles", "The roles after, such as Member and IT admin"],
+    ],
+  },
+  {
+    type: "subnetIPForwardingNotEnabled",
+    description: "A subnet router has IP forwarding turned off",
+  },
+  {
+    type: "exitNodeIPForwardingNotEnabled",
+    description: "An exit node has IP forwarding turned off",
+  },
+  { type: "webhookUpdated", description: "This webhook was changed in Tailscale" },
+  { type: "webhookDeleted", description: "This webhook was deleted in Tailscale" },
+  { type: "test", description: "A test event sent from the Tailscale admin console" },
+];
+
 const CATALOG: Partial<Record<WebhookEventAdapter, CatalogEntry[]>> = {
   linear: LINEAR_TYPES,
   sentry: SENTRY_TYPES,
+};
+
+/**
+ * The documented types of apps a custom webhook preset fills in, keyed by the
+ * format's `preset`. A custom source without a known preset lists the types it
+ * actually received.
+ */
+const PRESET_CATALOG: Record<string, CatalogEntry[]> = {
+  tailscale: TAILSCALE_TYPES,
 };
 
 function descriptor(entry: CatalogEntry): EventTypeDescriptor {
@@ -77,14 +166,18 @@ function descriptor(entry: CatalogEntry): EventTypeDescriptor {
 }
 
 /**
- * A webhook source's event types: the adapter's known types, then any other
- * type the source delivered recently.
+ * A webhook source's event types: the adapter's (or custom preset's) known
+ * types, then any other type the source delivered recently.
  */
 export function webhookEventTypeCatalog(
-  adapter: WebhookEventAdapter,
+  source: { adapter: WebhookEventAdapter | null; format: { preset?: string | undefined } | null },
   recent: ReadonlyArray<{ type: string; count: number }>,
 ): EventTypeDescriptor[] {
-  const known = (CATALOG[adapter] ?? []).map(descriptor);
+  const preset = source.adapter === "custom" ? source.format?.preset : undefined;
+  const entries =
+    CATALOG[source.adapter ?? "standard"] ??
+    (preset !== undefined && Object.hasOwn(PRESET_CATALOG, preset) ? PRESET_CATALOG[preset] : []);
+  const known = (entries ?? []).map(descriptor);
   const seen = new Set(known.map((entry) => entry.type));
   const observed = recent
     .filter((entry) => !seen.has(entry.type))

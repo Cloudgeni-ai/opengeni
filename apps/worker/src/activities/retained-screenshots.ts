@@ -33,6 +33,7 @@ import {
 import { createHash } from "node:crypto";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 const PNG_ALLOWED_CRITICAL_CHUNKS = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
@@ -779,7 +780,7 @@ export async function retainSessionScreenshot(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
     return unavailable(identity.artifactId, "storage_write_failed");
   }
@@ -820,7 +821,7 @@ export async function retainSessionScreenshot(input: {
         workspaceId: input.workspaceId,
         artifactId: identity.artifactId,
         settlementKey: identity.settlementKey,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }).catch(() => undefined);
     }
     return unavailable(identity.artifactId, "pending");
@@ -1015,32 +1016,6 @@ async function readRetainedImageObject(
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-}
-
-/** Expand durable markers in an SDK RunState immediately before resume. */
-export async function materializeRetainedScreenshotRunState(input: {
-  db: Database;
-  objectStorage: ObjectStorage | null;
-  workspaceId: string;
-  sessionId: string;
-  serialized: string;
-  now?: Date;
-}): Promise<string> {
-  const parsed = parseSerializedRunState(input.serialized);
-  if (!parsed) return input.serialized;
-  const cache = new Map<string, string | null>();
-  let changed = false;
-  await visitSerializedRunStateItemArraysAsync(parsed, async (items) => {
-    const materialized = await materializeRetainedScreenshotHistoryWithCache(
-      { ...input, history: items },
-      cache,
-    );
-    if (materialized.some((item, index) => item !== items[index])) {
-      items.splice(0, items.length, ...materialized);
-      changed = true;
-    }
-  });
-  return changed ? JSON.stringify(parsed) : input.serialized;
 }
 
 async function materializeRetainedScreenshotHistoryWithCache(
@@ -1323,43 +1298,6 @@ function visitSerializedRunStateItemArrays(
   ) {
     const output = (lastModelResponse as Record<string, unknown>).output;
     if (Array.isArray(output)) visitor(output as Array<Record<string, unknown>>);
-  }
-}
-
-async function visitSerializedRunStateItemArraysAsync(
-  root: Record<string, unknown>,
-  visitor: (items: Array<Record<string, unknown>>) => Promise<void>,
-): Promise<void> {
-  const originalInput = root.originalInput;
-  if (Array.isArray(originalInput)) {
-    await visitor(originalInput as Array<Record<string, unknown>>);
-  }
-  if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
-      if (!wrapper || typeof wrapper !== "object" || Array.isArray(wrapper)) continue;
-      const record = wrapper as Record<string, unknown>;
-      const rawItem = record.rawItem;
-      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
-      const items = [rawItem as Record<string, unknown>];
-      await visitor(items);
-      if (items[0] !== rawItem) record.rawItem = items[0];
-    }
-  }
-  if (Array.isArray(root.modelResponses)) {
-    for (const response of root.modelResponses) {
-      if (!response || typeof response !== "object" || Array.isArray(response)) continue;
-      const output = (response as Record<string, unknown>).output;
-      if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
-    }
-  }
-  const lastModelResponse = root.lastModelResponse;
-  if (
-    lastModelResponse &&
-    typeof lastModelResponse === "object" &&
-    !Array.isArray(lastModelResponse)
-  ) {
-    const output = (lastModelResponse as Record<string, unknown>).output;
-    if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
   }
 }
 

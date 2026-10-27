@@ -32,6 +32,7 @@ export {
   Input,
   ModelPicker,
   PauseButton,
+  PauseButtonSlot,
   PausedState,
   RestoredResources,
   Root,

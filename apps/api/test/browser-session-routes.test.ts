@@ -93,6 +93,7 @@ test("automatic managed directory recovery preserves current authority and refus
       sourceChecks: number;
       touches: number;
       lost: number;
+      displays: string[];
     }[];
     expect(results).toEqual([
       {
@@ -104,6 +105,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: ["own:offscreen"],
       },
       ...["unknown", "unattested"].map((scenario) => ({
         scenario,
@@ -114,6 +116,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: [],
       })),
       ...["token-changed", "generation-changed", "route-changed", "machine-moved"].map(
         (scenario) => ({
@@ -125,6 +128,7 @@ test("automatic managed directory recovery preserves current authority and refus
           sourceChecks: 2,
           touches: 1,
           lost: 0,
+          displays: [],
         }),
       ),
       {
@@ -136,6 +140,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: [],
       },
       {
         scenario: "access-revoked",
@@ -146,6 +151,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 1,
         lost: 0,
+        displays: [],
       },
       {
         scenario: "ephemeral",
@@ -156,6 +162,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 1,
         touches: 1,
         lost: 1,
+        displays: [],
       },
       {
         scenario: "lightpanda",
@@ -166,6 +173,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 1,
         touches: 1,
         lost: 0,
+        displays: ["own:offscreen"],
       },
     ]);
   } finally {
@@ -332,6 +340,7 @@ async function automaticBrowserRecoveryFixture() {
       headless: true,
       linkedComputerSessionId: null,
       networkRouteId: null,
+      associations: [],
     },
   };
   let state = {
@@ -343,6 +352,7 @@ async function automaticBrowserRecoveryFixture() {
     sourceChecks: 0,
     touches: 0,
     lost: 0,
+    displays: [] as string[],
   };
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
@@ -373,6 +383,15 @@ async function automaticBrowserRecoveryFixture() {
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     markEphemeralBrowserSessionLost: async () => {
       state.lost++;
+      return true;
+    },
+    recordBrowserSessionDisplay: async (
+      _db: unknown,
+      input: { browserSessionId: string; controllerGeneration: string; display: string | null },
+    ) => {
+      state.displays.push(
+        `${input.browserSessionId === browserSessionId && input.controllerGeneration === controllerGeneration ? "own" : "other"}:${input.display}`,
+      );
       return true;
     },
   }));
@@ -523,7 +542,8 @@ async function automaticBrowserRecoveryFixture() {
       if (["unknown", "unattested"].includes(state.scenario))
         return failure(409, "resource_unavailable");
       state.recovered = true;
-      return success({ browserSessionId, controllerGeneration, observation });
+      // The relaunch reports how it showed the browser this time.
+      return success({ browserSessionId, controllerGeneration, observation, display: "offscreen" });
     },
   });
   const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
@@ -610,6 +630,7 @@ async function automaticBrowserRecoveryFixture() {
           sourceChecks: 0,
           touches: 0,
           lost: 0,
+          displays: [],
         };
         opens = 0;
         const response = await app.request(
@@ -657,6 +678,7 @@ async function automaticBrowserRecoveryFixture() {
         sourceChecks: 0,
         touches: 0,
         lost: 0,
+        displays: [],
       };
       const response = await app.request(
         `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets`,
@@ -671,11 +693,279 @@ async function automaticBrowserRecoveryFixture() {
         sourceChecks: state.sourceChecks,
         touches: state.touches,
         lost: state.lost,
+        displays: state.displays,
       });
     }
     console.log(JSON.stringify(results));
   } finally {
     console.error = originalError;
+    await server.stop(true);
+  }
+}
+
+test("held browsers are renewed on every pass while their agent sessions work or wait, without starting anything", async () => {
+  const directory = await mkdtemp("/tmp/og-api-hold-renewal-");
+  const script = join(directory, "synthetic-hold-renewal.ts");
+  await writeFile(script, `(${holdRenewalFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const results = JSON.parse(stdout);
+    const hold = { browser: "machine", exactAuthority: true, generation: true, renewal: true };
+    // Reached as the person who started the holding session's latest turn,
+    // as the explicit hold operation, never with a request grant.
+    const asPerson = { operation: "browser.hold", subjectId: "synthetic-person", grant: false };
+    expect(results).toEqual([
+      // A turn runs: the running browser on the machine is held; the one in a
+      // stopped box is never started for it; an attached browser is reached
+      // as the person (here disconnected, so not held); one whose sessions no
+      // person started is not routed at all.
+      {
+        sweep: "working",
+        renewal: { listed: 4, held: 1 },
+        records: ["attached", "cold-box", "machine", "unrouted"],
+        leaseReads: ["cold-box", "cold-box"],
+        channels: [asPerson],
+        viewers: ["synthetic-person"],
+        holds: [hold],
+      },
+      // The turn ended and nothing waits: nothing is listed or sent.
+      {
+        sweep: "idle",
+        renewal: { listed: 0, held: 0 },
+        records: [],
+        leaseReads: [],
+        channels: [],
+        viewers: [],
+        holds: [],
+      },
+      // A new turn that never touches the browser: held again.
+      {
+        sweep: "working-again",
+        renewal: { listed: 1, held: 1 },
+        records: ["machine"],
+        leaseReads: [],
+        channels: [asPerson],
+        viewers: [],
+        holds: [hold],
+      },
+      // The task moved to another machine: the browser left behind is not held.
+      {
+        sweep: "machine-moved",
+        renewal: { listed: 1, held: 0 },
+        records: ["machine"],
+        leaseReads: [],
+        channels: [],
+        viewers: [],
+        holds: [],
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+/** Runs renewal passes against a fake controller, in a separate process,
+ * recording what each pass reaches. */
+async function holdRenewalFixture() {
+  const routeHref = process.argv[2]!;
+  const apiDirectory = new URL("..", routeHref).pathname;
+  const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
+  const { mock } = await import("bun:test");
+  const { randomUUID } = await import("node:crypto");
+  const { Hono } = (await import(resolveFromApi("hono"))) as typeof import("hono");
+  const db = (await import(resolveFromApi("@opengeni/db"))) as typeof import("@opengeni/db");
+  const { testSettings: fixtureSettings } = (await import(
+    resolveFromApi("@opengeni/testing")
+  )) as typeof import("@opengeni/testing");
+  const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
+  const accountId = randomUUID(),
+    workspaceId = randomUUID(),
+    sourceSessionId = randomUUID(),
+    machineId = randomUUID(),
+    instanceId = randomUUID(),
+    sandboxGroupId = randomUUID(),
+    deviceId = randomUUID(),
+    rootSecret = "synthetic-controller-authority";
+  const machinePlacement = { kind: "connected_machine", sandboxId: machineId };
+  const placements: Record<string, Record<string, string>> = {
+    machine: machinePlacement,
+    unrouted: machinePlacement,
+    "cold-box": { kind: "sandbox_group", sandboxGroupId },
+    attached: { kind: "attached_device", deviceId },
+  };
+  const ids: Record<string, string> = {};
+  const names = new Map<string, string>();
+  for (const name of Object.keys(placements)) {
+    ids[name] = randomUUID();
+    names.set(ids[name]!, name);
+  }
+  let listed: string[] = [];
+  let sweep = "working";
+  let records: string[] = [];
+  let leaseReads: string[] = [];
+  let channels: Array<Record<string, unknown>> = [];
+  let viewers: string[] = [];
+  let holds: Array<Record<string, unknown>> = [];
+  mock.module(resolveFromApi("@opengeni/db"), () => ({
+    ...db,
+    listAgentHeldBrowserSessions: async () =>
+      listed.map((name) => ({
+        accountId,
+        workspaceId,
+        browserSessionId: ids[name]!,
+        routeSubjectId: name === "unrouted" ? null : "synthetic-person",
+      })),
+    getBrowserSessionControlRecord: async (_db: unknown, input: { browserSessionId: string }) => {
+      const name = names.get(input.browserSessionId)!;
+      records.push(name);
+      return {
+        sourceSessionId,
+        tokenGeneration: 1,
+        controllerHostSandboxGroupId: name === "cold-box" ? sandboxGroupId : null,
+        deviceWorkspaceId: null,
+        networkRouteAuthority: null,
+        session: {
+          id: input.browserSessionId,
+          workspaceId,
+          lifecycle: "active",
+          placement: placements[name],
+          controller: {
+            controllerId: "opengeni-browserd",
+            controllerGeneration: `generation-${name}`,
+            placementInstanceId: instanceId,
+          },
+          lastUsedAt: new Date().toISOString(),
+          associations: [],
+          driverId: "opengeni.cdp.v1",
+          engine: "chromium",
+          headless: true,
+          linkedComputerSessionId: null,
+          networkRouteId: null,
+        },
+      };
+    },
+    readLease: async () => {
+      leaseReads.push("cold-box");
+      return null;
+    },
+    getSession: async (_db: unknown, _workspaceId: string, sessionId: string) => ({
+      id: sessionId,
+      workspaceId,
+      status: "idle",
+      activeSandboxId: sweep === "machine-moved" ? randomUUID() : machineId,
+    }),
+    getAttachedBrowserDevice: async (_db: unknown, input: { subjectId: string }) => {
+      viewers.push(input.subjectId);
+      return { id: deviceId, state: "disconnected" };
+    },
+  }));
+  const expectedAdmin = authority.deriveBrowserControllerAdminToken({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement: machinePlacement,
+    placementInstanceId: instanceId,
+  });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const [, , , browserSessionId, route] = new URL(request.url).pathname.split("/");
+      if (request.method !== "POST" || route !== "wait-hold") {
+        return Response.json({ protocolVersion: 1, ok: false }, { status: 500 });
+      }
+      const body = (await request.json()) as Record<string, string>;
+      const until = Date.parse(body.until!) - Date.now();
+      holds.push({
+        browser: names.get(browserSessionId!),
+        exactAuthority: request.headers.get("authorization") === `Bearer ${expectedAdmin}`,
+        generation: body.controllerGeneration === `generation-${names.get(browserSessionId!)}`,
+        // A short renewal (five minutes from the pass), not a far deadline.
+        renewal: until > 4 * 60_000 && until <= 5 * 60_000 && Object.keys(body).length === 2,
+      });
+      return Response.json({ protocolVersion: 1, ok: true, data: { held: true } });
+    },
+  });
+  const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
+  const channel = await import(channelHref);
+  const routedChannel = async (
+    _services: unknown,
+    context: { operation?: string; subjectId: string; grant?: unknown },
+    callback: (handle: unknown) => Promise<unknown>,
+  ) => {
+    channels.push({
+      operation: context.operation,
+      subjectId: context.subjectId,
+      grant: context.grant !== undefined,
+    });
+    return await callback({
+      routingSession: {
+        prime: async () => ({
+          kind: "selfhosted",
+          sandboxId: machineId,
+          providerInstanceId: instanceId,
+          session: {
+            resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+          },
+        }),
+      },
+    });
+  };
+  mock.module(channelHref, () => ({
+    ...channel,
+    withChannelARead: routedChannel,
+    withChannelA: routedChannel,
+  }));
+  const { registerBrowserSessionRoutes } = await import(routeHref);
+  const { renewBrowserHolds } = registerBrowserSessionRoutes(new Hono(), {
+    settings: fixtureSettings({ delegationSecret: rootSecret }),
+    db: {},
+    bus: {},
+  } as never);
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const results = [];
+    const sweeps: Array<[string, string[]]> = [
+      ["working", ["machine", "cold-box", "attached", "unrouted"]],
+      ["idle", []],
+      ["working-again", ["machine"]],
+      ["machine-moved", ["machine"]],
+    ];
+    for (const [next, held] of sweeps) {
+      sweep = next;
+      listed = held;
+      records = [];
+      leaseReads = [];
+      channels = [];
+      viewers = [];
+      holds = [];
+      const renewal = await renewBrowserHolds();
+      results.push({
+        sweep: next,
+        renewal,
+        records: records.sort(),
+        leaseReads,
+        channels,
+        viewers,
+        holds,
+      });
+    }
+    console.log(JSON.stringify(results));
+  } finally {
+    console.warn = originalWarn;
     await server.stop(true);
   }
 }
@@ -745,6 +1035,46 @@ describe("BrowserSession route discipline", () => {
     });
     // A transient outage keeps its retryable envelope.
     expect(browserTabDiagnosisError(transient)).toBe(transient);
+  });
+
+  test("a controller conflict worth retrying keeps its retry advice in the API envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const debugged = new BrowserControlRequestError(409, {
+      code: "operation_conflict",
+      message:
+        "Another debugger is attached to this tab, so the Opengeni Browser extension cannot control it right now. Try again in a moment; if it keeps happening, close DevTools for this tab or use another tab",
+      retryable: true,
+    });
+    // Read routes (observe, tab state, screenshot) all end in browserRouteError.
+    app.get("/v1/test/debugged", () => {
+      throw browserRouteError(debugged);
+    });
+    const response = await app.request("http://localhost/v1/test/debugged", {
+      headers: { "x-opengeni-correlation-id": "debugged-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: debugged.error.message,
+        retryable: true,
+        requestId: "debugged-request",
+      },
+    });
+    // A final conflict stays final.
+    const final = new BrowserControlRequestError(409, {
+      code: "operation_conflict",
+      message: "another operation holds this tab",
+      retryable: false,
+    });
+    expect(browserTabDiagnosisError(final)).toBe(final);
   });
 
   test("a controller change of unknown outcome stays unknown in the API envelope", async () => {
@@ -1400,6 +1730,40 @@ describe("BrowserSession route discipline", () => {
       binding.indexOf("await client.createComputerSession"),
     );
     expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
+  });
+
+  test("records the display every controller launch reports, never the requested mode", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    // Every launch through the controller stores what that launch reported:
+    // create, resume, in-place recovery of a lost controller, and continuing
+    // an expired resume on its working copy. A new launch path must be added
+    // here and store its display too.
+    const launches = [...source.matchAll(/(\S+) = await client\.createSession\(/gu)].map(
+      (match) => match[1],
+    );
+    expect(launches).toEqual(["launch.result", "resumed.result", "recovered", "adopted.result"]);
+    const after = (marker: string, call: string) => {
+      const start = source.indexOf(call, source.indexOf(marker));
+      expect(start).toBeGreaterThan(0);
+      return source.slice(start, source.indexOf("});", start));
+    };
+    const activations = [...source.matchAll(/await activateBrowserSession\(deps\.db, \{/gu)];
+    expect(activations).toHaveLength(2);
+    const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
+    const create = source.slice(createStart, source.indexOf("app.get(", createStart));
+    const createActivation = create.slice(create.indexOf("await activateBrowserSession("));
+    expect(createActivation.slice(0, createActivation.indexOf("});"))).toContain(
+      "display: launch.result?.display ?? null,",
+    );
+    expect(
+      after("resumed.result = await client.createSession(", "await activateBrowserSession("),
+    ).toContain("display: resumed.result?.display ?? null,");
+    expect(
+      after("const recovered = await client.createSession(", "recordBrowserSessionDisplay("),
+    ).toContain("display: recovered.display ?? null,");
+    expect(
+      after("adopted.result = await client.createSession(", "continueExpiredBrowserSessionResume("),
+    ).toContain("display: adopted.result?.display ?? null,");
   });
 
   test("uses linked and native displays without bootstrapping a standalone desktop", async () => {
@@ -2082,6 +2446,7 @@ async function workingCopyRoutesFixture() {
         headless: true,
         linkedComputerSessionId: null,
         networkRouteId: null,
+        associations: [],
       },
     }),
     getSession: async () => ({

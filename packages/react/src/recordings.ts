@@ -49,8 +49,11 @@ export {
   groupLiveTurns,
   groupTranscriptTurns,
   languageName,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -58,10 +61,12 @@ export {
   tidyPartialText,
   transcriptErrorText,
   versionSummary,
+  withoutLiveMicrophoneEchoes,
 } from "./recordings-model";
 export type {
   LiveTranscriptLine,
   LiveTranscriptTurn,
+  MeetingHereStatus,
   MeetingPhase,
   TranscriptTurn,
 } from "./recordings-model";

@@ -56,13 +56,16 @@ export function OrganizationCodexUsage({
 }) {
   const query = useOrganizationCodexUsage(client, organizationId, account);
   const { data: live, fetching: refreshing, refresh } = query;
-  const failed = Boolean(query.error) || live?.status === "error";
+  // The list row shows this same reading (codexOverviewUsage); only the page
+  // says that the live check failed and when the reading was saved.
+  const failed = Boolean(query.error) || Boolean(live?.checkError);
+  const reloginRequired =
+    live?.checkError === "needs_relogin" || live?.usage?.reason === "needs_relogin";
   useEffect(() => {
-    if (live?.usage?.reason === "needs_relogin" && account.status === "active")
-      void onNeedsReconnect();
-  }, [live?.usage?.reason, account.status, onNeedsReconnect]);
-  const needsReconnect = account.status !== "active" || live?.usage?.reason === "needs_relogin";
-  const usage = live?.status !== "error" ? live?.usage : null;
+    if (reloginRequired && account.status === "active") void onNeedsReconnect();
+  }, [reloginRequired, account.status, onNeedsReconnect]);
+  const needsReconnect = account.status !== "active" || reloginRequired;
+  const usage = live?.usage ?? null;
   const readings = codexUsageReadings(
     usage ?? { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
     Date.now(),

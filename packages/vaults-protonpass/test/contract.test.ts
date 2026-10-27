@@ -38,6 +38,7 @@ const readSide: VaultProvider = {
   listVaults: (ctx) => proton.listVaults(ctx),
   listItems: (ctx, vault) => proton.listItems(ctx, vault),
   readFields: (ctx, vault, item, fields) => proton.readFields(ctx, vault, item, fields),
+  readPasskeys: (ctx, vault, item) => proton.readPasskeys(ctx, vault, item),
   writeItem: (ctx, vault, item) => proton.writeItem(ctx, vault, item),
   archiveItem: (ctx, vault, item) => proton.archiveItem(ctx, vault, item),
 };

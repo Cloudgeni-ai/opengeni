@@ -2,6 +2,7 @@ import { afterAll, expect, mock, test } from "bun:test";
 import type { AccessGrant, ConnectionMetadata } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
+  ConnectorActionPolicySnapshotEntry,
   Database,
   ResolveConnectionCredentialInput,
 } from "@opengeni/db";
@@ -28,6 +29,7 @@ const fixtures = new Map<
     connections: ConnectionMetadata[];
     integrations: ApiIntegrationRuntime[];
     resolved: ResolveConnectionCredentialInput[];
+    policies: ConnectorActionPolicySnapshotEntry[];
   }
 >();
 mock.module("@opengeni/core", () => ({
@@ -62,7 +64,13 @@ mock.module("@opengeni/db", () => ({
   listConnectorToolPermissionPolicies: (
     ...args: Parameters<typeof real.listConnectorToolPermissionPolicies>
   ) =>
-    fixtures.has(args[0]) ? Promise.resolve([]) : real.listConnectorToolPermissionPolicies(...args),
+    fixtures.has(args[0])
+      ? Promise.resolve(
+          fixtures
+            .get(args[0])!
+            .policies.filter((policy) => policy.connectionId === args[1].connectionId),
+        )
+      : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
     const fixture = fixtures.get(args[0]);
     if (!fixture) return real.buildConnectionTokenResolver(...args);
@@ -153,6 +161,7 @@ function createFixture() {
     integrations: [] as ApiIntegrationRuntime[],
     connections: [shared, personal, foreign],
     resolved: [] as ResolveConnectionCredentialInput[],
+    policies: [] as ConnectorActionPolicySnapshotEntry[],
   };
   fixtures.set(database, state);
   const settings = testSettings({
@@ -254,6 +263,60 @@ test("agent-authored Grafana account identities survive the live Site catalog an
       ).toBe(true);
     }
     expect(f.provider.calls).toHaveLength(2);
+  } finally {
+    await prepared.close();
+    f.close();
+  }
+});
+
+// Regression: Bendik's newsletter Site could not send Gmail after he set
+// "Send message" to Allow, because the gateway hid the recommended-Ask tool
+// before applying his saved choice.
+test("a saved Allow makes a connection's recommended-Ask tool callable from a Site", async () => {
+  const f = createFixture();
+  f.settings.mcpServers[0]!.requireApproval = ["query_prometheus"];
+  f.policies.push({
+    id: "88888888-8888-4888-8888-888888888888",
+    connectionId: f.personal.id,
+    serverId: "grafana",
+    toolName: "query_prometheus",
+    actionName: "*",
+    policy: "allow",
+    version: 1,
+  });
+  const prepared = await prepareWorkspaceToolGatewayForGrant(f.deps, access);
+  try {
+    const requested = [f.identity(f.shared), f.identity(f.personal)];
+    const bridge = createSiteToolBridge({
+      workspaceId,
+      artifactId,
+      siteVersionId: versionId,
+      requestedTools: requested,
+      workspaceTools: { $catalog: async () => prepared.toolGatewayCatalog },
+      callTool: async ({ request }) =>
+        callWorkspaceToolGateway(
+          prepared,
+          access,
+          request,
+          f.deps.db,
+          undefined,
+          undefined,
+          async () => undefined,
+          async () => null,
+        ),
+    });
+    const catalog = await bridge.catalog({ signal: new AbortController().signal });
+    // The shared account keeps the recommended Ask, which a Site cannot approve.
+    expect(catalog.entries.map((entry) => [entry.identity, entry.approval])).toEqual([
+      [f.identity(f.personal), "policy"],
+    ]);
+    const result = await bridge.call(
+      { catalogDigest: catalog.digest, identity: f.identity(f.personal), arguments: {} },
+      { signal: new AbortController().signal },
+    );
+    expect(result.result.isError).not.toBe(true);
+    expect(f.provider.calls).toHaveLength(1);
+    expect(f.authorizations.at(-1)).toBe(`Bearer ${f.personal.id}`);
   } finally {
     await prepared.close();
     f.close();

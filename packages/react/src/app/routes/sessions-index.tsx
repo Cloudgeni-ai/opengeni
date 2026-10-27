@@ -261,6 +261,7 @@ function SessionsIndexRouteContent({
   const api = useAppApi();
   const page = usePage();
   const starters = useSessionUiFeature("starters");
+  const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
   const chatList = useSessionUiFeature("chatList");
@@ -1530,6 +1531,8 @@ function SessionsIndexRouteContent({
     setValue: setMessage,
     hasDraftContent: () => message.length > 0 || attachments.attachments.length > 0,
     sending: busy,
+    // Nothing runs before the session exists: Send just sends.
+    working: false,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).
@@ -1622,8 +1625,11 @@ function SessionsIndexRouteContent({
   // A transient outage is covered by the updating notice instead.
   const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
   // With no usable credit, the notice above the composer carries the one
-  // Add credits action, so the heading's top-up button steps aside.
+  // Add credits action, so the heading's top-up button steps aside. Hosts that
+  // turn off addCredits (side panes) get the notice's billing link instead of
+  // the dialog.
   const canTopUpCredits =
+    addCredits &&
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspace?.accountId) &&
     hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:manage");
@@ -1951,6 +1957,13 @@ function SessionsIndexRouteContent({
                   models={voiceSelection.models}
                   selectedModel={voiceSelection.selectedModel}
                   onSelectModel={voiceSelection.selectModel}
+                  // While the chat models load, "choose supported model settings"
+                  // is not a real blocker yet.
+                  loadState={
+                    voiceSelection.loadState === "ready" && modelCatalog.loading
+                      ? "loading"
+                      : voiceSelection.loadState
+                  }
                   modelMenu="split"
                   disabled={
                     busy ||

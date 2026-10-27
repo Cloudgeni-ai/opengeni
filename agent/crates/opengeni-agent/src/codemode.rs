@@ -72,10 +72,16 @@ fn running_native_client_path() -> Option<PathBuf> {
 /// Connected Machine link carrying it. The control plane cannot safely infer
 /// this route: one runner may serve several deployments, while `localhost` has
 /// a different meaning on each host.
+///
+/// Only the origin comes from the link. The workspace stays the one the
+/// control plane addressed, because the attempt's token is minted for the
+/// chat's workspace: a personal machine serves its owner in every workspace
+/// they use, so that can differ from the workspace that enrolled the machine.
+/// The link's workspace is the fallback when the request names none.
 pub fn bind_connection_origin(
     request: &mut ControlRequest,
     api_base_url: &str,
-    workspace_id: &str,
+    link_workspace_id: &str,
 ) {
     let Some(exec) = request_exec_mut(request) else {
         return;
@@ -89,11 +95,34 @@ pub fn bind_connection_origin(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return;
     }
+    let workspace_id = exec
+        .env
+        .get(URL_ENV)
+        .and_then(|requested| requested_workspace_id(requested))
+        .unwrap_or_else(|| link_workspace_id.to_string());
     let prefix = url.path().trim_end_matches('/');
     url.set_path(&format!("{prefix}/v1/workspaces/{workspace_id}/codemode"));
     url.set_query(None);
     url.set_fragment(None);
     exec.env.insert(URL_ENV.to_string(), url.to_string());
+}
+
+/// The workspace in a control-plane Codemode URL (`…/workspaces/<id>/codemode`).
+fn requested_workspace_id(requested: &str) -> Option<String> {
+    let url = Url::parse(requested).ok()?;
+    let segments: Vec<&str> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let [.., workspaces, workspace_id, codemode] = segments.as_slice() else {
+        return None;
+    };
+    let valid = *workspaces == "workspaces"
+        && *codemode == "codemode"
+        && workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    valid.then(|| (*workspace_id).to_string())
 }
 
 fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
@@ -246,6 +275,8 @@ const IMAGE_SAVE_FAILED_EXIT_CODE: i32 = 4;
 /// `codemode call`: run the tool, then write any images to files. A failure
 /// to save an image after the call completed still prints the result, with
 /// `imageSaveError` and the operation ID, and exits with status 4.
+/// An error result (`isError`) with `--save-image` prints as the call's
+/// answer, saves no file and exits 0, so scripts check `isError`.
 async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(), CodemodeError> {
     use std::io::Write as _;
     let full = args.full;
@@ -255,6 +286,13 @@ async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(),
     }
     let operation_id = Uuid::new_v4().to_string();
     let result = client.call_as(args, operation_id.clone()).await?;
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    let save_image = if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        None
+    } else {
+        save_image
+    };
     let materialized = if full && save_image.is_none() {
         Ok(result.clone())
     } else {
@@ -1414,6 +1452,59 @@ mod tests {
         assert!(!nested.exists());
     }
 
+    #[tokio::test]
+    async fn an_error_result_with_save_image_is_the_answer_not_an_image_save_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "interaction", "toolName": "browser_screenshot" },
+                    "modelName": "interaction__browser_screenshot",
+                    "codemodePath": ["interaction", "browser", "screenshot"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "completed", "result": {
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "API 404: browser target does not exist" }]
+                }}}),
+            )
+            .await;
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shot.png");
+        // Before the fix this branch reported an image-save failure and exited
+        // the process with status 4.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_call(
+                &client,
+                CodemodeCallArgs {
+                    tool: "interaction.browser.screenshot".to_string(),
+                    arguments: "{}".to_string(),
+                    full: false,
+                    save_image: Some(target.clone()),
+                },
+            ),
+        )
+        .await
+        .expect("the call finishes")
+        .expect("an error result is printed as the answer");
+        assert!(!target.exists(), "an error result saves no image");
+        server.await.expect("server");
+    }
+
     #[test]
     fn document_ids_preserve_namespace_and_sdk_counter_contract() {
         for (kind, prefix) in [
@@ -2065,6 +2156,60 @@ mod tests {
             exec.env.get(URL_ENV).map(String::as_str),
             Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
         );
+    }
+
+    fn bind_on_link(requested_url: &str) -> Option<String> {
+        let mut exec = ExecRequest::default();
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        exec.env
+            .insert(URL_ENV.to_string(), requested_url.to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
+            ..ControlRequest::default()
+        };
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni",
+            "home-workspace",
+        );
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
+        };
+        exec.env.get(URL_ENV).cloned()
+    }
+
+    #[test]
+    fn personal_machine_keeps_the_chat_workspace_the_token_was_minted_for() {
+        // A personal machine enrolled in its owner's home workspace, used from
+        // a chat in another workspace: only the origin follows the link.
+        assert_eq!(
+            bind_on_link("https://public.example.test/v1/workspaces/chat-workspace/codemode")
+                .as_deref(),
+            Some("https://machine.example.test/opengeni/v1/workspaces/chat-workspace/codemode")
+        );
+    }
+
+    #[test]
+    fn unrecognised_codemode_routes_fall_back_to_the_link_workspace() {
+        for requested in [
+            "https://public.example.test/custom/codemode",
+            "https://public.example.test/v1/workspaces/a%2Fb/codemode",
+            "https://public.example.test/v1/workspaces/chat-workspace/mcp",
+            "not a url",
+        ] {
+            assert_eq!(
+                bind_on_link(requested).as_deref(),
+                Some("https://machine.example.test/opengeni/v1/workspaces/home-workspace/codemode"),
+                "{requested}"
+            );
+        }
     }
 
     #[tokio::test]

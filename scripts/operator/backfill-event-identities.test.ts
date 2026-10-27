@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
@@ -356,4 +356,65 @@ test("configured statement timeout covers initial inspection before any checkpoi
     release.resolve();
     await held;
   }
+}, 180000);
+
+test("CLI retains its session lock across the driver's default connection lifetime", async () => {
+  const [tail] =
+    await fixture.admin`select coalesce(max(sequence),0)::int as sequence from session_events where session_id=${sessionId}`;
+  await fixture.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload)
+    select ${accountId}::uuid,${workspaceId}::uuid,${sessionId}::uuid,n,'agent.message.delta','{"text":"lifetime"}'::jsonb
+    from generate_series(${Number(tail!.sequence) + 1}::int,${Number(tail!.sequence) + 4}::int) n`;
+  const wrapper = join(directory, "accelerated-connection-lifetime.mjs");
+  const checkpoint = join(directory, "connection-lifetime.json");
+  // Isolate the clock acceleration in a child: only postgres.js's default
+  // 30–60 minute connection timer is shortened, not SQL or pacing timeouts.
+  await writeFile(
+    wrapper,
+    `import { runIdentityBackfill } from ${JSON.stringify(new URL("./backfill-event-identities.ts", import.meta.url).pathname)};
+const original = globalThis.setTimeout;
+let rotations = 0;
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay >= 1800000 && delay <= 3600000) { rotations++; delay = 25; }
+  return original(callback, delay, ...args);
+};
+await runIdentityBackfill(process.argv.slice(2));
+console.log(JSON.stringify({ rotations }));
+`,
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      wrapper,
+      "--apply",
+      "--checkpoint",
+      checkpoint,
+      "--batch-size",
+      "1",
+      "--pause-ms",
+      "100",
+      "--max-batches",
+      "3",
+    ],
+    {
+      env: { ...process.env, OPENGENI_MAINTENANCE_DATABASE_URL: fixture.adminUrl },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  const lines = stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(lines.at(-1)).toEqual({ rotations: 0 });
+  expect(lines.filter((line) => line.event === "batch")).toHaveLength(3);
+  const state = readCheckpoint(JSON.parse(await readFile(checkpoint, "utf8")));
+  expect(state.batches).toBe(3);
+  expect(state.scanned).toBe(3);
+  expect(state.done).toBe(false);
 }, 180000);

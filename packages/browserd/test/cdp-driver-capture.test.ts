@@ -343,6 +343,30 @@ test("a closed browser connection still authorizes runtime recovery", async () =
   }
 });
 
+test("the connection state tells an answering browser from a silent or lost one", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    expect(await fixture.driver.connectionState()).toBe("connected");
+    // A browser that does not answer in time is not shown to be connected.
+    fixture.stallNext("Browser.getVersion");
+    jest.useFakeTimers();
+    const silent = fixture.driver.connectionState();
+    await fixture.waitUntilStalled();
+    jest.advanceTimersByTime(2_000);
+    await settle();
+    expect(await silent).toBe("unresponsive");
+    fixture.replyToStalled();
+    await settle();
+    jest.useRealTimers();
+    fixture.disconnect();
+    expect(await fixture.driver.connectionState()).toBe("lost");
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
 test("the supervisor preserves target authority when a failed capture has a slow liveness probe", async () => {
   const reference = { browserSessionId: randomUUID(), controllerGeneration: randomUUID() };
   const fixture = await captureFixture(reference);

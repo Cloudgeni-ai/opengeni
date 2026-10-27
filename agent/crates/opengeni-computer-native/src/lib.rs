@@ -11,6 +11,7 @@ mod adapter;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod captured_frames;
 mod clipboard;
+mod desktop_session;
 #[cfg(any(target_os = "linux", test))]
 mod linux_pointer;
 mod model;
@@ -30,11 +31,13 @@ mod macos;
 pub use adapter::{
     ComputerAdapter, NativeAdapterError, NativeAdapterErrorCode, NativeAdapterResult,
 };
+pub use desktop_session::{desktop_session_answer, run_desktop_session_command};
 pub use model::*;
 pub use rpc::{run_native_rpc, NativeRpcServerError, NATIVE_RPC_PROTOCOL_VERSION};
 pub use tree::{RawSemanticNode, SemanticSnapshotIndex};
 pub use window_command::{
-    answer_window_command, run_window_command, WindowBounds, WindowPresence, WindowQuery,
+    answer_window_command, run_window_command, ConsoleState, WindowBounds, WindowNative,
+    WindowPresence, WindowQuery,
 };
 
 /// Opens the native adapter for the current desktop seat.

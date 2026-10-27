@@ -94,6 +94,7 @@ type Props = {
   loading?: boolean | undefined;
   error?: unknown | undefined;
   personalWorkspace?: boolean | undefined;
+  canShareWithWorkspace?: boolean | undefined;
   defaultScope?: "user" | "workspace" | undefined;
   useInChat?: { canUse: boolean; onUse: (machine: MachineView) => void } | undefined;
 };
@@ -122,6 +123,7 @@ async function render(initial: Props = {}) {
           machinesLoading={props.loading ?? false}
           machinesError={props.error ?? null}
           personalWorkspace={props.personalWorkspace}
+          canShareWithWorkspace={props.canShareWithWorkspace}
           defaultScope={props.defaultScope}
           onConnected={onConnected}
           useInChat={props.useInChat}
@@ -214,6 +216,22 @@ describe("Connect a machine dialog", () => {
       expect(h.text()).toContain("Machine connected");
       expect(h.text()).not.toContain("replacing the old version");
       expect(h.onConnected).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a Member without workspace sharing sees This workspace disabled and mints Only me", async () => {
+    const h = await render({ canShareWithWorkspace: false, defaultScope: "workspace" });
+    try {
+      expect(h.radio("Only me")?.getAttribute("aria-checked")).toBe("true");
+      const workspace = h.radio("This workspace");
+      expect(workspace?.disabled).toBe(true);
+      expect(h.text()).toContain("Only workspace admins can choose this.");
+      await click(workspace);
+      expect(h.radio("Only me")?.getAttribute("aria-checked")).toBe("true");
+      expect(mintEnrollToken.mock.calls.length).toBeGreaterThan(0);
+      for (const [, input] of mintEnrollToken.mock.calls) expect(input.scope).toBe("user");
     } finally {
       await h.close();
     }

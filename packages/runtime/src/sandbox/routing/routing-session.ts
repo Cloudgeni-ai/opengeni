@@ -28,7 +28,7 @@
 // `@opengeni/db`.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { noteRoutedCallRouteResolved } from "./routed-call-scope";
+import { noteRoutedCallRouteResolved, resolveRoutedCallRoute } from "./routed-call-scope";
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
@@ -116,6 +116,7 @@ import {
   type SecretFileWriter,
 } from "../secret-delivery";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -1070,7 +1071,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async resolve(
     remainingFenceRetries = this.maxFenceRetries,
   ): Promise<ResolvedActiveBackend> {
-    const resolved = await this.resolveRoute(remainingFenceRetries);
+    const resolved = await resolveRoutedCallRoute(() => this.resolveRoute(remainingFenceRetries));
     noteRoutedCallRouteResolved();
     return resolved;
   }
@@ -3462,7 +3463,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
     throw cause;
   }
@@ -3481,7 +3482,7 @@ async function assertProviderCanSeeMaterializedPath(
       output: returnedOutput || null,
       exitCode: null,
       providerSessionId: null,
-      causeMessage: cause instanceof Error ? cause.message : String(cause),
+      causeMessage: errorMessage(cause),
     });
   }
   const status = parseExecResponseBanner(output);

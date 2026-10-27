@@ -14,6 +14,7 @@ import {
 
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 type SpreadsheetUxWindow = typeof globalThis & {
@@ -821,7 +822,7 @@ async function importAndMountDenseFixture(
 }
 
 function isColdViteReload(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = errorMessage(cause);
   return /execution context was destroyed|most likely because of a navigation|target closed|outdated optimize dep|(?:failed to fetch|error loading) dynamically imported module/iu.test(
     message,
   );

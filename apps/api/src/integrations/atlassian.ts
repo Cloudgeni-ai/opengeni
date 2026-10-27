@@ -20,7 +20,7 @@ import {
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -44,7 +44,7 @@ import {
   type ConnectorDocumentDestinationSelection,
 } from "@opengeni/contracts/connector-destinations";
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerWorkflowId,
   requireEnvironmentEncryption,
@@ -484,220 +484,6 @@ export async function browseAtlassianSources(
           left.name.localeCompare(right.name),
       ),
   });
-}
-
-export async function searchAtlassianLive(
-  deps: ApiRouteDeps,
-  input: AtlassianRequestAuthority & {
-    workspaceId: string;
-    subjectId: string;
-    connectionId: string;
-    query: string;
-    product?: "jira" | "confluence" | undefined;
-    limit: number;
-  },
-) {
-  assertNativeAtlassianAvailable();
-  const connection = await getConnectionMetadata(
-    deps.db,
-    input.workspaceId,
-    input.connectionId,
-    input.subjectId,
-  );
-  if (!connection) throw new HTTPException(404, { message: "Atlassian connection not found" });
-  const metadata = requireUsableConnection(connection, input.subjectId);
-  const query = input.query.trim();
-  if (!query || query.length > 500)
-    throw new HTTPException(400, { message: "invalid search query" });
-  const jiraSources = metadata.selectedSources.filter(
-    (source) => source.kind === "jira_project" && input.product !== "confluence",
-  );
-  const confluenceSources = metadata.selectedSources.filter(
-    (source) => source.kind === "confluence_space" && input.product !== "jira",
-  );
-  const results = await Promise.all([
-    ...groupSourcesByCloudId(jiraSources).map(async ([cloudId, sources]) => {
-      const url = new URL(
-        `https://api.atlassian.com/ex/jira/${encodeURIComponent(cloudId)}/rest/api/3/search/jql`,
-      );
-      url.searchParams.set(
-        "jql",
-        `project in (${sources.map((source) => jqlString(source.key)).join(",")}) AND text ~ ${jqlString(query)} ORDER BY updated DESC`,
-      );
-      url.searchParams.set("maxResults", String(input.limit));
-      url.searchParams.set("fields", "summary,project,status,issuetype,updated");
-      const payload = objectRecord(
-        await atlassianApiRequest(deps, { ...input, url, label: "Jira live search" }),
-      );
-      return (Array.isArray(payload.issues) ? payload.issues : []).map((raw) => {
-        const row = objectRecord(raw);
-        const fields = objectRecord(row.fields);
-        const project = objectRecord(fields.project);
-        const key = requiredString(row.key, "issue.key");
-        const source = sources.find(
-          (candidate) => candidate.resourceId === optionalString(project.id),
-        );
-        return {
-          kind: "jira_issue" as const,
-          id: requiredString(row.id, "issue.id"),
-          key,
-          title: requiredString(fields.summary, "issue.summary"),
-          sourceId: source?.id ?? null,
-          sourceName: source?.name ?? optionalString(project.name),
-          status: optionalString(objectRecord(fields.status).name),
-          updatedAt: optionalString(fields.updated),
-          url: new URL(
-            `/browse/${encodeURIComponent(key)}`,
-            source?.siteUrl ?? sources[0]!.siteUrl,
-          ).toString(),
-        };
-      });
-    }),
-    ...groupSourcesByCloudId(confluenceSources).map(async ([cloudId, sources]) => {
-      const url = new URL(
-        `https://api.atlassian.com/ex/confluence/${encodeURIComponent(cloudId)}/wiki/rest/api/search`,
-      );
-      url.searchParams.set(
-        "cql",
-        `type=page AND space in (${sources.map((source) => cqlString(source.key)).join(",")}) AND text ~ ${cqlString(query)}`,
-      );
-      url.searchParams.set("limit", String(input.limit));
-      url.searchParams.set("expand", "content.space");
-      const payload = objectRecord(
-        await atlassianApiRequest(deps, { ...input, url, label: "Confluence live search" }),
-      );
-      const base = optionalString(objectRecord(payload._links).base) ?? sources[0]!.siteUrl;
-      return (Array.isArray(payload.results) ? payload.results : []).map((raw) => {
-        const row = objectRecord(raw);
-        const content = objectRecord(row.content);
-        const space = objectRecord(content.space);
-        const source = sources.find((candidate) => candidate.key === optionalString(space.key));
-        const webUi = optionalString(objectRecord(content._links).webui);
-        return {
-          kind: "confluence_page" as const,
-          id: requiredString(content.id, "page.id"),
-          key: null,
-          title: requiredString(content.title, "page.title"),
-          sourceId: source?.id ?? null,
-          sourceName: source?.name ?? optionalString(space.name),
-          status: null,
-          updatedAt: optionalString(objectRecord(row.lastModified).when),
-          url: webUi ? new URL(webUi, base).toString() : (source?.siteUrl ?? base),
-        };
-      });
-    }),
-  ]);
-  return results.flat().slice(0, input.limit);
-}
-
-export async function getAtlassianLiveItem(
-  deps: ApiRouteDeps,
-  input: AtlassianRequestAuthority & {
-    workspaceId: string;
-    subjectId: string;
-    connectionId: string;
-    kind: "jira_issue" | "confluence_page";
-    id: string;
-  },
-) {
-  assertNativeAtlassianAvailable();
-  const connection = await getConnectionMetadata(
-    deps.db,
-    input.workspaceId,
-    input.connectionId,
-    input.subjectId,
-  );
-  if (!connection) throw new HTTPException(404, { message: "Atlassian connection not found" });
-  const metadata = requireUsableConnection(connection, input.subjectId);
-  if (input.kind === "jira_issue") {
-    for (const [cloudId, sources] of groupSourcesByCloudId(
-      metadata.selectedSources.filter((source) => source.kind === "jira_project"),
-    )) {
-      const url = new URL(
-        `https://api.atlassian.com/ex/jira/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(input.id)}`,
-      );
-      url.searchParams.set(
-        "fields",
-        "summary,description,project,status,issuetype,priority,assignee,reporter,labels,created,updated",
-      );
-      try {
-        const issue = objectRecord(
-          await atlassianApiRequest(deps, { ...input, url, label: "Jira live issue" }),
-        );
-        const fields = objectRecord(issue.fields);
-        const source = sources.find(
-          (candidate) => candidate.resourceId === optionalString(objectRecord(fields.project).id),
-        );
-        if (!source) continue;
-        const comments = await readJiraLiveComments(deps, input, cloudId);
-        return {
-          kind: "jira_issue" as const,
-          id: requiredString(issue.id, "issue.id"),
-          key: requiredString(issue.key, "issue.key"),
-          title: requiredString(fields.summary, "issue.summary"),
-          source: { id: source.id, name: source.name, siteName: source.siteName },
-          status: optionalString(objectRecord(fields.status).name),
-          issueType: optionalString(objectRecord(fields.issuetype).name),
-          priority: optionalString(objectRecord(fields.priority).name),
-          assignee: optionalString(objectRecord(fields.assignee).displayName),
-          reporter: optionalString(objectRecord(fields.reporter).displayName),
-          labels: Array.isArray(fields.labels)
-            ? fields.labels.filter((value): value is string => typeof value === "string")
-            : [],
-          createdAt: optionalString(fields.created),
-          updatedAt: optionalString(fields.updated),
-          description: adfText(fields.description),
-          comments,
-          url: new URL(
-            `/browse/${encodeURIComponent(requiredString(issue.key, "issue.key"))}`,
-            source.siteUrl,
-          ).toString(),
-        };
-      } catch (error) {
-        if (error instanceof HTTPException && error.status === 404) continue;
-        throw error;
-      }
-    }
-    throw new HTTPException(404, { message: "Jira issue is outside the selected projects" });
-  }
-
-  for (const [cloudId, sources] of groupSourcesByCloudId(
-    metadata.selectedSources.filter((source) => source.kind === "confluence_space"),
-  )) {
-    const url = new URL(
-      `https://api.atlassian.com/ex/confluence/${encodeURIComponent(cloudId)}/wiki/api/v2/pages/${encodeURIComponent(input.id)}`,
-    );
-    url.searchParams.set("body-format", "storage");
-    try {
-      const page = objectRecord(
-        await atlassianApiRequest(deps, { ...input, url, label: "Confluence live page" }),
-      );
-      const source = sources.find(
-        (candidate) => candidate.resourceId === optionalString(page.spaceId),
-      );
-      if (!source) continue;
-      const comments = await readConfluenceLiveComments(deps, input, cloudId);
-      const webUi = optionalString(objectRecord(page._links).webui);
-      return {
-        kind: "confluence_page" as const,
-        id: requiredString(page.id, "page.id"),
-        title: requiredString(page.title, "page.title"),
-        source: { id: source.id, name: source.name, siteName: source.siteName },
-        status: optionalString(page.status),
-        createdAt: optionalString(page.createdAt),
-        updatedAt: optionalString(objectRecord(page.version).createdAt),
-        content: optionalString(objectRecord(objectRecord(page.body).storage).value) ?? "",
-        comments,
-        url: webUi
-          ? new URL(webUi.startsWith("/wiki/") ? webUi : `/wiki${webUi}`, source.siteUrl).toString()
-          : source.siteUrl,
-      };
-    } catch (error) {
-      if (error instanceof HTTPException && error.status === 404) continue;
-      throw error;
-    }
-  }
-  throw new HTTPException(404, { message: "Confluence page is outside the selected spaces" });
 }
 
 export async function saveAtlassianSources(
@@ -1213,7 +999,7 @@ async function materializeSchedules(
     };
     let task;
     if (existingTask) {
-      const previous = await captureScheduledTaskRestoreState(deps.db, existingTask);
+      const previous: ScheduledTaskRestoreState = { task: existingTask };
       task = await updateScheduledTask(deps.db, input.workspaceId, existingTask.id, {
         name: `Sync ${selectedSource.kind === "jira_project" ? "Jira" : "Confluence"}: ${selectedSource.name}`,
         schedule: atlassianSchedule(selectedSource.syncCadence),
@@ -1298,7 +1084,7 @@ async function materializeSchedules(
         actor,
       });
     }
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const disabled = await updateScheduledTask(deps.db, input.workspaceId, task.id, {
       metadata: {
         ...task.metadata,
@@ -1648,7 +1434,7 @@ async function setSchedulePause(
 ): Promise<void> {
   const tasks = await listKnowledgeSourceSyncTasksForConnection(deps.db, workspaceId, connectionId);
   for (const task of tasks) {
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const control = objectRecord(task.metadata.knowledgeSourceSync);
     const updated = await updateScheduledTask(deps.db, workspaceId, task.id, {
       metadata: {
@@ -1854,109 +1640,4 @@ function numberValue(value: unknown): number | undefined {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
-}
-
-function groupSourcesByCloudId(
-  sources: AtlassianSelectedSource[],
-): Array<[string, AtlassianSelectedSource[]]> {
-  const grouped = new Map<string, AtlassianSelectedSource[]>();
-  for (const source of sources) {
-    grouped.set(source.cloudId, [...(grouped.get(source.cloudId) ?? []), source]);
-  }
-  return [...grouped.entries()];
-}
-
-function jqlString(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-}
-
-function cqlString(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-}
-
-async function readJiraLiveComments(
-  deps: ApiRouteDeps,
-  input: AtlassianRequestAuthority & {
-    workspaceId: string;
-    subjectId: string;
-    connectionId: string;
-    id: string;
-  },
-  cloudId: string,
-) {
-  const comments: Array<{ author: string | null; createdAt: string | null; body: string }> = [];
-  let startAt = 0;
-  for (let page = 0; page < 20; page += 1) {
-    const url = new URL(
-      `https://api.atlassian.com/ex/jira/${encodeURIComponent(cloudId)}/rest/api/3/issue/${encodeURIComponent(input.id)}/comment`,
-    );
-    url.searchParams.set("startAt", String(startAt));
-    url.searchParams.set("maxResults", "100");
-    url.searchParams.set("orderBy", "created");
-    const payload = objectRecord(
-      await atlassianApiRequest(deps, { ...input, url, label: "Jira live comments" }),
-    );
-    const rows = Array.isArray(payload.comments) ? payload.comments : [];
-    for (const raw of rows) {
-      const row = objectRecord(raw);
-      comments.push({
-        author: optionalString(objectRecord(row.author).displayName),
-        createdAt: optionalString(row.created),
-        body: adfText(row.body),
-      });
-    }
-    const total = numberValue(payload.total) ?? comments.length;
-    if (comments.length >= total || rows.length === 0) break;
-    startAt += rows.length;
-  }
-  return comments;
-}
-
-async function readConfluenceLiveComments(
-  deps: ApiRouteDeps,
-  input: AtlassianRequestAuthority & {
-    workspaceId: string;
-    subjectId: string;
-    connectionId: string;
-    id: string;
-  },
-  cloudId: string,
-) {
-  const comments: Array<{ createdAt: string | null; content: string }> = [];
-  let cursor: string | null = null;
-  for (let page = 0; page < 20; page += 1) {
-    const url = new URL(
-      `https://api.atlassian.com/ex/confluence/${encodeURIComponent(cloudId)}/wiki/api/v2/pages/${encodeURIComponent(input.id)}/footer-comments`,
-    );
-    url.searchParams.set("body-format", "storage");
-    url.searchParams.set("limit", "100");
-    if (cursor) url.searchParams.set("cursor", cursor);
-    const payload = objectRecord(
-      await atlassianApiRequest(deps, { ...input, url, label: "Confluence live comments" }),
-    );
-    for (const raw of Array.isArray(payload.results) ? payload.results : []) {
-      const row = objectRecord(raw);
-      comments.push({
-        createdAt: optionalString(objectRecord(row.version).createdAt),
-        content: optionalString(objectRecord(objectRecord(row.body).storage).value) ?? "",
-      });
-    }
-    const next = optionalString(objectRecord(payload._links).next);
-    if (!next) break;
-    const nextUrl = confluenceNextUrl(cloudId, next);
-    cursor = nextUrl.searchParams.get("cursor");
-    if (!cursor) break;
-  }
-  return comments;
-}
-
-function adfText(value: unknown): string {
-  const node = objectRecord(value);
-  if (node.type === "text") return typeof node.text === "string" ? node.text : "";
-  const children = Array.isArray(node.content) ? node.content.map(adfText).join("") : "";
-  if (node.type === "paragraph" || node.type === "heading" || node.type === "listItem") {
-    return `${children.trim()}\n`;
-  }
-  if (node.type === "hardBreak") return "\n";
-  return children;
 }

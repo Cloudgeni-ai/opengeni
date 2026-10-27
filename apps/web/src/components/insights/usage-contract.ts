@@ -284,24 +284,3 @@ export function addMeasures(target: UsageMeasures, source: UsageMeasures): Usage
 export function sumMeasures(rows: readonly UsageMeasures[]): UsageMeasures {
   return rows.reduce((total, row) => addMeasures(total, row), emptyMeasures());
 }
-
-/*
- * Drift guard (types only, nothing ships): the shared contract
- * (`@opengeni/contracts/insights-usage`) must stay assignable to the shapes
- * this dashboard reads after its requested grouping is verified above.
- * Every dashboard grouping must remain supported by the shared query contract;
- * additive API-only groupings do not automatically become dashboard controls.
- */
-type AssertAssignable<_T extends true> = true;
-type DashboardUsageResponse = Omit<InsightsUsageResponse, "groupBy"> & {
-  groupBy: Extract<InsightsUsageResponse["groupBy"], UsageGroupBy>;
-};
-export type UsageContractGuard = [
-  AssertAssignable<
-    DashboardUsageResponse extends Omit<UsageResponse, "capabilities"> ? true : false
-  >,
-  AssertAssignable<UsageGroupBy extends InsightsUsageResponse["groupBy"] ? true : false>,
-  AssertAssignable<
-    import("@opengeni/contracts/insights-usage").InsightsCall extends UsageCall ? true : false
-  >,
-];

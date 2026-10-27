@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { run, type Model } from "@openai/agents-core";
 import { withWorkspaceGatewayCredential, type Settings } from "@opengeni/config";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { buildOpenGeniAgent, prepareAgentTools, type BuildAgentOptions } from "@opengeni/runtime";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
@@ -26,6 +27,7 @@ async function creditTurnImageGeneration(input: {
   settings: Partial<Settings>;
   workspaceCreditModelsAllowed?: boolean;
   capabilitySettings?: (settings: Settings) => Settings;
+  model?: Model;
 }) {
   const settings: Settings = testSettings({
     sandboxBackend: "none",
@@ -77,7 +79,7 @@ async function creditTurnImageGeneration(input: {
         options.push(buildOptions);
         return buildOpenGeniAgent(runSettings, resources, {
           ...buildOptions,
-          model: new ScriptedModel("done"),
+          model: input.model ?? new ScriptedModel("done"),
         });
       },
     } as BuildTurnAgentDeps["runtime"],
@@ -126,14 +128,40 @@ async function creditTurnImageGeneration(input: {
     codex: { generation: null },
     xai: { generation: null },
   };
-  await buildTurnAgent(deps as BuildTurnAgentDeps);
+  const { agent } = await buildTurnAgent(deps as BuildTurnAgentDeps);
   expect(options).toHaveLength(1);
-  return { imageGeneration: options[0]?.imageGeneration, remembered };
+  return { imageGeneration: options[0]?.imageGeneration, remembered, agent };
 }
 
 function fakeReceipt(): GeneratedImageReceipt {
   return { type: "generated_image" } as unknown as GeneratedImageReceipt;
 }
+
+// The body the image gateway sends when the deployment's provider account has
+// no credit left, through the real adapter so the error is the one production
+// sees.
+async function providerError(status: number, message: string) {
+  return await gatewayImages
+    .generateGatewayImage({
+      apiKey: MANAGED_KEY,
+      modelId: "openai/gpt-image-2",
+      prompt: "A cat",
+      toolCallId: "call-provider",
+      fetch: async () =>
+        new Response(JSON.stringify({ error: { message, type: "insufficient_funds" } }), {
+          status,
+        }),
+    })
+    .then(
+      () => {
+        throw new Error("expected a provider failure");
+      },
+      (error: unknown) => error as gatewayImages.GatewayImageApiError,
+    );
+}
+
+const OUT_OF_CREDIT =
+  "Insufficient funds. Please add credits to your account to continue using AI services. Visit https://billing.example.com/top-up to top up your credits.";
 
 describe("credit-funded image generation tool selection", () => {
   test("a credit turn gets the image tool on the deployment's managed key and frozen price", async () => {
@@ -199,6 +227,63 @@ describe("credit-funded image generation tool selection", () => {
     await expect(
       imageGeneration.execute({ prompt: "Another", references: [] }, { toolCallId: "call-2" }),
     ).rejects.toThrow("provider exploded");
+  });
+
+  test("an image provider out of credit is the tool's own error and the turn continues", async () => {
+    const failure = await providerError(402, OUT_OF_CREDIT);
+    restores.push(spyOn(gatewayImages, "executeGatewayImageGeneration").mockRejectedValue(failure));
+    const model = new ScriptedModel([
+      { output: [functionCall("generate_image", { prompt: "A cat", references: [] }, "call-1")] },
+      { outputText: "I can't make pictures right now." },
+    ]);
+    const { agent, remembered } = await creditTurnImageGeneration({ settings: billed, model });
+
+    const result = await run(agent, "Make a picture of a cat with a birthday cake");
+
+    expect(result.finalOutput).toBe("I can't make pictures right now.");
+    expect(model.calls).toBe(2);
+    const toolOutput = JSON.stringify(model.requests[1]!.input);
+    expect(toolOutput).toContain(
+      "Image generation isn't available right now, so no image was made.",
+    );
+    // Provider account details and billing links never reach the agent.
+    expect(toolOutput).not.toContain("billing.example.com");
+    expect(toolOutput).not.toContain("Insufficient funds");
+    expect(remembered).toEqual([]);
+  });
+
+  test("a provider failure is reported to the operator without its account text reaching the agent", async () => {
+    const failure = await providerError(402, OUT_OF_CREDIT);
+    restores.push(spyOn(gatewayImages, "executeGatewayImageGeneration").mockRejectedValue(failure));
+    const { imageGeneration } = await creditTurnImageGeneration({ settings: billed });
+    if (imageGeneration?.kind !== "provider_adapter") throw new Error("no adapter");
+    const warnings: unknown[] = [];
+    const report = spyOn(gatewayImages, "reportImageGenerationProviderFailure").mockImplementation(
+      (_observability, input) => {
+        warnings.push(input);
+      },
+    );
+    restores.push(report);
+    const result = await imageGeneration.execute(
+      { prompt: "A cat", references: [] },
+      { toolCallId: "call-402" },
+    );
+    expect(result).toEqual({
+      isError: true,
+      status: "rejected",
+      code: "image_provider_unavailable",
+      message: "Image generation isn't available right now, so no image was made.",
+      content: [
+        { type: "text", text: "Image generation isn't available right now, so no image was made." },
+      ],
+    });
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        error: failure,
+        modelId: "openai/gpt-image-2",
+        funding: "opengeni_credits",
+      }),
+    ]);
   });
 
   test("an operator can turn credit-funded images off", async () => {

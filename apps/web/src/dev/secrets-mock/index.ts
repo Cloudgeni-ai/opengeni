@@ -44,14 +44,6 @@ import {
 
 const FLAG = "og-dev-secrets-mock";
 
-export function secretsMockEnabled(): boolean {
-  try {
-    return window.localStorage.getItem(FLAG) === "1";
-  } catch {
-    return false;
-  }
-}
-
 function setting(key: string): string {
   try {
     return window.localStorage.getItem(key) ?? "";

@@ -19,6 +19,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Topic | Current canonical home | Known restatement locations |
 | --- | --- | --- |
+| Signup CAPTCHA, promotional funding holds, and automatic free-credit abuse detection | `docs/signup-abuse-protection.md` | Deployment and billing docs link here for policy, evidence, and activation. |
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
 | Local development stack, manual startup, `.env` configuration, and web-app walkthrough | `docs/local-development.md` | `README.md` keeps only the one-command quick start; `CONTRIBUTING.md`, `docs-site/run-locally.mdx`, and `docs/deployment.md` § Local Development Stack (launcher internals) link here. |
 | HTTP route families | `docs/http-api.md` | `README.md`, `packages/sdk/README.md`, and topic docs link instead of re-listing routes; typed method details stay in `packages/sdk/README.md`. |
@@ -88,6 +89,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Public API compatibility policy, public surface, deprecation, and enforcement | `docs/design/api-compatibility-policy.md` (accepted ADR, append-only exception log; the one design record that is current policy) | `docs/architecture.md` §3.10 summarizes; `packages/sdk/README.md`, `AGENTS.md`, the PR template, and release notes link instead of restating the rules. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `docs/local-development.md` § Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
+| Model route residency and EU-only inference | `docs/eu-only-inference.md` | `docs/model-providers.md` and provider docs should link instead of restating residency rules. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
 | Workspace and session artifact library | `docs/artifact-library.md` | Unified discovery and retained-file presentation; existing Site and editable-artifact authorities remain separate content models. |

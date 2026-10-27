@@ -53,11 +53,17 @@ fn agent_token() -> String {
     )
 }
 
+/// An input-granting (`control`) viewer token bound to this test's `ch-{port}`
+/// stream — what the API mints for a terminal viewer holding `terminal:attach`.
 fn viewer_token(epoch: u64, port: u32) -> String {
+    viewer_token_with_mode(epoch, port, "control")
+}
+
+fn viewer_token_with_mode(epoch: u64, port: u32, mode: &str) -> String {
     mint(
         "ogs_",
         &format!(
-            r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":{epoch},"mode":"view","port":{port},"exp":4102444800}}"#
+            r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":{epoch},"mode":"{mode}","port":{port},"exp":4102444800,"agentId":"{AGENT}","channelId":"ch-{port}"}}"#
         ),
     )
 }
@@ -121,6 +127,7 @@ struct Viewer {
     socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
+    channel_id: String,
 }
 
 impl Viewer {
@@ -169,7 +176,7 @@ impl Viewer {
             .map_err(|e| format!("dial: {e}"))?;
         let open = RelayMessage::Open(v1::StreamOpen {
             channel: Some(v1::StreamChannel {
-                channel_id,
+                channel_id: channel_id.clone(),
                 workspace_id: WORKSPACE.to_string(),
                 agent_id: AGENT.to_string(),
                 kind: v1::StreamKind::Pty as i32,
@@ -186,7 +193,7 @@ impl Viewer {
             .map_err(|e| format!("send open: {e}"))?;
         // Await the ack.
         match next_msg(&mut socket).await {
-            Some(RelayMessage::OpenAck(ack)) => Ok((Self { socket }, ack)),
+            Some(RelayMessage::OpenAck(ack)) => Ok((Self { socket, channel_id }, ack)),
             other => Err(format!("expected OpenAck, got {other:?}")),
         }
     }
@@ -203,12 +210,16 @@ impl Viewer {
 
     async fn send_frame(&mut self, seq: u64, data: &[u8]) {
         let frame = RelayMessage::Frame(v1::StreamFrame {
-            channel_id: "ch-viewer".to_string(),
+            channel_id: self.channel_id.clone(),
             seq,
             data: prost::bytes::Bytes::copy_from_slice(data),
             produced_at_ms: 0,
         });
-        let _ = self.socket.send(WsMessage::Binary(frame.encode())).await;
+        self.send(&frame).await;
+    }
+
+    async fn send(&mut self, message: &RelayMessage) {
+        let _ = self.socket.send(WsMessage::Binary(message.encode())).await;
     }
 }
 
@@ -786,4 +797,207 @@ async fn producer_reconnect_resumes_from_its_cursor() {
         .expect("post-reconnect frame")
         .unwrap();
     assert_eq!(&got.data[..], b"b");
+}
+
+/// The next message the producer receives, or `None` when nothing arrives within
+/// a short window (the relay dropped the viewer's message).
+async fn producer_next(producer: &mut RelayChannel, wait: Duration) -> Option<RelayMessage> {
+    match tokio::time::timeout(wait, producer.recv()).await {
+        Ok(Ok(message)) => message,
+        Ok(Err(e)) => panic!("producer recv failed: {e}"),
+        Err(_) => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_token_without_a_stream_binding_is_rejected() {
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
+    let _producer = RelayChannel::register(producer_config(&base, PTY_PORT))
+        .await
+        .expect("producer register");
+    // No binding at all, only the agent, or only the channel: each is rejected.
+    let partial_bindings = [
+        ("unbound", String::new()),
+        ("agent-only", format!(r#","agentId":"{AGENT}""#)),
+        ("channel-only", format!(r#","channelId":"ch-{PTY_PORT}""#)),
+    ];
+    for (case, binding) in partial_bindings {
+        let before = metrics.opens_rejected();
+        let token = mint(
+            "ogs_",
+            &format!(
+                r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":0,"mode":"control","port":{PTY_PORT},"exp":4102444800{binding}}}"#
+            ),
+        );
+        let (_v, ack) = Viewer::connect_with_token(&base, PTY_PORT, token, 0, None)
+            .await
+            .expect("dial");
+        assert!(
+            !ack.accepted,
+            "a {case} viewer token cannot open a relay stream"
+        );
+        assert!(
+            metrics.opens_rejected() > before,
+            "{case} counted as rejected"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_view_token_watches_a_terminal_but_cannot_type_into_or_close_it() {
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
+    let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
+        .await
+        .expect("producer register");
+    let (mut viewer, ack) = Viewer::connect_with_token(
+        &base,
+        PTY_PORT,
+        viewer_token_with_mode(0, PTY_PORT, "view"),
+        0,
+        None,
+    )
+    .await
+    .expect("view viewer");
+    assert!(ack.accepted, "a view token may watch the terminal");
+
+    producer
+        .send_frame(prost::bytes::Bytes::from_static(b"prompt$ "))
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), viewer.recv_frame())
+        .await
+        .expect("view viewer recv timed out")
+        .expect("view viewer frame");
+    assert_eq!(&got.data[..], b"prompt$ ");
+
+    // Keystrokes and a Close from the view token never reach the shell.
+    viewer.send_frame(0, b"rm -rf ~\n").await;
+    let close = RelayMessage::Close(v1::StreamClose {
+        channel_id: format!("ch-{PTY_PORT}"),
+        reason: v1::StreamCloseReason::Normal as i32,
+        message: "viewer close".to_string(),
+    });
+    viewer.send(&close).await;
+    assert!(
+        producer_next(&mut producer, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "view-mode keystrokes and Close must be dropped"
+    );
+    // Both drops become visible to operators (polled: a loaded runner may still
+    // be processing the second message).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while metrics.unauthorized_drops() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both dropped messages are counted");
+    assert_eq!(metrics.unauthorized_drops(), 2);
+
+    // The channel is still alive: output keeps flowing to the viewer.
+    producer
+        .send_frame(prost::bytes::Bytes::from_static(b"still-here"))
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), viewer.recv_frame())
+        .await
+        .expect("channel survived")
+        .expect("frame");
+    assert_eq!(&got.data[..], b"still-here");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_input_needs_a_control_token_and_the_established_channel() {
+    const DESKTOP_PORT: u32 = 6080;
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
+    let mut producer = RelayChannel::register(producer_config(&base, DESKTOP_PORT))
+        .await
+        .expect("producer register");
+    let input = |channel: &str| {
+        RelayMessage::DesktopInput(v1::DesktopInput {
+            channel_id: channel.to_string(),
+            ..Default::default()
+        })
+    };
+    let channel = format!("ch-{DESKTOP_PORT}");
+
+    // A view-only desktop viewer cannot inject input.
+    let (mut watcher, ack) = Viewer::connect_with_token(
+        &base,
+        DESKTOP_PORT,
+        viewer_token_with_mode(0, DESKTOP_PORT, "view"),
+        0,
+        None,
+    )
+    .await
+    .expect("view viewer");
+    assert!(ack.accepted);
+    watcher.send(&input(&channel)).await;
+    assert!(
+        producer_next(&mut producer, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "view-mode desktop input must be dropped"
+    );
+    // A desktop Frame (opaque bytes) is not input either.
+    watcher.send_frame(0, b"not-input").await;
+    assert!(producer_next(&mut producer, Duration::from_millis(300))
+        .await
+        .is_none());
+
+    // A control viewer's input reaches the producer only on its own channel.
+    let (mut controller, ack) = Viewer::connect(&base, DESKTOP_PORT, 0, 0)
+        .await
+        .expect("control viewer");
+    assert!(ack.accepted);
+    controller.send(&input("ch-someone-else")).await;
+    assert!(
+        producer_next(&mut producer, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "input naming another channel must be dropped"
+    );
+    controller.send(&input(&channel)).await;
+    match producer_next(&mut producer, Duration::from_secs(5)).await {
+        Some(RelayMessage::DesktopInput(got)) => assert_eq!(got.channel_id, channel),
+        other => panic!("expected the controller's desktop input, got {other:?}"),
+    }
+}
+
+/// Regression guard for a reconnect: a replaced viewer socket must not reach the
+/// producer. This also holds on the pre-fence relay (the old socket's splice ends
+/// once its sink is replaced); the generation fence itself is proven at the
+/// registry level by
+/// `registry::tests::a_replaced_connection_cannot_forward_or_close_on_its_successor`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reconnect_leaves_only_the_live_viewer_driving_the_terminal() {
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
+    let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
+        .await
+        .expect("producer register");
+    let (mut old, _) = Viewer::connect(&base, PTY_PORT, 0, 0).await.expect("old");
+    // A reconnect on the same channel replaces the old connection.
+    let (mut new, ack) = Viewer::connect(&base, PTY_PORT, 0, 0).await.expect("new");
+    assert!(ack.accepted);
+
+    old.send_frame(0, b"stale-keystroke").await;
+    old.send(&RelayMessage::Close(v1::StreamClose {
+        channel_id: format!("ch-{PTY_PORT}"),
+        reason: v1::StreamCloseReason::Normal as i32,
+        message: "stale close".to_string(),
+    }))
+    .await;
+    assert!(
+        producer_next(&mut producer, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "a replaced socket's input and Close must be dropped"
+    );
+
+    new.send_frame(0, b"live-keystroke").await;
+    match producer_next(&mut producer, Duration::from_secs(5)).await {
+        Some(RelayMessage::Frame(f)) => assert_eq!(&f.data[..], b"live-keystroke"),
+        other => panic!("expected the live viewer's keystroke, got {other:?}"),
+    }
 }

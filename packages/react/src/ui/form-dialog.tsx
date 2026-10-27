@@ -14,6 +14,7 @@ import {
 import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
 import { TechnicalDetails } from "./error-message";
 import { Notice } from "./notice";
@@ -167,7 +168,7 @@ export function FormFrame({
   submitLabel,
   pendingLabel,
   submitAnalyticsAction,
-  cancelLabel = "Cancel",
+  cancelLabel,
   tone = "default",
   onSubmit,
   onSubmitted,
@@ -187,6 +188,8 @@ export function FormFrame({
   className,
   bodyClassName,
 }: FormFrameProps) {
+  const msg = useOpenGeniText();
+  const cancelText = cancelLabel === undefined ? msg("formDialog.cancel") : cancelLabel;
   const chrome = useContext(FormChromeContext);
   const [internalPending, setInternalPending] = useState(false);
   const [thrown, setThrown] = useState<ReactNode>(null);
@@ -266,7 +269,7 @@ export function FormFrame({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Close"
+            aria-label={msg("formDialog.close")}
             disabled={pending}
             className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
           >
@@ -278,7 +281,7 @@ export function FormFrame({
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label="Close"
+          aria-label={msg("formDialog.close")}
           disabled={pending}
           onClick={onCancel}
           className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
@@ -301,7 +304,7 @@ export function FormFrame({
             "@max-[26rem]/form:w-full @max-[26rem]/form:flex-col-reverse @max-[26rem]/form:items-stretch",
         )}
       >
-        {cancelLabel !== null ? (
+        {cancelText !== null ? (
           <Button
             type="button"
             variant="ghost"
@@ -310,7 +313,7 @@ export function FormFrame({
             data-autofocus={initialFocus === "cancel" ? true : undefined}
             className="pointer-coarse:h-11"
           >
-            {cancelLabel}
+            {cancelText}
           </Button>
         ) : null}
         <Button
@@ -518,8 +521,13 @@ export function FormFrame({
 
 /** Label and control placeholders, the shape of the fields that are loading. */
 function FieldPlaceholders({ count }: { count: number }) {
+  const msg = useOpenGeniText();
   return (
-    <div role="status" aria-label="Loading" className="flex min-w-0 flex-col gap-6">
+    <div
+      role="status"
+      aria-label={msg("formDialog.loading")}
+      className="flex min-w-0 flex-col gap-6"
+    >
       {Array.from({ length: count }, (_, index) => (
         // oxlint-disable-next-line react/no-array-index-key -- fixed placeholders, never reordered
         <div key={index} aria-hidden="true" className="flex flex-col gap-2">

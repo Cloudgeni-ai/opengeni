@@ -39,6 +39,7 @@ import {
   type BrowserControlPlacementSession,
 } from "@opengeni/runtime";
 import type { ControlActivityServices } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_CLEANUP_GRACE_MS = 24 * 60 * 60_000;
 
@@ -164,7 +165,7 @@ async function retainDownloadsBeforeCapture(
       workspaceId: target.workspaceId,
       browserSessionId: target.browserSessionId,
       downloadId: null,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }

@@ -11,6 +11,7 @@ import {
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
+  turnCanChangeWorkspaceSettings,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
@@ -32,14 +33,15 @@ import {
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeCoreXaiImageGeneration } from "../xai-image-generation";
-import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
+import { rigProviderImageContentHash } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
-import { rigProviderImageSourceImage } from "../sandbox-images";
+import { createVideoGenerationToolAdapter } from "../video-generation-availability";
+import { rigProviderImageSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -47,8 +49,11 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import {
   executeGatewayImageGeneration,
+  GatewayImageApiError,
   imageGenerationCreditRefusedResult,
+  imageGenerationProviderFailedResult,
   managedImageGenerationCredential,
+  reportImageGenerationProviderFailure,
 } from "../gateway-image-generation";
 import {
   executeCodexImageGeneration,
@@ -59,10 +64,13 @@ import {
   resolveImageGenerationReferencesForTool,
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { withSandboxStartupPhases } from "./sandbox-startup-phase";
-import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
+import {
+  VideoGenerationRejectedResult,
+  resolveAgentToolFamilies,
+  type VideoGenerationPolicy,
+} from "@opengeni/contracts";
 
 import {
   structuredToolTransportForTurn,
@@ -229,12 +237,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const preparedTools = eventing.preparedTools!;
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
-  // These scoped reads are independent. Keep the second live video-policy
-  // read here rather than reusing tool preparation's earlier policy snapshot.
-  const [sessionInstructions, videoGenerationPolicy] = await Promise.all([
-    recoveryAwareSessionInstructions(db, input.workspaceId, session),
-    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-  ]);
+  const sessionInstructions = await recoveryAwareSessionInstructions(
+    db,
+    input.workspaceId,
+    session,
+  );
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -275,12 +282,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           "Sandbox image reference is unavailable",
         );
         const relativePath = path.slice("/workspace/".length);
-        const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
         const channel = new SandboxChannelAService({
           session: imageReferenceSandbox.session,
           workspaceRoot: "/workspace",
           leaseEpoch: imageReferenceSandbox.leaseEpoch,
-          ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
         });
         const read = await channel.fsRead({
           path: relativePath,
@@ -482,6 +487,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             if (error instanceof ImageGenerationCreditError) {
               return imageGenerationCreditRefusedResult(error);
             }
+            // The image provider answered without an image (out of credit,
+            // rate limited, refused, down). That is this tool's failure, not
+            // the chat model's: the agent gets a plain reason and the turn
+            // continues. Nothing is debited and no credits stay held.
+            if (error instanceof GatewayImageApiError) {
+              const result = imageGenerationProviderFailedResult(error);
+              reportImageGenerationProviderFailure(observability, {
+                error,
+                result,
+                modelId: route.modelId,
+                funding: route.pricedCostMicros > 0 ? "opengeni_credits" : "workspace_gateway",
+              });
+              return result;
+            }
             throw error;
           }
           media.rememberGeneratedImageCreatedThisTurn(receipt);
@@ -491,134 +510,136 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  const videoGenerationEnabled =
-    videoGenerationPolicy.defaultModelId !== null &&
-    videoGenerationPolicy.enabledModelIds.length > 0;
-  let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-  if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
-    if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
+  // The video tools are attached whenever the deployment has object storage,
+  // a sandbox and the agent has the media tools, whatever the workspace's
+  // policy. Each call reads the live policy and credential, so a turn that
+  // turns video on can use it, and while video is off the tools answer
+  // plainly (with who can turn it on) instead of being missing.
+  const resolveVideoGenerationCredential = async (
+    policy: VideoGenerationPolicy,
+  ): Promise<VideoGenerationCredentialLease | null> => {
+    if (policy.fundingSource === "opengeni_credits") {
       // Credit-funded video honors the workspace switch that turns Opengeni
-      // credits off: no credential, so the tool is never offered.
-      videoGenerationCredential =
-        deps.workspaceCreditModelsAllowed === false
-          ? null
-          : managedVideoGenerationCredentialLease(eventing.modelRunSettings);
-    } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
+      // credits off.
+      return deps.workspaceCreditModelsAllowed === false
+        ? null
+        : managedVideoGenerationCredentialLease(eventing.modelRunSettings);
+    }
+    if (policy.fundingSource === "workspace_gateway") {
       const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
         db,
         eventing.modelRunSettings,
         input.workspaceId,
       );
-      if (workspaceCredential) {
-        videoGenerationCredential = {
-          fundingSource: "workspace_gateway",
-          ...workspaceCredential,
-        };
-      }
-    } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
-      const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
+      return workspaceCredential
+        ? { fundingSource: "workspace_gateway", ...workspaceCredential }
+        : null;
+    }
+    const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
+    });
+    if (route !== "core" || !eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
+    // After the receipt: a shared connection for the session's owner,
+    // referenced (never copied) by the operation (EP-T17/EP-N12), only while
+    // the deployment enables SuperGrok subscriptions.
+    return await subscriptionCoreVideoGenerationCredentialLease(
+      db,
+      eventing.modelRunSettings,
+      SUBSCRIPTION_CORE_XAI,
+      policy.fundingSource,
+      {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
-      });
-      if (route === "core" && eventing.modelRunSettings.supergrokSubscriptionEnabled) {
-        // After the receipt: a shared connection for the session's owner,
-        // referenced (never copied) by the operation (EP-T17/EP-N12), only
-        // while the deployment enables SuperGrok subscriptions.
-        videoGenerationCredential = await subscriptionCoreVideoGenerationCredentialLease(
-          db,
-          eventing.modelRunSettings,
-          SUBSCRIPTION_CORE_XAI,
-          videoGenerationPolicy.fundingSource,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-          },
-        );
-      }
-    }
-  }
-  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
-    if (
-      !objectStorage ||
-      eventing.modelRunSettings.sandboxBackend === "none" ||
-      !videoGenerationCredential ||
-      !videoGenerationEnabled
-    ) {
-      return {};
-    }
-    // Parse the frozen capability snapshot before advertising either tool.
-    // Invalid or unsupported workspace policy therefore fails closed before
-    // it can perturb the model's tool list.
-    const capabilities = videoGenerationCapabilitiesForPolicy({
-      policy: videoGenerationPolicy,
-      credentialVersion: videoGenerationCredential.version,
-    });
-    return {
-      videoGeneration: {
-        capabilities: async () => capabilities,
-        execute: async (toolInput, { toolCallId }) => {
-          const referenceSandbox = await resolveVideoReferenceSandboxAccess(
-            toolInput,
-            sandboxState,
-            media.sdkOwnedSandboxSession,
-          );
-          const fence = eventing.toolCancellationFenceRef.current;
-          if (referenceSandbox && !fence) {
-            throw new Error("Video reference command fence is unavailable");
-          }
-          const runAs = sandboxRunAs(eventing.modelRunSettings);
-          let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
-          try {
-            accepted = await admitVideoGenerationRequest({
-              db,
-              storage: objectStorage,
-              settings: eventing.modelRunSettings,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              toolCallId,
-              toolInput,
-              policy: videoGenerationPolicy,
-              credential: videoGenerationCredential,
-              ...(referenceSandbox && fence
-                ? {
-                    runCommand: async (command) =>
-                      await fence.runSandboxCommandStructured(
-                        referenceSandbox.session as TurnSandboxCommandSession,
-                        {
-                          ...command,
-                          ...(runAs ? { runAs } : {}),
-                        },
-                      ),
-                  }
-                : {}),
-              ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-            });
-          } catch (error) {
-            if (error instanceof VideoReferenceInputError) {
-              return VideoGenerationRejectedResult.parse({
-                schemaVersion: 1,
-                status: "rejected",
-                code: error.code,
-                message: error.message,
-                operationCreated: false,
-              });
-            }
-            throw error;
-          }
-          videoGenerationAcceptancesByCallId.set(toolCallId, {
-            operationId: accepted.operationId,
-            requestDigest: accepted.requestDigest,
-          });
-          return accepted.receipt;
-        },
+        sessionId: input.sessionId,
       },
-    };
-  })();
+    );
+  };
+  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
+    !objectStorage ||
+    eventing.modelRunSettings.sandboxBackend === "none" ||
+    !resolveAgentToolFamilies(session.agent).media
+      ? {}
+      : {
+          videoGeneration: createVideoGenerationToolAdapter({
+            settings: eventing.modelRunSettings,
+            workspaceId: input.workspaceId,
+            creditModelsAllowed: deps.workspaceCreditModelsAllowed !== false,
+            // Who can turn video on: someone who uses Opengeni through
+            // another product has no Settings page; whether this turn's app
+            // actions can change the workspace's settings is decided live.
+            external: (
+              turn.initiatingHumanSubjectId ??
+              (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
+            ).startsWith("external_user:"),
+            canChangeSettings: () =>
+              turnCanChangeWorkspaceSettings(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+              }),
+            readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+            resolveCredential: resolveVideoGenerationCredential,
+            admit: async ({ policy, credential, toolInput, toolCallId }) => {
+              const referenceSandbox = await resolveVideoReferenceSandboxAccess(
+                toolInput,
+                sandboxState,
+                media.sdkOwnedSandboxSession,
+              );
+              const fence = eventing.toolCancellationFenceRef.current;
+              if (referenceSandbox && !fence) {
+                throw new Error("Video reference command fence is unavailable");
+              }
+              let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
+              try {
+                accepted = await admitVideoGenerationRequest({
+                  db,
+                  storage: objectStorage,
+                  settings: eventing.modelRunSettings,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                  toolCallId,
+                  toolInput,
+                  policy,
+                  credential,
+                  ...(referenceSandbox && fence
+                    ? {
+                        runCommand: async (command) =>
+                          await fence.runSandboxCommandStructured(
+                            referenceSandbox.session as TurnSandboxCommandSession,
+                            {
+                              ...command,
+                            },
+                          ),
+                      }
+                    : {}),
+                  ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+                });
+              } catch (error) {
+                if (error instanceof VideoReferenceInputError) {
+                  return VideoGenerationRejectedResult.parse({
+                    schemaVersion: 1,
+                    status: "rejected",
+                    code: error.code,
+                    message: error.message,
+                    operationCreated: false,
+                  });
+                }
+                throw error;
+              }
+              videoGenerationAcceptancesByCallId.set(toolCallId, {
+                operationId: accepted.operationId,
+                requestDigest: accepted.requestDigest,
+              });
+              return accepted.receipt;
+            },
+          }),
+        };
   const serviceTier = serviceTierForLatencyMode(
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,

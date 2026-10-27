@@ -31,6 +31,7 @@ import {
   useSharedQueryValue,
 } from "@opengeni/react/app/lib/shared-query";
 import { pollDeviceAuthorization } from "@opengeni/connect";
+import { codexOverviewUsage } from "@/components/models/codex-overview-usage";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -766,13 +767,10 @@ export function useCodexSubscriptions({
           client,
           workspaceId,
           Object.fromEntries(
-            Object.entries(result.accounts).map(([id, overview]) => [
-              id,
-              {
-                status: overview.usage.value?.status ?? "no-data",
-                usage: overview.usage.value ?? null,
-              },
-            ]),
+            Object.entries(result.accounts).map(([id, overview]) => {
+              const { status, usage } = codexOverviewUsage(overview.usage);
+              return [id, { status, usage }];
+            }),
           ) as CodexUsageMap,
           "replace",
         );
