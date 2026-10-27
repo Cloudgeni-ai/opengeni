@@ -91,26 +91,8 @@ function databaseUrl(database: string, role?: string, password?: string): string
 // into the name gives each exact contract its own immutable template. Inputs are
 // identified by their path INSIDE the db package, never by absolute path, so
 // every checkout with the same contract (parallel worktrees, fresh clones)
-// reuses one template instead of building its own.
-//
-// Templates are disposable caches, so they cannot be kept forever: every
-// acquisition stamps its template's last use (at most hourly) in the
-// database comment, and building a NEW template first prunes a bounded batch of
-// other templates that have not been used for TEMPLATE_RETENTION_MS. Templates
-// from before stamping are aged by their build time with a longer grace. A
-// pruned template is rebuilt on its next use, and a clone that loses its
-// template to a concurrent prune rebuilds it and retries.
+// shares one template instead of building its own.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
-const TEMPLATE_STAMP_PREFIX = "og-test-template last-used ";
-const HOUR_MS = 60 * 60 * 1000;
-/** Re-stamp a template's last use at most this often. */
-const TEMPLATE_STAMP_INTERVAL_MS = HOUR_MS;
-/** A stamped template unused for this long is pruned when another is built. */
-const TEMPLATE_RETENTION_MS = 72 * HOUR_MS;
-/** An unstamped template (built before stamping existed) is aged by build time. */
-const UNSTAMPED_TEMPLATE_RETENTION_MS = 7 * 24 * HOUR_MS;
-/** Bound one build's pruning: each DROP DATABASE forces a checkpoint. */
-const TEMPLATE_PRUNE_LIMIT = 25;
 
 /** This checkout's @opengeni/db package, whose `migrate()` builds the template. */
 const DB_PACKAGE_DIR = fileURLToPath(new URL("../../db", import.meta.url));
@@ -153,155 +135,6 @@ export async function sharedTestTemplateName(dbPackageDir: string): Promise<stri
 async function templateDbName(): Promise<string> {
   templateDbNameMemo ??= await sharedTestTemplateName(DB_PACKAGE_DIR);
   return templateDbNameMemo;
-}
-
-/** The database comment that records a template's last use. */
-export function sharedTestTemplateStamp(lastUsedAt: Date): string {
-  return `${TEMPLATE_STAMP_PREFIX}${lastUsedAt.toISOString()}`;
-}
-
-/** A template's recorded last use, or null when it has no valid stamp. */
-export function sharedTestTemplateLastUsed(comment: string | null | undefined): Date | null {
-  if (!comment?.startsWith(TEMPLATE_STAMP_PREFIX)) {
-    return null;
-  }
-  const lastUsedAt = new Date(comment.slice(TEMPLATE_STAMP_PREFIX.length));
-  return Number.isNaN(lastUsedAt.getTime()) ? null : lastUsedAt;
-}
-
-export type SharedTestTemplateCandidate = {
-  name: string;
-  /** The template's database comment (its last-use stamp, when it has one). */
-  comment: string | null;
-  /** When the database was created, or null when the server cannot tell. */
-  builtAt: Date | null;
-  /** A session is connected to it or holds a lock on it (for example a clone). */
-  busy: boolean;
-};
-
-export type SharedTestTemplatePrunePlan = {
-  /** Stale templates to drop, least recently used first, at most `limit`. */
-  drop: string[];
-  /** Templates of unknown age: stamp them now so they age out normally. */
-  stamp: string[];
-};
-
-/**
- * Decide which other templates a new build may prune. Never touches a busy
- * template; ages stamped templates by last use and unstamped ones by build time.
- */
-export function planSharedTestTemplatePrune(
-  candidates: readonly SharedTestTemplateCandidate[],
-  now: Date,
-  limit = TEMPLATE_PRUNE_LIMIT,
-): SharedTestTemplatePrunePlan {
-  const stale: { name: string; lastKnownUse: number }[] = [];
-  const stamp: string[] = [];
-  for (const candidate of candidates) {
-    if (candidate.busy) {
-      continue;
-    }
-    const lastUsedAt = sharedTestTemplateLastUsed(candidate.comment);
-    if (lastUsedAt) {
-      if (now.getTime() - lastUsedAt.getTime() > TEMPLATE_RETENTION_MS) {
-        stale.push({ name: candidate.name, lastKnownUse: lastUsedAt.getTime() });
-      }
-    } else if (candidate.builtAt) {
-      if (now.getTime() - candidate.builtAt.getTime() > UNSTAMPED_TEMPLATE_RETENTION_MS) {
-        stale.push({ name: candidate.name, lastKnownUse: candidate.builtAt.getTime() });
-      }
-    } else {
-      stamp.push(candidate.name);
-    }
-  }
-  stale.sort((left, right) => left.lastKnownUse - right.lastKnownUse);
-  return { drop: stale.slice(0, limit).map((entry) => entry.name), stamp };
-}
-
-function quoteIdentifier(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
-}
-
-function quoteLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
-}
-
-/** Record a template's last use. COMMENT never connects to the template. */
-async function stampTemplate(root: postgres.Sql, name: string, now: Date): Promise<void> {
-  await root.unsafe(
-    `COMMENT ON DATABASE ${quoteIdentifier(name)} IS ${quoteLiteral(sharedTestTemplateStamp(now))}`,
-  );
-}
-
-/**
- * Prune stale templates named `prefix*` other than `keep`, through a superuser
- * connection to the cluster. Best effort: a template that cannot be dropped
- * right now is left for a later build. Returns the names it dropped.
- */
-export async function pruneStaleSharedTestTemplates(
-  root: postgres.Sql,
-  options: { keep: string; prefix?: string; now?: Date; limit?: number },
-): Promise<string[]> {
-  const prefix = options.prefix ?? TEMPLATE_DB_PREFIX;
-  const now = options.now ?? new Date();
-  const pattern = `${prefix.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`;
-  const rows = await root<
-    {
-      name: string;
-      is_template: boolean;
-      comment: string | null;
-      built_at: Date | null;
-      busy: boolean;
-    }[]
-  >`
-    SELECT d.datname AS name,
-           d.datistemplate AS is_template,
-           shobj_description(d.oid, 'pg_database') AS comment,
-           (pg_stat_file('base/' || d.oid || '/PG_VERSION', true)).modification AS built_at,
-           EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datid = d.oid)
-             OR EXISTS (
-               SELECT 1 FROM pg_locks l
-               WHERE l.locktype = 'object'
-                 AND l.classid = 'pg_database'::regclass
-                 AND l.objid = d.oid
-             ) AS busy
-    FROM pg_database d
-    WHERE d.datname LIKE ${pattern} AND d.datname <> ${options.keep}`;
-  const plan = planSharedTestTemplatePrune(
-    rows.map((row) => ({
-      name: row.name,
-      comment: row.comment,
-      builtAt: row.built_at,
-      busy: row.busy,
-    })),
-    now,
-    options.limit,
-  );
-  for (const name of plan.stamp) {
-    await stampTemplate(root, name, now).catch(() => undefined);
-  }
-  const templates = new Set(rows.filter((row) => row.is_template).map((row) => row.name));
-  const dropped: string[] = [];
-  for (const name of plan.drop) {
-    // A template database cannot be dropped; demote it first. Without FORCE, a
-    // session that connected since the scan makes the drop fail harmlessly,
-    // and the template is restored. A crashed partial build is never a template.
-    const demote = templates.has(name);
-    try {
-      if (demote) {
-        await root.unsafe(`ALTER DATABASE ${quoteIdentifier(name)} WITH IS_TEMPLATE false`);
-      }
-      await root.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(name)}`);
-      dropped.push(name);
-    } catch {
-      if (demote) {
-        await root
-          .unsafe(`ALTER DATABASE ${quoteIdentifier(name)} WITH IS_TEMPLATE true`)
-          .catch(() => undefined);
-      }
-    }
-  }
-  return dropped;
 }
 
 const STATE_DIR = join(
@@ -634,35 +467,22 @@ async function templateReady(): Promise<boolean> {
  * Called only inside the container lock, so exactly one process builds it; the
  * `datistemplate` guard makes it idempotent and self-healing after a crash
  * mid-build (a leftover non-template DB of the same name is dropped + rebuilt).
- * A warm template gets its last-use stamp refreshed; a cold build first prunes
- * other stale templates so the shared server does not accumulate them.
  */
 async function ensureTemplateBuilt(): Promise<void> {
+  if (await templateReady()) {
+    return;
+  }
+  const { migrate } = await import("@opengeni/db/migrate");
+  const { provisionRoles } = await import("@opengeni/db/provision-roles");
+  // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
   const TEMPLATE_DB = await templateDbName();
-  // Never wait indefinitely behind another session's clone or catalog lock
-  // while holding the cross-process harness lock (milliseconds).
-  const root = postgres(ADMIN_URL, { max: 1, connection: { lock_timeout: 5_000 } });
+  const root = postgres(ADMIN_URL, { max: 1 });
   try {
-    const now = new Date();
-    const [current] = await root<{ ready: boolean; comment: string | null }[]>`
-      SELECT datistemplate AS ready, shobj_description(oid, 'pg_database') AS comment
-      FROM pg_database WHERE datname = ${TEMPLATE_DB}`;
-    if (current?.ready) {
-      const lastUsedAt = sharedTestTemplateLastUsed(current.comment);
-      if (!lastUsedAt || now.getTime() - lastUsedAt.getTime() >= TEMPLATE_STAMP_INTERVAL_MS) {
-        await stampTemplate(root, TEMPLATE_DB, now).catch(() => undefined);
-      }
-      return;
-    }
-    await pruneStaleSharedTestTemplates(root, { keep: TEMPLATE_DB, now }).catch(() => undefined);
-    // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
     await root.unsafe(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
     await root.unsafe(`CREATE DATABASE "${TEMPLATE_DB}"`);
   } finally {
     await root.end().catch(() => undefined);
   }
-  const { migrate } = await import("@opengeni/db/migrate");
-  const { provisionRoles } = await import("@opengeni/db/provision-roles");
 
   const templateUrl = databaseUrl(TEMPLATE_DB);
   // Apply the full migration chain once (the baseline creates the pgvector
@@ -686,7 +506,6 @@ async function ensureTemplateBuilt(): Promise<void> {
     await marker.unsafe(
       `UPDATE pg_database SET datistemplate = true WHERE datname = '${TEMPLATE_DB}'`,
     );
-    await stampTemplate(marker, TEMPLATE_DB, new Date());
   } finally {
     await marker.end().catch(() => undefined);
   }
@@ -895,24 +714,16 @@ async function createDatabase(dbName: string): Promise<void> {
  * parallel test-file processes two clones can race and Postgres briefly reports
  * the template as "being accessed by other users" — a transient that clears in
  * milliseconds — so retry a few times before giving up.
- * If another process pruned the template since this acquisition (for example
- * a different machine sharing a native cluster), rebuild it once and retry.
  */
 async function cloneFromTemplate(dbName: string): Promise<void> {
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     const deadline = Date.now() + 30_000;
-    let rebuilt = false;
     for (;;) {
       try {
         await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`);
         return;
       } catch (err) {
-        if ((err as { code?: unknown })?.code === "3D000" && !rebuilt) {
-          rebuilt = true;
-          await withLock(ensureTemplateBuilt);
-          continue;
-        }
         const message = String((err as { message?: string })?.message ?? err);
         if (
           /being accessed by other users|source database/i.test(message) &&
