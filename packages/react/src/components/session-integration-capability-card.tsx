@@ -1,6 +1,6 @@
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConnectSetup } from "../connect-setup";
 import { browserConnectWindowHost } from "../connect-window-host";
 import { connectionServicePresentation } from "../connection-service-presentation";
@@ -77,20 +77,42 @@ function ScopedCard({
     onConfigured,
   });
   const { availability, attempt, busy, waiting, error, chatAccessFailed, notRequester } = flow;
+  // The button the person pressed disappears as the card changes step; move
+  // focus to the step's own control so keyboard and screen reader users don't
+  // land back at the top of the page. Only when focus was actually lost.
+  const setupRef = useRef<HTMLDivElement>(null);
+  const step = waiting ? "waiting" : busy ? "busy" : (attempt?.state ?? "none");
+  const shownStep = useRef(step);
+  useEffect(() => {
+    if (shownStep.current === step) return;
+    shownStep.current = step;
+    if (step === "busy") return;
+    const region = setupRef.current;
+    const active = region?.ownerDocument.activeElement;
+    if (!region || (active && active !== region.ownerDocument.body)) return;
+    const target =
+      region.querySelector<HTMLElement>(".og-session-capability-waiting button") ??
+      region.querySelector<HTMLElement>(
+        ".og-session-capability-primary, .og-connect-setup-primary, button:not([disabled])",
+      );
+    (target ?? region).focus({ preventScroll: true });
+  }, [step]);
+  const retrySignIn = flow.signInClosed || Boolean(error);
   const setup =
     availability.kind === "ready" && (attempt || busy || error) ? (
-      <>
+      <div ref={setupRef} tabIndex={-1} className="og-session-capability-step">
         {error ? <p role="alert">{error}</p> : null}
         {flow.notice ? <p role="status">{flow.notice}</p> : null}
         {/* While the sign-in window is open, the card says so and offers one way
-            out; the sign-in controls return if the person cancels or it closes. */}
+            out, which ends the attempt; the sign-in controls return if the
+            window closes or the provider moves setup elsewhere. */}
         {waiting ? null : attempt ? (
           <ConnectSetup
             className="og-connect"
             controller={flow.controller}
             inChat
             authorizeLabel={
-              flow.signInClosed
+              retrySignIn
                 ? t("connectSetup.trySigningInAgain")
                 : t("sessionIntegrationCapabilityCard.signIn")
             }
@@ -105,17 +127,26 @@ function ScopedCard({
             <p role="status">
               {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}
             </p>
-            <button type="button" className="og-session-capability-stop" onClick={flow.stopWaiting}>
-              {t("sessionIntegrationCapabilityCard.stopWaiting")}
-            </button>
+            <span className="og-session-capability-waiting-actions">
+              <button type="button" onClick={flow.reopenSignIn}>
+                {t("sessionIntegrationCapabilityCard.reopenSignIn")}
+              </button>
+              <button
+                type="button"
+                className="og-session-capability-stop"
+                onClick={flow.stopWaiting}
+              >
+                {t("sessionIntegrationCapabilityCard.stopWaiting")}
+              </button>
+            </span>
           </div>
         ) : null}
-        {!busy && !waiting && (flow.restartable || error) ? (
+        {!busy && !waiting && (flow.restartable || (error && !attempt)) ? (
           <button type="button" className="og-session-capability-primary" onClick={flow.start}>
             {t("sessionIntegrationCapabilityCard.tryAgain")}
           </button>
         ) : null}
-      </>
+      </div>
     ) : undefined;
 
   return (

@@ -13,6 +13,11 @@ export type SessionCapabilityFrameProps = {
   logo: string | null;
   /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
+  /**
+   * A quiet label beside the name, only where it tells a person what they are
+   * trusting (a server someone added by hand). Reviewed services show none.
+   */
+  badge?: string | undefined;
   description: string;
   /**
    * The description is the agent's reason for asking: keep it to two lines so
@@ -68,6 +73,7 @@ export function SessionCapabilityFrame({
   subtitle,
   logo,
   typeLabel,
+  badge,
   description,
   clampDescription = false,
   skill,
@@ -101,6 +107,7 @@ export function SessionCapabilityFrame({
         <h3>{name}</h3>
         {subtitle ? <span>{subtitle}</span> : null}
       </div>
+      {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
   );
   return (

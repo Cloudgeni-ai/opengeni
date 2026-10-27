@@ -76,7 +76,7 @@ function ScopedSetup({
   const t = useOpenGeniText();
   const authorizeLabel =
     authorizeLabelProp === undefined ? t("connectSetup.authorizeConnection") : authorizeLabelProp;
-  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount });
+  const flow = useConnectSetupFlow(controller, { onAuthorize, onSelectAccount, inChat });
   const { view, attempt, navigating, invoke } = flow;
   if (!attempt)
     return (
@@ -116,8 +116,15 @@ function ScopedSetup({
       aria-busy={view.busy || navigating}
     >
       {/* A chat card already names the service and whose account it is; a
-          sign-in step there needs only its button. */}
-      {inChat && action.type === "authorize" ? null : (
+          sign-in step there needs only its button, and any other step only
+          its status. */}
+      {inChat ? (
+        action.type === "authorize" ? null : (
+          <p role="status" className="og-connect-setup-status">
+            {flow.status}
+          </p>
+        )
+      ) : (
         <div className="og-connect-setup-summary">
           <p className="og-connect-setup-scope">{flow.scopeLabel}</p>
           <p role="status" className="og-connect-setup-status">

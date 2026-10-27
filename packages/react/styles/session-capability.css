@@ -11,6 +11,7 @@
 .og-session-capability-identity h3 { margin:0; font-size:15px; line-height:1.35; font-weight:600; }
 .og-session-capability-identity span { font-size:12px; line-height:1.4; color:var(--og-color-fg-muted); }
 .og-session-capability-header > svg { flex-shrink:0; }
+.og-session-capability-type { flex-shrink:0; align-self:flex-start; padding:3px 7px; border:1px solid var(--og-color-border); border-radius:999px; color:var(--og-color-fg-muted); font-size:11px; line-height:1.3; white-space:nowrap; }
 .og-session-capability-copy { margin:0; padding:12px 16px 0; font-size:13px; line-height:1.55; color:var(--og-color-fg); overflow-wrap:anywhere; }
 .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child { padding-bottom:16px; }
 /* The agent's reason: at most two lines, so a long rationale never pushes the action away. */
@@ -46,6 +47,10 @@
 .og-session-capability-dialog:has(.og-session-capability-setup) { width:min(32rem,calc(100vw - 32px)); }
 .og-session-capability-setup { padding:24px; display:grid; gap:16px; font-size:13px; }
 .og-session-capability-setup > p { margin:0; line-height:1.6; }
+.og-session-capability-step { display:grid; gap:16px; min-width:0; }
+.og-session-capability-step:focus { outline:none; }
+.og-session-capability-step > p { margin:0; line-height:1.6; }
+.og-session-capability-setup .og-connect-setup > .og-connect-setup-status { margin:0; font-size:13px; line-height:1.5; font-weight:500; color:var(--og-color-fg-muted); }
 .og-session-capability-setup label { display:flex; align-items:flex-start; gap:8px; line-height:1.6; }
 .og-session-capability-setup button { font:inherit; padding:9px 12px; border-radius:var(--og-radius-md,10px); border:1px solid var(--og-color-border); background:var(--og-color-surface-2); color:inherit; cursor:pointer; }
 .og-session-capability-setup button:disabled { opacity:.55; cursor:not-allowed; }
@@ -59,13 +64,18 @@
 .og-session-capability-setup legend { padding:0 0 10px; font-weight:600; }
 .og-session-capability-setup input { margin-top:4px; accent-color:var(--og-color-accent-deep); }
 .og-session-capability-setup .og-session-capability-scope { color:var(--og-color-fg-muted); font-size:12px; }
-.og-session-capability-setup .og-session-capability-primary { justify-self:end; min-height:40px; padding:10px 16px; border:1px solid transparent; background:var(--og-color-fg); color:var(--og-color-bg); font-weight:500; }
-.og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) { background:color-mix(in srgb,var(--og-color-fg) 85%,transparent); }
+/* The card's one solid action, whichever step draws it: full width while the
+   card is narrow, at the end of its line once it is wide. */
+.og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) { justify-self:stretch; width:100%; min-height:40px; padding:8px 16px; border:1px solid transparent; border-radius:var(--og-radius-md,10px); background:var(--og-color-fg); color:var(--og-color-bg); font-size:13px; font-weight:500; }
+.og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary):hover:not(:disabled) { background:color-mix(in srgb,var(--og-color-fg) 85%,transparent); }
+@container og-capability (min-width:28rem) {
+  .og-session-capability-setup :is(.og-session-capability-primary,.og-connect-setup .og-connect-setup-primary) { justify-self:end; width:auto; min-height:36px; }
+}
 .og-session-capability-progress { color:var(--og-color-fg-muted); padding-block:8px; }
 .og-session-capability-waiting { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px 10px; color:var(--og-color-fg-muted); }
 .og-session-capability-waiting > p { flex:1 1 12rem; margin:0; line-height:1.5; }
 .og-session-capability-spinner { flex:none; box-sizing:border-box; width:14px; height:14px; margin-top:3px; border-radius:999px; border:2px solid color-mix(in srgb,currentColor 25%,transparent); border-top-color:currentColor; animation:og-session-capability-spin .8s linear infinite; }
-.og-session-capability-waiting .og-session-capability-stop { margin-inline-start:auto; align-self:center; }
+.og-session-capability-waiting-actions { display:flex; gap:8px; margin-inline-start:auto; align-self:center; }
 @keyframes og-session-capability-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .og-session-capability-spinner { animation:none; } }
 @media (pointer:coarse) { .og-session-capability-actions button,.og-session-capability-setup button { min-height:44px; } }

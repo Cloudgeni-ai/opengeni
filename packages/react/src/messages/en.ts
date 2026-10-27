@@ -1489,6 +1489,7 @@ export const englishMessages = {
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
+  "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
@@ -4433,8 +4434,10 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.personalUnavailable":
     "{name} can only be connected to your own account, and this app can't do that here. Ask its administrator for help.",
   "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
+  "sessionIntegrationCapabilityCard.reopenSignIn": "Reopen window",
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
+  "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
@@ -4481,7 +4484,7 @@ export const englishMessages = {
     "Sign-in did not finish. You can try connecting again.",
   "sessionMcpCapabilityCard.signInWasCancelledYou":
     "Sign-in was cancelled. You can try connecting again.",
-  "sessionMcpCapabilityCard.stopWaiting": "Cancel",
+  "sessionMcpCapabilityCard.stopWaiting": "Stop waiting",
   "sessionMcpCapabilityCard.theAuthorizedAccountDoesNot":
     "The authorized account does not match this integration. Review its connection settings.",
   "sessionMcpCapabilityCard.theConnectionOwnershipChangedReview":

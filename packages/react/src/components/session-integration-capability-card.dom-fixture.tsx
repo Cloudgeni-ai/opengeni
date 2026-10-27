@@ -17,6 +17,10 @@ let installed: Array<Record<string, unknown>> = [];
 let afterSignIn: Partial<ConnectAttempt> = {};
 let current: ConnectAttempt | null = null;
 let stillSigningIn = false;
+/** What the next poll after sign-in reports instead of the default, or a failure. */
+let nextPoll: Partial<ConnectAttempt> | Error | null = null;
+let popupBlocked = false;
+const cancels: unknown[] = [];
 const begins: Array<Record<string, unknown>> = [];
 const advances: Array<Record<string, unknown>> = [];
 const policies: Array<Record<string, unknown>> = [];
@@ -58,10 +62,13 @@ const transport: ConnectTransport = {
     });
   },
   // The provider callback has landed by the first poll, unless the person is still signing in.
-  get: async () =>
-    current!.nextAction.type === "authorize" && !stillSigningIn
+  get: async () => {
+    if (nextPoll instanceof Error) throw nextPoll;
+    if (nextPoll && current!.nextAction.type === "authorize") return attempt(nextPoll);
+    return current!.nextAction.type === "authorize" && !stillSigningIn
       ? attempt(afterSignIn)
-      : structuredClone(current!),
+      : structuredClone(current!);
+  },
   advance: async (_workspaceId, _attemptId, input) => {
     advances.push(input as Record<string, unknown>);
     const action = (input as { action: { type: string } }).action;
@@ -91,7 +98,10 @@ const transport: ConnectTransport = {
       nextAction: { type: "none" },
     });
   },
-  cancel: async () => current!,
+  cancel: async (_workspaceId, attemptId) => {
+    cancels.push(attemptId);
+    return attempt({ state: "cancelled", nextAction: { type: "none" } });
+  },
   disconnect: async () => {},
 };
 
@@ -118,6 +128,7 @@ const client = {
 
 const popups: Array<{ closed: boolean; urls: string[] }> = [];
 window.open = (() => {
+  if (popupBlocked) return null;
   const popup = {
     opener: {} as unknown,
     closed: false,
@@ -164,6 +175,9 @@ beforeEach(() => {
   continuation = { outcome: "queued", updateId: "update-1" };
   popups.length = 0;
   stillSigningIn = false;
+  nextPoll = null;
+  popupBlocked = false;
+  cancels.length = 0;
   sessionStorage.clear();
 });
 
@@ -275,9 +289,10 @@ test("under StrictMode the replayed mount still signs in", async () => {
   host.remove();
 });
 
-test("while the sign-in window is open the card offers one way out, then sign-in again", async () => {
+async function waitingForSignIn() {
   stillSigningIn = true;
-  const { host, root } = await mount();
+  const mounted = await mount();
+  const { host } = mounted;
   await until(
     () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
     "Connect",
@@ -286,18 +301,88 @@ test("while the sign-in window is open the card offers one way out, then sign-in
     button(host, "Connect Outlook Mail")!.click();
   });
   await until(() => host.textContent?.includes("in the window that opened") ?? false, "waiting");
-  // One status line and one Cancel: no second sign-in, status check or setup cancel.
+  return mounted;
+}
+
+test("while the sign-in window is open the card offers one way out, and it ends the attempt", async () => {
+  const { host, root } = await waitingForSignIn();
+  // One status line, a way to get the window back and one Cancel: no second
+  // sign-in, status check or setup cancel.
   for (const label of ["Sign in", "Check status", "Cancel setup", "Stop waiting"])
     expect(button(host, label)).toBeUndefined();
-  expect(button(host, "Cancel")).toBeDefined();
+  // Focus follows the step instead of falling back to the page.
+  expect(document.activeElement).toBe(button(host, "Reopen window")!);
   await act(async () => {
     button(host, "Cancel")!.click();
   });
-  await until(() => !!button(host, "Try signing in again"), "sign in again");
-  expect(host.textContent).toContain("Sign-in window closed");
-  expect(button(host, "Cancel setup")).toBeDefined();
+  await until(() => !!button(host, "Try again"), "try again");
+  // The attempt itself is cancelled and its window closed, so finishing there can't connect.
+  expect(cancels).toEqual(["attempt-1"]);
+  expect(popups[0]!.closed).toBe(true);
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).not.toContain("Sign-in window closed");
+  expect(document.activeElement).toBe(button(host, "Try again")!);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a lost sign-in window can be reopened, and a blocked window says so", async () => {
+  const { host, root } = await waitingForSignIn();
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => popups.length === 2, "second window");
+  expect(popups[0]!.closed).toBe(true);
+  expect(host.textContent).toContain("in the window that opened");
+  expect(cancels).toEqual([]);
+  popupBlocked = true;
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => host.textContent?.includes("blocked the sign-in window") ?? false, "blocked");
+  expect(host.textContent).not.toContain("Refresh its status");
+  expect(button(host, "Try signing in again")).toBeDefined();
   // In a chat card nothing asks the person to check status after a sign-in window.
   expect(button(host, "Check status")).toBeUndefined();
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a sign-in that fails after the first attempt still says so in plain words", async () => {
+  const { host, root } = await waitingForSignIn();
+  nextPoll = new Error("upstream 502 with internal detail");
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => host.textContent?.includes("Sign-in couldn't continue") ?? false, "failed");
+  expect(host.textContent).not.toContain("internal detail");
+  expect(host.textContent).not.toContain("Refresh its status");
+  expect(button(host, "Try signing in again")).toBeDefined();
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("when the provider moves setup elsewhere the card shows that step right away", async () => {
+  nextPoll = {
+    state: "requires_user_action",
+    nextAction: {
+      type: "wait",
+      pollAfterMs: 5000,
+      userCode: "ABCD-1234",
+      verificationUrl: "https://microsoft.com/devicelogin",
+    },
+  };
+  const { host, root } = await mount();
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => host.textContent?.includes("ABCD-1234") ?? false, "code");
+  expect(host.textContent).not.toContain("in the window that opened");
+  expect(button(host, "Check status")).toBeDefined();
   await act(async () => root.unmount());
   host.remove();
 });
