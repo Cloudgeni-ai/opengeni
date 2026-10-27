@@ -37,7 +37,8 @@ export type MintStreamTokenInput = {
    *  swapped off of. One field, two fences — the relay/in-box edge reads it as the
    *  stale-viewer floor either way. */
   leaseEpoch: number;
-  /** v1 is always "view"; "control" is the never-granted raw-input plane. */
+  /** `view` (default) only watches; `control` lets the relay forward this
+   *  viewer's input (PTY keystrokes; typed desktop input on the desktop port). */
   mode?: "view" | "control";
   /** The exposed stream port (noVNC); defaults to 6080. */
   port?: number;

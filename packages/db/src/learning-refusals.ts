@@ -3,6 +3,7 @@ import type {
   LearningRefusalDestination,
   LearningRefusalReason,
 } from "@opengeni/contracts/learning-refusal";
+import { nestedErrorRecords } from "./persistence-errors";
 
 /**
  * Refusals because Agent learning is Off, by the exact message of the routine
@@ -62,26 +63,14 @@ const TRANSIENT_FENCES = [
   /requires a human or exact agent attempt/iu,
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object");
-}
-
 /** The message of the 42501 raise inside a possibly wrapped driver error. */
 export function nestedAuthorityRefusalMessage(error: unknown): string | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     if (
       (current.code === "42501" || current.sqlState === "42501") &&
       typeof current.message === "string"
     )
       return current.message;
-    for (const key of ["cause", "original", "driverError", "error"] as const) {
-      if (current[key] !== undefined) queue.push(current[key]);
-    }
   }
   return null;
 }

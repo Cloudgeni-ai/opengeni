@@ -75,6 +75,7 @@ import {
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -351,7 +352,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             fileId: upload.file.id,
             uploadId: upload.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           },
         );
         throw new HTTPException(status, { message });

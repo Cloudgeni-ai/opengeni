@@ -184,6 +184,25 @@ export function requireWorkspaceToolGatewayAuthorization(
   return grant;
 }
 
+/**
+ * An approval capability records one person's consent to one call. A verified
+ * organization service key may call tools, but there is no person behind it to
+ * consent, so it cannot approve its own calls. A host approves as the verified
+ * external actor whose approval UI it showed.
+ */
+export function requireWorkspaceToolApprovalAuthorization(
+  authorization: WorkspaceToolGatewayAuthorization,
+): AccessGrant {
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  if (
+    isPublishedSiteToolAuthorization(authorization) ||
+    isVerifiedOrganizationServiceAuthorization(authorization)
+  ) {
+    throw new HTTPException(403, { message: "tool approval requires a person" });
+  }
+  return grant;
+}
+
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: WorkspaceToolGatewayAuthorization,

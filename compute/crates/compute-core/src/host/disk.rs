@@ -188,31 +188,34 @@ impl Sandbox {
     /// any retry, until its copy is whole.
     ///
     /// While a checkpoint runs, a clone of its disk shares every block the
-    /// disk held alone, so any guest write may take a new one: its disk
-    /// may grow by its whole bound until the clone is gone and a reading
-    /// shows what it took.
+    /// disk held alone, so any guest write may take a new one. While a
+    /// pause runs, its guest first trims its disk and may take what that
+    /// frees again before it pauses, and its disk is not read meanwhile.
+    /// Either way its disk may grow by its whole bound until the step ends
+    /// and a reading shows what it took.
     pub(super) fn disk_booking(&self) -> DiskSpace {
-        let checkpointing = self
+        let whole_disk = self
             .in_flight
-            .is_some_and(|flight| flight.step == Step::Checkpoint);
-        self.booking(checkpointing)
+            .is_some_and(|flight| matches!(flight.step, Step::Checkpoint | Step::Pause));
+        self.booking(whole_disk)
     }
 
-    /// What a checkpoint of it books besides what it already does: the
-    /// rest of its disk's bound, which its disk may grow by while the
-    /// checkpoint runs; see [`Self::disk_booking`].
+    /// What a checkpoint or a pause of it books besides what it already
+    /// does: the rest of its disk's bound, which its disk may grow by while
+    /// the step runs; see [`Self::disk_booking`].
     pub(super) fn checkpoint_need(&self) -> DiskSpace {
         self.booking(true).saturating_sub(self.booking(false))
     }
 
-    /// [`Self::disk_booking`], with a checkpoint running or not.
-    fn booking(&self, checkpointing: bool) -> DiskSpace {
+    /// [`Self::disk_booking`], with a step that books the whole disk
+    /// running or not.
+    fn booking(&self, whole_disk: bool) -> DiskSpace {
         let mut booked = DiskSpace::default();
         if self.books_save() {
             booked = booked.add(self.save_space());
         }
         if self.reserves() {
-            let growth = if checkpointing {
+            let growth = if whole_disk {
                 self.local_disk.growth.max(self.size.disk)
             } else {
                 self.local_disk.growth

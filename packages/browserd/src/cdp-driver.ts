@@ -120,6 +120,7 @@ import {
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -530,6 +531,9 @@ export type BrowserCommandRunner = {
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   /** A plain line for the agent about how this browser was launched. */
   readonly networkNotice?: string | null;
+  /** How a headed managed browser shows on its machine: in a native window or
+   * offscreen with none. Absent for headless, remote and attached browsers. */
+  readonly display?: "window" | "offscreen" | null;
   /** Credentials for the launch's proxy. They never reach the browser's
    * argv or environment; the driver answers the proxy's challenges. */
   readonly proxyCredentials?: { username: string; password: string } | null;
@@ -896,6 +900,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
   }
+  get display(): "window" | "offscreen" | null {
+    return this.runner.display ?? null;
+  }
   /** The load error of the page start() opened and kept on the browser's
    * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
   startLoadError: string | null = null;
@@ -1085,7 +1092,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   event: "browser.window_parking.failed",
                   browserSessionId: this.browserSessionId,
                   phase,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   at: new Date().toISOString(),
                 }),
               ),
@@ -1755,52 +1762,64 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
-    return await this.withTarget(targetId, async (state, info) => {
-      if (state.dialog) return await this.observeUnlocked(state, info);
-      try {
-        return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
-      } catch (error) {
-        // A dialog opened while the page was being read: report it.
-        if (!(error instanceof DialogBlockedError)) throw error;
-        return await this.observeUnlocked(state, info);
-      }
-    });
+    return await this.withTarget(
+      targetId,
+      async (state, info) => {
+        if (state.dialog) return await this.observeUnlocked(state, info);
+        try {
+          return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
+        } catch (error) {
+          // A dialog opened while the page was being read: report it.
+          if (!(error instanceof DialogBlockedError)) throw error;
+          return await this.observeUnlocked(state, info);
+        }
+      },
+      { read: true },
+    );
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (!state.dialog) {
-        try {
-          await this.untilDialog(state, async () => await this.refreshFrame(state));
-        } catch (error) {
-          if (!(error instanceof DialogBlockedError)) throw error;
+    return await this.withTarget(
+      this.browserTargetIdOf(tabId),
+      async (state) => {
+        if (!state.dialog) {
+          try {
+            await this.untilDialog(state, async () => await this.refreshFrame(state));
+          } catch (error) {
+            if (!(error instanceof DialogBlockedError)) throw error;
+          }
         }
-      }
-      return this.targetStateFrom(state);
-    });
+        return this.targetStateFrom(state);
+      },
+      { read: true },
+    );
   }
 
   async readDom(
     tabId: string,
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (request.kind === "count") {
-        assertSafeDomReadSelector(request.selector);
-      } else if (request.locator.kind === "css") {
-        assertSafeDomReadSelector(request.locator.selector);
-      }
-      if (state.dialog) {
-        throw new InteractionDefiniteDriverError(
-          "resource_unavailable",
-          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+    return await this.withTarget(
+      this.browserTargetIdOf(tabId),
+      async (state) => {
+        if (request.kind === "count") {
+          assertSafeDomReadSelector(request.selector);
+        } else if (request.locator.kind === "css") {
+          assertSafeDomReadSelector(request.locator.selector);
+        }
+        if (state.dialog) {
+          throw new InteractionDefiniteDriverError(
+            "resource_unavailable",
+            `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+          );
+        }
+        return this.typedSecrets.redact(
+          await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
         );
-      }
-      return this.typedSecrets.redact(
-        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
-      );
-    });
+      },
+      { read: true },
+    );
   }
 
   private async readDomUnlocked(
@@ -2112,6 +2131,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           throw new Error("unreachable screenshot attempt");
         }),
+      { read: true },
     );
   }
 
@@ -2750,35 +2770,87 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
         );
       }
-    }).catch((error: unknown) => {
-      if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
-        throw effects && effects.state.actionEffectCount !== effects.before
-          ? new InteractionOutcomeUnknownDriverError(
-              "tab_not_responding",
-              `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
-            )
-          : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
-      }
-      // A tab the browser will not let us control (an attached tab Chrome
-      // refuses to debug) fails before any input when nothing was sent yet,
-      // so the action definitely did not run.
-      if (
-        error instanceof InteractionControllerError &&
-        (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
-        (!effects || effects.state.actionEffectCount === effects.before)
-      ) {
-        throw new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
-      }
-      if (error instanceof CdpSessionDetachedError) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
-        );
-      }
-      throw error;
+    }).catch(async (error: unknown) => {
+      const failure = await this.actionFailure(error, effects);
+      if (effects) await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+      throw failure;
     });
     this.refreshSubscribedFrame(targetId);
     return redactInteractionSecretValues(observation, secretValues);
+  }
+
+  /** What a failed action reports, given whether it already sent input. */
+  private async actionFailure(
+    error: unknown,
+    effects: { state: TargetState; before: number } | undefined,
+  ): Promise<unknown> {
+    const inputSent = effects !== undefined && effects.state.actionEffectCount !== effects.before;
+    if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
+      return inputSent
+        ? new InteractionOutcomeUnknownDriverError(
+            "tab_not_responding",
+            `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
+          )
+        : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
+    }
+    // A tab the browser will not let us control (an attached tab Chrome
+    // refuses to debug) fails before any input when nothing was sent yet,
+    // so the action definitely did not run.
+    if (
+      error instanceof InteractionControllerError &&
+      (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
+      !inputSent
+    ) {
+      return new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
+    }
+    // The tab's debugging ended after input was sent, while a command was
+    // under way or before the next one could be: whether the rest ran is
+    // unknown.
+    if (
+      error instanceof CdpSessionDetachedError ||
+      (inputSent && effects && (await this.attachmentEndedUnder(effects.state, error)))
+    ) {
+      return new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+      );
+    }
+    return error;
+  }
+
+  /**
+   * After the tab's debugging ended under an action (Chrome ends it when
+   * another extension adds a frame to the page, as password managers do when
+   * a login field gets focus), attaches the tab again and reads it, so the
+   * receipt shows the page as the action left it and the caller can continue
+   * without another call. Best effort, like any failure observation.
+   */
+  private async observeOnNewAttachment(
+    failure: unknown,
+    state: TargetState,
+    command: BrowserActionCommandValue,
+    secretValues: BrowserActionCommandValue["secretValues"],
+  ): Promise<void> {
+    if (
+      !(
+        failure instanceof InteractionDefiniteDriverError ||
+        failure instanceof InteractionOutcomeUnknownDriverError
+      ) ||
+      failure.observation !== null ||
+      (command.observationMode !== undefined && command.observationMode !== "full")
+    )
+      return;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+      if (this.states.get(state.targetId) === state || this.crashedTargets.has(state.targetId))
+        return;
+      failure.observation = redactInteractionSecretValues(
+        await this.observe(command.targetId),
+        secretValues,
+      );
+    } catch {
+      // Optional context only.
+    }
   }
 
   /**
@@ -3416,6 +3488,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
+    options: { read?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
@@ -3442,8 +3515,36 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (this.crashedTargets.has(targetId)) throw tabCrashedError();
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
         throw tabNotRespondingError(error);
+      // A read changes nothing, so one whose tab debugging ended under it
+      // (Chrome detaches when another extension adds a frame to the page, as
+      // password managers do for their inline menu) reads again on a new
+      // attachment. A tab that closed meanwhile then says so.
+      if (options.read && (await this.attachmentEndedUnder(state, error)))
+        return await this.withTarget(targetId, operation);
       throw error;
     }
+  }
+
+  /** Whether an operation failed only because the debugging session of its
+   * tab ended while it ran. The session's end is applied once its detach
+   * event has arrived, which attached Chrome reports by polling. */
+  private async attachmentEndedUnder(state: TargetState, error: unknown): Promise<boolean> {
+    if (
+      !(
+        error instanceof CdpSessionDetachedError ||
+        error instanceof CdpProtocolError ||
+        (error instanceof InteractionControllerError &&
+          error.code === "resource_unavailable" &&
+          error.retryable)
+      )
+    )
+      return false;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+    } catch {
+      return false;
+    }
+    return this.states.get(state.targetId) !== state && !this.crashedTargets.has(state.targetId);
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -5291,7 +5392,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return await read(remaining);
     } catch (error) {
       const transport = error instanceof InteractionControllerError ? error.cause : error;
-      if (!(transport instanceof CdpTransportError)) throw error;
+      // The tab's debugging ending mid-capture is no page error either.
+      if (!(transport instanceof CdpTransportError || transport instanceof CdpSessionDetachedError))
+        throw error;
       const timeout = transport instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
@@ -11626,10 +11729,6 @@ function frameTreeFingerprint(frames: readonly MainFrame[]): string {
 
 function isSelectorList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((selector) => typeof selector === "string");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

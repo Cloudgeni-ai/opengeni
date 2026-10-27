@@ -1504,6 +1504,8 @@ export const englishMessages = {
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
     "Your request was sent. GitHub asked the owners of your organization to approve {product}.",
+  "connectWindowHost.allowPopups":
+    "Your browser blocked the sign-in window. Allow pop-ups for this page, then try again.",
   "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
   "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",

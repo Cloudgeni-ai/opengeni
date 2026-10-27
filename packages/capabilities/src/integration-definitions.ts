@@ -1,4 +1,5 @@
 import { IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export interface IntegrationDefinitionOAuth2Authentication {
   readonly kind: "oauth2";
@@ -779,8 +780,4 @@ function escapeJsonPointer(value: string): string {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

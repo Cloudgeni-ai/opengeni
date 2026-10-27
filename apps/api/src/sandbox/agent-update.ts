@@ -20,6 +20,7 @@ import {
   machineUpdateBlockedReason,
   promotedAgentVersion,
 } from "./machines";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type AgentUpdateDeps = {
   db: Database;
@@ -325,7 +326,7 @@ export function createAutomaticAgentUpdater(
           observability?.warn?.("Failed to request an automatic Connected Machine agent update", {
             workspaceId: enrollment.workspaceId,
             enrollmentId: enrollment.id,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         })
         .finally(() => inFlight.delete(enrollment.id));

@@ -5,6 +5,7 @@ import {
   touchLeaseHolder,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const MAX_HEARTBEAT_INTERVAL_MS = 10_000;
 
@@ -80,7 +81,7 @@ export async function withInteractionHolderHeartbeat<T>(
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
         holderId: input.holderId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };

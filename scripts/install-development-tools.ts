@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import garageProvenance from "./install-development-tools.garage-provenance.json";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type Target = { os: "linux" | "darwin"; arch: "amd64" | "arm64"; wsl2: boolean };
 export type ToolName = "nats" | "temporal" | "garage";
@@ -376,7 +377,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (import.meta.main)
   main().catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     if (process.argv.includes("--json"))
       console.log(JSON.stringify({ schemaVersion: 1, status: "error", error: message }));
     else console.error(message);

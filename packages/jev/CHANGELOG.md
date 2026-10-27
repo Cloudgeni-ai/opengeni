@@ -1,5 +1,11 @@
 # @opengeni/jev
 
+## 5.4.2
+
+### Patch Changes
+
+- @opengeni/decisions@5.4.0
+
 ## 5.3.1
 
 ### Patch Changes

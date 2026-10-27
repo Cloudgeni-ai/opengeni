@@ -72,6 +72,11 @@ import {
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
   type Session,
+  ModelResidencyDeclaration,
+  ModelResidencyV1,
+  UNKNOWN_MODEL_RESIDENCY,
+  modelResidencyClaim,
+  modelResidencyRouteProblems,
 } from "@opengeni/contracts";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
@@ -98,6 +103,7 @@ export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Default maximum provider silence on a generic OpenAI-compatible model stream
@@ -1164,6 +1170,10 @@ const SettingsSchema = z.object({
   // registry provider's models. validateSettings parses this at boot so a
   // malformed registry / unresolvable key / id collision fails fast.
   modelProvidersJson: z.string().default("[]"),
+  // Where each built-in OpenAI/Azure model processes data: a JSON object from
+  // model id to residency declaration. An undeclared model uses a built-in
+  // rule: Azure is unknown, never EU.
+  builtinModelResidencyJson: z.string().optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -2981,7 +2991,7 @@ export function safeResolveVoiceInputPricing(
   try {
     explicit = parseVoiceInputPricingJson(raw, env);
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: errorMessage(error) };
   }
   return {
     ok: true,
@@ -3425,6 +3435,9 @@ const RegistryModelSchema = z
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    // Where this route processes data, overriding the provider's declaration.
+    // Only operator registry providers may declare it; see docs/eu-only-inference.md.
+    residency: ModelResidencyDeclaration.optional(),
     // Reserved normalized contracts are derived by Opengeni in V1. Generic
     // registry JSON must not opt itself into workspace BYOK or reattribute cost.
     credentialSource: z.never().optional(),
@@ -3545,6 +3558,8 @@ const RegistryProviderSchema = z
     defaultHeaders: z.record(z.string(), z.string()).optional(),
     publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
     publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
+    // Where this provider's models process data unless a model overrides it.
+    residency: ModelResidencyDeclaration.optional(),
     // V1 derives these from provider kind. Workspace BYOK is deliberately not a
     // registry switch and requires a separately reviewed encrypted broker.
     credentialSource: z.never().optional(),
@@ -3552,6 +3567,24 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    if (!operatorDeclaresResidency(provider.kind)) {
+      if (provider.residency !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["residency"],
+          message: `${provider.kind} providers use a reviewed built-in residency rule and cannot declare their own`,
+        });
+      }
+      provider.models.forEach((model, index) => {
+        if (model.residency !== undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["models", index, "residency"],
+            message: `${provider.kind} providers use a reviewed built-in residency rule and cannot declare their own`,
+          });
+        }
+      });
+    }
     if (provider.azureEntra !== undefined) {
       if (provider.kind !== "direct-azure-organization") {
         ctx.addIssue({
@@ -3692,10 +3725,9 @@ export function parseModelCostPolicyJson(raw: string): Record<string, ModelCostC
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `OPENGENI_MODEL_COST_POLICY_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`OPENGENI_MODEL_COST_POLICY_JSON must be valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   return z.record(z.string().min(1), ModelCostClass).parse(parsed);
 }
@@ -3705,10 +3737,9 @@ export function parseModelNotesJson(raw: string): Record<string, string> {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `OPENGENI_MODEL_NOTES_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`OPENGENI_MODEL_NOTES_JSON must be valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   return z.record(z.string().min(1), ModelNote).parse(parsed);
 }
@@ -3855,6 +3886,7 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
   upstreamModelId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
   capabilities: ModelCapabilitiesV1Schema,
   pricing: z.never().optional(),
+  residency: z.never().optional(),
 })
   .strict()
   .superRefine((model, context) => {
@@ -4022,6 +4054,95 @@ export function parseModelCatalogDocument(value: unknown): ModelCatalogDocument 
   return ModelCatalogDocument.parse(value);
 }
 
+type ResidencyDeclaringProvider = {
+  id: string;
+  kind: RegistryProviderKind | InternalRegistryProvider["kind"];
+  baseUrl?: string | undefined;
+  residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  models: readonly {
+    id: string;
+    upstreamModelId?: string | undefined;
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  }[];
+};
+
+/**
+ * EU claims an operator provider's own routes contradict (see
+ * `modelResidencyRouteProblems`), one message per model. Strict for the host
+ * environment and the catalog upsert; a stored database document is never
+ * refused for it, its routes become unknown instead.
+ */
+export function registryProviderResidencyRouteProblems(
+  provider: ResidencyDeclaringProvider,
+): string[] {
+  if (!operatorDeclaresResidency(provider.kind)) return [];
+  return provider.models.flatMap((model) => {
+    const declared = model.residency ?? provider.residency;
+    if (!declared) return [];
+    return modelResidencyRouteProblems(declared, {
+      upstreamModelId: model.upstreamModelId ?? model.id,
+      baseUrl: provider.baseUrl,
+    }).map((problem) => `${provider.id} model ${model.id}: ${problem.message}`);
+  });
+}
+
+function residencyClaimKey(
+  declaration: z.output<typeof ModelResidencyDeclaration> | undefined,
+): string | null {
+  return declaration ? canonicalJson(modelResidencyClaim(declaration)) : null;
+}
+
+/** Whether a database provider makes the same residency claim as its host transport, per model. */
+function databaseResidencyAgreesWithHost(
+  provider: ResidencyDeclaringProvider,
+  host: ResidencyDeclaringProvider,
+): boolean {
+  const hostModels = new Map(host.models.map((model) => [model.id, model]));
+  return provider.models.every(
+    (model) =>
+      residencyClaimKey(model.residency ?? provider.residency) ===
+      residencyClaimKey(hostModels.get(model.id)?.residency ?? host.residency),
+  );
+}
+
+function withoutResidency<T extends ResidencyDeclaringProvider>(provider: T): T {
+  const { residency: _residency, ...rest } = provider;
+  return {
+    ...rest,
+    models: provider.models.map(({ residency: _modelResidency, ...model }) => model),
+  } as unknown as T;
+}
+
+const warnedCatalogResidency = new Set<string>();
+
+function warnCatalogResidencyOnce(key: string, message: string): void {
+  if (warnedCatalogResidency.has(key)) return;
+  warnedCatalogResidency.add(key);
+  console.warn(message);
+}
+
+/**
+ * Residency problems the catalog upsert refuses: a database provider whose
+ * claim differs from its host transport, and EU claims the route contradicts.
+ * At runtime the same problems only make the affected routes unknown.
+ */
+export function modelCatalogResidencyProblems(settings: Settings, rawDocument: unknown): string[] {
+  const document = parseModelCatalogDocument(rawDocument);
+  const hostProviders = new Map(
+    parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
+  );
+  return document.registryProviders.flatMap((provider) => {
+    const problems = registryProviderResidencyRouteProblems(provider);
+    const host = hostProviders.get(provider.id);
+    if (provider.kind === "api-key" && host && !databaseResidencyAgreesWithHost(provider, host)) {
+      problems.push(
+        `${provider.id}: the residency claim differs from its host-authorized transport (OPENGENI_MODEL_PROVIDERS_JSON)`,
+      );
+    }
+    return problems;
+  });
+}
+
 function deploymentRegistryProvidersWithHostCredentials(
   settings: Settings,
   providers: readonly z.infer<typeof DeploymentRegistryProviderSchema>[],
@@ -4030,7 +4151,17 @@ function deploymentRegistryProvidersWithHostCredentials(
     parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
   );
   return providers.map((provider) => {
-    if (provider.kind !== "api-key") return provider;
+    if (provider.kind !== "api-key") {
+      // An anonymous database provider owns its endpoint and residency; an
+      // EU claim its route contradicts makes its routes unknown.
+      const problems = registryProviderResidencyRouteProblems(provider);
+      if (problems.length === 0) return provider;
+      warnCatalogResidencyOnce(
+        `route:${provider.id}:${canonicalJson(problems)}`,
+        `database model catalog provider ${provider.id} has residency claims its route contradicts; its routes are treated as unknown: ${problems.join("; ")}`,
+      );
+      return withoutResidency(provider);
+    }
     const host = hostProviders.get(provider.id);
     if (!host || host.kind !== "api-key") {
       throw new Error(
@@ -4048,8 +4179,32 @@ function deploymentRegistryProvidersWithHostCredentials(
         `database model catalog provider ${provider.id} does not match its host-authorized transport`,
       );
     }
+    // Where the transport processes data is part of the transport, so the
+    // host configuration that owns the endpoint supplies it. The database
+    // document must make the same claim (geography, deployment type and
+    // regions) for every listed model; evidence and dates come from the host.
+    // A one-sided or different claim makes this provider's routes unknown, so
+    // never EU, without failing the rest of the catalog.
+    const hostModels = new Map(host.models.map((model) => [model.id, model]));
+    const residencyAgrees = databaseResidencyAgreesWithHost(provider, host);
+    if (!residencyAgrees) {
+      warnCatalogResidencyOnce(
+        `claim:${provider.id}:${canonicalJson(
+          provider.models.map((model) => residencyClaimKey(model.residency ?? provider.residency)),
+        )}`,
+        `database model catalog provider ${provider.id} does not make the same residency claim as its host-authorized transport; its routes are treated as unknown`,
+      );
+    }
+    const { residency: _databaseResidency, ...providerWithoutResidency } = provider;
     return {
-      ...provider,
+      ...providerWithoutResidency,
+      ...(residencyAgrees && host.residency !== undefined ? { residency: host.residency } : {}),
+      models: provider.models.map(({ residency: _modelResidency, ...model }) => {
+        const hostResidency = hostModels.get(model.id)?.residency;
+        return residencyAgrees && hostResidency !== undefined
+          ? { ...model, residency: hostResidency }
+          : model;
+      }),
       ...(host.defaultHeaders === undefined ? {} : { defaultHeaders: host.defaultHeaders }),
       ...(host.defaultQuery === undefined ? {} : { defaultQuery: host.defaultQuery }),
       ...(host.publicDefaultHeaderNames === undefined
@@ -4244,6 +4399,8 @@ export interface ConfiguredModel {
   };
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion: string;
+  /** Where this route processes data, and the evidence. Unknown is never EU. */
+  residency: ModelResidencyV1;
   contextWindowTokens?: number | undefined;
   effectiveContextWindowTokens?: number | undefined;
   autoCompactTokenLimit?: number | undefined;
@@ -5574,6 +5731,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opperApiKey: optional("OPENGENI_OPPER_API_KEY"),
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
+    builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
@@ -8028,6 +8186,260 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
   return { kind: "deployment", mechanism: "api_key" };
 }
 
+/** Only operator-declared providers (deployment registry) may declare residency. */
+export function operatorDeclaresResidency(
+  kind: RegistryProviderKind | InternalRegistryProvider["kind"],
+): boolean {
+  return kind === "api-key" || kind === "anonymous";
+}
+
+function residencyIsDeclared(
+  residency: ModelResidencyV1 | undefined,
+): residency is ModelResidencyV1 {
+  return (
+    residency !== undefined &&
+    residency.evidence.source !== "built_in_rule" &&
+    residency.evidence.source !== "none"
+  );
+}
+
+const RESIDENCY_RULES_REVIEWED_AT = "2026-10-26";
+
+function builtInResidencyRule(
+  geography: ModelResidencyV1["geography"],
+  deploymentType: ModelResidencyV1["deploymentType"],
+  reference: string,
+): ModelResidencyV1 {
+  return {
+    geography,
+    deploymentType,
+    regions: [],
+    evidence: {
+      source: "built_in_rule",
+      reference,
+      verifiedAt: RESIDENCY_RULES_REVIEWED_AT,
+    },
+  };
+}
+
+function normalizedResidencyDeclaration(
+  declaration: z.output<typeof ModelResidencyDeclaration>,
+): ModelResidencyV1 {
+  return ModelResidencyV1.parse({
+    geography: declaration.geography,
+    deploymentType: declaration.deploymentType,
+    // Sorted and deduplicated, so the same claim always has the same digest.
+    regions: [...new Set(declaration.regions)].sort(),
+    evidence: {
+      source: declaration.evidence.source,
+      reference: declaration.evidence.reference,
+      verifiedAt: declaration.evidence.verifiedAt,
+    },
+  });
+}
+
+/**
+ * Where a registry route processes data. Operator providers use their reviewed
+ * declaration (model over provider); every other provider kind uses a
+ * code-owned rule. Undeclared is unknown, and unknown is never EU.
+ */
+export function registryModelResidency(
+  provider: Pick<InternalRegistryProvider, "kind"> & {
+    baseUrl?: string | undefined;
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  },
+  model: {
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+    upstreamModelId?: string | undefined;
+  } = {},
+): ModelResidencyV1 {
+  switch (provider.kind) {
+    case "api-key":
+    case "anonymous": {
+      const declared = model.residency ?? provider.residency;
+      if (!declared) return UNKNOWN_MODEL_RESIDENCY;
+      const residency = normalizedResidencyDeclaration(declared);
+      // An EU claim that its own route contradicts (a non-EU Bedrock profile,
+      // a known global host) counts as unknown. Boot validation reports it.
+      if (
+        modelResidencyRouteProblems(residency, {
+          upstreamModelId: model.upstreamModelId,
+          baseUrl: provider.baseUrl,
+        }).length > 0
+      ) {
+        return UNKNOWN_MODEL_RESIDENCY;
+      }
+      return residency;
+    }
+    case "codex-subscription":
+      return builtInResidencyRule(
+        "us",
+        "subscription",
+        "ChatGPT Codex subscription (chatgpt.com/backend-api/codex) offers no regional processing control.",
+      );
+    case "xai-subscription":
+      return builtInResidencyRule(
+        "us",
+        "subscription",
+        "SuperGrok subscription (api.x.ai) offers no EU processing option.",
+      );
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      return builtInResidencyRule(
+        "global",
+        "subscription",
+        "Claude subscription on api.anthropic.com; inference_geo accepts only us or global. https://docs.anthropic.com/en/docs/build-with-claude/data-residency",
+      );
+    case "anthropic-workspace":
+    case "anthropic-organization":
+      return builtInResidencyRule(
+        "global",
+        "provider_default",
+        "Anthropic API (api.anthropic.com); inference_geo accepts only us or global. https://docs.anthropic.com/en/docs/build-with-claude/data-residency",
+      );
+    case "vercel-gateway-managed":
+    case "vercel-gateway-workspace":
+    case "vercel-gateway-organization":
+      return builtInResidencyRule(
+        "global",
+        "gateway",
+        "Vercel AI Gateway routes to any provider region unless an inference region is requested; Opengeni requests none.",
+      );
+    case "openrouter-managed":
+    case "openrouter-workspace":
+    case "openrouter-organization":
+      return builtInResidencyRule(
+        "global",
+        "gateway",
+        "OpenRouter routes to providers worldwide; EU routing (eu.openrouter.ai) is enterprise-only and not used.",
+      );
+    case "opper-managed":
+    case "opper-workspace":
+    case "opper-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "gateway",
+        "Opper's processing location depends on the route and is not verified per request.",
+      );
+    case "direct-openai-workspace":
+    case "direct-openai-organization":
+      return builtInResidencyRule(
+        "us",
+        "provider_default",
+        "api.openai.com processes in the US by default; EU data residency projects use eu.api.openai.com, which this connection does not target.",
+      );
+    case "direct-azure-workspace":
+    case "direct-azure-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "The connection does not record the Azure deployment type, which can be GlobalStandard.",
+      );
+    default: {
+      const _exhaustive: never = provider.kind;
+      return _exhaustive;
+    }
+  }
+}
+
+const builtinResidencyCache = new WeakMap<Settings, ReadonlyMap<string, ModelResidencyV1>>();
+
+function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, ModelResidencyV1> {
+  const cached = builtinResidencyCache.get(settings);
+  if (cached) return cached;
+  const declarations = new Map<string, ModelResidencyV1>(
+    settings.builtinModelResidencyJson === undefined
+      ? []
+      : Object.entries(parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson)).map(
+          ([modelId, declaration]) => [modelId, normalizedResidencyDeclaration(declaration)],
+        ),
+  );
+  builtinResidencyCache.set(settings, declarations);
+  return declarations;
+}
+
+/** The built-in provider's endpoint, for the residency route check. */
+function builtinResidencyBaseUrl(settings: Settings): string | undefined {
+  if (settings.openaiProvider === "azure") {
+    return settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+  }
+  return settings.openaiBaseUrl ?? "https://api.openai.com/v1";
+}
+
+function builtinResidencyRouteProblems(
+  settings: Settings,
+  modelId: string,
+  declared: Pick<ModelResidencyV1, "geography" | "deploymentType">,
+): string[] {
+  return modelResidencyRouteProblems(declared, {
+    upstreamModelId: modelId,
+    baseUrl: builtinResidencyBaseUrl(settings),
+  }).map((problem) => `${modelId}: ${problem.message}`);
+}
+
+/**
+ * Where one built-in OpenAI or Azure model processes data. Each built-in model
+ * is its own deployment (on Azure, with its own SKU), so the operator declares
+ * each one in `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`, keyed by model id. An
+ * undeclared model uses a rule: Azure and custom base URLs are unknown,
+ * because GlobalStandard deployments may process in any Azure region.
+ */
+export function builtinModelResidency(settings: Settings, modelId: string): ModelResidencyV1 {
+  const declared = builtinResidencyDeclarations(settings).get(modelId);
+  if (declared) {
+    // The same route check as registry providers: an EU claim on
+    // api.openai.com, for example, is wrong and counts as unknown.
+    return builtinResidencyRouteProblems(settings, modelId, declared).length > 0
+      ? UNKNOWN_MODEL_RESIDENCY
+      : declared;
+  }
+  if (settings.openaiProvider === "azure") {
+    return builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "No OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration for this model; Azure GlobalStandard deployments may process in any Azure region.",
+    );
+  }
+  if (settings.openaiBaseUrl) {
+    return builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "Custom OpenAI-compatible base URL without an OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration for this model.",
+    );
+  }
+  return builtInResidencyRule(
+    "us",
+    "provider_default",
+    "api.openai.com processes in the US by default.",
+  );
+}
+
+const BuiltinModelResidencyDeclarations = z.record(
+  z.string().trim().min(1),
+  ModelResidencyDeclaration,
+);
+
+/** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
+export function parseBuiltinModelResidencyJson(
+  value: string,
+): Record<string, z.output<typeof ModelResidencyDeclaration>> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON must be a JSON object");
+  }
+  const parsed = BuiltinModelResidencyDeclarations.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON is invalid: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  return parsed.data;
+}
+
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   anthropic?: ResolvedModelProvider["anthropic"];
   headers: Array<{
@@ -8127,6 +8539,21 @@ function definitionVersionFor(
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
+    // Where an operator declares a route processes data is executable
+    // identity: moving it fails accepted turns instead of silently moving them.
+    // Only what moves processing is hashed, so re-verifying evidence keeps the
+    // digest. Built-in rules and unknown records carry no operator claim and
+    // stay out, so existing digests are unchanged. Enforcement still checks the
+    // live record on every call rather than relying on this digest.
+    ...(residencyIsDeclared(model.residency)
+      ? {
+          residency: {
+            geography: model.residency.geography,
+            deploymentType: model.residency.deploymentType,
+            regions: model.residency.regions,
+          },
+        }
+      : {}),
   });
   return `sha256:${createHash("sha256")
     .update("opengeni:model-definition:v1\n", "utf8")
@@ -8839,6 +9266,7 @@ export function configuredModels(
         deployment: { upstreamModelId: id, wireApi: "responses" },
         credentialSource: builtinProvider.credentialSource,
         billing: builtinProvider.billing,
+        residency: builtinModelResidency(settings, id),
         capabilities,
         ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
         ...builtinContextLimitsForModel(settings, id),
@@ -8879,6 +9307,7 @@ export function configuredModels(
           deployment: { upstreamModelId, wireApi: provider.api },
           credentialSource: resolvedProvider.credentialSource,
           billing: resolvedProvider.billing,
+          residency: registryModelResidency(provider, { ...model, upstreamModelId }),
           capabilities,
           ...(pricingSchedules[model.id] === undefined
             ? {}
@@ -10597,7 +11026,7 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     }
     return parsed;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, {
       cause: error,
     });
@@ -10614,7 +11043,7 @@ export function parseModelPricingJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -10642,7 +11071,7 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(
       `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be valid JSON: ${message}`,
       { cause: error },
@@ -10691,7 +11120,7 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -10709,7 +11138,7 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
     try {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`, {
         cause: error,
       });
@@ -10727,7 +11156,7 @@ export function parseIntegrationsOauthClientsJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -10793,7 +11222,7 @@ export function parseSocialOauthClientsJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -10830,7 +11259,7 @@ export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -10846,7 +11275,7 @@ export function parseStaticEntitlementsJson(raw: string): EntitlementsConfig {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -11591,6 +12020,41 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  // Only the operator's own environment is strict here. Settings resolved
+  // from a stored catalog document re-parse providers without this check;
+  // a contradicted claim there is unknown (registryModelResidency).
+  const providerResidencyProblems = parseModelProvidersJson(settings.modelProvidersJson).flatMap(
+    (provider) => registryProviderResidencyRouteProblems(provider),
+  );
+  if (providerResidencyProblems.length > 0) {
+    throw new Error(
+      `OPENGENI_MODEL_PROVIDERS_JSON is invalid: ${providerResidencyProblems.join("; ")}`,
+    );
+  }
+  if (settings.builtinModelResidencyJson !== undefined) {
+    const declared = parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
+    const routeProblems = Object.entries(declared).flatMap(([modelId, declaration]) =>
+      builtinResidencyRouteProblems(settings, modelId, declaration),
+    );
+    if (routeProblems.length > 0) {
+      throw new Error(
+        `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON is invalid: ${routeProblems.join("; ")}`,
+      );
+    }
+    // A misspelled key would leave the intended model unknown without a sign.
+    // In database catalog mode the document lists the built-in models, so the
+    // environment's list proves nothing.
+    const builtinIds = new Set([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
+    const unmatched =
+      settings.modelCatalogSource === "database"
+        ? []
+        : Object.keys(declared).filter((modelId) => !builtinIds.has(modelId));
+    if (unmatched.length > 0) {
+      console.warn(
+        `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,
+      );
+    }
+  }
   if (
     settings.productAccessMode === "configured" &&
     !["local", "test"].includes(settings.environment) &&
@@ -12446,7 +12910,7 @@ function parseGcsCredentialsJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });

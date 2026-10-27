@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.3.1",
+  "version": "5.4.2",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -49,6 +49,10 @@
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
       "default": "./src/learning-refusal.ts"
+    },
+    "./values": {
+      "types": "./src/values.ts",
+      "default": "./src/values.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",

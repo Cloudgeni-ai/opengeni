@@ -3,6 +3,7 @@
  * integration and using it in their own chats, without administering the
  * workspace. One shared definition for the API, the SDK and every client.
  */
+import { integrationDefinitionIdFromCapabilityId } from "./integration-capability-id";
 
 /** The narrow permission. `connections:write` includes it. */
 export const PERSONAL_INTEGRATION_SETUP_PERMISSION = "connections:personal" as const;
@@ -89,4 +90,61 @@ export function personalIntegrationSetupAccess(
   return can("capabilities:manage") || isPersonalIntegrationSetupCandidate(item)
     ? "personal"
     : null;
+}
+
+/**
+ * What an agent's setup card for one capability can offer this person in
+ * their chat, read from their workspace grant and the capability's catalog
+ * entry (`undefined` when the catalog has none):
+ *
+ * - `"card"`: an OAuth MCP integration they can connect from the card;
+ *   `personalOnly` when only their own account is allowed.
+ * - `"integration"`: a deployment's reviewed integration definition they
+ *   connect with their own account.
+ * - `"unavailable"`: they cannot finish this setup from the chat.
+ * - `"default"`: not decided here (other kinds of setup keep their own row).
+ *
+ * The chat card and the agent's setup tool both use this rule, so what the
+ * agent says matches what the card offers.
+ */
+export type InChatCapabilitySetup =
+  | { kind: "card"; personalOnly: boolean }
+  | { kind: "integration" }
+  | { kind: "unavailable" }
+  | { kind: "default" };
+
+export function inChatCapabilitySetup(
+  grant: { permissions: readonly string[]; permissionMode?: "legacy" | "explicit" | undefined },
+  capabilityId: string,
+  item:
+    | (Parameters<typeof personalIntegrationSetupAccess>[1] & {
+        authKind?: string | null | undefined;
+      })
+    | undefined,
+): InChatCapabilitySetup {
+  const can = (permission: string) =>
+    grant.permissions.includes(permission) ||
+    (grant.permissionMode !== "explicit" && grant.permissions.includes("workspace:admin"));
+  if (integrationDefinitionIdFromCapabilityId(capabilityId)) {
+    // Connecting your own account is the whole step: the integration's tools
+    // are installed for that account only, never for the workspace, so the
+    // personal setup permission (included in connections:write) is enough.
+    return can("sessions:control") &&
+      (can(PERSONAL_INTEGRATION_SETUP_PERMISSION) || can("connections:write"))
+      ? { kind: "integration" }
+      : { kind: "unavailable" };
+  }
+  if (!item || item.kind !== "mcp" || item.authKind !== "oauth2") return { kind: "default" };
+  if (!can("sessions:control")) return { kind: "unavailable" };
+  const usesSharedAccount =
+    item.enabled === true &&
+    item.connectionRef !== null &&
+    item.connectionRef !== undefined &&
+    item.connectionRef.subjectScope !== "subject";
+  if (usesSharedAccount)
+    return can("connections:read")
+      ? { kind: "card", personalOnly: false }
+      : { kind: "unavailable" };
+  const access = personalIntegrationSetupAccess(grant, item);
+  return access ? { kind: "card", personalOnly: access === "personal" } : { kind: "unavailable" };
 }

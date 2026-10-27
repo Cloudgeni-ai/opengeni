@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type BatchOutcome = "success" | "code_failure" | "infrastructure" | "cancelled";
 export type BatchIdentity = {
@@ -179,10 +180,7 @@ if (import.meta.main) {
       });
       exitCode = await child.exited;
     } catch (error) {
-      console.error(
-        "Batch task could not execute:",
-        error instanceof Error ? error.message : String(error),
-      );
+      console.error("Batch task could not execute:", errorMessage(error));
     }
     if (interrupted) exitCode = 130;
     // Setup success is not test success. If a later test is killed, do not
