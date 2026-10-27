@@ -45,6 +45,63 @@ export const VIRTUAL_AUTHENTICATOR_OPTIONS = {
   automaticPresenceSimulation: true,
 } as const;
 
+/**
+ * Installed in every frame of a tab that hosts the virtual authenticator,
+ * before the page's own scripts. Passkey autofill (conditional mediation) is
+ * a request a browser answers only once the person picks a passkey from the
+ * autofill list, but the virtual authenticator answers every request at once
+ * with whichever credential it holds. So a sign-in page that offers autofill
+ * on load (as large identity providers' do) would sign in a saved account
+ * nobody chose, on every visit, even right after signing out. The tab
+ * therefore reports passkey autofill as unavailable, as a browser without it
+ * does, and a conditional request a page makes anyway stays pending until the
+ * page aborts it. A passkey request the page makes in the open, after a
+ * "Sign in with a passkey" click, still reaches the authenticator.
+ */
+export const PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT = `(() => {
+  const Container = globalThis.CredentialsContainer;
+  const Credential = globalThis.PublicKeyCredential;
+  if (!Container || !Credential) return;
+  const unanswered = (options) => new Promise((_, reject) => {
+    const signal = options && options.signal;
+    if (!signal) return;
+    if (signal.aborted) return reject(signal.reason);
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  for (const name of ["get", "create"]) {
+    const original = Container.prototype[name];
+    if (typeof original !== "function") continue;
+    Object.defineProperty(Container.prototype, name, {
+      configurable: true,
+      writable: true,
+      value: { [name](options) {
+        return options && options.mediation === "conditional"
+          ? unanswered(options)
+          : original.apply(this, arguments);
+      } }[name],
+    });
+  }
+  if (typeof Credential.isConditionalMediationAvailable === "function") {
+    Object.defineProperty(Credential, "isConditionalMediationAvailable", {
+      configurable: true,
+      writable: true,
+      value: { isConditionalMediationAvailable() { return Promise.resolve(false); } }
+        .isConditionalMediationAvailable,
+    });
+  }
+  const capabilities = Credential.getClientCapabilities;
+  if (typeof capabilities === "function") {
+    Object.defineProperty(Credential, "getClientCapabilities", {
+      configurable: true,
+      writable: true,
+      value: { async getClientCapabilities() {
+        const reported = await capabilities.apply(this, arguments);
+        return { ...reported, conditionalGet: false, conditionalCreate: false };
+      } }.getClientCapabilities,
+    });
+  }
+})();`;
+
 type DesiredCredential = {
   material: BrowserPasskeyCredentialMaterial;
   /** Vault item it was loaded from; null for one registered in this session. */
@@ -112,6 +169,9 @@ export class BrowserPasskeyManager {
       }
       const { sessionId } = target;
       try {
+        // Before the authenticator, so no page script ever sees passkey
+        // autofill a tab with an authenticator would answer unasked.
+        await this.withdrawAutofill(connection, sessionId, true);
         await this.send(connection, "WebAuthn.enable", { enableUI: false }, sessionId);
         const added = await this.send<{ authenticatorId?: unknown }>(
           connection,
@@ -162,6 +222,32 @@ export class BrowserPasskeyManager {
         return false;
       }
     });
+  }
+
+  /**
+   * Install {@link PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT} on a page session, or on
+   * a cross-origin frame's own session (such a frame shares its page's
+   * authenticator), while the target still waits for its debugger. Chromium
+   * runs a session's new-document scripts only while its Page domain is
+   * enabled, so it stays enabled. A frame that closed meanwhile simply needs
+   * nothing; a page that cannot take it gets no authenticator.
+   */
+  async withdrawAutofill(
+    connection: PasskeyCdpConnection,
+    sessionId: string,
+    required = false,
+  ): Promise<void> {
+    try {
+      await this.send(connection, "Page.enable", {}, sessionId);
+      await this.send(
+        connection,
+        "Page.addScriptToEvaluateOnNewDocument",
+        { source: PASSKEY_AUTOFILL_WITHDRAWAL_SCRIPT, runImmediately: true },
+        sessionId,
+      );
+    } catch (error) {
+      if (required) throw error;
+    }
   }
 
   /** The CDP session hosting an authenticator ended (tab closed or detached). */

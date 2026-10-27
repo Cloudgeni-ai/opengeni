@@ -3768,14 +3768,10 @@ Numeric and string gRPC transport codes and bounded AggregateError causes
 dominate terminal sandbox hints; transient observation can never retire a live
 lease or authorize command replay.
 
-`modal-control-v1` is an explicit legacy reader for already launched commands;
-new starts never select it. Its batch API does not guarantee full replay, so
-historical missing output cannot be reconstructed or called complete. Never
-reinterpret its `tp-` execution IDs or batch indices as router UUIDs/byte offsets.
-The locator-schema rollout requires a maintenance worker cutover because old
-readers cannot parse the new discriminator. After old active locators have
-settled or passed the existing evidence-backed drain, remove the legacy live
-reader; historical records remain immutable and do not authorize execution.
+Modal commands use only the `modal-router-v1` locator. The earlier
+batch-index `modal-control-v1` reader has been removed; any historical exited
+row that still carries that locator is immutable evidence and never authorizes
+reading or execution.
 
 Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
 `/bin/true` invocation with no shell, user environment or command admission.

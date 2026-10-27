@@ -976,10 +976,17 @@ export class CuaComputerBackend implements ComputerBackend {
       if (!live.has(id)) {
         this.targetsById.delete(id);
         this.observations.delete(id);
-        this.unreadableSheets.delete(id);
         for (const [frameId, frame] of this.frames)
           if (frame.targetId === id) this.frames.delete(frameId);
       }
+    // A sheet that has gone away is no longer one that cannot be read: its
+    // window closed, is kept off screen for reuse (AppKit keeps file panels),
+    // or no longer lies within another window of its app.
+    for (const id of this.unreadableSheets) {
+      const target = this.targetsById.get(id);
+      if (!target || !target.onScreen || !this.sheetHosts(target).length)
+        this.unreadableSheets.delete(id);
+    }
     return [...this.targetsById.values()].map((target) => target.native);
   }
 
@@ -1197,7 +1204,21 @@ export class CuaComputerBackend implements ComputerBackend {
     observed: ComputerBackendObservation | undefined,
   ): ComputerBackendError | null {
     const target = this.targetsById.get(targetId);
-    if (!target || this.identity.platform !== "macos" || cuaCode !== "window_not_key") return null;
+    if (
+      !target ||
+      this.identity.platform !== "macos" ||
+      (cuaCode !== "window_not_key" && cuaCode !== "key_focus_unknown")
+    )
+      return null;
+    // The app named no focused window, or did not answer in time: nothing
+    // is known about where keys would go.
+    if (cuaCode === "key_focus_unknown")
+      return new ComputerBackendError(
+        code,
+        "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
+        false,
+        false,
+      );
     if (observed?.roots.some((node) => node.role === "AXSheet"))
       return new ComputerBackendError(
         code,
@@ -1355,6 +1376,8 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     }
+    // It read, so it is no longer a sheet that cannot be.
+    this.unreadableSheets.delete(targetId);
     const projected = projectElements(
       state.elements,
       this.identity.platform,
@@ -1930,7 +1953,9 @@ export class CuaComputerBackend implements ComputerBackend {
     // document with the same element focused, which keeps its ref across
     // readings of one document. With nothing focused the keys carry no
     // element and land wherever the focus is by then, so only the latest
-    // reading fences them.
+    // reading fences them. A reading the app did not answer showed the
+    // caller no focused element, so it fences no keys either, even once a
+    // later reading has one.
     const fencedOn =
       action.type === "keyboard" && observed
         ? (this.recentObservations.get(command.targetId) ?? []).find(
@@ -1943,6 +1968,7 @@ export class CuaComputerBackend implements ComputerBackend {
       this.documents.get(fencedOn) === this.documents.get(observed!);
     const keyFenced =
       sameDocument &&
+      !this.unansweredReadings.has(fencedOn!) &&
       observed!.focusedRef !== null &&
       fencedOn!.focusedRef === observed!.focusedRef;
     if (

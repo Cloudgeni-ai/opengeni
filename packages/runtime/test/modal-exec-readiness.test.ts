@@ -454,7 +454,6 @@ test("supervised cancellation uncertainty retains intent, writer and partial hel
                 };
                 f.session.bindProviderCommand!(73, command, {
                   load: async () => structuredClone(command),
-                  acknowledge: async (next) => next,
                   reserveInput: async () => {
                     throw new Error("no stdin permitted");
                   },
@@ -564,7 +563,6 @@ function foregroundTools(
     stored.streams.stdout.byteOffset = stdoutOffset;
     f.session.bindProviderCommand!(73, stored, {
       load: async () => stored,
-      acknowledge: async (command) => command,
       reserveInput: async () => 0,
       captureRouterPage: async (page) => {
         stored = page.command;

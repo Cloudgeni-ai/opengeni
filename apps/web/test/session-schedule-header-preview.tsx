@@ -229,6 +229,24 @@ const states: {
     } as Session,
   },
   {
+    label: "Pinned chat from a Site, with an automation",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004009",
+      title: "Customer intake",
+      pinned: true,
+      metadata: {
+        _opengeniSiteOrigin: {
+          siteId: "22222222-2222-4222-8222-222222222222",
+          title: "Intake portal",
+        },
+      },
+      hasSchedules: true,
+      waitingForEvents: true,
+      automationWait: { nextRunAt: null, event: mail, events: [mail], automations: 1 },
+    } as Session,
+  },
+  {
     label: "Only paused or past one-time schedules",
     session: {
       ...base,
@@ -278,6 +296,18 @@ const root = createRootRoute({
           <section
             key={session.id}
             data-header-state={label}
+            // The parts this header has, so the check can find each one in
+            // the row or in the "…" menu.
+            data-header-parts={[
+              "panel",
+              "access",
+              "fullAccess",
+              session.hasSchedules ? "automations" : null,
+              session.metadata?._opengeniSiteOrigin ? "site" : null,
+              keyAuthRequired ? "accessKey" : null,
+            ]
+              .filter(Boolean)
+              .join(" ")}
             className={`rounded-lg border border-border bg-surface ${frame ?? ""}`}
           >
             <p className="border-b border-border px-4 py-2 text-xs text-fg-muted">{label}</p>

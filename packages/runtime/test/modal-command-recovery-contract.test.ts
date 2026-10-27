@@ -395,9 +395,6 @@ test.each([
       },
       providerCommandPersistence: () => ({
         load: async () => structuredClone(command),
-        acknowledge: async (next) => {
-          throw new Error(`output must use atomic capture, not acknowledge ${next.kind}`);
-        },
         reserveInput: async (length = 1) => {
           reservations++;
           const offset = inputOffset;
@@ -496,10 +493,6 @@ test.each(["write_stdin", "command_input"] as const)(
     installModalCommandSession(session as never, f.control);
     session.bindProviderCommand(77, command, {
       load: async () => structuredClone(command),
-      acknowledge: async (next: typeof command) => {
-        command = next;
-        return next;
-      },
       reserveInput: async (length: number) => {
         reservations++;
         const old = inputOffset;
@@ -615,9 +608,6 @@ test.each([
         const offset = inputOffset;
         inputOffset += length;
         return offset;
-      },
-      acknowledge: async () => {
-        throw new Error("uncertain stdin must not acknowledge output");
       },
       captureRouterPage: async () => {
         throw new Error("uncertain stdin must not capture output");

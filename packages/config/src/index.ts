@@ -9499,8 +9499,11 @@ export function resolveModelProvider(
   settings: Settings,
   modelId: string,
 ): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined {
-  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
-  const model = configuredModels(settings).find((candidate) => candidate.id === canonicalModelId);
+  // Canonical ids take precedence over aliases within one freshly built catalog.
+  const models = configuredModels(settings);
+  const model =
+    models.find((candidate) => candidate.id === modelId) ??
+    models.find((candidate) => candidate.aliases.includes(modelId));
   if (!model) {
     return undefined;
   }

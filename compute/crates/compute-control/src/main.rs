@@ -202,7 +202,8 @@ struct Serve {
     /// What a team's sandboxes may ask to reach of what hosts offer
     /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
     /// given none may ask for none. Taking one away refuses new sandboxes
-    /// that ask for it; those made before keep it.
+    /// that ask for it; those made before keep it. Creates through the E2B
+    /// front door, which cannot ask, reach every offer their team is given.
     #[arg(long = "team-reach", value_parser = parse_team_reach)]
     team_reach: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
@@ -265,7 +266,11 @@ struct Serve {
     /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
     /// `base=base:2x1024`, or `id=image:VCPUSxMEMORY_MIBxDISK_MIB` for
     /// sandboxes with a disk of at least `DISK_MIB` (`ci=runner:4x8192x65536`);
-    /// repeat for more. Without any, `base` is the default image at 2x1024.
+    /// either may end in `,memory-request=MIB` and `,cpu-request=MILLIS`
+    /// for sandboxes guaranteed only that much memory and processor time,
+    /// using more when the host has it free
+    /// (`ci=runner:8x24576x65536,memory-request=8192`). Repeat for more.
+    /// Without any, `base` is the default image at 2x1024.
     #[arg(long = "e2b-template", value_parser = parse_template)]
     e2b_templates: Vec<(String, e2b::Template)>,
 }
@@ -312,9 +317,12 @@ fn parse_team_reach(text: &str) -> Result<(String, String), String> {
 }
 
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
-    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`";
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`, \
+                 then optionally `,memory-request=MIB` and `,cpu-request=MILLIS`";
     let (id, rest) = text.split_once('=').ok_or(shape)?;
-    let (image, size) = rest.rsplit_once(':').ok_or(shape)?;
+    let (image, sized) = rest.rsplit_once(':').ok_or(shape)?;
+    let mut options = sized.split(',');
+    let size = options.next().unwrap_or_default();
     let mut parts = size.split('x');
     let (Some(vcpus), Some(memory), disk, None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
@@ -334,16 +342,32 @@ fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
                 })
         })
         .transpose()?;
-    Ok((
-        id.to_owned(),
-        e2b::Template {
-            image: image.to_owned(),
-            vcpus: vcpus.parse().map_err(|_| shape)?,
-            memory_mib: memory.parse().map_err(|_| shape)?,
-            disk,
-            disk_mib: 0,
-        },
-    ))
+    let mut template = e2b::Template {
+        image: image.to_owned(),
+        vcpus: vcpus.parse().map_err(|_| shape)?,
+        memory_mib: memory.parse().map_err(|_| shape)?,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        disk,
+        disk_mib: 0,
+    };
+    for option in options {
+        let (key, value) = option.split_once('=').ok_or(shape)?;
+        let value: u32 = value.parse().map_err(|_| shape)?;
+        let slot = match key {
+            "memory-request" => &mut template.memory_request_mib,
+            "cpu-request" => &mut template.cpu_request_millis,
+            _ => return Err(shape.into()),
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{text:?} names {key} twice"));
+        }
+    }
+    template
+        .config(compute_protocol::host::SleepConfig::default())
+        .validate()
+        .map_err(|why| format!("{text:?}: {why}"))?;
+    Ok((id.to_owned(), template))
 }
 
 /// The service's names in `url`, an `https://` URL, and `extra`.
@@ -844,6 +868,49 @@ mod tests {
             "ci=runner:4x8192x99999999",
             "ci=runner:4x8192x1x2",
             "ci=runner:4",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_template_may_guarantee_less_than_its_sandboxes_may_use() {
+        let (_, template) = parse_template("ci=runner:8x24576x65536").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (None, None)
+        );
+        let (_, template) =
+            parse_template("ci=runner:8x24576x65536,memory-request=8192,cpu-request=2000").unwrap();
+        assert_eq!(
+            (template.memory_request_mib, template.cpu_request_millis),
+            (Some(8192), Some(2000))
+        );
+        assert_eq!(template.disk, Some(65536));
+        let config = template.config(compute_protocol::host::SleepConfig::default());
+        assert_eq!(
+            (config.memory_request(), config.cpu_request()),
+            (8192, 2000)
+        );
+        let (_, template) = parse_template("small=base:2x1024,cpu-request=500").unwrap();
+        assert_eq!(
+            (
+                template.disk,
+                template.memory_request_mib,
+                template.cpu_request_millis
+            ),
+            (None, None, Some(500))
+        );
+        for wrong in [
+            // More guaranteed than the sandbox has.
+            "ci=runner:8x8192,memory-request=16384",
+            "ci=runner:2x1024,cpu-request=4000",
+            "ci=runner:2x1024,memory-request=8",
+            "ci=runner:2x1024,memory-request=512,memory-request=256",
+            "ci=runner:2x1024,memory-request",
+            "ci=runner:2x1024,memory-request=lots",
+            "ci=runner:2x1024,disk=4096",
+            "ci=runner:2x1024,",
         ] {
             assert!(parse_template(wrong).is_err(), "{wrong}");
         }
