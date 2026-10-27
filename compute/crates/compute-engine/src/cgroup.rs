@@ -215,6 +215,16 @@ impl Cgroup {
         fs::write(self.path.join("memory.max"), value)
     }
 
+    /// Sets the memory above which the kernel slows the group's processes
+    /// down as they take more (`memory.high`), reclaiming from the group
+    /// first and making each wait on its own allocations, or no such
+    /// point for `None`. It never ends a process: a group past it only
+    /// gets slower.
+    pub fn set_memory_high(&self, bytes: Option<u64>) -> io::Result<()> {
+        let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
+        fs::write(self.path.join("memory.high"), value)
+    }
+
     /// Sets the parent group's `memory.low` to the sum of its children's.
     /// A group is protected only as far as its ancestors are, so a parent
     /// left at 0 would protect none of its VMs from the rest of the host.

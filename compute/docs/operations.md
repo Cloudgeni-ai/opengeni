@@ -1054,6 +1054,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   (the path under `--cgroup`). Its files stay and the agent treats
   the VM's end like a crash. Remove the sandbox through the API once the
   disk is writable again.
+- **Lifting the VMs' memory limit.** `echo max > /sys/fs/cgroup/compute/memory.high`
+  (the group under `--cgroup`) lifts it until the agent next starts, which
+  sets it again. Without it, guests bursting together can take the
+  host's memory faster than relief saves them (see Capacity and cost).
 
 ## Network
 
@@ -1161,6 +1165,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   Raise it, or the headroom, where saved sandboxes wait long for their
   archive and local disk runs short; `--worker-threads` and
   `--blocking-threads` rarely need changing.
+- **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
+  pages with relief, the agent sets `memory.high` on the VMs' group
+  (`--cgroup`) to the host's memory less the high watermark, and logs it
+  (`memory the VMs may hold together`) as it starts. Sandboxes above
+  their request that reach it together are slowed while relief pauses and
+  saves them, instead of taking the agent's and the guard's memory.
+  A warning at start says the memory capacity is above the limit, which
+  the defaults never do (their headroom is the high watermark): with
+  `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks
+  given, keep the capacity at or under it so requests always fit.
+  `memory.events` in that group counts `high` each time the kernel slowed
+  the VMs.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.

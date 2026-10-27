@@ -152,6 +152,43 @@ pick a VM.
   that compresses must have zswap on, or the agent refuses to start.
   Status shows each VM's zswap traffic and memory pressure; a running VM
   with zswap stores is a bug.
+- On 4 KiB pages with relief, the VMs together may hold the host's memory
+  less the high watermark before the kernel slows them down: their parent
+  group's `memory.high`, set as the agent starts (and lifted where it
+  does not apply, so no earlier setting lingers). By default that is the
+  memory capacity, so the host keeps the headroom it was promised. Their
+  VMMs, pagers and the page cache of their disks and images count, as in
+  each VM's own group; the kernel drops that page cache first. Running
+  guests are never swapped, so when sandboxes in use go
+  above their request together faster than relief can save them, the
+  kernel otherwise takes what they reach for from everything else: the
+  agent's memory and code, its guard's, the rest of the host's. The agent
+  then grows too slow to renew its lease or to pause anyone. Measured on a
+  32 GiB host: eight guests growing together took it from 12 GiB
+  available to none in 17 s; balloons had nothing to give, two sandboxes
+  were paused, the lease ran out and the guard ended every VM, and in
+  another run the machine reset. A limit a low watermark short of the
+  host's memory was not enough: beside the VMs the kernel's own memory,
+  page tables and compressed pages took most of a gigabyte, so under
+  350 MiB stayed available, the agent reclaimed its own pages and the
+  lease ran out again. Past the limit a guest waits on its own
+  allocations while the kernel reclaims from the VMs' groups first, and
+  nothing ends. Available memory is never more than the limit leaves (the
+  limit less what the VMs' group holds, droppable page cache left out, as
+  for each VM), so at the limit available memory is below the low
+  watermark and relief is already pausing and saving the sandboxes above
+  their request, until it is back at the high watermark. Not
+  `memory.max`: at it the kernel ends a VM, and slowing VMs down is the
+  better failure, as for `memory.low`. A capacity given above the limit
+  is kept but warned about: requests within it could then be slowed at
+  the limit. The VMMs' and pagers' own memory is not booked, so a host
+  booked to its last byte with every guest at its request can reach the
+  limit too, and its guests are then slowed slightly; nothing above
+  request is left for relief to save. On huge pages nothing limits them
+  together: guests take their memory from the pool, which their groups do
+  not count, and every awake sandbox is booked whole. An agent of a
+  release before this leaves a limit an earlier one set in place without
+  counting it; `max` in the group's `memory.high` lifts it.
 - VMMs and pagers run with `oom_score_adj` -900, so the host's
   out-of-memory killer ends nearly anything else first, and the agent with
   -999, so it outlasts the VMs it can bring back. It runs in a service unit

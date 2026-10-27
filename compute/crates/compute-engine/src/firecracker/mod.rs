@@ -182,6 +182,9 @@ pub struct Firecracker {
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
     memory: MemoryProfile,
+    /// The parent group's `memory.high`: what the VMs may hold together
+    /// before the kernel slows them down; `None` for no limit.
+    memory_high: Option<u64>,
 }
 
 impl Firecracker {
@@ -231,6 +234,7 @@ impl Firecracker {
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
             memory: MemoryProfile::bare_metal(),
+            memory_high: None,
         })
     }
 
@@ -238,6 +242,19 @@ impl Firecracker {
     /// Refuses an unsafe profile.
     pub fn with_memory_profile(mut self, profile: MemoryProfile) -> Result<Self, ProfileError> {
         self.memory = profile.validate()?;
+        Ok(self)
+    }
+
+    /// Lets the VMs hold at most `bytes` of memory together before the
+    /// kernel slows them down (the parent group's `memory.high`), or lifts
+    /// that for `None`, which also undoes what an earlier agent set. Their
+    /// VMMs, pagers and the page cache of their disks and images count,
+    /// as in each VM's own group. A guest past it waits on its own
+    /// allocations while the kernel reclaims from the VMs' groups first,
+    /// so the host's other processes keep their memory; nothing is ended.
+    pub fn with_memory_high(mut self, bytes: Option<u64>) -> io::Result<Self> {
+        self.cgroups.set_memory_high(bytes)?;
+        self.memory_high = bytes;
         Ok(self)
     }
 
@@ -1033,6 +1050,17 @@ impl Engine for Firecracker {
         self.cgroups
             .remove_empty_children()
             .map_err(|error| EngineError::io("clean_up_left_behind", error))
+    }
+
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        let Some(high) = self.memory_high else {
+            return Ok(None);
+        };
+        let held = self
+            .cgroups
+            .memory_held()
+            .map_err(|error| EngineError::io("memory_room", error))?;
+        Ok(Some(high.saturating_sub(held)))
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
