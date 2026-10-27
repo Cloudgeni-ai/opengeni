@@ -242,13 +242,17 @@ test("a viewport change waits for a frame capture already running and starts non
       const measured = applied
         .map((call) => call.method === "Runtime.evaluate" && call.params?.expression)
         .lastIndexOf(
-          "({width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height,outerWidth,outerHeight,deviceScaleFactor:devicePixelRatio})",
+          "({width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height,deviceScaleFactor:devicePixelRatio})",
         );
       expect(sent).toBeGreaterThan(0);
       expect(measured).toBeGreaterThan(sent);
-      expect(
-        applied.slice(sent, measured).filter((call) => call.method === "Page.captureScreenshot"),
-      ).toHaveLength(0);
+      const captures = applied
+        .slice(sent, measured)
+        .filter((call) => call.method === "Page.captureScreenshot");
+      // Only the reset's own one-pixel redraw, never a frame of the stream.
+      expect(captures.map((call) => [call.params?.clip?.width, call.params?.clip?.height])).toEqual(
+        action.type === "viewport_reset" ? [[1, 1]] : [],
+      );
     }
     // Frames resume once the change is applied.
     const iterator = frames[Symbol.asyncIterator]();
@@ -258,6 +262,42 @@ test("a viewport change waits for a frame capture already running and starts non
     await fixture.driver.close();
   }
 }, 10_000);
+
+test("a capture still running after its frame stream closed holds off a viewport change", async () => {
+  const fixture = await captureFixture();
+  try {
+    fixture.setViewport(ownMetrics);
+    fixture.setViewportOn("Emulation.setDeviceMetricsOverride", emulatedMetrics);
+    await fixture.driver.start();
+    const frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    fixture.stallNext("Page.captureScreenshot");
+    await fixture.waitUntilStalled();
+    await frames.close();
+    const capture = fixture.calls.length - 1;
+    const dispatched = dispatchAction(fixture, {
+      type: "viewport",
+      width: 390,
+      height: 844,
+      mobile: true,
+      deviceScaleFactor: 2,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(
+      fixture.calls
+        .slice(capture)
+        .some((call) => call.method === "Emulation.setDeviceMetricsOverride"),
+    ).toBe(false);
+    fixture.replyToStalled();
+    await dispatched;
+    expect(
+      fixture.calls
+        .slice(capture)
+        .some((call) => call.method === "Emulation.setDeviceMetricsOverride"),
+    ).toBe(true);
+  } finally {
+    await fixture.driver.close();
+  }
+});
 
 test("a viewport change or reset the page did not take is an unknown outcome, never a success", async () => {
   const fixture = await captureFixture();
@@ -310,6 +350,27 @@ test("a viewport change or reset the page did not take is an unknown outcome, ne
 
     fixture.setViewportOn("Emulation.clearDeviceMetricsOverride", ownMetrics);
     await dispatchAction(fixture, { type: "viewport_reset" });
+
+    // A page that cannot be read does not confirm a change either.
+    fixture.setViewportOn("Emulation.setDeviceMetricsOverride", { screenWidth: 0 });
+    const overrides = fixture.calls.filter(
+      (call) => call.method === "Emulation.setDeviceMetricsOverride",
+    ).length;
+    await expect(
+      dispatchAction(fixture, { type: "viewport", width: 800, height: 600, mobile: false }),
+    ).rejects.toMatchObject({ code: "outcome_unknown" });
+    expect(
+      fixture.calls.filter((call) => call.method === "Emulation.setDeviceMetricsOverride"),
+    ).toHaveLength(overrides + 2);
+    // The page is read in a world of the driver's own, where page scripts
+    // cannot redefine what it reports.
+    const readings = fixture.calls.filter(
+      (call) =>
+        call.method === "Runtime.evaluate" &&
+        String(call.params?.expression).includes("screenWidth:screen.width"),
+    );
+    expect(readings.length).toBeGreaterThan(0);
+    expect(readings.every((call) => call.params?.contextId === 7)).toBe(true);
   } finally {
     await fixture.driver.close();
   }
@@ -723,6 +784,9 @@ async function captureFixture(
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
+  // The device metrics the driver last emulated, which a page's own reading
+  // follows unless a test sets what the page reports.
+  let emulation: { width: number; height: number; deviceScaleFactor: number } | null = null;
   // What the page reports from the moment a command is sent.
   const viewportOn = new Map<string, unknown>();
   let viewportFailure: string | null = null;
@@ -761,8 +825,34 @@ async function captureFixture(
         frameTree: { frame: { id: "frame-1", loaderId: "loader-1", url: "about:blank" } },
       };
     }
+    if (command.method === "Emulation.setDeviceMetricsOverride") {
+      emulation = {
+        width: Number(command.params?.width),
+        height: Number(command.params?.height),
+        deviceScaleFactor: Number(command.params?.deviceScaleFactor),
+      };
+    }
+    if (command.method === "Emulation.clearDeviceMetricsOverride") emulation = null;
+    if (command.method === "Page.createIsolatedWorld") result = { executionContextId: 7 };
     if (command.method === "Runtime.evaluate") {
-      if (String(command.params?.expression).startsWith("({width:innerWidth")) {
+      if (
+        String(command.params?.expression).includes("screenWidth:screen.width") &&
+        !(viewport && typeof viewport === "object" && "screenWidth" in viewport)
+      ) {
+        result = {
+          result: {
+            value: emulation
+              ? { ...emulation, screenWidth: emulation.width, screenHeight: emulation.height }
+              : {
+                  width: 1280,
+                  height: 720,
+                  screenWidth: 1920,
+                  screenHeight: 1080,
+                  deviceScaleFactor: 1,
+                },
+          },
+        };
+      } else if (String(command.params?.expression).startsWith("({width:innerWidth")) {
         if (viewportFailure) {
           queueMicrotask(() =>
             socket.dispatchEvent(

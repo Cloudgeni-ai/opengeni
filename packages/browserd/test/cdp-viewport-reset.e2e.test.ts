@@ -204,3 +204,41 @@ e2e(
   },
   90_000,
 );
+
+// Every tab the agent opens starts in the background, where Chromium does not
+// lay a page out again when its emulation is cleared until the tab is shown.
+e2e(
+  "a background tab is resized and reset exactly without being shown",
+  async () => {
+    await withDriver(async (driver) => {
+      const front = await driver.start(page("Front"));
+      const background = await driver.openTarget(
+        `data:text/html,${encodeURIComponent(
+          `<!doctype html><meta name="viewport" content="width=device-width"><title>Background</title><body style="margin:0"><h1>Background</h1><script>document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") document.title += " shown"; });</script>`,
+        )}`,
+      );
+      const id = background.target.id;
+      const frontOwn = await settledSize(driver, front.target.id);
+      const own = await settledSize(driver, id);
+      expect(own.deviceScaleFactor).toBe(DISPLAY_SCALE);
+      for (const viewport of [
+        { width: 600, height: 900, mobile: false, deviceScaleFactor: 2 },
+        { width: 768, height: 1024, mobile: true },
+        { width: 800, height: 600, mobile: false },
+      ]) {
+        await act(driver, id, { type: "viewport", ...viewport });
+        // Laid out in whole display pixels, so it can come out a pixel larger.
+        expect(Math.abs((await size(driver, id)).width! - viewport.width)).toBeLessThanOrEqual(1);
+        await act(driver, id, { type: "viewport_reset" });
+        expect(await size(driver, id)).toEqual(own);
+        await pause(500);
+        expect(await size(driver, id)).toEqual(own);
+      }
+      // The tab stayed in the background throughout, and the front tab kept
+      // its own size.
+      expect((await driver.observe(id)).target.title).toBe("Background");
+      expect(await size(driver, front.target.id)).toEqual(frontOwn);
+    });
+  },
+  90_000,
+);
