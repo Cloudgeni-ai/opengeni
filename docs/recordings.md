@@ -259,6 +259,19 @@ person in the speaker directory, which starting such a recording adds them
 to, or "Microphone" while no name is known) and the system track's text is
 under "Others". A microphone alone is
 named by its source, as are tracks of a recording without a `system` track.
+The owner's name is the one Opengeni has for them (their profile name or
+membership label). An app's own users often have none there, so the app can
+send `ownerName` when it creates the recording (`createBrowserRecorder` and
+`useRecorder` take `ownerName`; the React recorder sends its `viewerName`);
+it names them only while Opengeni has no name and they aren't in the
+speaker directory yet. The same name labels their microphone in the
+transcript.
+Without headphones the microphone also hears the others from the speakers.
+The live text leaves out a microphone line when at least two of its words,
+and 70% of them, were heard in the system track's text at the same moment
+(within two seconds); `withoutLiveMicrophoneEchoes` in
+`@opengeni/react/recordings` does this for any live view. The transcript
+does it word by word once the recording is done (see Processing).
 
 `createBrowserRecorder({ liveTranscript: true })` and
 `useRecorder({ liveTranscript: true })` do all of this and expose the text as

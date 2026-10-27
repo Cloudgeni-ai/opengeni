@@ -68,6 +68,7 @@ import {
   type LiveWebSocketConstructor,
 } from "./recording-live";
 import { errorMessage } from "@opengeni/contracts/values";
+import { ownerNameField } from "./recording-owner";
 
 export * from "./recording-live";
 
@@ -1431,6 +1432,12 @@ export type RecorderOptions = {
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /**
@@ -2084,6 +2091,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
+          ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({
             trackNumber: capture.trackNumber,
             source: capture.source,

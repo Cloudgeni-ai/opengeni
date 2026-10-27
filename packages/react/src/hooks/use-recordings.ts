@@ -167,6 +167,12 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   externalRef?: string;
   metadata?: Record<string, unknown>;
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /** Also record shared tab or system audio as its own track (Chromium). Default: off. */
@@ -220,6 +226,7 @@ export type UseRecorderResult = RecorderSnapshot & {
       | "transcription"
       | "externalRef"
       | "metadata"
+      | "ownerName"
     >,
   ) => Promise<void>;
   pause: () => void;
@@ -407,6 +414,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
         ...(merged.transcription ? { transcription: merged.transcription } : {}),
+        ...(merged.ownerName?.trim() ? { ownerName: merged.ownerName } : {}),
         ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),
         ...(merged.systemAudio !== undefined ? { systemAudio: merged.systemAudio } : {}),
         ...(merged.timesliceMilliseconds

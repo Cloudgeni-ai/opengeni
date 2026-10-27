@@ -508,16 +508,20 @@ export function registerRecordingRoutes(
             ...(language ? { language } : {}),
           }
         : undefined;
-    // Computer or tab audio makes the microphone the owner, named in the live preview.
+    // Computer or tab audio makes the microphone the owner, named in the live
+    // preview and the transcript. The name Opengeni has for them comes first;
+    // an embedding app's own users may have none, so theirs is next.
     const ownerName = recordingMicrophoneIsOwner(body.tracks)
-      ? await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
+      ? ((await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
           // The recording starts regardless; the microphone stays unnamed until then.
           observability?.warn("couldn't read the recording owner's name", {
             workspaceId: actor.workspaceId,
             error: errorMessage(error),
           });
           return null;
-        })
+        })) ??
+        body.ownerName ??
+        null)
       : null;
     const result = await guard(() =>
       createRecording(db, {
