@@ -231,9 +231,6 @@ function fixture(exitCode = 0, sharedTerminal = false) {
     },
     providerCommandPersistence: (process: RoutingRetainedProcess) => ({
       load: async () => commands.get(process.id) ?? null,
-      acknowledge: async () => {
-        throw new Error("byte cursors require atomic capture");
-      },
       reserveInput: async () => {
         throw new Error("observation must not reserve stdin");
       },

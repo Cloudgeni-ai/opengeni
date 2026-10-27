@@ -32,8 +32,6 @@ export function retainedProviderCommandPersistence(
       requestRetainedProcessCancellation(db, scope, reason),
     cancellationRequested: () => retainedProcessCancellationRequested(db, scope),
     load: () => getRetainedProviderCommand(db, scope),
-    acknowledge: (command: SandboxProviderCommand) =>
-      acknowledgeRetainedProviderOutput(db, scope, command),
     reserveInput: (byteLength?: number) => reserveRetainedProviderInput(db, scope, byteLength),
     captureRouterPage: async (page: RetainedRouterOutputPage) => {
       const result = await captureRetainedRouterOutput(db, scope, page);
@@ -123,49 +121,6 @@ export async function getRetainedProviderCommand(
       .where(processWhere(scope))
       .limit(1);
     return row?.command ? SandboxProviderCommand.parse(row.command) : null;
-  });
-}
-
-/** Call only after all output in this provider page has been durably captured.
- * A stale acknowledgment cannot roll back a cursor or erase terminal evidence. */
-export async function acknowledgeRetainedProviderOutput(
-  db: Database,
-  scope: ProcessScope,
-  candidate: SandboxProviderCommand,
-): Promise<SandboxProviderCommand> {
-  const next = SandboxProviderCommand.parse(candidate);
-  if (next.kind !== "modal-control-v1")
-    throw new Error("Byte-offset command output requires atomic capture");
-  return withRlsContext(db, scope, async (tx) => {
-    const [row] = await tx
-      .select()
-      .from(schema.sandboxRetainedProcesses)
-      .where(processWhere(scope))
-      .for("update")
-      .limit(1);
-    if (!row?.providerCommand) throw new Error("Retained provider command is unavailable");
-    const previous = SandboxProviderCommand.parse(row.providerCommand);
-    if (previous.kind !== "modal-control-v1")
-      throw new Error("Legacy acknowledgment cannot advance byte-offset output");
-    if (!sameExecution(previous, next))
-      throw new Error("Output acknowledgment changed provider execution identity");
-    const merged = structuredClone(previous);
-    for (const stream of ["stdout", "stderr"] as const) {
-      const oldCursor = previous.streams[stream];
-      const newCursor = next.streams[stream];
-      if (newCursor.batchIndex < oldCursor.batchIndex) continue;
-      if (
-        (newCursor.batchIndex === oldCursor.batchIndex || oldCursor.exitCode !== null) &&
-        !isDeepStrictEqual(oldCursor, newCursor)
-      )
-        throw new Error("Provider output acknowledgment conflicts with retained evidence");
-      merged.streams[stream] = newCursor;
-    }
-    await tx
-      .update(schema.sandboxRetainedProcesses)
-      .set({ providerCommand: merged })
-      .where(processWhere(scope));
-    return merged;
   });
 }
 

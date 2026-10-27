@@ -3329,19 +3329,16 @@ export async function probeRetainedProcessAtProvider(
         throw new Error("Provider command output requires durable capture before settlement");
       return;
     }
-    const page = session.getProviderCommandOutput?.(value);
-    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
-      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+    if (session.getProviderCommandOutput?.(value)) {
+      if (
+        typeof value !== "string" ||
+        !session.captureCommandOutput ||
+        !(await session.captureCommandOutput(value))
+      )
         throw new Error("Byte-offset output requires atomic capture before settlement");
       return;
     }
-    if (page) {
-      for (const chunk of page.chunks)
-        if (chunk.text)
-          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
-    } else {
-      await captureRetainedProbeOutput(process.id, value, captureOutput);
-    }
+    await captureRetainedProbeOutput(process.id, value, captureOutput);
     if (typeof value === "string") await session.acknowledgeCommandOutput?.(value);
   };
 
