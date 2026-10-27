@@ -866,21 +866,30 @@ server and authorized for another organization. The runtime sends the calling
 workspace in a signed `x-opengeni-calling-workspace` header on every request
 to Opengeni itself: its own host however it is spelled (case, trailing dots,
 percent-encoding) and any request carrying an Opengeni API key or MCP OAuth
-token, on any host. It sends nothing it can't sign. One middleware on every
-MCP endpoint (`/v1/mcp` and everything under `/v1/workspaces/:workspaceId/mcp`,
-including `/mcp/files` and `/mcp/docs`) verifies the header first (a proof
-Opengeni didn't sign is `403`), lets the endpoint authorize and run, and then
-withholds its answer with `422 region_restricted` when content of the
-workspace or organization it reached may not go to the calling workspace
-(`503` when that can't be checked). Content leaves only through that answer;
-what the call sends in is the calling workspace's own content. The credential
-is checked where it is bound too: MCP OAuth consent refuses a grant to
-Opengeni's own client (named by its signed integration state, or refused when
-its callback carries no such state) for a workspace that EU-only content of
-the granted workspace or organization may not reach, and saving an Opengeni
-organization or personal API key as an MCP credential (capability headers,
-session MCP servers and their rotation, Connect credentials) is refused in a
-workspace that the key's organization's EU-only content may not reach. EU-only
+token, on any host. The header is opaque (encrypted and authenticated with a
+key derived from the server secret, with a short expiry), so a relay that sees
+it learns no account or workspace id. It sends nothing it can't sign. One
+middleware on every MCP endpoint (`/v1/mcp` and everything under
+`/v1/workspaces/:workspaceId/mcp`, including `/mcp/files` and `/mcp/docs`)
+verifies the header first (a proof Opengeni didn't sign is `403`). Each
+endpoint, right after it authorizes the request, names the workspace or
+organization it reached; any request beyond the handshake (`initialize`,
+`ping` and listing tools, resources and prompts) is then refused with
+`422 region_restricted` before it runs unless content may go both ways
+between the calling workspace and what was reached, because a call can carry
+the calling workspace's content in as well as bring content back. Handshake
+answers are checked one way, after the endpoint answers. An endpoint that
+never named what it reached, or carried a call without the both-ways check,
+has its answer withheld (`503`), as does a check that can't be read. The
+credential is checked where it is bound too, both ways: MCP OAuth consent
+refuses a grant to Opengeni's own client (named by its signed integration
+state, or refused when its callback carries no such state) between a
+workspace and a granted workspace or organization when either side's EU-only
+content may not reach the other, and saving an Opengeni organization or
+personal API key as an MCP credential (capability headers, session MCP
+servers and their rotation, Connect credentials) is refused in a workspace
+that the key's organization's EU-only content may not reach, or whose own
+EU-only content would go to an organization that isn't EU-only. EU-only
 covers Opengeni's own inference and content moving between Opengeni
 workspaces, not outside agents an organization connects itself (organization
 MCP clients, API keys, desktop clients), which send no header and stay

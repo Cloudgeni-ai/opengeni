@@ -4156,9 +4156,10 @@ export async function verifyDelegatedAccessToken(
 //
 // When an agent in an Opengeni workspace calls Opengeni's own MCP endpoints as
 // a remote MCP server, the runtime adds this header naming that workspace, so
-// the endpoint can keep EU-only content out of a non-EU workspace. The same
-// HMAC envelope as the delegated token with its own `ogcw_` prefix, signed
-// into the MAC, so it is never accepted as any other token. It grants
+// the endpoint can keep EU-only content in EU-only workspaces. The proof is
+// opaque: AES-256-GCM under a key derived from the server secret for this use
+// only, with its own `ogcw_` prefix as additional data, so a relay that sees
+// it learns nothing and it is never accepted as any other token. It grants
 // nothing: it only lets the endpoint refuse.
 export const OPENGENI_CALLING_WORKSPACE_HEADER = "x-opengeni-calling-workspace" as const;
 const callingWorkspaceProofPrefix = "ogcw_";
@@ -4171,6 +4172,30 @@ const CallingWorkspaceProofPayload = z
   .strict();
 export type CallingWorkspaceProof = { accountId: string; workspaceId: string };
 
+async function callingWorkspaceProofKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`opengeni calling-workspace proof v1\u0000${secret}`),
+  );
+  return await crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  try {
+    const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
 export async function signCallingWorkspaceProof(
   secret: string,
   input: CallingWorkspaceProof & { expiresInSeconds?: number },
@@ -4181,12 +4206,22 @@ export async function signCallingWorkspaceProof(
     workspaceId: input.workspaceId,
     exp: nowSeconds + (input.expiresInSeconds ?? 300),
   });
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const signature = await hmacSha256Base64Url(
-    secret,
-    `${callingWorkspaceProofPrefix}${encodedPayload}`,
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: new TextEncoder().encode(callingWorkspaceProofPrefix),
+      },
+      await callingWorkspaceProofKey(secret),
+      new TextEncoder().encode(JSON.stringify(payload)),
+    ),
   );
-  return `${callingWorkspaceProofPrefix}${encodedPayload}.${signature}`;
+  const token = new Uint8Array(iv.length + sealed.length);
+  token.set(iv);
+  token.set(sealed, iv.length);
+  return `${callingWorkspaceProofPrefix}${bytesToBase64Url(token)}`;
 }
 
 /** The calling workspace, or null when the proof is malformed, forged or expired. */
@@ -4195,19 +4230,28 @@ export async function verifyCallingWorkspaceProof(
   proof: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<CallingWorkspaceProof | null> {
-  if (!proof.startsWith(callingWorkspaceProofPrefix)) return null;
-  const withoutPrefix = proof.slice(callingWorkspaceProofPrefix.length);
-  const dot = withoutPrefix.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const encodedPayload = withoutPrefix.slice(0, dot);
-  const expected = await hmacSha256Base64Url(
-    secret,
-    `${callingWorkspaceProofPrefix}${encodedPayload}`,
-  );
-  if (!constantTimeEqual(withoutPrefix.slice(dot + 1), expected)) return null;
+  if (!proof.startsWith(callingWorkspaceProofPrefix) || proof.length > 2_048) return null;
+  const token = base64UrlToBytes(proof.slice(callingWorkspaceProofPrefix.length));
+  // A 12-byte nonce and at least the 16-byte authentication tag.
+  if (!token || token.length < 12 + 16) return null;
+  let opened: ArrayBuffer;
+  try {
+    opened = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: token.slice(0, 12),
+        additionalData: new TextEncoder().encode(callingWorkspaceProofPrefix),
+      },
+      await callingWorkspaceProofKey(secret),
+      token.slice(12),
+    );
+  } catch {
+    // Forged, altered or under another secret: the tag check failed.
+    return null;
+  }
   let decoded: unknown;
   try {
-    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+    decoded = JSON.parse(new TextDecoder().decode(opened));
   } catch {
     return null;
   }

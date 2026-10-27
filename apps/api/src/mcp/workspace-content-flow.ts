@@ -5,6 +5,7 @@ import {
   verifyCallingWorkspaceProof,
 } from "@opengeni/contracts";
 import {
+  assertOrganizationContentExchangeAllowed,
   assertOrganizationContentFlowAllowed,
   assertWorkspaceContentExchangeAllowed,
   assertWorkspaceContentFlowAllowed,
@@ -17,6 +18,7 @@ import {
 } from "@opengeni/db";
 import { inspectSignedState } from "@opengeni/github";
 import { normalizedUrlHost, opengeniOwnHosts } from "@opengeni/runtime/calling-workspace";
+import { boundedMcpRequest } from "@opengeni/runtime/mcp-network";
 import type { MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 
@@ -34,9 +36,10 @@ import { HTTPException } from "hono/http-exception";
 
    An agent of one workspace calling Opengeni's own MCP endpoints as a remote
    MCP server sends a signed header naming its workspace (the runtime adds it
-   and sends nothing it can't sign). One guard on every MCP endpoint withholds
-   the answer when content of the workspace or organization it reached may not
-   go to that workspace.
+   and sends nothing it can't sign). Each MCP endpoint refuses a call beyond
+   the handshake before it runs unless content may move both ways, and one
+   guard on every MCP endpoint withholds any answer whose content may not go
+   to that workspace.
    -------------------------------------------------------------------------- */
 
 /**
@@ -124,16 +127,31 @@ const ORGANIZATION_MCP_ENDPOINT = /^\/v1\/mcp\/?$/;
 const WORKSPACE_MCP_ENDPOINT = /^\/v1\/workspaces\/([^/]+)\/mcp(?:\/|$)/;
 const UNCHECKED_ENDPOINT =
   "Nothing was shown: Opengeni couldn't confirm that content may go to the calling workspace. Retry.";
+const UNCHECKED_CALL =
+  "Nothing was run: Opengeni couldn't confirm that content may move between these workspaces. Retry.";
+/** MCP methods that only set up the connection or list what it offers. */
+const HANDSHAKE_METHODS = new Set([
+  "initialize",
+  "ping",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+  "prompts/list",
+]);
 
 /** What an Opengeni MCP endpoint reaches: one workspace, or every workspace of an organization. */
 export type McpEndpointReach = { workspaceId: string } | { accountId: string };
 
-/** Which organization `/v1/mcp` served, noted by its handler once the caller is authorized. */
-const organizationMcpReach = new WeakMap<Request, string>();
-
-export function noteOrganizationMcpReach(request: Request, accountId: string): void {
-  organizationMcpReach.set(request, accountId);
-}
+/** A request naming the Opengeni workspace calling, as the guard and the endpoint see it. */
+type CallingWorkspaceRequest = {
+  calling: WorkspaceContentFlowEnd;
+  /** Anything beyond the handshake, which may carry the caller's content in or change things. */
+  carriesContent: boolean;
+  /** What the endpoint authorized, recorded right after it did. */
+  reached?: McpEndpointReach;
+  exchangeChecked?: boolean;
+};
+const callingWorkspaceRequests = new WeakMap<Request, CallingWorkspaceRequest>();
 
 /**
  * The Opengeni workspace calling, from its signed header: null when the
@@ -155,6 +173,25 @@ export async function callingWorkspaceOf(
   return calling;
 }
 
+/** Whether a JSON-RPC request asks for more than the handshake; unreadable counts as more. */
+async function carriesContent(request: Request): Promise<boolean> {
+  if (request.method !== "POST") return false;
+  let messages: unknown;
+  try {
+    messages = JSON.parse(await (await boundedMcpRequest(request.clone())).text());
+  } catch {
+    return true;
+  }
+  const list = Array.isArray(messages) ? messages : [messages];
+  return list.some((message) => {
+    const method = (message as { method?: unknown } | null)?.method;
+    // A response or notification sent to the server carries no request.
+    if (method === undefined && message !== null && typeof message === "object") return false;
+    if (typeof method !== "string") return true;
+    return !HANDSHAKE_METHODS.has(method) && !method.startsWith("notifications/");
+  });
+}
+
 /** Refuse unless content of what an MCP endpoint reached may go to the calling workspace. */
 export async function assertCallingWorkspaceMayReceive(
   db: Database,
@@ -173,19 +210,64 @@ export async function assertCallingWorkspaceMayReceive(
   await assertWorkspaceContentFlowAllowed(db, { source, target: calling });
 }
 
+/** Refuse unless content may move both ways between what was reached and the calling workspace. */
+export async function assertCallingWorkspaceExchangeAllowed(
+  db: Database,
+  reached: McpEndpointReach,
+  calling: WorkspaceContentFlowEnd,
+): Promise<void> {
+  if ("accountId" in reached) {
+    await assertOrganizationContentExchangeAllowed(db, {
+      accountId: reached.accountId,
+      here: calling,
+    });
+    return;
+  }
+  const there = await workspaceContentFlowEnd(db, reached.workspaceId);
+  if (!there) throw new WorkspaceInferenceResidencyUnknownError();
+  await assertWorkspaceContentExchangeAllowed(db, { here: calling, there });
+}
+
+/**
+ * Every Opengeni MCP endpoint calls this right after it authorized the caller,
+ * with the workspace or organization that authorization reaches, and before
+ * it runs anything. For a request naming the Opengeni workspace calling, a
+ * call beyond the handshake (a tool call, a read) is refused before it runs
+ * unless content may move both ways: it can carry the caller's content in or
+ * change things there, and its answer brings content back. A refusal here
+ * comes after authorization, so it says nothing to anyone who can't already
+ * reach it.
+ */
+export async function requireCallingWorkspaceContentExchange(
+  db: Database,
+  request: Request,
+  reached: McpEndpointReach,
+): Promise<void> {
+  const state = callingWorkspaceRequests.get(request);
+  if (!state) return;
+  state.reached = reached;
+  if (!state.carriesContent) return;
+  try {
+    await assertCallingWorkspaceExchangeAllowed(db, reached, state.calling);
+  } catch (error) {
+    if (error instanceof WorkspaceContentFlowRefusedError) throw error;
+    throw new HTTPException(503, { message: UNCHECKED_CALL, cause: error });
+  }
+  state.exchangeChecked = true;
+}
+
 /**
  * One guard on every Opengeni MCP endpoint (`/v1/mcp` and everything under
- * `/v1/workspaces/:workspaceId/mcp`), so a new endpoint can't miss it. A
- * request naming the Opengeni workspace calling (the runtime adds the header
- * when a workspace agent calls Opengeni itself as a remote MCP server) gets an
- * answer only when content of what it reached may go to that workspace.
+ * `/v1/workspaces/:workspaceId/mcp`), so a new endpoint can't slip past it.
+ * For a request naming the Opengeni workspace calling (the runtime adds the
+ * header when a workspace agent calls Opengeni itself as a remote MCP server):
  *
- * The check runs on the endpoint's answer, after the endpoint authorized the
- * caller, so a refusal says nothing to anyone who can't already reach it.
- * Content only leaves through that answer: whatever the call sent in is
- * content of the calling workspace, which may go anywhere unless that
- * workspace is EU-only, and then the reached one must be too for the answer.
- * A failed check withholds the answer.
+ * - the proof is verified first (403, nothing runs);
+ * - the endpoint refuses a call beyond the handshake before it runs unless
+ *   content may move both ways (`requireCallingWorkspaceContentExchange`);
+ * - the answer is withheld unless content of what was reached may go to the
+ *   calling workspace, and when the endpoint didn't record what it reached or
+ *   didn't check a call that carries content. A failed check withholds it too.
  */
 export function callingWorkspaceContentFlowGuard(deps: {
   db: Database;
@@ -193,23 +275,21 @@ export function callingWorkspaceContentFlowGuard(deps: {
 }): MiddlewareHandler {
   return async (c, next) => {
     const path = c.req.path;
-    const workspaceMatch = WORKSPACE_MCP_ENDPOINT.exec(path);
-    if (!workspaceMatch && !ORGANIZATION_MCP_ENDPOINT.test(path)) return await next();
+    if (!WORKSPACE_MCP_ENDPOINT.test(path) && !ORGANIZATION_MCP_ENDPOINT.test(path))
+      return await next();
     const calling = await callingWorkspaceOf(deps.settings, c.req.raw);
     if (!calling) return await next();
+    const state: CallingWorkspaceRequest = {
+      calling,
+      carriesContent: await carriesContent(c.req.raw),
+    };
+    callingWorkspaceRequests.set(c.req.raw, state);
     await next();
     if (c.res.status >= 400) return;
     try {
-      let reached: McpEndpointReach;
-      if (workspaceMatch) {
-        reached = { workspaceId: decodeURIComponent(workspaceMatch[1]!).toLowerCase() };
-        if (!UUID.test(reached.workspaceId)) throw new WorkspaceInferenceResidencyUnknownError();
-      } else {
-        const accountId = organizationMcpReach.get(c.req.raw);
-        if (!accountId) throw new WorkspaceInferenceResidencyUnknownError();
-        reached = { accountId };
-      }
-      await assertCallingWorkspaceMayReceive(deps.db, reached, calling);
+      if (!state.reached || (state.carriesContent && !state.exchangeChecked))
+        throw new WorkspaceInferenceResidencyUnknownError();
+      await assertCallingWorkspaceMayReceive(deps.db, state.reached, calling);
     } catch (error) {
       // Drop the answer, and its own headers, before the error answers.
       await c.res.body?.cancel().catch(() => undefined);
@@ -271,8 +351,8 @@ export function oauthRequestingWorkspace(
 
 /**
  * At MCP OAuth consent: refuse a grant to Opengeni's own client in a workspace
- * that EU-only content of what the grant reaches may not go to. Outside
- * clients the organization connects stay allowed.
+ * unless content may move both ways between it and what the grant reaches.
+ * Outside clients the organization connects stay allowed.
  */
 export async function assertOAuthConsentContentFlowAllowed(
   deps: { db: Database; settings: Settings },
@@ -284,5 +364,6 @@ export async function assertOAuthConsentContentFlowAllowed(
 ): Promise<void> {
   const requesting = oauthRequestingWorkspace(deps.settings, input.request, input.requestUrl);
   if (!requesting) return;
-  await assertCallingWorkspaceMayReceive(deps.db, input.reached, requesting);
+  // The grant lets that workspace's agent read and change what it reaches.
+  await assertCallingWorkspaceExchangeAllowed(deps.db, input.reached, requesting);
 }

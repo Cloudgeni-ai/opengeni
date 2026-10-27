@@ -6,6 +6,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 
 import {
+  assertOrganizationContentExchangeAllowed,
   assertOrganizationContentFlowAllowed,
   assertWorkspaceContentExchangeAllowed,
   assertWorkspaceContentFlowAllowed,
@@ -211,6 +212,52 @@ test("an organization-wide reach fails closed", async () => {
       assertOrganizationContentFlowAllowed(unreadableDb(), {
         sourceAccountId: eu.shared.accountId,
         target: open.shared,
+      }),
+  ]) {
+    const failed = await refusal(check());
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(WorkspaceContentFlowRefusedError);
+  }
+});
+
+test("an organization-wide exchange: allowed only when content may go each way", async () => {
+  const eu = await organization(true);
+  const euElsewhere = await organization(true);
+  const open = await organization(false);
+  const openElsewhere = await organization(false);
+  const exchange = (
+    organizationOf: { shared: WorkspaceContentFlowEnd },
+    here: WorkspaceContentFlowEnd,
+  ) =>
+    assertOrganizationContentExchangeAllowed(client.db, {
+      accountId: organizationOf.shared.accountId,
+      here,
+    });
+  await exchange(eu, euElsewhere.shared);
+  await exchange(eu, eu.personal);
+  await exchange(open, openElsewhere.shared);
+  await exchange(open, open.personal);
+  // An EU-only workspace would carry its content into a non-EU organization.
+  expect(await refusal(exchange(open, eu.shared))).toMatchObject({
+    code: "region_restricted",
+    sourceWorkspaceId: eu.shared.workspaceId,
+  });
+  // A non-EU workspace would bring EU-only content out.
+  expect(await refusal(exchange(eu, open.shared))).toMatchObject({
+    code: "region_restricted",
+    targetWorkspaceId: open.shared.workspaceId,
+  });
+  // Fails closed: no such organization, or one that can't be read.
+  for (const check of [
+    () =>
+      assertOrganizationContentExchangeAllowed(client.db, {
+        accountId: crypto.randomUUID(),
+        here: eu.shared,
+      }),
+    () =>
+      assertOrganizationContentExchangeAllowed(unreadableDb(), {
+        accountId: open.shared.accountId,
+        here: eu.shared,
       }),
   ]) {
     const failed = await refusal(check());

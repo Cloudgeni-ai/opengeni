@@ -120,4 +120,31 @@ describe("calling-workspace header on remote MCP requests", () => {
     const later = Math.floor(Date.now() / 1000) + 3_600;
     expect(await verifyCallingWorkspaceProof(secret, proof, later)).toBeNull();
   });
+
+  test("the proof is opaque: it names no account or workspace to whoever sees it", async () => {
+    const init = await withCallingWorkspaceProof(
+      settings,
+      caller,
+      "https://opengeni.example/v1/mcp",
+      undefined,
+    );
+    const proof = header(init)!;
+    const decoded = Buffer.from(proof.slice("ogcw_".length), "base64url").toString("latin1");
+    for (const visible of [proof, decoded, decoded.toLowerCase()]) {
+      for (const id of [caller.accountId, caller.workspaceId]) {
+        expect(visible).not.toContain(id);
+        expect(visible).not.toContain(id.replaceAll("-", ""));
+      }
+    }
+    // Each proof is fresh, so two calls can't be linked by their proofs.
+    const again = header(
+      await withCallingWorkspaceProof(
+        settings,
+        caller,
+        "https://opengeni.example/v1/mcp",
+        undefined,
+      ),
+    )!;
+    expect(again).not.toBe(proof);
+  });
 });

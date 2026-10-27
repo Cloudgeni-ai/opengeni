@@ -138,7 +138,7 @@ import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js"
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
 import {
   callingWorkspaceContentFlowGuard,
-  noteOrganizationMcpReach,
+  requireCallingWorkspaceContentExchange,
 } from "./mcp/workspace-content-flow";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -1781,12 +1781,11 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
-    // This reaches every workspace of the organization; the calling-workspace
-    // guard checks the answer against it.
-    noteOrganizationMcpReach(
-      c.req.raw,
-      caller.kind === "person" ? caller.accountId : organizationKeyAccountId!,
-    );
+    // This reaches every workspace of the organization: EU-only content stays
+    // in EU-only workspaces when another Opengeni workspace calls.
+    await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
+      accountId: caller.kind === "person" ? caller.accountId : organizationKeyAccountId!,
+    });
     // Stateless JSON-response transport: there is no server-to-client stream.
     // Answering GET with an empty 200 made clients (Claude) reconnect every
     // second; refuse it after authorization, as the workspace endpoint does.
@@ -1936,6 +1935,11 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     // MCP handshakes (initialize, ping, notifications) read and disclose
     // nothing scoped. A session-bound agent attempt still proves it is the
     // live attempt, but skips the catalog and admin reads

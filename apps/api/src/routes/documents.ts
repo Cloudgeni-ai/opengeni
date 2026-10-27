@@ -55,6 +55,7 @@ import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
+import { requireCallingWorkspaceContentExchange } from "../mcp/workspace-content-flow";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -815,6 +816,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
       const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
       const server = buildDocumentsMcpServer(

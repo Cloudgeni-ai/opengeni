@@ -56,7 +56,10 @@ import {
   requireWorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
-import { assertOAuthConsentContentFlowAllowed } from "./mcp/workspace-content-flow";
+import {
+  assertOAuthConsentContentFlowAllowed,
+  requireCallingWorkspaceContentExchange,
+} from "./mcp/workspace-content-flow";
 
 const CLIENT_PREFIX = "ogmcp_client_";
 const REQUEST_PREFIX = "ogmcp_req_";
@@ -572,6 +575,11 @@ export async function resolveMcpOAuthRouteAccess(
   const allowedToolIdentities = access.toolIdentities.filter((identity) =>
     requestResource.kind === "all" ? true : identity.serverId === requestResource.kind,
   );
+  // Another Opengeni workspace calling: EU-only content stays in EU-only
+  // workspaces, for the workspace the grant really reaches.
+  await requireCallingWorkspaceContentExchange(deps.db, request, {
+    workspaceId: grant.workspaceId,
+  });
   return { grant, allowedToolIdentities };
 }
 

@@ -86,38 +86,72 @@ export async function assertWorkspaceContentExchangeAllowed(
 }
 
 /**
+ * Whether any and whether every workspace of an organization is EU-only, in
+ * one read with the same join `isWorkspaceEuOnly` uses (a per-workspace switch
+ * must change both). An organization whose workspaces can't be read throws.
+ */
+async function organizationEuOnlySummary(
+  db: Database,
+  accountId: string,
+): Promise<{ any: boolean; every: boolean }> {
+  const [row] = await withRlsContext(
+    db,
+    { accountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{
+        scoped_account_id: string | null;
+        workspaces: number;
+        any_eu_only: boolean;
+        every_eu_only: boolean;
+      }>(
+        scopedDb,
+        sql`select nullif(current_setting('opengeni.account_id', true), '') as scoped_account_id,
+            count(workspace.id)::int as workspaces,
+            coalesce(bool_or(residency.eu_only is true), false) as any_eu_only,
+            coalesce(bool_and(residency.eu_only is true), false) as every_eu_only
+          from workspaces workspace
+          left join organization_inference_residency residency
+            on residency.account_id = workspace.account_id
+          where workspace.account_id = ${accountId}::uuid`,
+      ),
+  );
+  if (
+    !row ||
+    row.workspaces < 1 ||
+    row.scoped_account_id?.toLowerCase() !== accountId.toLowerCase()
+  )
+    throw new WorkspaceInferenceResidencyUnknownError();
+  return { any: row.any_eu_only, every: row.every_eu_only };
+}
+
+/**
  * For a step that can bring content from any workspace of an organization to
  * `target` (an organization-wide connection): allowed when `target` is
- * EU-only, or when no workspace of that organization is. One read, with the
- * same join `isWorkspaceEuOnly` uses (a per-workspace switch must change both);
- * an organization whose workspaces can't be read fails closed.
+ * EU-only, or when no workspace of that organization is.
  */
 export async function assertOrganizationContentFlowAllowed(
   db: Database,
   input: { sourceAccountId: string; target: WorkspaceContentFlowEnd },
 ): Promise<void> {
   if (await isWorkspaceEuOnly(db, input.target)) return;
-  const [row] = await withRlsContext(
-    db,
-    { accountId: input.sourceAccountId, workspaceId: null },
-    async (scopedDb) =>
-      await rawRows<{ scoped_account_id: string | null; workspaces: number; eu_only: boolean }>(
-        scopedDb,
-        sql`select nullif(current_setting('opengeni.account_id', true), '') as scoped_account_id,
-            count(workspace.id)::int as workspaces,
-            coalesce(bool_or(residency.eu_only is true), false) as eu_only
-          from workspaces workspace
-          left join organization_inference_residency residency
-            on residency.account_id = workspace.account_id
-          where workspace.account_id = ${input.sourceAccountId}::uuid`,
-      ),
-  );
-  if (
-    !row ||
-    row.workspaces < 1 ||
-    row.scoped_account_id?.toLowerCase() !== input.sourceAccountId.toLowerCase()
-  )
-    throw new WorkspaceInferenceResidencyUnknownError();
-  if (row.eu_only)
+  if ((await organizationEuOnlySummary(db, input.sourceAccountId)).any)
     throw new WorkspaceContentFlowRefusedError(input.sourceAccountId, input.target.workspaceId);
+}
+
+/**
+ * For a step between `here` and any workspace of an organization that carries
+ * content both ways (an organization-wide connection that can change things):
+ * allowed only when content may go each way, so either every workspace of the
+ * organization and `here` are EU-only, or none of them is.
+ */
+export async function assertOrganizationContentExchangeAllowed(
+  db: Database,
+  input: { accountId: string; here: WorkspaceContentFlowEnd },
+): Promise<void> {
+  const here = await isWorkspaceEuOnly(db, input.here);
+  const organization = await organizationEuOnlySummary(db, input.accountId);
+  if (here && !organization.every)
+    throw new WorkspaceContentFlowRefusedError(input.here.workspaceId, input.accountId);
+  if (!here && organization.any)
+    throw new WorkspaceContentFlowRefusedError(input.accountId, input.here.workspaceId);
 }

@@ -401,8 +401,51 @@ describe("EU-only content between workspaces, end to end", () => {
     // Content that isn't EU-only may go to an EU-only workspace.
     expect((await toolsList("/v1/mcp", otherKey, await from(euOrg, home))).status).toBe(200);
 
+    // But an EU-only workspace can't carry its content into a workspace that
+    // isn't: a call beyond the handshake is refused before it runs.
+    const renameOtherChat = async (calling: string | undefined, title: string) =>
+      await app.request("/v1/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${otherKey}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(calling ? { [OPENGENI_CALLING_WORKSPACE_HEADER]: calling } : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "opengeni_action_call",
+            arguments: {
+              id: "updateSession",
+              pathParameters: { workspaceId: otherWorkspace, sessionId: otherChat },
+              body: { title },
+            },
+          },
+        }),
+      });
+    const otherChatTitle = async () =>
+      (
+        await shared.admin<Array<{ title: string | null }>>`
+          select title from sessions where id = ${otherChat}`
+      )[0]?.title ?? null;
+    const titleBefore = await otherChatTitle();
+    const written = await renameOtherChat(await from(euOrg, home), "EU-only customer text");
+    expect(written.status, await written.clone().text()).toBe(422);
+    expect(await written.json()).toMatchObject({ error: { code: "region_restricted" } });
+    expect(await otherChatTitle()).toBe(titleBefore);
+    // The same call from an outside agent the organization connected runs.
+    const outside = await renameOtherChat(undefined, "Renamed from outside");
+    expect(outside.status, await outside.clone().text()).toBe(200);
+    expect(await outside.text()).toContain("Renamed from outside");
+    expect(await otherChatTitle()).toBe("Renamed from outside");
+
     // A workspace that isn't EU-only can't store a key that reads the
-    // EU-only organization; an EU-only one can.
+    // EU-only organization, and an EU-only one can't store a key that would
+    // carry its content into an organization that isn't; EU-only keys stay
+    // usable in EU-only workspaces.
     const sessionWithKey = async (workspaceId: string, key: string) =>
       await app.request(`/v1/workspaces/${workspaceId}/sessions`, {
         method: "POST",
@@ -422,7 +465,10 @@ describe("EU-only content between workspaces, end to end", () => {
     const storedRefused = await sessionWithKey(otherWorkspace, euKey);
     expect(storedRefused.status, await storedRefused.clone().text()).toBe(422);
     expect(await storedRefused.json()).toMatchObject({ error: { code: "region_restricted" } });
-    const storedAllowed = await sessionWithKey(home, otherKey);
+    const storedOutward = await sessionWithKey(home, otherKey);
+    expect(storedOutward.status, await storedOutward.clone().text()).toBe(422);
+    expect(await storedOutward.json()).toMatchObject({ error: { code: "region_restricted" } });
+    const storedAllowed = await sessionWithKey(home, euKey);
     expect(storedAllowed.status, await storedAllowed.clone().text()).toBe(202);
 
     // MCP OAuth consent: Opengeni's own client in a workspace that isn't

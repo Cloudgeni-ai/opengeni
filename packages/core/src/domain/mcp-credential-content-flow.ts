@@ -1,5 +1,5 @@
 import {
-  assertOrganizationContentFlowAllowed,
+  assertOrganizationContentExchangeAllowed,
   findActiveApiKeyByHash,
   type Database,
   type WorkspaceContentFlowEnd,
@@ -8,9 +8,10 @@ import {
 /**
  * EU-only content stays in EU-only workspaces (docs/organization-tenancy.md).
  * An MCP server a workspace stores with an Opengeni organization (`ogk_`) or
- * personal (`ogp_`) API key reads that organization's workspaces. Saving one
- * in `target` is refused unless every workspace that key's organization has
- * may send content there. The endpoint checks every call again.
+ * personal (`ogp_`) API key reads and changes that organization's
+ * workspaces. Saving one in `target` is refused unless content may move both
+ * ways between `target` and every workspace of that key's organization. The
+ * endpoint checks every call again.
  */
 const OPENGENI_KEY = /\bog[kp]_[A-Za-z0-9_-]{8,}/g;
 
@@ -21,7 +22,7 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
-/** Throws when a stored Opengeni key would bring EU-only content into `target`. */
+/** Throws when a stored Opengeni key would move EU-only content into or out of `target`. */
 export async function assertMcpCredentialContentFlowAllowed(
   db: Database,
   input: {
@@ -38,9 +39,9 @@ export async function assertMcpCredentialContentFlowAllowed(
     const apiKey = await findActiveApiKeyByHash(db, await sha256Hex(key));
     // Not a live key: it reaches nothing.
     if (!apiKey) continue;
-    await assertOrganizationContentFlowAllowed(db, {
-      sourceAccountId: apiKey.accountId,
-      target: input.target,
+    await assertOrganizationContentExchangeAllowed(db, {
+      accountId: apiKey.accountId,
+      here: input.target,
     });
   }
 }
