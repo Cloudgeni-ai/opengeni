@@ -411,7 +411,7 @@ export function makeActiveBackendResolver(
         runAsSupported: connection.runAsSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
-        // snapshot only when a new exec/Git is admitted.
+        // snapshot only when a new exec is admitted.
         resolveOperationAdmission: async () => {
           const current = await deps.resolveSelfhostedConnection(sandbox);
           if (!current) return null;

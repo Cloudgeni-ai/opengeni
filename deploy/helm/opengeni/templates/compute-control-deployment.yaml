@@ -173,8 +173,8 @@ spec:
             - --e2b-tls-key=/etc/compute/api-tls/tls.key
             {{- end }}
             {{- range $id, $template := $cc.e2b.templates }}
-            {{- if not (regexMatch "^[^:]+:[0-9]+x[0-9]+(x[0-9]+)?$" (toString $template)) }}
-            {{- fail (printf "computeControl.e2b.templates.%s must be image:VCPUSxMEMORY_MIB or image:VCPUSxMEMORY_MIBxDISK_MIB" $id) }}
+            {{- if not (regexMatch "^[^:,]+:[0-9]+x[0-9]+(x[0-9]+)?(,(memory|cpu)-request=[0-9]+)*$" (toString $template)) }}
+            {{- fail (printf "computeControl.e2b.templates.%s must be image:VCPUSxMEMORY_MIB or image:VCPUSxMEMORY_MIBxDISK_MIB, then optionally ,memory-request=MIB and ,cpu-request=MILLIS" $id) }}
             {{- end }}
             - --e2b-template={{ $id }}={{ $template }}
             {{- end }}

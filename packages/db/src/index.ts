@@ -942,6 +942,9 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_APP_ACTION_CALL_LEAF,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
   SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
@@ -1439,8 +1442,14 @@ export {
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export {
   DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
+  DATABASE_CREDENTIAL_METRICS,
   DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  DATABASE_LOGIN_ATTEMPT,
+  databaseCredentialEventAttributes,
   databaseCredentialEventMessage,
+  databaseLoginAttemptOf,
   databasePasswordFileOptions,
   databasePasswordFileOptionsFromEnvironment,
   rotatingDatabasePasswordFor,
@@ -1448,10 +1457,15 @@ export {
   databaseUrlUser,
   isDatabaseAuthenticationFailure,
   logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   RotatingDatabasePassword,
+  tagDatabaseLoginAttempt,
   withDatabaseAuthenticationRetry,
+  type DatabaseAuthenticationRefusal,
   type DatabaseCredentialEvent,
   type DatabaseCredentialEventListener,
+  type DatabaseCredentialExhaustion,
+  type DatabaseCredentialObserver,
   type DatabaseCredentialPosition,
   type DatabasePasswordFiles,
   type RotatingDatabasePasswordOptions,
@@ -38044,10 +38058,10 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
-   * Keep `agent.toolCall.created` rows of presented tools (see
-   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
-   * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY and
+   * Keep `agent.toolCall.created` rows of presented calls (see
+   * isPresentedSessionToolCall) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files, Skill
+   * changes and payment pages without loading every step. Excluded rows without a turn (PTY and
    * background command output) stay excluded: the sandbox dock reads them
    * itself. No effect unless `agent.toolCall.created` is excluded.
    */
@@ -38081,6 +38095,12 @@ const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap
   return [literal, `%\\_\\_${literal}`];
 });
 
+/** The same LIKE patterns for the app action call tool. */
+const APP_ACTION_CALL_NAME_PATTERNS = [SESSION_EVENT_APP_ACTION_CALL_LEAF].flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -38097,11 +38117,40 @@ function sessionEventExcludeTypesFilter(
     PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
     sql`, `,
   );
+  const appActionPatterns = sql.join(
+    APP_ACTION_CALL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
+  const toolName = sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name')`;
+  // An app action call's arguments are an object or its JSON text; only their
+  // top-level "id" counts, trimmed and matched exactly as presentedAppActionId does.
+  // Text is read as json (not jsonb) and skipped if it escapes a NUL, which
+  // Postgres can't turn into text: no stored call can make this query fail.
+  const payload = schema.sessionEvents.payload;
+  const actionId = sql`btrim(case jsonb_typeof(${payload} -> 'arguments')
+    when 'object' then ${payload} -> 'arguments' ->> 'id'
+    when 'string' then case
+      when (${payload} ->> 'arguments') is json object
+        and strpos(${payload} ->> 'arguments', ${"\\u0000"}::text) = 0
+      then (${payload} ->> 'arguments')::json ->> 'id' end
+  end, ${SESSION_EVENT_APP_ACTION_ID_SPACE}::text)`;
+  const presentedActions = sql.join(
+    SESSION_EVENT_PRESENTED_APP_ACTION_NAMES.map((name) => sql`${name}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
+      or(
+        sql`${toolName} like any (array[${patterns}])`,
+        // Payment pages: only app action calls (whose payload is their short
+        // arguments) are read past the name, for the action id.
+        and(
+          sql`${toolName} like any (array[${appActionPatterns}])`,
+          sql`${actionId} = any (array[${presentedActions}])`,
+        ),
+      ),
     ),
   )!;
 }

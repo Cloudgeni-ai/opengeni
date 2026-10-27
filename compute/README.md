@@ -24,6 +24,7 @@ clients.
 | --- | --- |
 | Host agent | jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite |
 | Templates and a ready pool | new sandboxes from a template, or at once from a ready pool |
+| Templates saved from sandboxes | a prepared sandbox's disk captured as an image new sandboxes start from |
 | Admission | requests and limits, memory guarantees for running VMs |
 | Fleet decisions | placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol |
 | A host in a fleet | registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out |
@@ -339,6 +340,15 @@ otherwise write a sixty-fourth of the space added. Only images whose init
 is from a release that grows its disk do so; an older one runs with its
 image's file system on the longer disk.
 
+A team may also save a sandbox as a template
+([ADR 22](docs/adr/0022-templates-saved-from-sandboxes.md)):
+`POST /v1/sandboxes/{id}/templates` saves the sandbox, has its host copy
+the disk (sharing its blocks, so in milliseconds) and store the copy as an
+image in the background, and records a template naming it; a create names
+it with `template`, by id or name, and boots afresh on that disk. Only the
+filesystem is kept. Images no template, sandbox or built image has used
+for an hour are forgotten.
+
 ## The fleet
 
 `compute-control` is the control service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
@@ -387,7 +397,12 @@ connect, pause, kill, set the timeout, list templates) and traffic to
 `E2b-Sandbox-Port` headers. Templates name an image and a shape
 (`--e2b-template base=<image>:2x1024`), and may name the disk their
 sandboxes get (`--e2b-template ci=<image>:4x8192x65536`, in MiB, as a
-create's `disk_mib`). With `--e2b-tls-cert` and
+create's `disk_mib`) and guarantee them less than their shape
+(`,memory-request=MIB` and `,cpu-request=MILLIS`, as a create's
+`memory_request_mib` and `cpu_request_millis`), so a host runs more of
+them at once and each uses more when the host has it free. A snapshot
+guarantees the sandboxes started from it what its source was guaranteed.
+With `--e2b-tls-cert` and
 `--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
 name and `*.<domain>`; without them it speaks plain HTTP behind a load
 balancer that terminates TLS.
@@ -401,9 +416,11 @@ create with environment, metadata, timeout, internet access, public
 traffic and pause-or-kill at the timeout with auto-resume; connect;
 commands in the foreground and background; PTYs with input and kill;
 files read, write, make directory and remove; `getHost`; pause; kill.
-Left out: snapshots (the backend's optional native snapshot persistence),
-volumes, MCP, IAM, egress rules, sandboxes without internet access,
-template builds, metrics and logs. A create asking for those is refused.
+Filesystem snapshots (`memory: false`) are templates saved from sandboxes
+(ADR 22): create, list and delete them, and create from one by id or
+name. Left out: snapshots with memory, volumes, MCP, IAM, egress rules,
+sandboxes without internet access, template builds, metrics and logs. A
+request asking for those is refused.
 
 ## GitHub Actions runner pools
 
