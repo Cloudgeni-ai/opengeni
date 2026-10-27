@@ -10,7 +10,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-// Migration 0997: credential profiles (names and secret references, never
+// Migration 1003: credential profiles (names and secret references, never
 // values). Foreign keys to workspaces and sessions live in the migration.
 
 export type CredentialProfileEntryRow = { name: string; reference: string };

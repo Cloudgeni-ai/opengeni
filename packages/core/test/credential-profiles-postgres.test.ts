@@ -1,4 +1,4 @@
-// Credential profiles (0997) against real PostgreSQL as the application role:
+// Credential profiles (1003) against real PostgreSQL as the application role:
 // the workspace profile plus session additions that child sessions inherit,
 // validation, clearing, audit with names only, and the per-command
 // environment a child session's commands receive. Every value is fake.
