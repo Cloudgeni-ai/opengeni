@@ -70,6 +70,7 @@
     "@opengeni/vaults-onepassword": "workspace:*",
     "@opengeni/vaults-protonpass": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
+    "@simplewebauthn/server": "14.0.3",
     "@temporalio/client": "^1.17.0",
     "ajv": "^8.20.0",
     "better-auth": "^1.6.14",

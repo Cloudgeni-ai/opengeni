@@ -6,7 +6,7 @@
 use cidre::core_audio::aggregate_device_keys as agg_keys;
 use cidre::{arc, cat, cf, core_audio as ca, ns, os};
 
-use crate::output::Sink;
+use crate::output::{self, Event, Sink};
 use crate::{Capture, CaptureError, Options};
 
 struct Context {
@@ -78,6 +78,13 @@ fn failed(step: &str, status: os::Error) -> CaptureError {
     )
 }
 
+fn permission_denied() -> CaptureError {
+    CaptureError::new(
+        "permission_denied",
+        "System Audio Recording is turned off for this app.",
+    )
+}
+
 /// Whether the app may record system audio, from TCC's preflight: 0 allowed,
 /// 1 turned off, 2 not asked yet. There is no public API for this permission,
 /// and a tap the person turned off records silence instead of failing, so
@@ -104,11 +111,12 @@ fn audio_capture_permission() -> Option<isize> {
 }
 
 pub fn start(options: &Options, sink: Sink) -> Result<Capture, CaptureError> {
-    if audio_capture_permission() == Some(1) {
-        return Err(CaptureError::new(
-            "permission_denied",
-            "System Audio Recording is turned off for this app.",
-        ));
+    match audio_capture_permission() {
+        Some(1) => return Err(permission_denied()),
+        // Not asked yet: macOS asks now, and starting the device below waits
+        // for the person's answer. Say so, so the app doesn't give up meanwhile.
+        Some(2) => output::event(&Event::AwaitingPermission),
+        _ => {}
     }
     let excluded = excluded_processes(options);
     let excluded = ns::Array::from_slice_retained(&excluded);
@@ -160,6 +168,10 @@ pub fn start(options: &Options, sink: Sink) -> Result<Capture, CaptureError> {
         .map_err(|status| failed("listen to the device", status))?;
     let started = ca::device_start(device, Some(proc_id))
         .map_err(|status| failed("start the device", status))?;
+    // Turned off in the prompt just now: the tap would record only silence.
+    if audio_capture_permission() == Some(1) {
+        return Err(permission_denied());
+    }
     Ok(Capture {
         sample_rate: format.sample_rate.round() as u32,
         backend: "core-audio-tap",

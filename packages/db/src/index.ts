@@ -243,6 +243,7 @@ export {
   type SubscriptionCoreCodexRefreshResult,
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -2710,7 +2711,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
-  const subjectLabel = input.email || input.name;
+  const subjectLabel = accountContactEmail(input.email) || input.name;
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
@@ -31474,6 +31475,27 @@ export async function getSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
+export async function getSessionModelGate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "model" | "codexCompactionMode"> | null> {
+  const session = await readSession(db, workspaceId, sessionId, "model_gate");
+  return session
+    ? { model: session.model, codexCompactionMode: session.codexCompactionMode }
+    : null;
+}
+
+async function readSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  presentation: "full" | "model_gate",
+): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -31490,8 +31512,21 @@ export async function getSession(
       false,
     );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
-    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
+    const grouped =
+      presentation === "full"
+        ? await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id])
+        : null;
+    return await mapSessionWithControl(
+      scopedDb,
+      session,
+      grouped?.get(row.id) ?? [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      presentation,
+    );
   });
 }
 
@@ -33807,7 +33842,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{
     needsYouCount: number;
     groups: SessionListTotals["groups"];
-    sites: SiteConversationGroup[] | null;
+    sites: Array<SiteConversationGroup & { rankAt?: string | null }> | null;
   }>(
     db,
     sql`
@@ -33980,9 +34015,10 @@ async function sessionListTotalsInScope(
       }
     ), site_conv_totals as (
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
-        max(updated_at) as updated_at, max(created_at) as created_at,
+        min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
-          filter (where origin_title is not null))[1] as origin_title
+          filter (where origin_title is not null))[1] as origin_title,
+        max(updated_at) as activity_at
       from site_conv group by site_id, row_channel_id
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
@@ -34030,38 +34066,37 @@ async function sessionListTotalsInScope(
     ), site_keys as (
       select * from site_conv_totals
       union all
-      select site_id, channel_id, 0, null, null, null from site_home
+      select site_id, channel_id, 0, null, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
-      -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its newest published version (creation
-      -- is version 1) and the chats that published its versions (the chat
-      -- that created it and any used to edit it), as far as this viewer can
-      -- see them. Opening a Site is not activity, as opening a chat is not;
-      -- an open only lists it. Archive, restore, rollback and other updates
-      -- to the Site's record are not activity either, so they never lift a
-      -- Site for everyone. One extra row reports truncation.
+      -- conversations needs a live Site the viewer can see. A row's time is
+      -- the Site's newest published version (creation is version 1) and
+      -- nothing else: messages and turns in its conversations, or in the chat
+      -- that created or published it, never move it, nor does opening it (an
+      -- open only lists it). Archive, restore, rollback (Undo) and other
+      -- updates to the Site's record add no version, so they never lift it
+      -- either. A viewer who cannot read the Site sees no publishes, so its
+      -- row keeps the time its first conversation here started, which
+      -- messages do not change. Which rows the bound keeps is a separate
+      -- question: pinned rows first, then the later of the newest publish and
+      -- conversation activity, so a Site whose conversation runs or needs this
+      -- person is never cut for an old publish. One extra row reports
+      -- truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
-        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt",
+        greatest(site.published_at, key.activity_at, key.first_created_at) as "rankAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at,
-          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
-            join ${schema.sessions} source
-              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-            join ${schema.sessions} editor
-              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
-            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
-            as edited_at
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
@@ -34075,7 +34110,7 @@ async function sessionListTotalsInScope(
       -- This person's archived Sites leave their sidebar; pinned ones lead.
       where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 7 desc, 5 desc, 1, 2
+      order by 7 desc, 9 desc nulls last, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -34105,7 +34140,8 @@ async function sessionListTotalsInScope(
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
       coalesce((select jsonb_agg(to_jsonb(site_grouped)
-        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        order by site_grouped.pinned desc, site_grouped."rankAt" desc nulls last,
+          site_grouped."siteId", site_grouped."channelId")
         from site_grouped), '[]'::jsonb) as sites
   `,
   );
@@ -34118,21 +34154,37 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
-      ...site,
-      updatedAt: iso(site.updatedAt)!,
-      createdAt: iso(site.createdAt)!,
-      attentionSince: iso(site.attentionSince),
-      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
-      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
-    })),
+    // The bound keeps rows in rank order; the kept rows then sort by their
+    // time, the newest publish.
+    sites: sites
+      .slice(0, SITE_CONVERSATION_GROUP_LIMIT)
+      .map(({ pinned, pinnedAt, rankAt: _rankAt, ...site }) => ({
+        ...site,
+        updatedAt: iso(site.updatedAt)!,
+        createdAt: iso(site.createdAt)!,
+        attentionSince: iso(site.attentionSince),
+        // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+        ...(pinned ? { pinned: true as const, pinnedAt: iso(pinnedAt ?? null) } : {}),
+      }))
+      .sort(
+        (a, b) =>
+          compareCodePoints(b.updatedAt, a.updatedAt) ||
+          compareCodePoints(a.siteId, b.siteId) ||
+          // As SQL orders it: a Site's Default row (no project) last.
+          compareCodePoints(a.channelId ?? "\uffff", b.channelId ?? "\uffff"),
+      ),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
- * for a long time fall past it; the Artifacts page lists every Site.
+ * Bound on Site rows per read. Pinned rows are kept first, then by the later of
+ * the newest publish and conversation activity, so Sites nobody touched for a
+ * long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
@@ -42763,12 +42815,29 @@ export type ApplyContextCompactionResult =
     }
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
+const RETAINED_ROW_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function retainedRowTurnId(
+  turnId: string | null | undefined,
+  sessionTurnIds: ReadonlySet<string>,
+): string | null {
+  return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
  * existing row. A paused, replaced, recovered, or terminal attempt cannot
  * mutate conversation truth.
+ *
+ * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
+ * retained message came from, so a later compaction can still pair a request
+ * with its own turn's answer. (Retained reply copies are passed as null and
+ * record their turn in the item, so turn-keyed readers such as message forks
+ * never see two rows of one reply.) An id that is not a turn of
+ * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(
   db: Database,
@@ -42780,12 +42849,19 @@ export async function applyContextCompaction(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
+    replacementTurnIds?: ReadonlyArray<string | null | undefined>;
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
+  if (
+    input.replacementTurnIds !== undefined &&
+    input.replacementTurnIds.length !== input.replacementItems.length
+  ) {
+    throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -42839,6 +42915,30 @@ export async function applyContextCompaction(
               eq(schema.sessionHistoryItems.active, true),
             ),
           );
+        const requestedTurnIds = [
+          ...new Set(
+            (input.replacementTurnIds ?? []).filter(
+              (turnId): turnId is string =>
+                typeof turnId === "string" && RETAINED_ROW_TURN_ID_PATTERN.test(turnId),
+            ),
+          ),
+        ];
+        const sessionTurnIds = new Set(
+          requestedTurnIds.length === 0
+            ? []
+            : (
+                await tx
+                  .select({ id: schema.sessionTurns.id })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                      eq(schema.sessionTurns.sessionId, input.sessionId),
+                      inArray(schema.sessionTurns.id, requestedTurnIds),
+                    ),
+                  )
+              ).map((row) => row.id),
+        );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
             withLosslessContentWriteVersion(
@@ -42846,7 +42946,7 @@ export async function applyContextCompaction(
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: null,
+                turnId: retainedRowTurnId(input.replacementTurnIds?.[index], sessionTurnIds),
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
                 active: true,
@@ -54878,7 +54978,7 @@ export async function listAgentHeldBrowserSessions(
  * waiting (an armed input wait) keeps it, page state and all, but never
  * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
  * browser's own controller keeps it by the same rule;
- * `list_idle_interaction_leases` (migration 0997) skips such boxes.
+ * `list_idle_interaction_leases` (migration 0999) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
@@ -55575,6 +55675,74 @@ export async function summarizeSessionRecoveryBacklog(
       count: Number(row.count),
       scheduled: Number(row.scheduled),
       oldestOverdueSeconds: Number(row.oldest_overdue_seconds),
+    };
+  }
+  return summary;
+}
+
+/** What currently holds a durable queued turn, from its session's own state. */
+export const QUEUED_TURN_HOLDS = [
+  "ready",
+  "behind_active_turn",
+  "paused",
+  "failed",
+  "requires_action",
+  "waiting_capacity",
+  "cancelled",
+] as const;
+
+export type QueuedTurnHold = (typeof QUEUED_TURN_HOLDS)[number];
+
+export type QueuedTurnHoldSummary = {
+  count: number;
+  /** Age of the oldest queued turn in this class; 0 when the class is empty. */
+  oldestAgeSeconds: number;
+};
+
+const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
+
+/**
+ * Content-free cross-workspace classification of every `status = 'queued'`
+ * turn by what holds it (migration 0988). The classes sum to
+ * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
+ * the rest wait for a running turn, Resume, a new message, or a person.
+ *
+ * 0988 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this returns null. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function summarizeQueuedTurnsByHold(
+  db: Database,
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return null;
+  const summary = Object.fromEntries(
+    QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
+  ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const rows = await rawRows<{
+    hold: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select hold, count, oldest_age_seconds
+      from opengeni_private.summarize_queued_turns_by_hold()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.hold in summary)) continue;
+    summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
     };
   }
   return summary;
@@ -90515,6 +90683,7 @@ async function mapSessionWithControl(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
+  presentation: "full" | "model_gate" = "full",
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -90535,6 +90704,7 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
     // Temporal acknowledgement proves that a worker has admitted a turn.

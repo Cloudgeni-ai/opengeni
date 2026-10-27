@@ -16702,7 +16702,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: primitives.string,
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: primitives.nonnegativeInteger,
-    /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
+    /** When the Site last got a new published version (creation is the first); for a viewer who cannot read the Site, when its first conversation here started. Its conversations, the chats that made it and opening it never move it. */
     updatedAt: primitives.dateTime,
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: primitives.dateTime,
@@ -20862,6 +20862,10 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
       signupChallengeSiteKey: z.string().optional(),
+      // Sign in with a passkey, and add passkeys to an account in Security.
+      passkeySignIn: primitives.boolean.default(false),
+      // Create an account with only a passkey: no email address or password.
+      passkeySignUp: primitives.boolean.default(false),
     }),
   ]),
 );

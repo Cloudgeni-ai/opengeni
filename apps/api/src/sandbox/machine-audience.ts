@@ -67,7 +67,7 @@ export function machineAudienceRequestFor(
     if (!workspaceAdmin) {
       throw new ApiHttpError(403, {
         code: "forbidden",
-        message: "missing permission: workspace:admin",
+        message: "Only workspace admins can share a machine with the whole workspace.",
         retryable: false,
       });
     }
@@ -77,7 +77,7 @@ export function machineAudienceRequestFor(
   if (ownerSubjectId !== caller.subjectId && !workspaceAdmin) {
     throw new ApiHttpError(403, {
       code: "forbidden",
-      message: "missing permission: workspace:admin",
+      message: "Only workspace admins can make a machine Only me for someone else.",
       retryable: false,
     });
   }

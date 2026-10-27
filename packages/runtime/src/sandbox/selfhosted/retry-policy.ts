@@ -63,6 +63,12 @@ export const SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES = SELFHOSTED_EXEC_DRAINING_M
 /** A read-only op that timed out is retried at most once (see the at-least-once
  *  note above — even a read gets a single re-issue, not an unbounded loop). */
 export const SELFHOSTED_TIMEOUT_MAX_RETRIES = 1;
+/** The agent's `failure_code` when it refuses a call's delivery token as expired
+ *  or unknown. Its usual cause is an agent process that started after Opengeni
+ *  fetched the token, so it never issued it; the transport has then already
+ *  dropped its other prefetched tokens. Whether an earlier delivery ran is
+ *  unknown, so only a read-only op is re-issued, once, with a fresh token. */
+export const SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE = "control_delivery_expired";
 /** A fault the transport synthesized PRE-SEND (no connection / no responder) — the
  *  op provably never reached the machine, so it is safe to re-issue for ANY op kind.
  *  Short bounded budget (≈3.5s summed): enough to ride out a NATS reconnect blip
@@ -109,6 +115,8 @@ export function selfhostedRetryBackoffMs(attempt: number, jitter: number): numbe
  *    → retry at most `SELFHOSTED_TIMEOUT_MAX_RETRIES`, and ONLY for a read-only
  *    idempotent-safe op (`SELFHOSTED_IDEMPOTENT_READONLY_OPS`). A timed-out
  *    MUTATION is never retried here — it may already have run (at-least-once).
+ *  - a refused delivery token (`SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE`, an
+ *    unknown outcome) → the same single re-issue, ONLY for a read-only op.
  *  - Everything else → no retry at this layer:
  *      · FENCED is retried by the routing proxy against a RE-RESOLVED backend
  *        (retrying here under the same stale epoch would just re-fence);
@@ -175,10 +183,13 @@ export function decideSelfhostedRetry(input: {
     return { action: "retry", delayMs: selfhostedRetryBackoffMs(drainingRetries, jitter) };
   }
 
-  if (error.reason === "agent_reconnecting") {
+  if (
+    error.reason === "agent_reconnecting" ||
+    error.detail.failure_code === SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE
+  ) {
     if (!SELFHOSTED_IDEMPOTENT_READONLY_OPS.has(opKind)) {
-      // A timed-out mutation may already have executed on the machine — never
-      // re-issue it (at-least-once). Surface the reconnecting error instead.
+      // A timed-out or refused mutation may already have executed on the
+      // machine — never re-issue it (at-least-once). Surface the error instead.
       return { action: "fail" };
     }
     if (timeoutRetries >= SELFHOSTED_TIMEOUT_MAX_RETRIES) {

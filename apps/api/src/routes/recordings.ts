@@ -27,7 +27,6 @@ import {
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
 import {
-  DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
   RecordingTranscriptionError,
@@ -392,15 +391,21 @@ export function registerRecordingRoutes(
     providerId?: string | undefined;
     model?: string | undefined;
   }) {
-    const providerId = requested.providerId ?? DEFAULT_RECORDING_LIVE_TRANSCRIPTION.providerId;
+    const fallback = deployment.liveDefault;
+    const providerId = requested.providerId ?? fallback?.providerId;
     const model =
       requested.model ??
       (requested.providerId
-        ? registry.get(providerId)?.models.find((spec) => spec.capabilities.live)?.model
-        : DEFAULT_RECORDING_LIVE_TRANSCRIPTION.model);
-    // A pinned deployment sends audio only to its one provider.
+        ? registry.get(requested.providerId)?.models.find((spec) => spec.capabilities.live)?.model
+        : fallback?.model);
+    // A pinned deployment sends audio only to its one provider, or to the
+    // live model its operator named.
+    const allowed =
+      !deployment.pinned ||
+      deployment.pinned.providerId === providerId ||
+      (fallback !== null && fallback.providerId === providerId && fallback.model === model);
     const found =
-      model && (!deployment.pinned || deployment.pinned.providerId === providerId)
+      providerId && model && allowed
         ? findRecordingTranscriptionModel(registry, providerId, model, "live")
         : null;
     if (!found) {
@@ -408,7 +413,7 @@ export function registerRecordingRoutes(
         code: "validation_failed",
         message: "This live transcription model is not offered here.",
         retryable: false,
-        details: { code: "unknown_model", providerId, model: model ?? null },
+        details: { code: "unknown_model", providerId: providerId ?? null, model: model ?? null },
       });
     }
     return found;
@@ -971,8 +976,15 @@ export function registerRecordingRoutes(
       resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
       { accountId: actor.accountId, workspaceId: actor.workspaceId, subjectId: actor.subjectId },
     );
-    const offered = deployment.pinned
-      ? [registry.get(deployment.pinned.providerId)!]
+    const pinned = deployment.pinned;
+    const liveDefault = deployment.liveDefault;
+    const offered = pinned
+      ? [
+          registry.get(pinned.providerId)!,
+          ...(liveDefault && liveDefault.providerId !== pinned.providerId
+            ? [registry.get(liveDefault.providerId)!]
+            : []),
+        ]
       : [...registry.values()];
     const availability = new Map(
       await Promise.all(
@@ -990,21 +1002,42 @@ export function registerRecordingRoutes(
       ),
     );
     // The models a meeting can use: each places every word in time, or the
-    // deployment does it for them.
+    // deployment does it for them. Live models stream the live transcript;
+    // a pinned deployment offers its own provider's and the one its operator
+    // named, as the live session route does.
     const models: RecordingTranscriptionModel[] = offered.flatMap((provider) =>
-      provider.models
-        .filter((spec) => !deployment.pinned || spec.model === deployment.pinned.model)
-        .filter((spec) => speechToTextServesMeetings(deployment, spec))
-        .map((spec) => ({
-          providerId: provider.id,
-          providerName: provider.name,
-          model: spec.model,
-          name: spec.name,
-          available: availability.get(provider.id) ?? false,
-          funding: provider.funding,
-          capabilities: spec.capabilities,
-          usdPerHour: spec.usdPerHour,
-        })),
+      provider.models.flatMap((spec) => {
+        const meeting =
+          spec.capabilities.batch &&
+          (!pinned || (provider.id === pinned.providerId && spec.model === pinned.model)) &&
+          speechToTextServesMeetings(deployment, spec);
+        const live =
+          spec.capabilities.live &&
+          (!pinned ||
+            provider.id === pinned.providerId ||
+            (liveDefault?.providerId === provider.id && liveDefault.model === spec.model));
+        if (!meeting && !live) return [];
+        return [
+          {
+            providerId: provider.id,
+            providerName: provider.name,
+            model: spec.model,
+            name: spec.name,
+            available: availability.get(provider.id) ?? false,
+            funding: provider.funding,
+            capabilities: { ...spec.capabilities, batch: meeting, live },
+            // A price only where this workspace pays it: its own key, or credits
+            // charged for a deployment's model. Otherwise the hour costs it nothing.
+            usdPerHour:
+              provider.funding === "workspace_key" ||
+              (provider.funding === "deployment" &&
+                voiceInputCreditBillingActive(deps.settings) &&
+                spec.creditPricing)
+                ? spec.usdPerHour
+                : null,
+          },
+        ];
+      }),
     );
     const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
     const preferred = voiceInput?.preferredProvider
@@ -1042,10 +1075,10 @@ export function registerRecordingRoutes(
     const { provider, spec } = liveModelChoice(body);
     await admitRecordingUsage(actor);
     const resolved = await deployment.credentials(provider.id, actor);
-    const credentials = resolved === "missing" ? null : resolved.credentials;
     const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };
     const liveHelp = "Live transcript sessions asked for, by outcome.";
-    if (!credentials) {
+    // Deployment accounts hold their own credential; only a key provider needs the workspace's.
+    if (resolved === "missing") {
       count("opengeni_recording_live_sessions_total", liveHelp, {
         ...liveLabels,
         outcome: "no_credentials",
@@ -1070,7 +1103,7 @@ export function registerRecordingRoutes(
     try {
       grant = await provider.createLiveSession!(
         { model: spec.model, language: language ?? undefined },
-        credentials,
+        resolved.credentials,
       );
     } catch (error) {
       count("opengeni_recording_live_sessions_total", liveHelp, {
@@ -1099,6 +1132,8 @@ export function registerRecordingRoutes(
       model: spec.model,
       protocol: grant.protocol,
       url: grant.url,
+      ...(grant.token ? { token: grant.token } : {}),
+      ...(grant.webrtcUrl ? { webrtcUrl: grant.webrtcUrl } : {}),
       audio: grant.audio,
       expiresAt: grant.expiresAt.toISOString(),
     };

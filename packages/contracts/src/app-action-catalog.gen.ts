@@ -290,6 +290,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DeviceEnrollmentApproveResponse"
     ],
+    "permission": "enrollments:read",
     "secretFields": [
       "request.userCode"
     ]
@@ -1951,7 +1952,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DeviceEnrollmentDenyResponse"
     ],
-    "permission": "enrollments:manage",
+    "permission": "enrollments:read",
     "secretFields": [
       "request.userCode"
     ]
@@ -2178,7 +2179,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "EnableMachineScreenControlResponse"
     ],
-    "permission": "enrollments:manage"
+    "permission": "enrollments:read"
   },
   {
     "id": "endBrowserSession",
@@ -6200,7 +6201,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "MintEnrollTokenResponse"
     ],
-    "permission": "enrollments:manage",
+    "permission": "enrollments:read",
     "secretFields": [
       "response.token"
     ]
@@ -6367,7 +6368,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OpenMachinePrivacySettingsResponse"
     ],
-    "permission": "enrollments:manage"
+    "permission": "enrollments:read"
   },
   {
     "id": "openWorkspaceControlEventStream",
@@ -7863,7 +7864,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "RemoveEnrollmentRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "enrollments:read"
   },
   {
     "id": "removeIntegrationFacet",
@@ -9382,7 +9384,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UpdateMachineAgentResponse"
     ],
-    "permission": "enrollments:manage"
+    "permission": "enrollments:read"
   },
   {
     "id": "updateMachineOperationPolicy",
@@ -9394,7 +9396,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "MachineOperationPolicy"
     ],
-    "permission": "enrollments:manage"
+    "permission": "enrollments:read"
   },
   {
     "id": "updateMemberNotifications",

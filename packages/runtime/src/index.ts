@@ -826,6 +826,7 @@ export {
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
+  RETAINED_REPLY_TURN_FIELD,
   hasOpaqueProviderArtifact,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -876,7 +877,10 @@ export {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   buildCompactionPromptInput,
+  buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  type CompactionReplacement,
+  type CompactionTurnContext,
   compactionAttachmentFileIds,
   type AttachmentUploadTimes,
   compactionReplacementFingerprint,
@@ -885,6 +889,7 @@ export {
   decideCompaction,
   buildSummaryItem,
   buildRemoteCompactionV2PromptInput,
+  buildRemoteV2Replacement,
   buildRemoteV2ReplacementHistory,
   extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
@@ -913,6 +918,7 @@ export {
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  RETAINED_REPLY_MAX_TOKENS,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
@@ -5108,12 +5114,14 @@ export type PrepareToolsOptions = {
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
     resolveApproval?: ToolGatewayApprovalResolver;
+    /** Applied to every definition before `filterDefinition`. */
     mapDefinition?: (definition: ToolGatewayDefinition) => ToolGatewayDefinition;
     requireApproval?: (
       entry: ToolGatewayCatalogEntry,
       caller: ToolGatewayCaller,
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
+    /** Receives the `mapDefinition` result, so it sees the effective approval. */
     filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
     /** Viewer-authority secret resolution for Site and workspace HTTP calls. */
     resolveArguments?: ToolGatewayArgumentResolver;
@@ -6644,12 +6652,14 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const admittedDefinitions = options.workspaceToolGateway.filterDefinition
-    ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
+  // Map before filtering: the filter must see each tool's effective approval
+  // (a saved Allow over a recommended Ask), not only the provider default.
+  const mappedDefinitions = options.workspaceToolGateway.mapDefinition
+    ? prepared.definitions.map(options.workspaceToolGateway.mapDefinition)
     : prepared.definitions;
-  const definitions = options.workspaceToolGateway.mapDefinition
-    ? admittedDefinitions.map(options.workspaceToolGateway.mapDefinition)
-    : admittedDefinitions;
+  const definitions = options.workspaceToolGateway.filterDefinition
+    ? mappedDefinitions.filter(options.workspaceToolGateway.filterDefinition)
+    : mappedDefinitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,

@@ -40,6 +40,33 @@ describe("voice input provider registry", () => {
     expect(providers.map((provider) => provider.id)).toEqual(["azure-openai"]);
   });
 
+  test("a speech deployment named for voice input signs in with the deployment's Entra identity", () => {
+    const identity = { azureTenantId: "tenant", azureClientId: "client", azureClientSecret: "s" };
+    const named = resolveVoiceInputProviderRegistry(
+      testSettings({
+        ...identity,
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: "https://ai.example.cognitiveservices.azure.com",
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+      }),
+    );
+    expect(named).toMatchObject([
+      { id: "azure-openai", deployment: "gpt-4o-transcribe", apiKey: null, adToken: null },
+    ]);
+    // The models the deployment talks with are not speech deployments.
+    const ambient = resolveVoiceInputProviderRegistry(
+      testSettings({
+        ...identity,
+        openaiProvider: "azure",
+        openaiApiKey: undefined,
+        voiceInputProviderOrder: "azure-openai",
+        azureOpenaiEndpoint: "https://example.openai.azure.com",
+        azureOpenaiDeployment: "gpt-5",
+      }),
+    );
+    expect(ambient).toEqual([]);
+  });
+
   test("prefers Codex ahead of OpenAI when subscription routing is enabled", () => {
     expect(
       resolveVoiceInputProviderRegistry(

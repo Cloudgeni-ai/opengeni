@@ -11,6 +11,7 @@ import {
   textRequestAudio,
   textTranscriptionResult,
 } from "../text-models";
+import { createOpenAiRealtimeLiveSession, openAiRealtimeTranscribes } from "./openai-realtime";
 
 /** OpenAI's file transcription API: about 25 minutes or 25 MB per request. */
 export const OPENAI_TRANSCRIPTION_LIMITS = {
@@ -36,8 +37,19 @@ export function createOpenAiTranscriptionProvider(input: {
         name: input.model,
         pricing: input.pricing ?? null,
         ...OPENAI_TRANSCRIPTION_LIMITS,
+        live: openAiRealtimeTranscribes(input.model),
       }),
     ],
+    async createLiveSession(request) {
+      return await createOpenAiRealtimeLiveSession({
+        providerName: "OpenAI",
+        baseUrl: input.baseUrl,
+        headers: { Authorization: `Bearer ${input.apiKey}` },
+        model: input.model,
+        request,
+        fetch: fetchImpl,
+      });
+    },
     async transcribe(request) {
       const { audio, mimeType, filename } = textRequestAudio(request);
       const requestId = requestIdOf(request);

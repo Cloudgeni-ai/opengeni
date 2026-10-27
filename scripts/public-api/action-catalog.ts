@@ -342,6 +342,7 @@ const ACCESS_GATES = new Set([
   "requireAccessGrant",
   "requireAccessGrantAuthorization",
   "requireFreshAccessGrant",
+  "requireMachineAccessGrant",
 ]);
 
 /**

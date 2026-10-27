@@ -4,9 +4,13 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
+import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
+
+import { meetingQuestionMessage } from "@/lib/meeting-ask";
 
 /** The detail page draws its own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
@@ -50,10 +54,27 @@ export function MeetingDetailRoute({
 }) {
   const navigate = useNavigate();
   const context = useAppContext();
-  const { accessContext, workspaces } = context;
+  const { accessContext, workspaces, startSession } = context;
+  const { client: recordings } = useRecordingsClient({ workspaceId });
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const voiceRecognition =
     resolveWorkspaceRecordingSettings(workspace?.settings).voiceprints === true;
+  // "Ask about this meeting" starts a normal chat on the person's model, with
+  // the question first and the meeting attached for meeting_read.
+  const canAsk = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  const ask = async (meetingId: string, question: string): Promise<boolean> => {
+    const meeting = await recordings.getRecording(workspaceId, meetingId).catch(() => null);
+    const created = await startSession(workspaceId, {
+      text: meetingQuestionMessage(question, { id: meetingId, title: meeting?.title ?? null }),
+    });
+    // startSession has already said why it couldn't start; keep the question.
+    if (!created) return false;
+    await navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId: created.id },
+    });
+    return true;
+  };
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
       <MeetingDetailPage
@@ -79,6 +100,7 @@ export function MeetingDetailRoute({
             params: { workspaceId, sessionId },
           })
         }
+        onAsk={canAsk ? ask : undefined}
       />
     </ContentPage>
   );
