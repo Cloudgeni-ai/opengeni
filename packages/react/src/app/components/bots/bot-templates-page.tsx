@@ -6,9 +6,9 @@
  * ordinary tools. Templates can be exported as a file and imported into
  * another workspace. Whoever saved one, or an admin, can change or delete it.
  */
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BotIcon, DownloadIcon, PlusIcon, UploadIcon } from "lucide-react";
-import type { WorkspaceBotTemplate } from "@opengeni/contracts";
+import type { BotTemplateProposal, WorkspaceBotTemplate } from "@opengeni/contracts";
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
@@ -35,6 +35,7 @@ import {
   sessionAvatarInitials,
 } from "../session/session-avatar";
 import { BotTemplateDialog, type BotTemplateValues } from "./bot-template-dialog";
+import { BotTemplateProposalReview } from "./bot-template-proposal-review";
 
 const EMPTY_TEMPLATE: BotTemplateValues = {
   name: "",
@@ -51,6 +52,39 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
   const [editing, setEditing] = useState<WorkspaceBotTemplate | null>(null);
   const [deleting, setDeleting] = useState<WorkspaceBotTemplate | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const proposals = usePendingBotTemplateProposals(workspaceId, saved.supported);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+
+  const decide = async (
+    proposal: BotTemplateProposal,
+    template: WorkspaceBotTemplate,
+    accept: boolean,
+  ) => {
+    setDecidingId(proposal.id);
+    try {
+      if (accept) {
+        const accepted = await client.acceptBotTemplateProposal(workspaceId, proposal.id, {
+          expectedUpdatedAt: template.updatedAt,
+        });
+        saved.replace((current) =>
+          current.map((entry) => (entry.id === accepted.template.id ? accepted.template : entry)),
+        );
+        toast.success(`Updated the ${accepted.template.name} template`, {
+          description: "New bots started from it get this setup.",
+        });
+      } else {
+        await client.dismissBotTemplateProposal(workspaceId, proposal.id);
+      }
+    } catch (error) {
+      toast.error(`Couldn't update the ${template.name} template`, {
+        description: userErrorText(error),
+      });
+      saved.reload();
+    } finally {
+      setDecidingId(null);
+      proposals.reload();
+    }
+  };
 
   const start = (template: WorkspaceBotTemplate) =>
     void navigate({
@@ -162,76 +196,105 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
           }
         />
       ) : (
-        <DetailSection
-          title="Saved in this workspace"
-          description="Anyone in the workspace can start a bot from these."
-        >
-          <RowList label="Bot templates" variant="catalog">
-            {saved.templates.map((template) => (
-              <ListRow
-                key={template.id}
-                leading={
-                  template.avatar ? (
-                    <SessionAvatar
-                      avatar={template.avatar}
-                      name={template.name}
-                      workspaceId={workspaceId}
-                      seed={template.id}
-                      size="md"
+        <>
+          {proposals.items.some((proposal) =>
+            saved.templates?.some((template) => template.id === proposal.templateId),
+          ) ? (
+            <DetailSection
+              title="Proposed updates"
+              description="Bots propose these when their setup changes. Accepting one updates the template for new bots."
+            >
+              <div className="flex flex-col gap-6">
+                {proposals.items.map((proposal) => {
+                  const template = saved.templates?.find(
+                    (entry) => entry.id === proposal.templateId,
+                  );
+                  if (!template) return null;
+                  return (
+                    <BotTemplateProposalReview
+                      key={proposal.id}
+                      template={template}
+                      proposal={proposal}
+                      busy={decidingId === proposal.id}
+                      onAccept={() => void decide(proposal, template, true)}
+                      onDismiss={() => void decide(proposal, template, false)}
                     />
-                  ) : (
-                    <SessionAvatar
-                      avatar={{
-                        kind: "letters",
-                        letters: sessionAvatarInitials(template.name).slice(0, 2),
-                        hue: sessionAvatarFallbackHue(template.id),
-                      }}
-                      name={template.name}
-                      workspaceId={workspaceId}
-                      size="md"
-                    />
-                  )
-                }
-                title={template.name}
-                description={template.description || undefined}
-                control={
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="pointer-coarse:h-11"
-                    onClick={() => start(template)}
-                  >
-                    Start
-                  </Button>
-                }
-                menuLabel={`More actions for the ${template.name} template`}
-                menu={
-                  <>
-                    <DropdownMenuItem onSelect={() => downloadBotTemplate(template)}>
-                      <DownloadIcon />
-                      Export
-                    </DropdownMenuItem>
-                    {template.viewerAccess === "manage" ? (
-                      <>
-                        <DropdownMenuItem onSelect={() => setEditing(template)}>
-                          Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onSelect={() => setDeleting(template)}
-                        >
-                          Delete
-                        </DropdownMenuItem>
-                      </>
-                    ) : null}
-                  </>
-                }
-                onOpen={() => start(template)}
-              />
-            ))}
-          </RowList>
-        </DetailSection>
+                  );
+                })}
+              </div>
+            </DetailSection>
+          ) : null}
+          <DetailSection
+            title="Saved in this workspace"
+            description="Anyone in the workspace can start a bot from these."
+          >
+            <RowList label="Bot templates" variant="catalog">
+              {saved.templates.map((template) => (
+                <ListRow
+                  key={template.id}
+                  leading={
+                    template.avatar ? (
+                      <SessionAvatar
+                        avatar={template.avatar}
+                        name={template.name}
+                        workspaceId={workspaceId}
+                        seed={template.id}
+                        size="md"
+                      />
+                    ) : (
+                      <SessionAvatar
+                        avatar={{
+                          kind: "letters",
+                          letters: sessionAvatarInitials(template.name).slice(0, 2),
+                          hue: sessionAvatarFallbackHue(template.id),
+                        }}
+                        name={template.name}
+                        workspaceId={workspaceId}
+                        size="md"
+                      />
+                    )
+                  }
+                  title={template.name}
+                  description={template.description || undefined}
+                  control={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="pointer-coarse:h-11"
+                      onClick={() => start(template)}
+                    >
+                      Start
+                    </Button>
+                  }
+                  menuLabel={`More actions for the ${template.name} template`}
+                  menu={
+                    <>
+                      <DropdownMenuItem onSelect={() => downloadBotTemplate(template)}>
+                        <DownloadIcon />
+                        Export
+                      </DropdownMenuItem>
+                      {template.viewerAccess === "manage" ? (
+                        <>
+                          <DropdownMenuItem onSelect={() => setEditing(template)}>
+                            Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => setDeleting(template)}
+                          >
+                            Delete
+                          </DropdownMenuItem>
+                        </>
+                      ) : null}
+                    </>
+                  }
+                  onOpen={() => start(template)}
+                />
+              ))}
+            </RowList>
+          </DetailSection>
+        </>
       )}
       <BotTemplateDialog
         open={creating}
@@ -298,4 +361,24 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
       />
     </DetailPage>
   );
+}
+
+/** Pending setup-instruction updates the viewer can see, for every template. */
+function usePendingBotTemplateProposals(workspaceId: string, enabled: boolean) {
+  const { client } = useAppContext();
+  const [items, setItems] = useState<BotTemplateProposal[]>([]);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    if (!enabled) return;
+    let live = true;
+    client
+      .listBotTemplateProposals(workspaceId)
+      .then((list) => live && setItems(list))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client, enabled, revision, workspaceId]);
+  const reload = useCallback(() => setRevision((value) => value + 1), []);
+  return { items, reload };
 }

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   BOT_SUGGESTION_REASON_MAX_LENGTH,
   BOT_SUGGESTION_SETUP_INSTRUCTIONS_MAX_LENGTH,
+  BOT_TEMPLATE_PROPOSAL_REASON_MAX_LENGTH,
   BOT_TEMPLATE_NAME_MAX_LENGTH,
   BOT_TEMPLATE_SETUP_INSTRUCTIONS_MAX_LENGTH,
   CreateBotTemplateRequest,
@@ -12,13 +13,17 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  botTemplateProposalView,
   botTemplateViewerForGrant,
   createBotTemplateForViewer,
   updateSessionProfile,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  botTemplateForSession,
+  createBotTemplateProposal,
   getBotTemplate,
+  getSession,
   getSessionForSubject,
   listBotTemplates,
   listWorkspaceBotSessions,
@@ -156,6 +161,7 @@ export function registerBotTemplateTools(input: {
     },
   );
   registerBotSuggestTool(input);
+  registerBotTemplateProposeUpdateTool(input);
 }
 
 /** The receipt a chat shows as a bot suggestion card. */
@@ -333,6 +339,100 @@ function registerBotSuggestTool(input: {
         status: "suggested",
         ...suggestion,
         note: "The person sees this as a card in the chat and decides. Nothing has changed yet.",
+      });
+    },
+  );
+}
+
+/** The receipt a chat shows as a proposed template update card. */
+export const BOT_TEMPLATE_PROPOSAL_RECEIPT_TYPE = "bot_template_proposal";
+
+/**
+ * `bot_template_propose_update`: a bot chat proposes new setup instructions
+ * for its template (the one it started from, or was saved as) when its setup
+ * changed in a way new bots should start with. It never changes the template:
+ * a person who may change it accepts or dismisses the proposal, against the
+ * template as it was when proposed. Lessons that apply to every chat belong in
+ * workspace Skills and Knowledge instead, which every chat already shares.
+ */
+function registerBotTemplateProposeUpdateTool(input: {
+  server: McpServer;
+  deps: ApiRouteDeps;
+  grant: AccessGrant;
+  sessionId: string;
+  authorize: () => Promise<void>;
+  json: (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+}): void {
+  const { server, deps, grant, sessionId } = input;
+  server.registerTool(
+    "bot_template_propose_update",
+    {
+      description:
+        "Propose new setup instructions for the bot template this chat started from (or was saved as), so new bots started from it get a setup change made here: a Skill installed, a connection or machine added, a schedule or event trigger created, or a standing rule the person set for this bot. Pass the complete new setup instructions: start from the template's current instructions (returned when you call with no change) and change only what the new setup needs; leave out one-off tasks, history, personal details and secrets. " +
+        "Do not use it for general lessons: those go in workspace Skills or Knowledge, which every chat already shares. A person who may change the template reviews a diff and accepts or dismisses it; nothing changes until they accept. Do not mention the review card in your reply. " +
+        "If this chat has no template, this returns not_proposed; do not retry.",
+      inputSchema: {
+        setupInstructions: z4
+          .string()
+          .max(BOT_TEMPLATE_SETUP_INSTRUCTIONS_MAX_LENGTH)
+          .optional()
+          .describe(
+            "The complete proposed setup instructions. Omit to read the template's current ones.",
+          ),
+        reason: z4
+          .string()
+          .max(BOT_TEMPLATE_PROPOSAL_REASON_MAX_LENGTH)
+          .optional()
+          .describe("One sentence the reviewer sees: what changed in this bot's setup and why."),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      const notProposed = (code: string, message: string, extra: Record<string, unknown> = {}) =>
+        input.json({ status: "not_proposed", code, message, ...extra });
+      const session = await getSession(deps.db, grant.workspaceId, sessionId);
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      const template = await botTemplateForSession(deps.db, {
+        workspaceId: grant.workspaceId,
+        sessionId,
+        startedFromTemplateId: session.botTemplateId ?? null,
+      });
+      if (!template) {
+        return notProposed(
+          "no_template",
+          "This chat did not start from a bot template and was not saved as one.",
+        );
+      }
+      const proposed = request.setupInstructions?.trim();
+      if (!proposed) {
+        return input.json({
+          status: "current",
+          templateId: template.id,
+          templateName: template.name,
+          setupInstructions: template.setupInstructions,
+        });
+      }
+      if (proposed === template.setupInstructions.trim()) {
+        return notProposed("unchanged", "These are already the template's setup instructions.");
+      }
+      const reason = request.reason?.trim();
+      if (!reason) return notProposed("reason_required", "Say in one sentence what changed.");
+      const proposal = await createBotTemplateProposal(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        templateId: template.id,
+        sessionId,
+        baseUpdatedAt: template.updatedAt,
+        setupInstructions: proposed,
+        reason,
+        proposedBySubjectId: grant.subjectId,
+      });
+      return input.json({
+        type: BOT_TEMPLATE_PROPOSAL_RECEIPT_TYPE,
+        status: "proposed",
+        templateName: template.name,
+        proposal: botTemplateProposalView(proposal),
+        note: `A person who may change ${template.name} reviews this and accepts or dismisses it. Nothing changes until they accept.`,
       });
     },
   );

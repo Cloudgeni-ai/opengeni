@@ -1,5 +1,6 @@
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
+import { botTemplateProposalReceiptCount } from "../lib/bot-template-proposals";
 import { currentBotSuggestion } from "../lib/bot-suggestions";
 import {
   BotMentionMenu,
@@ -298,6 +299,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const BotTemplateProposalCard = lazy(() =>
+  import("../components/bots/bot-template-proposal-card").then((module) => ({
+    default: module.BotTemplateProposalCard,
+  })),
+);
 const BotSuggestionCard = lazy(() =>
   import("../components/bots/bot-suggestion-card").then((module) => ({
     default: module.BotSuggestionCard,
@@ -2706,6 +2712,11 @@ function SessionChatPane(props: {
         connectionAccounts.loading ||
         connectionAccounts.error !== null,
     });
+  // A bot chat linked to its template, or one that just proposed an update.
+  const mayHaveTemplateProposal = useMemo(
+    () => Boolean(props.session.botTemplateId) || botTemplateProposalReceiptCount(props.events) > 0,
+    [props.session.botTemplateId, props.events],
+  );
   const hasBotSuggestion = useMemo(
     () => currentBotSuggestion(props.session, props.events) !== null,
     [props.session, props.events],
@@ -3673,6 +3684,14 @@ function SessionChatPane(props: {
                                 events={props.events}
                               />
                             </Suspense>
+                            {mayHaveTemplateProposal ? (
+                              <Suspense fallback={null}>
+                                <BotTemplateProposalCard
+                                  session={props.session}
+                                  events={props.events}
+                                />
+                              </Suspense>
+                            ) : null}
                             {hasBotSuggestion ? (
                               <Suspense fallback={null}>
                                 <BotSuggestionCard session={props.session} events={props.events} />

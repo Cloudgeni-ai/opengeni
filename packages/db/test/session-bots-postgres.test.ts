@@ -3,6 +3,12 @@ import { BOT_TEMPLATES_PER_WORKSPACE_MAX } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   BotTemplateLimitError,
+  createBotTemplateProposal,
+  ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
+  listBotTemplateProposals,
+  transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   bootstrapWorkspace,
   createBotTemplate,
   createDb,
@@ -253,5 +259,82 @@ describe("bot templates", () => {
       shared.admin`insert into bot_templates (account_id, workspace_id, name, setup_instructions)
         values (${place.accountId}, ${place.workspaceId}, 'Bot', ${"x".repeat(20_001)})`,
     ).rejects.toThrow(/check constraint/);
+  }, 180_000);
+
+  test("a template proposal from a private chat is visible only to who can see the chat", async () => {
+    if (!shared) return;
+    const userId = `bots-proposals-${crypto.randomUUID()}`;
+    const owner = `user:${userId}`;
+    const context = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Bot owner",
+    });
+    const grant = context.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== context.defaultWorkspaceId,
+    );
+    if (!grant?.workspaceId) throw new Error("managed human has no personal workspace");
+    const settings = await getOrganizationPrivateSessionSettings(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: owner,
+    });
+    if (!settings.enabled) {
+      await updateOrganizationPrivateSessionSettings(client.db, {
+        organizationId: grant.accountId,
+        actorSubjectId: owner,
+        enabled: true,
+        expectedVersion: settings.version,
+        operationId: crypto.randomUUID(),
+      });
+    }
+    const place = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+    const template = await createBotTemplate(client.db, {
+      ...place,
+      name: "SRE bot",
+      description: "",
+      avatar: null,
+      setupInstructions: "Install the on-call Skill.",
+      sourceSessionId: null,
+      createdBySubjectId: owner,
+    });
+    const chat = await createSession(client.db, {
+      ...place,
+      initialMessage: "Install the on-call Skill.",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: owner },
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await transitionSessionVisibility(client.db, {
+      workspaceId: place.workspaceId,
+      sessionId: chat.id,
+      actorSubjectId: owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `visibility-${crypto.randomUUID()}`,
+    });
+    const proposal = await createBotTemplateProposal(client.db, {
+      ...place,
+      templateId: template.id,
+      sessionId: chat.id,
+      baseUpdatedAt: template.updatedAt,
+      setupInstructions: "Install the on-call Skill. Connect PagerDuty.",
+      reason: "This bot now pages through PagerDuty.",
+      proposedBySubjectId: owner,
+    });
+    const read = (subjectId: string) =>
+      listBotTemplateProposals(client.db, {
+        workspaceId: place.workspaceId,
+        subjectId,
+        templateId: template.id,
+      });
+    expect((await read(owner)).map((entry) => entry.id)).toEqual([proposal.id]);
+    expect(await read("user:someone-else")).toEqual([]);
+    // Deleting the template removes its proposals with it.
+    expect(await deleteBotTemplate(client.db, place.workspaceId, template.id)).toBe(true);
+    expect(await read(owner)).toEqual([]);
   }, 180_000);
 });

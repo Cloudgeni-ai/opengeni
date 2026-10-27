@@ -232,6 +232,60 @@ export const SessionBotSuggestion = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type SessionBotSuggestion = z.output<typeof SessionBotSuggestion>;
+// --- Bot template proposals -----------------------------------------------
+
+export const BOT_TEMPLATE_PROPOSAL_REASON_MAX_LENGTH = 400;
+
+export const BotTemplateProposalStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "accepted", "dismissed", "superseded"]),
+);
+export type BotTemplateProposalStatus = z.output<typeof BotTemplateProposalStatus>;
+
+/**
+ * New setup instructions a bot chat proposed for its template
+ * (`bot_template_propose_update`), because its setup changed in a way new
+ * bots should get. A person who may change the template accepts it, which
+ * replaces the template's setup instructions, or dismisses it. `superseded`:
+ * the same chat proposed again before anyone decided.
+ */
+export const BotTemplateProposal = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: Uuid,
+    templateId: Uuid,
+    sessionId: Uuid,
+    /** The template's `updatedAt` the proposal was written against. */
+    baseUpdatedAt: z.string(),
+    setupInstructions: z.string(),
+    reason: z.string(),
+    proposedBySubjectId: z.string().nullable(),
+    status: BotTemplateProposalStatus,
+    decidedBySubjectId: z.string().nullable(),
+    decidedAt: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
+export type BotTemplateProposal = z.output<typeof BotTemplateProposal>;
+
+export const ListBotTemplateProposalsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ proposals: z.array(BotTemplateProposal) }),
+);
+export type ListBotTemplateProposalsResponse = z.output<typeof ListBotTemplateProposalsResponse>;
+
+/** `expectedUpdatedAt`: the template version (its `updatedAt`) the person reviewed against. */
+export const AcceptBotTemplateProposalRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ expectedUpdatedAt: z.string().min(1) }).strict(),
+);
+export type AcceptBotTemplateProposalRequest = z.input<typeof AcceptBotTemplateProposalRequest>;
+
+export const AcceptBotTemplateProposalResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ template: WorkspaceBotTemplate, proposal: BotTemplateProposal }),
+);
+export type AcceptBotTemplateProposalResponse = z.output<typeof AcceptBotTemplateProposalResponse>;
+
+export const BotTemplateProposalResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ proposal: BotTemplateProposal }),
+);
+export type BotTemplateProposalResponse = z.output<typeof BotTemplateProposalResponse>;
 
 export const BOT_TEMPLATE_FILE_FORMAT = "opengeni.bot-template";
 

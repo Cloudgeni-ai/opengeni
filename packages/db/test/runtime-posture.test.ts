@@ -1790,6 +1790,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1015 bot template proposals: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_DML_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1918,7 +1924,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
-        1; // 1008 bot templates: full-DML, FORCE-RLS.
+        1 + // 1008 bot templates: full-DML, FORCE-RLS.
+        1; // 1015 bot template proposals: FORCE-RLS, no runtime DELETE.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1933,6 +1940,12 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
       expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
       expect(FORCE_RLS_TABLES).toContain("bot_templates");
+      expect(FORCE_RLS_TABLES).toContain("bot_template_proposals");
+      expect(RUNTIME_TABLE_PRIVILEGES.bot_template_proposals).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
       expect(RUNTIME_FULL_DML_TABLES).toContain("bot_templates");
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");

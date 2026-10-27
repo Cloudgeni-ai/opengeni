@@ -32,6 +32,8 @@ const COPIED = [
   "avatar",
   // A fork keeps the newest bot suggestion card, like the rest of its profile.
   "bot_suggestion",
+  // A fork keeps the template a bot started from, like the rest of its profile.
+  "bot_template_id",
   "instructions",
   "policy_role",
   "skills",

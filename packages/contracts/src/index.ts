@@ -1090,6 +1090,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_other_session_title",
   "bot_template_save",
   "bot_suggest",
+  "bot_template_propose_update",
   "interaction_discover",
   "browser_open",
   "browser_tabs",
@@ -16461,6 +16462,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     avatar: SessionAvatar.nullable().default(null),
     /** The newest bot suggestion the agent made here (`bot_suggest`); detail reads only. */
     botSuggestion: SessionBotSuggestion.nullable().optional(),
+    /** The bot template this chat was started from; omitted by older servers. */
+    botTemplateId: z.string().uuid().nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -19936,6 +19939,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       /** The new chat's name, description and avatar, as if a person set them
        * (a bot started from a template, for example). Display metadata only;
        * never sent to the model. */
+      /** The bot template this chat starts from (a link for its template's proposals). */
+      botTemplateId: z.string().uuid().optional(),
       profile: z
         .object({
           title: z.string().trim().min(1).max(200).optional(),

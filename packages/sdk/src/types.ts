@@ -1853,6 +1853,8 @@ export type Session = {
   avatar?: SessionAvatar | null | undefined;
   /** The newest bot suggestion the agent made here (`bot_suggest`); detail reads only. */
   botSuggestion?: SessionBotSuggestion | null | undefined;
+  /** The bot template this chat was started from. */
+  botTemplateId?: string | null | undefined;
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
@@ -3882,6 +3884,8 @@ export type CreateSessionRequest = {
         avatar?: SessionAvatar | undefined;
       }
     | undefined;
+  /** The bot template this chat starts from (a link for its template's proposals). */
+  botTemplateId?: string | undefined;
   /**
    * `realtime` creates an idle session shell so realtime voice can be the
    * first interaction. `standard` is the explicit default; `createSession`
@@ -4135,6 +4139,7 @@ export type FirstPartyMcpToolName =
   | "set_other_session_title"
   | "bot_template_save"
   | "bot_suggest"
+  | "bot_template_propose_update"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"

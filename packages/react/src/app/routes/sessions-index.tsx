@@ -373,6 +373,7 @@ function SessionsIndexRouteContent({
         name: botTemplate.name,
         description: botTemplate.description,
         avatar: botTemplate.avatar,
+        templateId: botTemplate.id,
       }
     : undefined;
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);

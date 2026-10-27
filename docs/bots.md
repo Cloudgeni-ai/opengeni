@@ -117,6 +117,36 @@ template dialog filled in from the draft; a `reuse` card opens the bot chat or
 starts a bot from the template; **Not now** hides it in that browser. A chat
 that is already a bot is not offered one. One sentence of prompt guidance,
 shown only while the tool can be available, tells the agent when to call it.
+### Templates learn setup changes from their bots
+
+A chat started from a template remembers it (`sessions.bot_template_id`,
+migration `1015_bot_template_proposals.sql`, sent as `botTemplateId` when the
+web app starts a bot; `Session.botTemplateId`). A chat saved as a template is
+linked through the template's `sourceSessionId`.
+
+Lessons that apply to every chat already reach every chat through workspace
+Skills and Knowledge. What a template does not learn on its own is a bot's
+**setup**: a Skill it installed, a connection or machine it added, a schedule
+or event trigger it created, or a standing rule the person set for this bot.
+When that changes, the agent may call `bot_template_propose_update`
+(capability `subagents`, needs `sessions:read`) with the complete new setup
+instructions (called with none, it returns the template's current ones). It
+never changes the template: it stores a pending proposal
+(`bot_template_proposals`, FORCE RLS plus the restrictive chat-visibility
+policy, so a proposal from someone's Only me chat is visible only to them)
+against the template as it was, and supersedes the same chat's earlier pending
+one.
+
+Whoever may change the template reviews a diff of the setup instructions, in
+the chat or under **Proposed updates** on the Bot templates page, and accepts
+or dismisses it. Accepting checks the template is still the version reviewed
+(otherwise 409) and replaces its setup instructions; new bots started from it
+then get the change, while bots already running keep their own chats.
+
+| Route | Needs |
+| --- | --- |
+| `GET /v1/workspaces/:workspaceId/bot-template-proposals?templateId&sessionId&status` | `sessions:read` |
+| `POST .../bot-template-proposals/:proposalId/accept` (`expectedUpdatedAt`) and `/dismiss` | `sessions:create`, and manage access to the template |
 
 ### Sharing a template as a file
 

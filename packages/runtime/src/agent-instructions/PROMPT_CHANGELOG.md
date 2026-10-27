@@ -12,6 +12,20 @@ composition can render it; legacy bytes are unchanged.
 + When the user asks for the same kind of work two or more times in a chat, or says they will want it again, call `bot_suggest` once in that chat, preferring a bot that already does the work: it offers them a bot as a card and changes nothing until they accept.
 ```
 
+Bot templates learn setup changes. When the `bot_template_propose_update`
+tool may exist, Working with the user adds one sentence after the repeated-ask
+rule. A bot chat whose setup changes (a Skill, connection, schedule or standing
+rule for that bot) can propose updated setup instructions for the template it
+started from or was saved as, so new bots start the same way. General lessons
+still go to workspace Skills and Knowledge, which every chat shares. A person
+who may change the template accepts or dismisses the proposal; nothing changes
+until then. Only the modular composition can render it; legacy bytes are
+unchanged.
+
+```diff
++ When this chat started from a bot template or was saved as one, and its setup changes in a way new bots from that template should start with (a Skill, connection, schedule or standing rule for this bot), propose the updated setup instructions with `bot_template_propose_update`; a person approves it.
+```
+
 Settings that block a tool are changed in the chat. When the app-action tools
 may exist (capability `workspaceAdmin` on and neither `admin_actions_search`
 nor `admin_action_call` proven absent), the Autonomy and persistence rule for

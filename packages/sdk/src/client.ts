@@ -41,8 +41,14 @@ import type {
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   AutomationTemplateResponse,
+  AcceptBotTemplateProposalRequest,
+  AcceptBotTemplateProposalResponse,
+  BotTemplateProposal,
+  BotTemplateProposalResponse,
+  BotTemplateProposalStatus,
   BotTemplateResponse,
   CreateBotTemplateRequest,
+  ListBotTemplateProposalsResponse,
   ListBotTemplatesResponse,
   UpdateBotTemplateRequest,
   WorkspaceBotTemplate,
@@ -7917,6 +7923,51 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
     );
+  }
+
+  /** Setup-instruction updates bot chats proposed for their templates (pending by default). */
+  async listBotTemplateProposals(
+    workspaceId: string,
+    filter: {
+      templateId?: string;
+      sessionId?: string;
+      status?: BotTemplateProposalStatus | "all";
+    } = {},
+  ): Promise<BotTemplateProposal[]> {
+    const query = new URLSearchParams();
+    if (filter.templateId) query.set("templateId", filter.templateId);
+    if (filter.sessionId) query.set("sessionId", filter.sessionId);
+    if (filter.status) query.set("status", filter.status);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const response = await this.requestJson<ListBotTemplateProposalsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-template-proposals${suffix}`,
+    );
+    return response.proposals;
+  }
+
+  /** Accept a proposal against the template version (`updatedAt`) the person reviewed. */
+  async acceptBotTemplateProposal(
+    workspaceId: string,
+    proposalId: string,
+    request: AcceptBotTemplateProposalRequest,
+  ): Promise<AcceptBotTemplateProposalResponse> {
+    return await this.requestJson<AcceptBotTemplateProposalResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-template-proposals/${proposalId}/accept`,
+      request,
+    );
+  }
+
+  async dismissBotTemplateProposal(
+    workspaceId: string,
+    proposalId: string,
+  ): Promise<BotTemplateProposal> {
+    const response = await this.requestJson<BotTemplateProposalResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-template-proposals/${proposalId}/dismiss`,
+    );
+    return response.proposal;
   }
 
   // --- Vaults ---------------------------------------------------------------

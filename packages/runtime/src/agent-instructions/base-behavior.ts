@@ -48,6 +48,10 @@ function workingWithTheUser(context: AgentPromptContext): string {
     toolAvailable(context, "bot_suggest")
       ? "When the user asks for the same kind of work two or more times in a chat, or says they will want it again, call `bot_suggest` once in that chat, preferring a bot that already does the work: it offers them a bot as a card and changes nothing until they accept."
       : null,
+    // Proposing a template update is described only while the tool may exist.
+    toolAvailable(context, "bot_template_propose_update")
+      ? "When this chat started from a bot template or was saved as one, and its setup changes in a way new bots from that template should start with (a Skill, connection, schedule or standing rule for this bot), propose the updated setup instructions with `bot_template_propose_update`; a person approves it."
+      : null,
     `## Progress updates
 
 A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them. Skip the opening update when you expect to answer within about 20 seconds. Web searches take several seconds each, so before searching the web, write the opening update in a few words. During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context. Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested. Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance. Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it. ${
