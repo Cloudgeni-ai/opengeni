@@ -109,11 +109,6 @@ workspace, or selected ones). The connection then acts as that person:
   one way a route validates input, so an invalid request answers 400 or 422
   with `validation_failed`, a message naming each bad field
   (`Invalid Skill request: stableKey: …; scope: …`) and `details.issues`.
-- A route retired in favour of another answers 410 with code `gone` and
-  `details.replacement` (`routeRetired` in `apps/api/src/http/deprecation.ts`).
-  Its action is marked `retired`: search never returns it, and describe or
-  call names the replacement action without running anything. App actions in
-  chat count it as a read, so it never asks the person for a confirmation.
 - A call result holds at most 256 KiB. A JSON list larger than that keeps as
   many whole items as fit (a top-level array, or the largest array in the
   top-level object) with `truncated` counts and a hint naming the `offset`,

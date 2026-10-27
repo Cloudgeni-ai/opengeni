@@ -638,7 +638,6 @@ An effective first-party permission ceiling of `[]` remains zero delegated
 Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
-See [automation defaults](automations.md#empty-first-party-authority).
 
 Managed password sign-ups require email verification outside local development
 unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
@@ -1072,10 +1071,10 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
 The `@opengeni/sdk` major is the API compatibility major. Within a major the
 public surface (SDK-reachable `/v1` routes and their shapes, the session event
-envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, automation
-ingress) evolves additively and both sides are tolerant readers. Breaking
-changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
-days on the managed service, and a new major. `bun run check:public-api` and
+envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
+routes) evolves additively and both sides are tolerant readers. Breaking
+changes need a deprecation, at least 90 days on the managed service, and a new
+major. `bun run check:public-api` and
 `bun run test:sdk-compat` enforce it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
@@ -1092,7 +1091,7 @@ the local switch; activation switches gate producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
-`scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
+and `scripts/public-api/`.
 
 `embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
 narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
@@ -1577,7 +1576,7 @@ from old workers during a rolling deployment.
 Admission and provenance differ; logical turn, attempt, event, recovery, and
 usage boundaries remain shared. No parallel agent engine is created.
 
-Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
+Canonical: [`goals.md`](goals.md), [`automations-and-events.md`](design/automations-and-events.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
 [`reliability-fixes.md`](reliability-fixes.md).
 
@@ -1613,10 +1612,9 @@ ceilings apply; defaults never rewrite sessions or accepted attempts.
 
 Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
-turn, task, trigger, binding, or occurrence. This covers fresh sessions,
-explicit switches, new/materially reaccepted schedules, automation triggers,
-PR-review bindings, and fresh generated-session occurrences. Automation adapter
-templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+turn, task, or occurrence. This covers fresh sessions, explicit switches,
+new/materially reaccepted schedules, and fresh generated-session occurrences.
+Deployment-curated
 workspace models retain public provider prefixes but have no mutable custom row
 and bypass this fence. Retirement holds the exclusive counterpart. Accepted
 work, exact replays, same-model/existing-session continuations, and
@@ -3000,7 +2998,7 @@ Topics: [`README.md`](README.md).
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
-| Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
+| Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
@@ -3058,7 +3056,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
-| Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
@@ -3067,7 +3065,6 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
-| Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |

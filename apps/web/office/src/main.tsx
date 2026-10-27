@@ -281,10 +281,7 @@ function PaneAccount(props: {
 }
 
 function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }) {
-  const client = useMemo(
-    () => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token, onDeprecation: false }),
-    [token],
-  );
+  const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);

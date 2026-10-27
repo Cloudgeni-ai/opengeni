@@ -504,10 +504,6 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/model-catalog`) return json({ models: [] });
-    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/registrations`)
-      return json({ registrations: [], repositories: [] });
-    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/github`)
-      return json({ status: "unavailable", installations: [], missing: [], installUrl: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({
         provider: "skills_sh",

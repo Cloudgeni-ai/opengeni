@@ -1010,7 +1010,6 @@ import {
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
-export * from "./pr-review";
 import {
   and,
   asc,
@@ -92098,7 +92097,6 @@ export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./site-tool-allowances";
-export * from "./transcription-recordings";
 export * from "./recordings";
 export * from "./recording-live";
 export {
@@ -92136,7 +92134,6 @@ export * from "./organization-recovery";
 export * from "./active-sandbox";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
-export * from "./automations";
 export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
