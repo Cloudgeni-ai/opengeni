@@ -154,7 +154,6 @@ interface Active {
 }
 
 export class Dictation {
-  private settings: DesktopDictationSettings;
   private shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[] = [];
   private actionShortcutErrors: {
     action: DesktopDictationAction;
@@ -174,8 +173,12 @@ export class Dictation {
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly deps: DictationDeps) {
-    this.settings = deps.store.read();
     deps.hud.onAction((action) => this.onHudAction(action));
+  }
+
+  /** Read each time: until the person saves, the defaults follow the app (its language). */
+  private get settings(): DesktopDictationSettings {
+    return this.deps.store.read();
   }
 
   start(): void {
@@ -220,9 +223,9 @@ export class Dictation {
   }
 
   async update(change: unknown): Promise<DesktopDictationStatus> {
-    const next = mergeDictationSettings(this.settings, change);
-    if (JSON.stringify(next) !== JSON.stringify(this.settings)) {
-      this.settings = next;
+    const current = this.settings;
+    const next = mergeDictationSettings(current, change);
+    if (JSON.stringify(next) !== JSON.stringify(current)) {
       this.deps.store.write(next);
       if (!next.enabled && this.active) this.cancel();
       await this.apply();

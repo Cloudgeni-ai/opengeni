@@ -51,8 +51,10 @@ export interface CreateDesktopDictationOptions {
   /**
    * The language the first shortcut hears until the person picks another,
    * as an ISO code such as "nb". Null (the default) detects the language.
+   * Pass a function when the app learns its language later (from the
+   * signed-in account, say): it is read each time, like `words`.
    */
-  language?: string | null;
+  language?: string | null | (() => string | null);
   /** Where the settings and recent dictations are kept: `app.getPath("userData")`. */
   dataDir: string;
   /** Bring the app's window to the front. */
