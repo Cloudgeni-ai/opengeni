@@ -455,6 +455,8 @@ describe("useVoiceInput: dictations as recordings", () => {
       VOICE_RECORDING_TIMESLICE_MILLISECONDS,
     );
     expect(recorders[0]?.options.systemAudio).toBeFalsy();
+    // No language named: the provider detects it.
+    expect(recorders[0]?.options.transcription).toBeUndefined();
     expect(server.created[0]?.request.purpose).toBe("dictation");
     const id = hook.result.current.recordingId!;
 
@@ -489,6 +491,50 @@ describe("useVoiceInput: dictations as recordings", () => {
     server.complete(id, "slow words");
     await waitFor(() => hook.result.current.status === "idle");
     expect(draft.value).toBe("slow words");
+    await hook.unmount();
+  });
+
+  test("a dictation is heard in the language it was started in", async () => {
+    const server = new FakeServer();
+    const { platform, recorders } = fakePlatform(server);
+    const { hook } = await renderDurable(server, platform, { language: "nb" });
+    await act(async () => {
+      expect(await hook.result.current.start()).toBe(true);
+    });
+    expect(recorders[0]?.options.transcription).toEqual({ language: "nb" });
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle();
+    });
+    await hook.unmount();
+  });
+
+  test("a host check before the microphone can keep it off", async () => {
+    const server = new FakeServer();
+    const { platform, recorders } = fakePlatform(server);
+    const answers = [false, true];
+    const asked: number[] = [];
+    const { hook } = await renderDurable(server, platform, {
+      beforeStart: async () => {
+        asked.push(asked.length);
+        return answers.shift() ?? false;
+      },
+    });
+    await act(async () => {
+      expect(await hook.result.current.start()).toBe(false);
+    });
+    expect(recorders).toHaveLength(0);
+    expect(hook.result.current.status).toBe("idle");
+    await act(async () => {
+      expect(await hook.result.current.start()).toBe(true);
+    });
+    expect(asked).toEqual([0, 1]);
+    expect(recorders).toHaveLength(1);
+    expect(hook.result.current.status).toBe("recording");
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle();
+    });
     await hook.unmount();
   });
 
@@ -779,6 +825,7 @@ describe("useVoiceInput: one request", () => {
             draft = value;
           },
           focusInput: () => undefined,
+          language: "en",
         }),
       { value: draft },
     );
@@ -796,6 +843,7 @@ describe("useVoiceInput: one request", () => {
       await settle();
     });
     expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ language: "en" });
     expect(draft).toBe("hello voice");
     expect(track.stop).toHaveBeenCalled();
     expect(hook.result.current.status).toBe("idle");

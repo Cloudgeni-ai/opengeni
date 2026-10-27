@@ -52,6 +52,16 @@ export type UseVoiceInputOptions = {
   setValue: (value: string) => void;
   focusInput: () => void;
   disabled?: boolean | undefined;
+  /**
+   * The language spoken, as an ISO 639-1 or 639-3 code ("nb", "en"). Omitted
+   * or null detects it. Each dictation keeps the language it was started in.
+   */
+  language?: string | null | undefined;
+  /**
+   * Asked before each new dictation takes the microphone, such as a host's
+   * consent prompt. Resolving false (or throwing) keeps the microphone off.
+   */
+  beforeStart?: (() => boolean | Promise<boolean>) | undefined;
   /** A recordings client, such as a host proxy. Built from `client` otherwise. */
   recordings?: Partial<VoiceInputRecordingsClient> | undefined;
   /** How this device records; the browser's by default. */
@@ -217,6 +227,10 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const dictationRef = useRef<Dictation | null>(null);
   const recorderRef = useRef<Recorder | null>(null);
   const oneShotRef = useRef<OneShotCapture | null>(null);
+  /** The language the in-memory dictation was started in. */
+  const oneShotLanguage = useRef<string | null>(null);
+  /** A start is waiting on `beforeStart`; another start is ignored meanwhile. */
+  const gatingRef = useRef(false);
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploaderRef = useRef<RecordingUploader | null>(null);
   const startedAtRef = useRef(0);
@@ -520,6 +534,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
           audio,
           mimeType: audio.type || capture.mimeType,
           durationSeconds: capture.durationSeconds(),
+          ...(oneShotLanguage.current ? { language: oneShotLanguage.current } : {}),
         });
         if (generation !== generationRef.current) return;
         if (autoInsert && !latest.current.disabled) {
@@ -614,24 +629,42 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   );
 
   const start = useCallback(async (): Promise<boolean> => {
-    const current = latest.current;
-    if (
-      (!current.durable && !current.client) ||
-      !current.capability?.available ||
-      !current.enabled ||
-      current.disabled ||
-      statusRef.current === "requesting-permission" ||
-      statusRef.current === "recording" ||
-      statusRef.current === "saving" ||
-      statusRef.current === "transcribing" ||
-      dictationRef.current
-    ) {
-      return false;
+    const startable = () => {
+      const current = latest.current;
+      return !(
+        (!current.durable && !current.client) ||
+        !current.capability?.available ||
+        !current.enabled ||
+        current.disabled ||
+        statusRef.current === "requesting-permission" ||
+        statusRef.current === "recording" ||
+        statusRef.current === "saving" ||
+        statusRef.current === "transcribing" ||
+        dictationRef.current
+      );
+    };
+    if (gatingRef.current || !startable()) return false;
+    const gate = latest.current.beforeStart;
+    if (gate) {
+      gatingRef.current = true;
+      let allowed = false;
+      try {
+        allowed = await gate();
+      } catch {
+        allowed = false;
+      } finally {
+        gatingRef.current = false;
+      }
+      if (!allowed || !startable()) return false;
     }
+    const current = latest.current;
+    if (!current.capability) return false;
     const generation = ++generationRef.current;
     setStatus("requesting-permission");
     setError(null);
+    const language = current.language || null;
     if (!current.durable) {
+      oneShotLanguage.current = language;
       const capture = await startOneShot(current.capability.acceptedMimeTypes);
       if (generation !== generationRef.current) {
         if (!(capture instanceof Error)) await capture.stop();
@@ -651,6 +684,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       workspaceId: current.workspaceId,
       purpose: "dictation",
       microphone: true,
+      ...(language ? { transcription: { language } } : {}),
       uploader: uploader(),
       timesliceMilliseconds: VOICE_RECORDING_TIMESLICE_MILLISECONDS,
       keepAwake: false,
