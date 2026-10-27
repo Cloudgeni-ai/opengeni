@@ -54932,6 +54932,9 @@ export type AgentHeldBrowserSession = {
   routeSubjectId: string | null;
 };
 
+const LIST_AGENT_HELD_BROWSER_SESSIONS =
+  "opengeni_private.list_agent_held_browser_sessions(integer, bigint)";
+
 /**
  * The browsers that agent sessions hold right now, across workspaces: active,
  * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
@@ -54939,11 +54942,25 @@ export type AgentHeldBrowserSession = {
  * capacity or waiting on a person) or has an armed input wait. The same rule
  * as the box release below; the API renews each one's hold on its controller.
  * Most recently used first, at most `limit`.
+ *
+ * 0999 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this lists nothing. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
  */
 export async function listAgentHeldBrowserSessions(
   db: Database,
   input: { limit: number },
 ): Promise<AgentHeldBrowserSession[]> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${LIST_AGENT_HELD_BROWSER_SESSIONS})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return [];
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;
