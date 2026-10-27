@@ -1201,7 +1201,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
@@ -1373,6 +1373,8 @@ fn template(team: &str, image: ImageId, name: Option<&str>, created_ms: u64) -> 
         source: Id(SandboxId(u128::from(random()) << 64 | u128::from(random()))),
         vcpus: 2,
         memory_mib: 1024,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         disk_mib: 8192,
         created_ms,
     }
@@ -1381,7 +1383,12 @@ fn template(team: &str, image: ImageId, name: Option<&str>, created_ms: u64) -> 
 async fn templates<S: Store>(store: S) {
     let team = format!("team-{:x}", random());
     let other = format!("team-{:x}", random());
-    let named = template(&team, image_id(), Some("warm"), 2);
+    // One guaranteed less than its shape, which it keeps, one all of it.
+    let named = TemplateRow {
+        memory_request_mib: Some(512),
+        cpu_request_millis: Some(250),
+        ..template(&team, image_id(), Some("warm"), 2)
+    };
     let plain = template(&team, image_id(), None, 1);
     for row in [&named, &plain] {
         assert_eq!(store.insert_template(row).await.unwrap(), Inserted::Done);

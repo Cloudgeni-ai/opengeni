@@ -397,7 +397,12 @@ connect, pause, kill, set the timeout, list templates) and traffic to
 `E2b-Sandbox-Port` headers. Templates name an image and a shape
 (`--e2b-template base=<image>:2x1024`), and may name the disk their
 sandboxes get (`--e2b-template ci=<image>:4x8192x65536`, in MiB, as a
-create's `disk_mib`). With `--e2b-tls-cert` and
+create's `disk_mib`) and guarantee them less than their shape
+(`,memory-request=MIB` and `,cpu-request=MILLIS`, as a create's
+`memory_request_mib` and `cpu_request_millis`), so a host runs more of
+them at once and each uses more when the host has it free. A snapshot
+guarantees the sandboxes started from it what its source was guaranteed.
+With `--e2b-tls-cert` and
 `--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
 name and `*.<domain>`; without them it speaks plain HTTP behind a load
 balancer that terminates TLS.

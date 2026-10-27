@@ -390,6 +390,11 @@ reach compute through its E2B front door. In the chart:
    `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
    where `runner` is a stored image built from
    `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   Jobs rarely use all of their shape at once; a template that guarantees
+   less, for example `"runner:8x24576x65536,memory-request=8192"`, fits
+   more jobs on a host at once, each using more memory when the host has
+   it free, and warm templates saved from it guarantee the same. A host
+   that backs guest memory with huge pages reserves all of it anyway.
    It listens on its own port (3000) of the API Service, with the API's
    certificate under `apiTls`, and network policy admits only the pools
    and `e2b.ingressFrom`.
