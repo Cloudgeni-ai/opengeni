@@ -4,13 +4,18 @@
 // which processes use a microphone (`--watch-microphone`, no permission
 // needed); this module decides which of them is a call and when to ask. It
 // never starts or stops a recording itself: the person chooses on the
-// notification, and the page carries it out.
+// card in the corner of the screen, and the page carries it out.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { DesktopMeetingDetectionStatus, DesktopMeetingRequest } from "../contract";
+import {
+  DESKTOP_IPC,
+  type DesktopMeetingDetectionStatus,
+  type DesktopMeetingRequest,
+} from "../../contract";
+import { ENGLISH_MEETING_WORDS, fillMeetingWords, type MeetingWords } from "./words";
 
 /** One process using a microphone, as the helper reports it. */
 export interface MicrophoneUser {
@@ -305,6 +310,18 @@ export interface ShownPrompt {
   close(): void;
 }
 
+/** How a question ended for the person: they chose it, closed it, or it timed out. */
+export type MeetingPromptOutcome = "chosen" | "dismissed" | "expired";
+
+/** Puts the questions in front of the person: the card in the corner of the screen. */
+export interface MeetingPromptView {
+  /**
+   * Show `prompt` in place of any other. `done` runs once, when the person
+   * chooses it, closes it, or it times out; not when the handle closes it.
+   */
+  show(prompt: MeetingPrompt, done: (outcome: MeetingPromptOutcome) => void): ShownPrompt;
+}
+
 interface TrackedCall {
   app: CallApp;
   since: number;
@@ -429,28 +446,38 @@ export class MeetingPrompter {
   }
 }
 
-/** The notification's words for a prompt. */
+/** What the card says for a prompt. */
+export interface MeetingPromptText {
+  question: string;
+  /** Why it asks. */
+  reason: string;
+  /** The button that does it. */
+  action: string;
+  /** The button that closes the card. */
+  dismiss: string;
+}
+
 export function promptText(
   prompt: MeetingPrompt,
-  platform: NodeJS.Platform,
-): { title: string; body: string; action: string } {
-  // Only macOS shows action buttons; elsewhere clicking the notification is the action.
-  const buttons = platform === "darwin";
+  words: MeetingWords = ENGLISH_MEETING_WORDS,
+): MeetingPromptText {
+  const values = { app: prompt.app.name };
   if (prompt.kind === "record") {
-    const started = prompt.app.browser
-      ? `${prompt.app.name} is using your microphone.`
-      : `A call in ${prompt.app.name} started.`;
     return {
-      title: "Record this meeting?",
-      body: buttons ? started : `${started} Click to record it.`,
-      action: "Record",
+      question: words.recordQuestion,
+      reason: fillMeetingWords(
+        prompt.app.browser ? words.browserStarted : words.callStarted,
+        values,
+      ),
+      action: words.record,
+      dismiss: words.notNow,
     };
   }
-  const ended = `${prompt.app.name} stopped using your microphone.`;
   return {
-    title: "Meeting over?",
-    body: buttons ? `${ended} The recording is still going.` : `${ended} Click to stop recording.`,
-    action: "Stop recording",
+    question: words.stopQuestion,
+    reason: fillMeetingWords(words.callEnded, values),
+    action: words.stop,
+    dismiss: words.keepRecording,
   };
 }
 
@@ -496,6 +523,13 @@ const PROBLEMS: Record<string, string> = {
     "Calls can't be noticed because no sound server (PulseAudio or PipeWire) is running.",
 };
 
+/** A page that records meetings: Electron's WebContents. */
+export interface MeetingPage {
+  readonly id: number;
+  isDestroyed(): boolean;
+  send(channel: string, ...args: unknown[]): void;
+}
+
 export interface MeetingDetectionOptions {
   /** The bundled audio helper, or null when the app has none. */
   helperPath: string | null;
@@ -503,11 +537,16 @@ export interface MeetingDetectionOptions {
   available: boolean;
   own: OwnApp;
   store: { enabled(): boolean; setEnabled(enabled: boolean): void };
-  /** Show a prompt as a notification; `act` runs when the person chooses it. */
-  notify(prompt: MeetingPrompt, act: () => void): ShownPrompt;
-  /** The person chose a prompt: bring the window up and tell the page. */
-  request(request: DesktopMeetingRequest): void;
-  onChange(): void;
+  /** Puts the questions in front of the person: the card in the corner of the screen. */
+  view: MeetingPromptView;
+  /** The person chose a question: bring the app's window up, opening it if it is closed. */
+  reveal(): void;
+  /**
+   * Of the pages that take the person's choices, the one that gets this one.
+   * None waits for another page to take it. The newest by default.
+   */
+  chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
+  /** What detection did, a line at a time. Lines name the call app's id, nothing about the call. */
   log(message: string, error?: unknown): void;
   spawnProcess?: typeof spawn;
   now?: () => number;
@@ -515,10 +554,13 @@ export interface MeetingDetectionOptions {
 
 const RESTART_MIN_MS = 1_000;
 const RESTART_MAX_MS = 60_000;
+/** A choice no page takes within this long is dropped: the call may be long over. */
+export const REQUEST_WAIT_MS = 60_000;
 
 /**
  * Runs the helper's microphone watch while detection is on, feeds the
- * prompter, and restarts the helper (with back-off) if it exits.
+ * prompter, restarts the helper (with back-off) if it exits, and hands the
+ * person's choices to the pages that record.
  */
 export class MeetingDetection {
   private readonly prompter: MeetingPrompter;
@@ -528,15 +570,14 @@ export class MeetingDetection {
   private restartDelay = RESTART_MIN_MS;
   private problem: string | null = null;
   private running = false;
-  private readonly recordingPages = new Set<number>();
+  /** Pages that take choices, oldest first. */
+  private readonly pages: MeetingPage[] = [];
+  private readonly recordingPages = new Set<MeetingPage>();
+  private readonly listeners = new Set<() => void>();
+  private pending: { request: DesktopMeetingRequest; timer: NodeJS.Timeout } | null = null;
 
   constructor(private readonly options: MeetingDetectionOptions) {
-    this.prompter = new MeetingPrompter(options.own, (prompt) =>
-      options.notify(prompt, () => {
-        this.prompter.dismissed(prompt);
-        options.request(promptRequest(prompt));
-      }),
-    );
+    this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt));
   }
 
   status(): DesktopMeetingDetectionStatus {
@@ -552,17 +593,42 @@ export class MeetingDetection {
       change && typeof change === "object" ? (change as { enabled?: unknown }).enabled : undefined;
     if (typeof enabled === "boolean" && enabled !== this.options.store.enabled()) {
       this.options.store.setEnabled(enabled);
+      this.options.log(`Meeting detection: turned ${enabled ? "on" : "off"}.`);
       this.apply();
-      this.options.onChange();
+      this.changed();
     }
     return this.status();
   }
 
-  /** A page started or stopped recording a meeting (or went away: false). */
-  setRecording(pageId: number, recording: boolean): void {
-    if (recording) this.recordingPages.add(pageId);
-    else this.recordingPages.delete(pageId);
+  /** Runs `listener` when the switch or its problem changes. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** A page starts or stops taking the person's choices. */
+  listen(page: MeetingPage, listening: boolean): void {
+    const index = this.pages.indexOf(page);
+    if (index >= 0) this.pages.splice(index, 1);
+    if (listening) this.pages.push(page);
+    const pending = this.pending;
+    if (!listening || !pending) return;
+    if (this.send(pending.request)) this.clearPending();
+  }
+
+  /** A page started or stopped recording a meeting. */
+  setRecording(page: MeetingPage, recording: boolean): void {
+    if (recording) this.recordingPages.add(page);
+    else this.recordingPages.delete(page);
     this.prompter.setRecording(this.recordingPages.size > 0, this.now());
+  }
+
+  /** A page closed or went to another address: it neither records nor listens. */
+  pageGone(page: MeetingPage): void {
+    this.listen(page, false);
+    this.setRecording(page, false);
   }
 
   start(): void {
@@ -584,6 +650,76 @@ export class MeetingDetection {
       }, 3_000).unref?.();
     }
     this.prompter.observe([], this.now());
+  }
+
+  private present(prompt: MeetingPrompt): ShownPrompt {
+    const app = prompt.app.id;
+    this.options.log(
+      `Meeting detection: asked ${prompt.kind === "record" ? "to record a call" : "to stop recording"} (${app}).`,
+    );
+    let open = true;
+    const shown = this.options.view.show(prompt, (outcome) => {
+      if (!open) return;
+      open = false;
+      this.prompter.dismissed(prompt);
+      this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
+      if (outcome === "chosen") this.deliver(promptRequest(prompt));
+    });
+    return {
+      close: () => {
+        if (!open) return;
+        open = false;
+        this.options.log(`Meeting detection: took the question back (${app}).`);
+        shown.close();
+      },
+    };
+  }
+
+  /** Bring the window up and give the choice to a page, waiting briefly for one if none listens. */
+  private deliver(request: DesktopMeetingRequest): void {
+    this.clearPending();
+    try {
+      this.options.reveal();
+    } catch (error) {
+      this.options.log("Meeting detection: couldn't bring the window up.", error);
+    }
+    if (this.send(request)) return;
+    const timer = setTimeout(() => {
+      this.pending = null;
+      this.options.log("Meeting detection: no page took the choice in time.");
+    }, REQUEST_WAIT_MS);
+    timer.unref?.();
+    this.pending = { request, timer };
+  }
+
+  /** Whether a page took it. Stopping goes to the pages that record. */
+  private send(request: DesktopMeetingRequest): boolean {
+    const pages = this.livePages();
+    const recording = pages.filter((page) => this.recordingPages.has(page));
+    if (request.kind === "stop" && recording.length > 0) {
+      for (const page of recording) page.send(DESKTOP_IPC.meetingDetectionRequest, request);
+      return true;
+    }
+    const page = this.options.chooseTarget ? this.options.chooseTarget(pages) : pages.at(-1);
+    if (!page) return false;
+    page.send(DESKTOP_IPC.meetingDetectionRequest, request);
+    return true;
+  }
+
+  private livePages(): MeetingPage[] {
+    for (let index = this.pages.length - 1; index >= 0; index -= 1) {
+      if (this.pages[index]!.isDestroyed()) this.pages.splice(index, 1);
+    }
+    return [...this.pages];
+  }
+
+  private clearPending(): void {
+    if (this.pending) clearTimeout(this.pending.timer);
+    this.pending = null;
+  }
+
+  private changed(): void {
+    for (const listener of this.listeners) listener();
   }
 
   private now(): number {
@@ -617,7 +753,7 @@ export class MeetingDetection {
         windowsHide: true,
       });
     } catch (error) {
-      this.options.log("Call detection could not start its helper.", error);
+      this.options.log("Meeting detection: couldn't start its helper.", error);
       this.scheduleRestart();
       return;
     }
@@ -635,10 +771,11 @@ export class MeetingDetection {
         if (event) this.receive(event);
       }
     });
-    child.on("error", (error) => this.options.log("Call detection helper failed.", error));
-    child.on("exit", () => {
+    child.on("error", (error) => this.options.log("Meeting detection: its helper failed.", error));
+    child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.child = null;
+      this.options.log(`Meeting detection: its helper exited (${signal ?? code}).`);
       this.prompter.observe([], this.now());
       this.scheduleRestart();
     });
@@ -651,7 +788,7 @@ export class MeetingDetection {
       this.prompter.observe(event.users, this.now());
       return;
     }
-    this.options.log(`Call detection: ${event.code}: ${event.message}`);
+    this.options.log(`Meeting detection: ${event.code}: ${event.message}`);
     this.setProblem(PROBLEMS[event.code] ?? "Calls can't be noticed on this computer right now.");
   }
 
@@ -669,6 +806,12 @@ export class MeetingDetection {
   private setProblem(problem: string | null): void {
     if (problem === this.problem) return;
     this.problem = problem;
-    this.options.onChange();
+    this.changed();
   }
 }
+
+const OUTCOMES: Record<MeetingPromptOutcome, string> = {
+  chosen: "the person chose it",
+  dismissed: "the person closed the question",
+  expired: "the question timed out",
+};

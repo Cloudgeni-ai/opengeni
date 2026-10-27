@@ -30,7 +30,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { getDesktopBridge, hasDesktopCapability } from "@opengeni/sdk/desktop-bridge";
+import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult;
@@ -241,8 +241,9 @@ export function MeetingRecorderProvider({
 const NO_FINISHED: readonly string[] = [];
 
 /**
- * The desktop app's call notifications: "Record" opens Meetings and starts
- * recording the call; "Stop" (the call ended) stops and opens the meeting.
+ * The desktop app's meeting card: "Record" opens Meetings and starts
+ * recording the call; "Stop recording" (the call ended) stops and opens the
+ * meeting.
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
@@ -254,11 +255,9 @@ function useDesktopMeetingRequests(
   });
   useEffect(() => {
     // The bridge itself, not the app layer's helper, which would bring every
-    // contract into this module, mounted above a host's routes.
-    const bridge = getDesktopBridge();
-    const detection = hasDesktopCapability(bridge, "meetingDetection")
-      ? bridge?.meetingDetection
-      : undefined;
+    // contract into this module, mounted above a host's routes. Any Electron
+    // app that embeds these pages can offer it, not only the Opengeni app.
+    const detection = getDesktopMeetingDetection();
     if (!detection) return;
     return detection.onRequest((request) => {
       const recorder = store.get();
