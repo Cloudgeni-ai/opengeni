@@ -459,6 +459,7 @@ export {
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,
+  parseSessionReference,
   parseSandboxLink,
   SESSION_SCOPE_HEADER,
 } from "./message-links";

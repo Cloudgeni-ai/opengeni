@@ -1055,6 +1055,8 @@ function CustomComposer({ sessionComposer, attachments, effectiveControl }) {
               <Composer.Controls>
                 <Composer.AttachButton />
                 <InsertTranscript />
+                {/* Keeps Pause's room while nothing is working, so the row never jumps. */}
+                <Composer.PauseButtonSlot />
               </Composer.Controls>
               <Composer.Actions>
                 <Composer.PauseButton />

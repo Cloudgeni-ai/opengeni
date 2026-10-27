@@ -8928,6 +8928,7 @@ export class OpenGeniClient {
     const query = new URLSearchParams();
     for (const key of [
       "sourceSessionId",
+      "includeSubSessions",
       "q",
       "kind",
       "sort",

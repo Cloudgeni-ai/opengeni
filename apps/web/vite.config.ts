@@ -66,11 +66,33 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Relative times, disabled-control reasons and section variants
+              // are shared by settings, sign-in methods and the session
+              // retention control, never by the first page. The web host's
+              // entry-aware merge otherwise folds them into a chunk startup
+              // needs for the organization model, so keep them in a leaf.
+              name: "row-detail-primitives",
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|disabled-reason|section-variant)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Pure hash primitives for secret generation, TOTP and editable
               // artifact digests. Keep them in a leaf chunk so entry-aware
               // merging cannot fold them into chunks the session route loads.
               name: "noble-hashes",
               test: /[\\/]@noble[\\/]hashes[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // Markdown syntax-tree helpers build their node tests with
+              // `convert` at module load (for example mdast's phrasing test).
+              // The markdown renderer and its lazy math plugins share them,
+              // so keep the dependency-free predicate builder in a leaf chunk
+              // that never sits in a cycle with the chunks that call it.
+              name: "unist-util-is",
+              test: /[\\/]unist-util-is[\\/]/,
               includeDependenciesRecursively: false,
               priority: 22,
             },

@@ -64,7 +64,8 @@ import {
   type AccountReach,
   type ModelsScopeLabels,
 } from "@opengeni/react/app/components/models/models-ui";
-import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
+import { OpenGeniCreditsRow } from "@/components/models/opengeni-credits-row";
+import type { OpenGeniCredits } from "@/lib/opengeni-credits";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
   SuperGrokRow,

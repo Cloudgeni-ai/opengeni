@@ -48,6 +48,22 @@ pub struct HandoverManifest {
     /// instead of running the ops again.
     #[serde(default)]
     pub lost_markers: Vec<CarriedMarker>,
+    /// Control delivery tokens Opengeni still holds that no delivery used.
+    /// The successor answers the same subjects, so it takes them over;
+    /// otherwise every call Opengeni makes with one right after the update
+    /// would fail with an unknown outcome. Added once every link stopped.
+    #[serde(default)]
+    pub reply_leases: Vec<CarriedReplyLeases>,
+}
+
+/// The unused control delivery tokens of one reply scope (an exact link
+/// subject), carried to the successor image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedReplyLeases {
+    pub api_url: Option<String>,
+    pub connection_id: String,
+    pub subject_prefix: String,
+    pub leases: Vec<crate::rpc_replay::CarriedLease>,
 }
 
 /// Why a carried op is gone.
@@ -149,6 +165,18 @@ pub fn write_manifest(path: &Path, manifest: &HandoverManifest) -> std::io::Resu
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temporary, path)
+}
+
+/// Adds the unused control delivery tokens to the manifest already written
+/// at `path` for the same `exec`.
+///
+/// # Errors
+///
+/// The manifest could not be read or written again.
+pub fn carry_reply_leases(path: &Path, leases: Vec<CarriedReplyLeases>) -> std::io::Result<()> {
+    let mut manifest = read_manifest(path).map_err(std::io::Error::other)?;
+    manifest.reply_leases = leases;
+    write_manifest(path, &manifest)
 }
 
 /// Why an inherited handover could not be read.
@@ -306,6 +334,7 @@ mod tests {
                 reason: CarriedReason::Released,
                 remaining_ms: 1_800_000,
             }],
+            reply_leases: Vec::new(),
         };
         write_manifest(&path, &manifest).unwrap();
         #[cfg(unix)]
@@ -315,6 +344,46 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert_eq!(read_manifest(&path).unwrap(), manifest);
+
+        let leases = vec![CarriedReplyLeases {
+            api_url: Some("https://opengeni.example".into()),
+            connection_id: "default".into(),
+            subject_prefix: "agent.w.a.connection.instance".into(),
+            leases: vec![crate::rpc_replay::CarriedLease {
+                token: "00000000-0000-4000-8000-000000000000".into(),
+                issued_at: std::time::Duration::from_millis(1_500),
+                expires_at: std::time::Duration::from_millis(241_500),
+            }],
+        }];
+        carry_reply_leases(&path, leases.clone()).unwrap();
+        let carried = read_manifest(&path).unwrap();
+        assert_eq!(carried.reply_leases, leases);
+        assert_eq!(
+            HandoverManifest {
+                reply_leases: Vec::new(),
+                ..carried
+            },
+            manifest,
+            "only the tokens are added"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         assert!(manifest.env_value(&path).ends_with("#n1#"));
+    }
+
+    #[test]
+    fn a_manifest_from_an_image_without_carried_tokens_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MANIFEST_FILE);
+        std::fs::write(
+            &path,
+            br#"{"nonce":"n1","from_version":"0.0.0","connection_instance_id":"instance","ops":[]}"#,
+        )
+        .unwrap();
+        assert!(read_manifest(&path).unwrap().reply_leases.is_empty());
     }
 }

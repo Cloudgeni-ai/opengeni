@@ -277,6 +277,10 @@ export function checkBillingPortalSurface(file: string, text: string, out: Findi
 const GITHUB_APP_MANIFEST_FILE = "packages/github/src/index.ts";
 const GITHUB_WEBHOOK_RECEIVER_FILE = "packages/core/src/domain/event-triggers/github-events.ts";
 const GITHUB_WEBHOOK_PATH = ["/v1", "webhooks", "github"].join("/");
+/** A template literal whose only content is one base-URL variable followed by the receiver path. */
+const GITHUB_WEBHOOK_URL_TEMPLATE = new RegExp(
+  `\`\\$\\{[A-Za-z_$][\\w$]*\\}${GITHUB_WEBHOOK_PATH.replaceAll("/", "\\/")}\``,
+);
 
 /**
  * The GitHub App manifest may advertise webhooks only to the event-source
@@ -290,7 +294,7 @@ export function checkGithubWebhookAdvertising(
   out: Finding[],
 ): void {
   if (file !== GITHUB_APP_MANIFEST_FILE || !text.includes("hook_attributes")) return;
-  const advertisesReceiver = text.includes(`\${base}${GITHUB_WEBHOOK_PATH}\``);
+  const advertisesReceiver = GITHUB_WEBHOOK_URL_TEMPLATE.test(text);
   const receiverSignedAndIdempotent =
     receiver.includes('"x-hub-signature-256"') && receiver.includes('"x-github-delivery"');
   if (advertisesReceiver && receiverSignedAndIdempotent) return;

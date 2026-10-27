@@ -133,7 +133,7 @@ export function SessionChromeCapabilityCard({
     ? "Connected Machines aren't available on this deployment."
     : step === "computer" && !offerThisComputer && !fleet.canRead
       ? "You don't have access to this workspace's machines."
-      : step === "computer" && !offerThisComputer && !fleet.canManage
+      : step === "computer" && !offerThisComputer && !fleet.canConnect
         ? "Ask a workspace admin to connect a computer."
         : null;
 
@@ -221,7 +221,7 @@ export function SessionChromeCapabilityCard({
           ) : null
         }
       />
-      {fleet.canManage && !unavailableOnDeployment ? (
+      {fleet.canConnect && !unavailableOnDeployment ? (
         <ConnectMachineDialog
           open={setupOpen}
           onOpenChange={(open) => {
@@ -237,6 +237,7 @@ export function SessionChromeCapabilityCard({
             context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind ===
             "personal"
           }
+          canShareWithWorkspace={fleet.canManage}
           defaultScope="user"
         />
       ) : null}

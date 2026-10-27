@@ -79,6 +79,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "mathjax-full": "^3.2.2",
     "thinking-orbs": "^0.3.1"
   },
   "devDependencies": {

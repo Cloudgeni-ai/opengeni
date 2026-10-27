@@ -452,18 +452,23 @@ impl GnomeScreen {
 
     /// Delivers one pointer, scroll or keyboard input in frame pixel coordinates.
     pub(crate) async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
-        // Resolve keys before anything is sent, so unsupported text fails cleanly.
+        // Resolve keys before anything is sent, so unsupported text or keys
+        // fail cleanly: the compositor silently drops a keysym its layout
+        // lacks while reporting success.
         let keysyms = match input.event.as_ref() {
-            Some(v1::desktop_input::Event::Key(key)) if key.is_text => {
+            Some(v1::desktop_input::Event::Key(key)) => {
                 let display = self.layout_display.clone();
-                let text = key.key.clone();
+                let (value, is_text) = (key.key.clone(), key.is_text);
                 tokio::task::spawn_blocking(move || {
-                    linux_layout_text_keysyms(display.as_deref(), &text)
+                    if is_text {
+                        linux_layout_text_keysyms(display.as_deref(), &value)
+                    } else {
+                        linux_named_key_chord_keysyms(display.as_deref(), &value)
+                    }
                 })
                 .await
                 .map_err(|error| os("keyboard layout task", error))??
             }
-            Some(v1::desktop_input::Event::Key(key)) => linux_named_key_chord_keysyms(&key.key)?,
             Some(_) => Vec::new(),
             None => return Err(PlatformError::os("DesktopInput carried no event")),
         };

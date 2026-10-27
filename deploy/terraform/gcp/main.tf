@@ -27,6 +27,43 @@ resource "google_compute_subnetwork" "this" {
   region        = var.region
 }
 
+# Private GKE nodes and pods need public egress for model-provider and external
+# Temporal endpoints. Existing networks keep their operator-owned NAT/routing.
+resource "google_compute_router" "private_nodes" {
+  count   = var.network.create_network && var.gke.enable_private_nodes ? 1 : 0
+  name    = "${var.name_prefix}-private-nodes"
+  region  = var.region
+  network = google_compute_network.this[0].id
+}
+
+resource "google_compute_router_nat" "private_nodes" {
+  count                              = var.network.create_network && var.gke.enable_private_nodes ? 1 : 0
+  name                               = "${var.name_prefix}-private-nodes"
+  region                             = var.region
+  router                             = google_compute_router.private_nodes[0].name
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+
+  # Every pod on a node shares the node's NAT ports, and agent workloads hold
+  # many concurrent connections to the same model-provider endpoints. Grow the
+  # per-node allocation on demand instead of capping it at the 64-port default,
+  # and log only allocation failures so exhaustion is visible.
+  enable_dynamic_port_allocation      = true
+  enable_endpoint_independent_mapping = false
+  min_ports_per_vm                    = 64
+  max_ports_per_vm                    = 65536
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+
+  subnetwork {
+    name                    = google_compute_subnetwork.this[0].id
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
+}
+
 resource "google_project_service" "servicenetworking" {
   count              = local.postgres_private_ip_enabled ? 1 : 0
   project            = var.project_id
@@ -178,10 +215,21 @@ resource "google_secret_manager_secret" "runtime" {
   }
 }
 
-resource "google_project_iam_member" "runtime_secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.runtime.email}"
+resource "google_secret_manager_secret_iam_member" "runtime_secret_accessor" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.runtime.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# Operator-named extra secrets, each bound individually. Never grant
+# secretAccessor through google_project_iam_member: that reads every secret.
+resource "google_secret_manager_secret_iam_member" "runtime_readable_secrets" {
+  for_each  = toset(var.runtime_readable_secret_ids)
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_project_iam_member" "gke_admin" {

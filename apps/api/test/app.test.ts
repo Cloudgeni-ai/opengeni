@@ -451,6 +451,7 @@ describe("API helpers", () => {
     expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
     expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
     expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
+    expect(temporalOverlapPolicy("steer")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
   });
 
   test("only creates a schedule after update when Temporal reports not found", () => {
