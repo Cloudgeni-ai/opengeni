@@ -24,7 +24,7 @@ import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
 import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
-import { withOpeningContext } from "./lib/message-context";
+import { createWithOpeningContext } from "./lib/message-context";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -1830,13 +1830,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // spoken turn does.
       const hostContext =
         attempt.request.startMode === "realtime" ? undefined : hostMessageContext.current?.();
-      const created = await client.createSession(
-        workspaceId,
-        withOpeningContext(
-          attempt.request,
-          hostContext,
-          hostContext ? hostMessageContextTools.current?.() : undefined,
-        ),
+      const created = await createWithOpeningContext(
+        (request) => client.createSession(workspaceId, request),
+        attempt.request,
+        hostContext,
+        hostContext ? hostMessageContextTools.current?.() : undefined,
       );
       // Do not clear a newer concurrent attempt that replaced this one.
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {

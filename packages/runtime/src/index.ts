@@ -2320,6 +2320,12 @@ export type BuildAgentOptions = {
   /** Explicit provider-contained progressive tool-disclosure strategy. */
   lazyToolTransport?: LazyToolTransport;
   /**
+   * Tools the turn's opening context is for (a new session's frozen opening
+   * tools). The turn's first model step loads them the way a tool_search by
+   * name does, without a provider call; the tool block is unchanged.
+   */
+  openingToolNames?: readonly string[];
+  /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
    * search, deferred invocation, and catalog-dependent runtime join it. A host
@@ -3612,7 +3618,7 @@ function maybeInstallLazyToolTransport(
   const harnessControlServer = mcpServers.find(
     (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
   );
-  installLazyToolRuntime(
+  const lazyRuntime = installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
     mcpServerIds,
@@ -3675,6 +3681,7 @@ function maybeInstallLazyToolTransport(
       return accounts;
     },
   );
+  if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -10700,6 +10707,7 @@ function runScopedRunner(
 }
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
+export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {

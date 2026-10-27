@@ -11,7 +11,7 @@ import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
   newSessionKnowledgeSearchTools,
-  newSessionModelContextTools,
+  newSessionOpeningTools,
   resolveSessionAgentConfigForCreate,
 } from "../src/domain/agent-config-resolution";
 
@@ -110,32 +110,30 @@ describe("new-session Knowledge search selection", () => {
 });
 
 describe("new-session tools named by the opening context", () => {
-  test("a selected first-party tool joins the first request; others are ignored", () => {
+  test("only selected first-party tools count; the session's tools are untouched", () => {
     const tools: ToolRef[] = [
       { kind: "mcp", id: "opengeni", eager: ["knowledge_search"] },
       { kind: "mcp", id: "files" },
     ];
+    const before = structuredClone(tools);
     expect(
-      newSessionModelContextTools(
+      newSessionOpeningTools(
         tools,
         ["knowledge_search", "excel_run"],
-        ["excel_run", "session_create", "not_a_tool"],
+        ["excel_run", "session_create", "not_a_tool", "excel_run"],
       ),
-    ).toEqual([
-      { kind: "mcp", id: "opengeni", eager: ["knowledge_search", "excel_run"] },
-      tools[1],
-    ]);
+    ).toEqual(["excel_run"]);
+    expect(tools).toEqual(before);
   });
 
-  test("leaves the tools exactly as they were when nothing selected is named", () => {
+  test("names nothing outside the opengeni ref's own selection", () => {
     const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
-    expect(newSessionModelContextTools(tools, ["excel_run"], undefined)).toBe(tools);
-    expect(newSessionModelContextTools(tools, ["excel_run"], [])).toBe(tools);
-    expect(newSessionModelContextTools(tools, [], ["excel_run"])).toBe(tools);
+    expect(newSessionOpeningTools(tools, ["excel_run"], undefined)).toEqual([]);
+    expect(newSessionOpeningTools(tools, ["excel_run"], [])).toEqual([]);
+    expect(newSessionOpeningTools(tools, [], ["excel_run"])).toEqual([]);
+    expect(newSessionOpeningTools([], ["excel_run"], ["excel_run"])).toEqual([]);
     const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: ["goal_set"] }];
-    expect(newSessionModelContextTools(narrowed, ["excel_run"], ["excel_run"])).toBe(narrowed);
-    const allEager: ToolRef[] = [{ kind: "mcp", id: "opengeni", eager: true }];
-    expect(newSessionModelContextTools(allEager, ["excel_run"], ["excel_run"])).toEqual(allEager);
+    expect(newSessionOpeningTools(narrowed, ["excel_run"], ["excel_run"])).toEqual([]);
   });
 });
 

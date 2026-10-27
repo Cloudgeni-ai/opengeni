@@ -15,9 +15,9 @@ export type MessageContextItem = Readonly<{
   detail?: string | undefined;
   /**
    * Tools this context is for, such as the tool that reaches the open
-   * document it names. A new chat that starts with this context has them in
-   * its first model request, so the agent can use them right away; context
-   * that arrives later never changes a chat's tools.
+   * document it names. A new chat that starts with this context loads them
+   * before its first model request, so the agent can use them right away;
+   * context that arrives later never loads tools.
    */
   tools?: readonly string[] | undefined;
 }>;
@@ -160,4 +160,30 @@ export function withOpeningContext<T extends object>(
     modelContext: context,
     ...(tools?.length ? { modelContextTools: [...tools] } : {}),
   };
+}
+
+/**
+ * Create a new chat with the page's context. A session proxy from before
+ * `modelContextTools` refuses that field before anything is created; the chat
+ * is then created with the context alone, as before.
+ */
+export async function createWithOpeningContext<T extends object, R>(
+  create: (request: T | (T & { modelContext: string; modelContextTools?: string[] })) => Promise<R>,
+  request: T,
+  context: string | undefined,
+  tools: readonly string[] | undefined,
+): Promise<R> {
+  const withTools = withOpeningContext(request, context, tools);
+  try {
+    return await create(withTools);
+  } catch (error) {
+    const refused =
+      "modelContextTools" in withTools &&
+      typeof error === "object" &&
+      error !== null &&
+      (error as { status?: unknown }).status === 400 &&
+      (error as { code?: unknown }).code === "create_field_not_allowed";
+    if (!refused) throw error;
+    return await create(withOpeningContext(request, context, undefined));
+  }
 }

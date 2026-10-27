@@ -67,6 +67,7 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { withSandboxStartupPhases } from "./sandbox-startup-phase";
 import {
+  openingToolsFromTurnMetadata,
   VideoGenerationRejectedResult,
   resolveAgentToolFamilies,
   type VideoGenerationPolicy,
@@ -886,6 +887,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
+        // A new session's opening tools load in its first turn's first model
+        // step, as a search by name would; the tool block stays unchanged.
+        openingToolNames: openingToolsFromTurnMetadata(turn.metadata),
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
           onUnavailable: () =>

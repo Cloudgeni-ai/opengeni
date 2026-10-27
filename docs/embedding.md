@@ -183,12 +183,14 @@ context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
 An item may also name the first-party `tools` it is for, such as the tool that
 reaches the open document it describes. A new chat that starts with that item
-has those tools in its first model request, so the agent can use them without
-searching first. This is decided once, when the chat is created: context that
-arrives later never changes a chat's tools, and names outside the chat's tool
-selection are ignored, so it grants nothing. Through the HTTP API, send the
-same names as `modelContextTools` next to `modelContext` when creating a
-session; the session proxy forwards them only with the browser's own context.
+loads those tools before its first model request, as a tool search by name
+would, so the agent can call them in its first step without searching. The
+chat's instructions and tool list stay the same as any other chat's, and its
+timeline shows that tool search. This is decided once, when the chat is
+created: context that arrives later never loads tools, and names outside the
+chat's tool selection are ignored, so it grants nothing. Through the HTTP API,
+send the same names as `modelContextTools` next to `modelContext` when creating
+a session; the session proxy forwards them only with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
 Links in agent messages to Opengeni objects (files, Sites, editable
