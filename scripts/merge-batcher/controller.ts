@@ -21,7 +21,14 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
+import {
+  plan,
+  latestRun,
+  infrastructureRetryReason,
+  settledCiFinished,
+  unseenRunHoldsSlot,
+  type Action,
+} from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 import { proveHeadRefresh } from "./head-refresh";
@@ -35,6 +42,7 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
+  | { kind: "cancel"; runs: Run[] }
   | { kind: "announce"; number: number; body: string; key: string; commentKey?: string }
   | { kind: "park"; number: number; body: string; key: string };
 /** Final read-only validation found contention; no transaction was attempted. */
@@ -159,6 +167,8 @@ export class LiveReader implements Reader {
     // Bound historical provider lookups independently of cache cardinality.
     // Persist a round-robin cursor so restarts do not repeatedly sample only
     // the oldest refs. Unobserved no-run refs remain conservative reservations.
+    // Settled refs the ledger already records as finished need no lookup, so
+    // the bounded sample covers only refs whose outcome is still unknown.
     const historical = candidates
       .filter(
         (candidate) =>
@@ -167,12 +177,15 @@ export class LiveReader implements Reader {
           ledger.invalidated.includes(candidate.manifest.batchId),
       )
       .sort((a, b) => a.branch.localeCompare(b.branch));
+    const unresolved = historical.filter(
+      (candidate) => !settledCiFinished(ledger, candidate.manifest.batchId),
+    );
     const cursorKey = `history-cursor:${this.config.repository}:${this.config.branchPrefix}`;
     const savedCursor = await this.manifestCache.get<number>(cursorKey);
     const cursor = Number.isSafeInteger(savedCursor) && savedCursor! >= 0 ? savedCursor! : 0;
     const selected = new Set<string>();
-    for (let i = 0; i < Math.min(8, historical.length); i++)
-      selected.add(historical[(cursor + i) % historical.length]!.manifest.batchId);
+    for (let i = 0; i < Math.min(8, unresolved.length); i++)
+      selected.add(unresolved[(cursor + i) % unresolved.length]!.manifest.batchId);
     const archivedIds = new Set(historical.map((candidate) => candidate.manifest.batchId));
     for (const candidate of candidates) {
       const archived = archivedIds.has(candidate.manifest.batchId);
@@ -193,11 +206,11 @@ export class LiveReader implements Reader {
         if (refresh) candidate.headRefresh = refresh;
       }
     }
-    if (historical.length)
-      await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
-    if (historical.length > selected.size)
+    if (unresolved.length)
+      await this.manifestCache.set(cursorKey, (cursor + selected.size) % unresolved.length);
+    if (unresolved.length > selected.size)
       observationWarnings.push(
-        `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
+        `Historical CI scan sampled ${selected.size}/${unresolved.length} unresolved refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
     const failedRoot = candidates.some((candidate) => {
       const run = latestRun(candidate, this.config);
@@ -212,7 +225,10 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // A ready priority fix needs exact-base evidence to decide preemption.
+      ...(failedRoot || admission.priority?.length
+        ? { baseCI: await this.github.baseCI(baseSha) }
+        : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
@@ -222,8 +238,9 @@ export class LiveReader implements Reader {
       ledger,
       observationWarnings,
       // The planner separately counts live runs and durable missing-run
-      // reservations. A full provider slot must not veto a safe root landing.
-      // Publication/retry rechecks provider capacity at the effect boundary.
+      // reservations. This headroom gates only publication and retry; the
+      // planner lands a trusted green root regardless of it. Publication/retry
+      // recheck provider capacity at the effect boundary.
       mainBusy:
         this.config.mode === "shadow"
           ? false
@@ -239,10 +256,7 @@ export class LiveReader implements Reader {
                     headSha: candidate.manifest.tipSha,
                     runId: run.id,
                   }));
-                if (
-                  !latestRun(candidate, this.config) &&
-                  ledger.missingRuns[candidate.manifest.batchId]?.status !== "released"
-                )
+                if (unseenRunHoldsSlot(candidate, ledger, this.config))
                   return [
                     ...reservations,
                     { branch: candidate.branch, headSha: candidate.manifest.tipSha },
@@ -362,7 +376,10 @@ export class Controller {
         }
       }
     } else if (action.kind === "record") ledger = action.ledger;
-    else if (action.kind === "land") {
+    else if (action.kind === "abandon") {
+      ledger = action.ledger;
+      if (action.runs.length) effect = { kind: "cancel", runs: action.runs };
+    } else if (action.kind === "land") {
       const manifest = await this.git.inspect(action.candidate.manifest.tipSha);
       if (!(await this.git.ancestor(observation.baseSha, manifest.tipSha)))
         throw new Error("Landing would not fast-forward");

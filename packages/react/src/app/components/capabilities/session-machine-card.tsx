@@ -266,7 +266,7 @@ export function SessionMachineCapabilityCard({
             ? "Choose where this chat runs."
             : reachable.length > 0
               ? "You can't change where this chat runs."
-              : fleet.canManage
+              : fleet.canConnect
                 ? null
                 : machines.length > 0
                   ? "Turn on one of the machines below to use it here."
@@ -282,7 +282,7 @@ export function SessionMachineCapabilityCard({
     !thisComputerReady(desktop.computer.status) &&
     !unavailableOnDeployment &&
     fleet.canRead;
-  const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
+  const connectAnother = fleet.canConnect && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
     useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
   // While the agent's request can be allowed here, everything else is one
@@ -342,7 +342,7 @@ export function SessionMachineCapabilityCard({
             ? ""
             : offerThisComputer
               ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
-              : fleet.canManage
+              : fleet.canConnect
                 ? "You can remove a connected machine anytime from Machines."
                 : ""
         }
@@ -425,7 +425,7 @@ export function SessionMachineCapabilityCard({
                       key={chromeMachine.sandboxId}
                       machine={chromeMachine}
                       workspaceId={workspaceId}
-                      canManage={fleet.canManage}
+                      canManage={fleet.canManageMachine(chromeMachine)}
                       refresh={fleet.refresh}
                       onReconnect={() => openSetup(chromeMachine)}
                     />
@@ -454,7 +454,7 @@ export function SessionMachineCapabilityCard({
           )
         }
       />
-      {fleet.canManage && !unavailableOnDeployment ? (
+      {fleet.canConnect && !unavailableOnDeployment ? (
         <ConnectMachineDialog
           open={setupOpen}
           onOpenChange={(open) => {
@@ -467,6 +467,7 @@ export function SessionMachineCapabilityCard({
           machinesLoading={fleet.loading}
           machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
+          canShareWithWorkspace={fleet.canManage}
           defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {

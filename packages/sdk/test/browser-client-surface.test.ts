@@ -75,7 +75,6 @@ const legacyBrowserUnusedMethods = [
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
   "undoGovernedLearningActivation",
-  "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
   // The session agent-configuration panel (web milestone M5) adopts this.
   "verifyPersonalGitHubRepositorySelections",
@@ -196,6 +195,15 @@ const deprecatedTranscriptionRecordingMethods = [
   "uploadTranscriptionRecordingChunk",
 ];
 
+// #6256 deleted the unreachable web components that called these (the Atlassian
+// source dialog, schedule Slack posting and sandbox artifact download). The
+// public SDK methods stay for existing callers.
+const retiredDeadWebComponentMethods = [
+  "listScheduledTaskSlackChannels",
+  "publishSandboxFileArtifact",
+  "saveAtlassianSources",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -265,6 +273,7 @@ describe("browser client runtime surface", () => {
         ...pendingModelAccountMethods,
         ...chatShareLinkMethods,
         ...deprecatedTranscriptionRecordingMethods,
+        ...retiredDeadWebComponentMethods,
       ].sort(),
     );
   });

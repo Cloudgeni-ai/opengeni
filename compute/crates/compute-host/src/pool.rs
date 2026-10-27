@@ -87,8 +87,10 @@ use crate::protocol::{ImageId, MAX_MEMORY_MIB, MAX_VCPUS, TemplateState, Templat
 use crate::rootfs::Cache;
 use crate::step::{DiskWatch, take_written};
 
-/// Version of the template layout; a change rebuilds every template.
-const FORMAT: u32 = 2;
+/// Version of the template layout; a change rebuilds every template. 3:
+/// drives take discards, which a template's clones get only from a
+/// template booted with them, since a restore keeps its device's features.
+const FORMAT: u32 = 3;
 /// The inputs file in a template's directory.
 const INPUTS: &str = "template.json";
 /// The file in a template VM's directory naming the ordinal it runs as.

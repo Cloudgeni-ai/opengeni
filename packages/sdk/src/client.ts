@@ -841,6 +841,7 @@ import {
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 function sessionListQuery(options: {
   siteAccessId?: string;
@@ -8986,6 +8987,7 @@ export class OpenGeniClient {
     const query = new URLSearchParams();
     for (const key of [
       "sourceSessionId",
+      "includeSubSessions",
       "q",
       "kind",
       "sort",
@@ -12464,12 +12466,6 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
         ? new Uint8Array(await body.arrayBuffer())
         : new Uint8Array(body);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const owned = Uint8Array.from(bytes);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

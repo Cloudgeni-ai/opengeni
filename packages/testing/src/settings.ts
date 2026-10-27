@@ -83,6 +83,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     nativeAppSchemes: ["opengeni"],
     nativeAppIds: ["ai.opengeni.app"],
     managedAuthNewSignupsEnabled: true,
+    managedAuthPasskeySignUpEnabled: false,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",

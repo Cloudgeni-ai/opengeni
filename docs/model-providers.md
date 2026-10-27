@@ -428,12 +428,18 @@ interface ConfiguredModel {
   capabilities: ModelCapabilitiesV1;
   pricing?: ModelPricingScheduleV1;
   definitionVersion: `sha256:${string}`;
+  residency: ModelResidencyV1;
 }
 ```
 
 The built-in OpenAI or Azure provider remains configured by the existing flat
 settings. Additional providers are declared with
 `OPENGENI_MODEL_PROVIDERS_JSON`.
+
+`residency` records where the route processes data and how that is known.
+Registry providers may declare it; every other provider kind uses a code-owned
+rule, and undeclared routes are unknown, never EU. See
+[EU-only inference](eu-only-inference.md#residency-record).
 
 ## Deployment catalog source and cost policy
 

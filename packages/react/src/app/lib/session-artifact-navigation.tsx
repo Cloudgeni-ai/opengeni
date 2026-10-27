@@ -80,19 +80,39 @@ export function useAppLinkResolver(): OpenGeniLinkResolver {
 
 /**
  * {@link useAppLinkResolver} inside one workspace's session: a workspace-less
- * `artifact:` file link opens that workspace's file page, as it does in the
- * agent's chat replies, so links in its questions and other session text
- * resolve the same way. The host's resolver still sees the link first.
+ * `artifact:` file link or `session:` chat link belongs to that workspace, as
+ * it does in the agent's chat replies, so links in its questions and other
+ * session text resolve the same way. The host's resolver still sees the link
+ * first. With `openSession`, a plain click on a chat link opens the chat here
+ * without reloading the app, while the link keeps the chat's page as its href,
+ * so ⌘/Ctrl-click and the context menu treat it as an ordinary page (a new
+ * tab, or the browser from the desktop app). An embed opens it beside the host.
  */
-export function useWorkspaceAppLinkResolver(workspaceId: string): OpenGeniLinkResolver {
+export function useWorkspaceAppLinkResolver(
+  workspaceId: string,
+  openSession?: (workspaceId: string, sessionId: string) => void,
+): OpenGeniLinkResolver {
+  const host = useOpenGeniLinkResolver();
   const app = useAppLinkResolver();
+  const opensBeside = useAppHost().navigation?.page?.opensBeside === true;
   return useMemo(
     () =>
-      chainLinkResolvers(app, (target) =>
-        target.kind === "file" && target.workspaceId === null
-          ? app({ ...target, workspaceId })
+      chainLinkResolvers(
+        host,
+        openSession && !opensBeside
+          ? (target) => {
+              if (target.kind !== "session") return null;
+              const workspace = target.workspaceId ?? workspaceId;
+              const href = openGeniConsolePath(target, workspace);
+              return href ? { href, open: () => openSession(workspace, target.sessionId) } : null;
+            }
           : null,
+        app,
+        (target) =>
+          (target.kind === "file" || target.kind === "session") && target.workspaceId === null
+            ? app({ ...target, workspaceId })
+            : null,
       ) ?? app,
-    [app, workspaceId],
+    [app, host, opensBeside, openSession, workspaceId],
   );
 }

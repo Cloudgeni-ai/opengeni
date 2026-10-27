@@ -69,6 +69,20 @@ enabling it changes no session's backend.
    in place, recording their version. It also takes two Postgres advisory
    locks (7231401 for its schema, and its leader lock); keep them free in
    a shared database.
+   Its connections give up on a database the network stops answering:
+   5 s to reach it, 10 s to open a connection in all, 15 s for data left
+   unacknowledged, and keepalives after a minute idle, under the idle
+   limit of cloud NAT gateways and load balancers. A connection string
+   can choose other values (`connect_timeout`, `tcp_user_timeout`,
+   `keepalives_idle`, `keepalives_interval`, `keepalives_retries`) but
+   not turn the bounds off: a zero for one of the four durations, and a
+   `keepalives_idle` of exactly 7200 (the library's default, which reads
+   as unset), get the bound. `keepalives=0` still turns keepalives off,
+   and `keepalives_retries=0` is kept as given. A
+   replica that has read no hosts from the database for a lease term
+   cannot tell which hosts renew: it answers creates and wakes 503
+   `unavailable` ("has not read its hosts from the store"), not
+   `no_capacity`.
 2. **Its keys.** API keys are `team key` lines in a Secret
    (`computeControl.keys.existingSecret`, entry `keys`); the service
    stores their digests at every start. Make one key for Opengeni's team
@@ -299,7 +313,9 @@ a reboot: keep them the way the host keeps its other firewall rules.
 `install.sh` checks the bundle against `SHA256SUMS`; installs the packages
 the agent runs (iproute2, nftables, e2fsprogs, xfsprogs); installs the
 release under `/opt/compute/releases/<version>` behind
-`/opt/compute/current`; downloads Firecracker, its jailer and the guest
+`/opt/compute/current`, once its `compute-host` has run on this host (a
+binary that cannot, say one built for another C library, is refused
+before anything switches to it); downloads Firecracker, its jailer and the guest
 kernel that `pins.env` names, checking each SHA-256; formats and mounts the
 state volume at `/var/lib/compute` the first time and records its
 filesystem UUID; builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
@@ -314,8 +330,14 @@ installs three units:
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
   when the host's lease runs out, and the watchdog resets the machine if
-  the guard itself ends. An upgrade hands it over to the new release's
-  guard (below);
+  the guard itself ends or stalls. So that a host short of processors or
+  memory (guests holding more than it has, the swap file busy) does not
+  stall it into that reset, it runs at real-time priority, locks its own
+  memory in, and never waits on the journal (it drops log lines the
+  journal is too slow to take, and says how many) or on systemd. Locking
+  does not cover the pages of the files it reads, such as the lease file
+  on tmpfs, nor the kernel's own work for it.
+  An upgrade hands it over to the new release's guard (below);
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
@@ -357,6 +379,40 @@ Hosts check the gateway's certificate against the system's authorities;
 for a gateway with a certificate of a private authority, give each host
 `--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
 authority alone for agent links.
+
+### Runner pools
+
+GitHub Actions runner pools ([ADR 23](adr/0023-github-actions-runner-pools.md))
+reach compute through its E2B front door. In the chart:
+
+1. **The front door.** Set `computeControl.e2b.enabled` and give the
+   runner template a shape with room for a job's disk, for example
+   `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
+   where `runner` is a stored image built from
+   `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   It listens on its own port (3000) of the API Service, with the API's
+   certificate under `apiTls`, and network policy admits only the pools
+   and `e2b.ingressFrom`.
+2. **A key.** Add a team for the pools to `computeControl.keys`; its
+   sandboxes are its own. Put the key in a Secret (`COMPUTE_API_KEY`).
+3. **GitHub.** A GitHub App installed on the organization or repository,
+   with administration access to self-hosted runners (repository
+   `administration: write`, or organization `self-hosted runners: write`)
+   and, for warm templates, `contents: read`; or a token with the same
+   rights. Its private key (`app.pem`) or token (`GITHUB_TOKEN`) goes in a
+   Secret.
+4. **The pool**, an entry of `computeRunners.pools`: name, scope,
+   template, `minIdle` and `max`, the two Secrets, and optionally `warm`
+   (repository, branch, prepare command) and `cache` (bucket, its address
+   as runners reach it, a token Secret). The cache's Service must be
+   reachable from the hosts, so give it a LoadBalancer or an Ingress and
+   name that address in `cache.url`; the pods' identity
+   (`computeRunners.serviceAccount.annotations`) needs read and write on
+   the bucket.
+
+Workflows say `runs-on: <pool name>`, and with a warm template check out
+with `clean: false` so the prepared dependencies stay. A pool's log shows
+each job it takes, each runner it starts and ends, and each warm refresh.
 
 ## Hosts
 
@@ -420,7 +476,8 @@ authority alone for agent links.
   once it renews again; giving up on it would end every program they
   run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
   the service fences it (on GCP it resets the
-  instance, or finds it stopped or gone), then clears its sandboxes'
+  instance, or finds it stopped or gone, or restarted since: see below),
+  then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
   latest archived copy on its next request. It boots from that copy's
   files: its programs end and start afresh, and what it wrote since the
@@ -431,6 +488,19 @@ authority alone for agent links.
   host raises the `programs_lost` alarm for each sandbox whose memory it
   set aside, as a host does for a VM that died. Nothing has to be done by
   hand, except replacing the machine where no group does it.
+  A GCP host whose machine restarted (its watchdog reset it, or it
+  crashed) is given up on as soon as its lease lapses, with no second
+  reset and no wait: its agent writes the machine's boot to the
+  instance's `compute/boot` guest attribute as it starts, numbered one
+  past the boot named there before, and the service sees a boot numbered
+  higher there than the old registration named. The agent registers
+  only once it has written the boot (or given up, within ten seconds),
+  and names it only if the write was taken. The
+  host template turns guest attributes on (`enable-guest-attributes`) and
+  the service's role may read them
+  (`compute.instances.getGuestAttributes`); without either, the agent
+  logs that the metadata server refused the boot, and a restarted
+  machine is reset once more before its host rejoins, as before.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
   running any sandbox that moved (ADR 18). A host given up on stays in
@@ -675,6 +745,12 @@ before users move to compute from Modal:
   than its free space suggests. Writes outside the agent (logs, other
   programs on the volume) are not booked: keep `--disk-reserve-mib` above
   them and alert on free space early, for example below 20 %.
+  A sleeping sandbox's disk holds little more than its files use: the guest
+  trims its file system's free runs of 1 MiB or more before every pause, so
+  space it freed comes back to the volume
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Sandboxes whose VM
+  booted before a host had discards, or whose image's guest is older, keep
+  what they freed until their next fresh boot.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted
@@ -800,8 +876,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   check a guest takes no connection on, and after five in a row an error
   naming the sandbox (`guest took no connection on its notice port`).
   It then ends the VM as a crashed one: a `compute.alarm` for programs
-  lost, files kept, and the next wake boots from the disk. A host whose
-  guest image does not listen on the notice port must not set it.
+  lost, files kept, and the next wake boots from the disk. A guest that
+  halted or powered off says so first: Firecracker on x86 gives it no
+  way to power off, so its kernel's last line on its console
+  (`console.log`, after which come only the VMM's own lines) is
+  `reboot: System halted` or `reboot: Power off not available: System
+  halted instead`. Such a guest is ended at its first miss that counts,
+  within about 35 seconds, with the error `guest said it halted`. The
+  line alone ends nothing: a guest that still takes connections keeps
+  running whatever its console says. A host whose guest image does not
+  listen on the notice port must not set it.
   A check counts only if the guest could run all through it: no step
   paused it meanwhile, the guard did not freeze it, and the machine did
   not suspend. The guard says when it freezes the VMs, which it does on
@@ -857,6 +941,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   configuration stays):
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  A release whose binary does not run on the host is refused first, and
+  the running release, guard and agent are left as they are: the guard
+  handed over to a binary that cannot start would let the watchdog reset
+  the host.
   A guard running another binary (of another release, or one replaced
   in this one) is handed over to this one's by restarting its service.
   Opening or closing the watchdog feeds it (it stays armed), so the guard
@@ -969,6 +1057,23 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
   default); keep them public, as sandboxes can look up whatever they
   know.
+- **Private destinations only some sandboxes need.** Where only some
+  workloads should reach a private destination, such as CI jobs that
+  deploy to a private cluster's API, offer it under a name instead:
+  `--offer previews=k3s.internal:6443` in `COMPUTE_HOST_ARGS`, repeated
+  per destination (entries with one name make one offer). It is checked
+  and resolved as `--reach` is, but opens only to the sandboxes whose
+  create lists the name in `reach` (`"reach": ["previews"]`), in their
+  namespaces and, on the host, for their links' addresses alone; their
+  name servers alone answer its names. The host tells the control service
+  its offers' names, and placement puts such a sandbox only on a host that
+  offers every name it asks for: elsewhere its create answers 503 (no host
+  offers it). Grant each team the names its sandboxes may ask for on the
+  control service, `--team-reach TEAM=NAME`, repeated (in the chart,
+  `computeControl.extraArgs`); a create asking for one its team was not
+  given is refused with 400. A sandbox keeps its `reach` for life,
+  including on another host after a move, which must offer it too; one on
+  a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with

@@ -66,6 +66,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
         "./session-usage-limit-refusal",
         "./secret-use-approval-question",
         "./vault-provider-wire",
+        "./values",
       ],
     ],
     [

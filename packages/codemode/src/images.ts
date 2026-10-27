@@ -32,7 +32,7 @@ export async function materializeCodemodeImages(
 ): Promise<CodemodeLocalImage[]> {
   const blocks = result.content.filter((content) => content.type === "image");
   if (options.requireOne && blocks.length !== 1) {
-    throw new Error("Codemode browser screenshot must return exactly one image block");
+    throw new Error("A Codemode screenshot must return exactly one image block");
   }
   if (blocks.length === 0) return [];
   if (options.saveTo !== undefined && blocks.length !== 1) {

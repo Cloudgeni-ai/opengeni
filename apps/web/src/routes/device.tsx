@@ -25,7 +25,10 @@ import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import {
+  hasAccountPermission,
+  lacksWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
  * shape (the server is authoritative) — we just trim + uppercase what the user
@@ -184,6 +187,10 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
         userCode={lookup ? lookup.userCode : userCode}
         machine={lookup ? toConsentMachine(lookup.machine) : EMPTY_MACHINE}
         phase={phase}
+        allowWorkspaceScope={
+          !lookup ||
+          !lacksWorkspacePermission(accessContext, lookup.workspaceId, "enrollments:manage")
+        }
         allowOrganizationScope={Boolean(
           lookup &&
           accessContext.workspaceGrants.some(

@@ -119,7 +119,13 @@ describe("responsive production session header", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    // OPENGENI_TEST_CHROMIUM points at a system Chromium where Playwright's
+    // own build can't load (NixOS, for example), as other browser tests allow.
+    browser = await chromium.launch(
+      process.env.OPENGENI_TEST_CHROMIUM
+        ? { executablePath: process.env.OPENGENI_TEST_CHROMIUM, args: ["--no-sandbox"] }
+        : {},
+    );
 
     const bootstrap = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -450,10 +456,10 @@ describe("responsive production session header", () => {
 
         const ancestry = page.getByRole("navigation", { name: "Session ancestry" });
         if (matrixCase.viewport.width >= 640) {
-          await ancestry
-            .getByRole("button", { name: "31 intermediate ancestor sessions" })
-            .waitFor();
-          expect(await ancestry.getByRole("link").count()).toBe(2);
+          // The 32 ancestors before the parent share one menu; the parent is
+          // the one link, leading into the title.
+          await ancestry.getByRole("button", { name: "32 earlier sessions" }).waitFor();
+          expect(await ancestry.getByRole("link").count()).toBe(1);
         } else {
           expect(await ancestry.getByRole("link").count()).toBe(1);
         }

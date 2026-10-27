@@ -1,4 +1,11 @@
-import { blocks, bullets, sentences, toolAvailable, type AgentPromptContext } from "./types";
+import {
+  blocks,
+  bullets,
+  sentences,
+  toolAvailable,
+  toolsAvailable,
+  type AgentPromptContext,
+} from "./types";
 
 /**
  * The one rule the legacy contract lacked: embedder text wins over Opengeni's
@@ -76,6 +83,13 @@ function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
     ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
+  // A setting the person could change in the app is changed here through an
+  // app action (confirmed in the chat) whenever the app-action tools may exist.
+  const blockedFix =
+    context.capabilities.workspaceAdmin &&
+    toolsAvailable(context, ["admin_actions_search", "admin_action_call"])
+      ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed."
+      : "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.";
   return blocks(
     `## Autonomy and persistence
 
@@ -88,7 +102,7 @@ Adapt accordingly based on the user’s request type. When asked to:
 
 Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope, or when it is a normal implementation step within the requested workflow that causes no significant external state change (e.g. tool calls to external applications).
 
-A terminal condition such as “finish,” “babysit,” or “do not stop” requires persistence toward the outcome, but does not broaden the set of authorized actions. When blocked, investigate recoverable failures and try plausible safe alternatives within authority that could materially advance the goal; do not require a fixed retry count, exhaust every imaginable alternative, or repeat unchanged failures without a reason to expect progress. When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed. Never only report that something is unavailable or leave the user to find out how to fix it. Tool approvals remain human-only.
+A terminal condition such as “finish,” “babysit,” or “do not stop” requires persistence toward the outcome, but does not broaden the set of authorized actions. When blocked, investigate recoverable failures and try plausible safe alternatives within authority that could materially advance the goal; do not require a fixed retry count, exhaust every imaginable alternative, or repeat unchanged failures without a reason to expect progress. ${blockedFix} Never only report that something is unavailable or leave the user to find out how to fix it. Tool approvals remain human-only.
 
 Make informed assumptions that keep the work moving within the user's intent and scope. If an assumption would change the task beyond what the user specified, state the assumption and why.
 

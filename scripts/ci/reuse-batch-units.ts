@@ -11,6 +11,7 @@ import {
   verifyArtifactBytes,
   verifyBatchUnitProof,
   type ArtifactIdentity,
+  type BatchTreeExpectation,
   type BatchUnitProof,
   type ProviderRun,
 } from "./batch-unit-proof";
@@ -30,6 +31,28 @@ export async function findBatchUnitProof(
   reads: ProofReads,
   context: ProofContext,
 ): Promise<BatchUnitProof | null> {
+  return findBatchTreeProof(reads, context, {
+    branch: /^queue\//,
+    acceptPlan: (plan) => sameInventory(plan.unitTests, context.inventory),
+    verify: (proof) => verifyBatchUnitProof(proof, context),
+  });
+}
+
+/**
+ * Bounded discovery of the newest trusted successful Batch attempt whose tested
+ * commit has exactly `context.tree`. `acceptPlan` filters without failing; any
+ * provider, archive or provenance inconsistency on a tree-matching run throws,
+ * so callers fall back to their ordinary (full) path.
+ */
+export async function findBatchTreeProof(
+  reads: ProofReads,
+  context: BatchTreeExpectation,
+  policy: {
+    branch: RegExp;
+    acceptPlan: (plan: { unitTests?: unknown }) => boolean;
+    verify: (proof: BatchUnitProof) => BatchUnitProof;
+  },
+): Promise<BatchUnitProof | null> {
   const listing = await reads.get(
     "actions/workflows/batch-ci.yml/runs?event=push&status=success&per_page=100&page=1",
   );
@@ -38,7 +61,7 @@ export async function findBatchUnitProof(
   for (const listed of listing.workflow_runs) {
     if (
       listed.path !== BATCH_WORKFLOW ||
-      !/^queue\//.test(listed.head_branch ?? "") ||
+      !policy.branch.test(listed.head_branch ?? "") ||
       !/^[a-f0-9]{40}$/.test(listed.head_sha ?? "")
     )
       continue;
@@ -84,7 +107,7 @@ export async function findBatchUnitProof(
     const planBytes = await reads.archive(planArtifact.id);
     verifyArtifactBytes(planArtifact, planBytes, run, planArtifact.name);
     const plan = JSON.parse(readResultZip(planBytes, ["impact-plan.json"], 1_000_000));
-    if (!sameInventory(plan.unitTests, context.inventory)) continue;
+    if (!policy.acceptPlan(plan)) continue;
     const resultBytes = await reads.archive(resultArtifact.id);
     verifyArtifactBytes(resultArtifact, resultBytes, run, resultArtifact.name);
     const manifest = await reads.manifest(run.head_sha);
@@ -107,7 +130,7 @@ export async function findBatchUnitProof(
       result: JSON.parse(readResultZip(resultBytes)),
       artifacts: [planArtifact, resultArtifact],
     };
-    verifyBatchUnitProof(proof, context);
+    policy.verify(proof);
     // A rerun starting while we read the old attempt invalidates this reuse.
     const current = await reads.get(`actions/runs/${run.id}`);
     if (
@@ -155,6 +178,47 @@ export async function optionalUnitProof(
   }
 }
 
+/**
+ * Authenticated GitHub reads plus local Git provenance for proof discovery. The
+ * shared deadline bounds the whole optional discovery; artifact bytes are
+ * fetched from the redirect without forwarding the repository credential.
+ */
+export function githubProofReads(repository: string, token: string, git: GitStore): ProofReads {
+  const deadline = AbortSignal.timeout(90_000);
+  const base = `https://api.github.com/repos/${repository}/`;
+  const request = (url: string, authenticated: boolean, redirect: RequestRedirect = "error") =>
+    retryRead(fetch, url, {
+      redirect,
+      signal: deadline,
+      headers: {
+        Accept: "application/vnd.github+json",
+        ...(authenticated ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  return {
+    get: async (path) => {
+      const response = await request(base + path, true);
+      if (!response.ok) throw new Error("Provider read unavailable");
+      return response.json() as Promise<Wire>;
+    },
+    archive: async (id) => {
+      const response = await request(base + `actions/artifacts/${id}/zip`, true, "manual");
+      if (response.status !== 302 || !response.headers.get("location"))
+        throw new Error("Artifact redirect missing");
+      const url = new URL(response.headers.get("location")!);
+      if (url.protocol !== "https:" || url.username || url.password)
+        throw new Error("Invalid artifact location");
+      const download = await request(url.href, false);
+      if (!download.ok) throw new Error("Artifact download unavailable");
+      const bytes = new Uint8Array(await download.arrayBuffer());
+      if (bytes.length > 1_000_000) throw new Error("Artifact too large");
+      return bytes;
+    },
+    tree: async (sha) => git.exec(["rev-parse", `${sha}^{tree}`]),
+    manifest: async (sha) => git.inspect(sha),
+  };
+}
+
 async function readContext(): Promise<{ context: ProofContext; git: GitStore }> {
   const env = process.env;
   const gitDir = (await Bun.$`git rev-parse --absolute-git-dir`.text()).trim();
@@ -197,41 +261,8 @@ async function main(): Promise<void> {
       if (env.GITHUB_SHA !== context.mainSha) throw new Error("Main source changed");
       if (!/^[\w.-]+\/[\w.-]+$/.test(context.repository) || !env.GITHUB_TOKEN)
         throw new Error("Missing read identity");
-      const deadline = AbortSignal.timeout(90_000);
-      const base = `https://api.github.com/repos/${context.repository}/`;
-      const request = (url: string, authenticated: boolean, redirect: RequestRedirect = "error") =>
-        retryRead(fetch, url, {
-          redirect,
-          signal: deadline,
-          headers: {
-            Accept: "application/vnd.github+json",
-            ...(authenticated ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
-          },
-        });
-      const get = async (path: string) => {
-        const response = await request(base + path, true);
-        if (!response.ok) throw new Error("Provider read unavailable");
-        return response.json() as Promise<Wire>;
-      };
       return await findBatchUnitProof(
-        {
-          get,
-          archive: async (id) => {
-            const response = await request(base + `actions/artifacts/${id}/zip`, true, "manual");
-            if (response.status !== 302 || !response.headers.get("location"))
-              throw new Error("Artifact redirect missing");
-            const url = new URL(response.headers.get("location")!);
-            if (url.protocol !== "https:" || url.username || url.password)
-              throw new Error("Invalid artifact location");
-            const download = await request(url.href, false);
-            if (!download.ok) throw new Error("Artifact download unavailable");
-            const bytes = new Uint8Array(await download.arrayBuffer());
-            if (bytes.length > 1_000_000) throw new Error("Artifact too large");
-            return bytes;
-          },
-          tree: async (sha) => git.exec(["rev-parse", `${sha}^{tree}`]),
-          manifest: async (sha) => git.inspect(sha),
-        },
+        githubProofReads(context.repository, env.GITHUB_TOKEN, git),
         context,
       );
     },

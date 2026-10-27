@@ -53,6 +53,7 @@ export {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -60,6 +61,7 @@ export {
   tidyPartialText,
   transcriptErrorText,
   versionSummary,
+  withoutLiveMicrophoneEchoes,
 } from "./recordings-model";
 export type {
   LiveTranscriptLine,

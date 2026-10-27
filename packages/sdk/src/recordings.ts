@@ -54,7 +54,12 @@ import type {
   UpdateRecordingSpeakersResponse,
 } from "@opengeni/contracts";
 import type { OpenGeniClient } from "./client";
-import { type DesktopBridge, getDesktopBridge, getDesktopSystemAudio } from "./desktop-bridge";
+import {
+  type DesktopBridge,
+  type DesktopSystemAudioErrorCode,
+  getDesktopBridge,
+  getDesktopSystemAudio,
+} from "./desktop-bridge";
 import {
   createLiveTranscriber,
   type LiveTranscriber,
@@ -62,6 +67,8 @@ import {
   type LiveTranscriptTransport,
   type LiveWebSocketConstructor,
 } from "./recording-live";
+import { errorMessage } from "@opengeni/contracts/values";
+import { ownerNameField } from "./recording-owner";
 
 export * from "./recording-live";
 
@@ -1135,10 +1142,6 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 // --- Local stores -------------------------------------------------------------
 
 /** A store that lives only as long as the page or process. For tests and short captures. */
@@ -1385,7 +1388,16 @@ export type RecorderSnapshot = {
     label: string;
   }>;
   upload: RecordingUploadStatus | null;
-  error: { code: RecorderErrorCode; message: string } | null;
+  error: {
+    code: RecorderErrorCode;
+    message: string;
+    /**
+     * Why the desktop app couldn't record computer audio, with
+     * system_audio_unavailable from a desktop source. Show your own words for
+     * it; message is the app's English sentence.
+     */
+    reason?: DesktopSystemAudioErrorCode;
+  } | null;
   /**
    * The live transcript per track while `liveTranscript` is on, else null
    * or absent. A preview only; it never affects the recording.
@@ -1420,6 +1432,12 @@ export type RecorderOptions = {
   externalRef?: string;
   metadata?: CreateRecordingRequest["metadata"];
   transcription?: RecordingTranscriptionRequest;
+  /**
+   * The person recording's name, as your app knows it: their microphone's
+   * name in the transcript when computer or tab audio is recorded beside it
+   * and Opengeni has no name for them.
+   */
+  ownerName?: string;
   /** Microphone constraints; false records no microphone. Default: on. */
   microphone?: boolean | MediaTrackConstraints;
   /**
@@ -1673,11 +1691,19 @@ export function desktopSystemAudioSource(
         sampleRate = started.sampleRate;
       } catch (error) {
         finish();
+        const failure = (error && typeof error === "object" ? error : {}) as {
+          code?: unknown;
+          message?: unknown;
+        };
         const message =
-          error && typeof error === "object" && "message" in error
-            ? String((error as { message: unknown }).message)
+          typeof failure.message === "string"
+            ? failure.message
             : "This computer can't record its own audio.";
-        throw new RecorderCaptureError("system_audio_unavailable", message);
+        throw new RecorderCaptureError(
+          "system_audio_unavailable",
+          message,
+          desktopSystemAudioReason(failure.code),
+        );
       }
       for (const [id, samples] of early.splice(0)) if (id === captureId) write(samples);
       const id = captureId;
@@ -1818,8 +1844,8 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     }
   };
 
-  const fail = (code: RecorderErrorCode, message: string) => {
-    emit({ state: "failed", error: { code, message } });
+  const fail = (code: RecorderErrorCode, message: string, reason?: DesktopSystemAudioErrorCode) => {
+    emit({ state: "failed", error: { code, message, ...(reason ? { reason } : {}) } });
   };
 
   const liveSnapshot = () =>
@@ -1836,6 +1862,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         recordingId,
         trackNumber: capture.trackNumber,
         ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+        mediaTrack: capture.stream.getAudioTracks()[0] ?? null,
         onChange: () => emit({ live: liveSnapshot() }),
       });
     }
@@ -2019,7 +2046,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       try {
         streams = await openStreams();
       } catch (error) {
-        if (error instanceof RecorderCaptureError) fail(error.code, error.message);
+        if (error instanceof RecorderCaptureError) fail(error.code, error.message, error.reason);
         else fail("capture_failed", errorMessage(error));
         return;
       }
@@ -2064,6 +2091,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
           ...(options.metadata ? { metadata: options.metadata } : {}),
           ...(options.transcription ? { transcription: options.transcription } : {}),
+          ...ownerNameField(options.ownerName, captures),
           tracks: captures.map((capture) => ({
             trackNumber: capture.trackNumber,
             source: capture.source,
@@ -2123,6 +2151,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       if (snapshot.state !== "recording") return;
       for (const capture of captures)
         if (capture.recorder.state === "recording") capture.recorder.pause();
+      for (const capture of captures) capture.live?.setPaused(true);
       pausedAt = performance.now();
       emit({
         state: "paused",
@@ -2137,6 +2166,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       pausedAt = null;
       for (const capture of captures)
         if (capture.recorder.state === "paused") capture.recorder.resume();
+      for (const capture of captures) capture.live?.setPaused(false);
       emit({ state: "recording", pauseReason: null });
     },
 
@@ -2239,10 +2269,20 @@ export class RecorderCaptureError extends Error {
   constructor(
     readonly code: RecorderErrorCode,
     message: string,
+    /** The desktop app's reason, when computer audio couldn't be recorded. */
+    readonly reason?: DesktopSystemAudioErrorCode,
   ) {
     super(message);
     this.name = "RecorderCaptureError";
   }
+}
+
+function desktopSystemAudioReason(code: unknown): DesktopSystemAudioErrorCode {
+  return code === "unavailable" ||
+    code === "permission_denied" ||
+    code === "sound_server_unavailable"
+    ? code
+    : "capture_failed";
 }
 
 /** The browser's capture: MediaRecorder, IndexedDB and cross-tab capture locks. */

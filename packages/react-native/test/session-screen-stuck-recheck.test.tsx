@@ -114,9 +114,12 @@ registerDom();
  * flight, so a second tap cannot send a second Resume.
  */
 const timelinePath = new URL("../src/timeline/message-timeline.tsx", import.meta.url).pathname;
+let timelineFailure: Error | null = null;
 mock.module(timelinePath, () => ({
-  MessageTimeline: (props: { trailing?: ReactNode }) =>
-    createElement("div", { "data-testid": "timeline" }, props.trailing),
+  MessageTimeline: (props: { trailing?: ReactNode }) => {
+    if (timelineFailure) throw timelineFailure;
+    return createElement("div", { "data-testid": "timeline" }, props.trailing);
+  },
 }));
 const annotationsPath = new URL("../src/timeline/annotations.tsx", import.meta.url).pathname;
 mock.module(annotationsPath, () => ({
@@ -135,7 +138,7 @@ const { OpenGeniContext } = await import("../../react/src/session-context");
 const { useSessionControl } = await import("../../react/src/hooks/use-session-control");
 const { flush } = await import("../../react/test/render-hook");
 
-const session = {
+const grantBlockedSession = {
   id: "session-a",
   workspaceId: "workspace-a",
   status: "requires_action",
@@ -159,8 +162,14 @@ function deferred() {
 }
 
 const resumes: { args: unknown[]; done: ReturnType<typeof deferred> }[] = [];
+let session: Omit<typeof grantBlockedSession, "activeSandboxId" | "admissionBlock"> & {
+  activeSandboxId: string | null;
+  admissionBlock: Record<string, string>;
+} = grantBlockedSession;
+let machinesResponse: unknown = null;
 const client = new Proxy(
   {
+    listMachines: async () => machinesResponse,
     resumeSession: (...args: unknown[]) => {
       const done = deferred();
       resumes.push({ args, done });
@@ -177,6 +186,9 @@ const client = new Proxy(
 
 beforeEach(() => {
   resumes.length = 0;
+  timelineFailure = null;
+  session = grantBlockedSession;
+  machinesResponse = null;
 });
 
 const noop = async () => {};
@@ -188,6 +200,7 @@ function Screen() {
   const controller = {
     sessionId: "session-a",
     workspaceId: "workspace-a",
+    client,
     session: { session, refresh: noop, loading: false, error: null },
     events: [],
     timeline: [],
@@ -238,13 +251,16 @@ function Screen() {
   } as never);
 }
 
-async function renderScreen() {
+// The phone app mounts the screen without an OpenGeniProvider; a host may add one.
+async function renderScreen(options: { provider?: boolean } = {}) {
   const view = await renderComponent(
-    createElement(
-      OpenGeniContext.Provider,
-      { value: { client, workspaceId: "workspace-a" } as never },
-      createElement(Screen),
-    ),
+    options.provider
+      ? createElement(
+          OpenGeniContext.Provider,
+          { value: { client, workspaceId: "workspace-a" } as never },
+          createElement(Screen),
+        )
+      : createElement(Screen),
   );
   const retry = () => {
     const button = view.container.querySelector<HTMLButtonElement>(
@@ -297,5 +313,78 @@ test("a refused recheck says so and lets the person try again", async () => {
     resumes[1]!.done.resolve({ session });
   });
   await flush();
+  await view.unmount();
+});
+
+test("a blocked chat opens without an OpenGeniProvider, as the phone app mounts it", async () => {
+  const { view, retry } = await renderScreen();
+  expect(retry().disabled).toBe(false);
+  await view.unmount();
+  const wrapped = await renderScreen({ provider: true });
+  expect(wrapped.retry().disabled).toBe(false);
+  await wrapped.view.unmount();
+});
+
+test("a chat that fails to draw offers Retry instead of taking the app down", async () => {
+  const errors = console.error;
+  console.error = () => {};
+  try {
+    timelineFailure = new Error("render exploded");
+    const view = await renderComponent(createElement(Screen));
+    expect(view.container.textContent).toContain("render exploded");
+    expect(view.container.textContent).toContain("Couldn't load this session");
+    timelineFailure = null;
+    const button = Array.from(view.container.querySelectorAll("button")).find((element) =>
+      element.textContent?.includes("Retry"),
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(view.container.querySelector('[data-testid="timeline"]')).not.toBeNull();
+    await view.unmount();
+  } finally {
+    console.error = errors;
+  }
+});
+
+const ownerOnlySession = {
+  ...grantBlockedSession,
+  activeSandboxId: "owner-laptop",
+  admissionBlock: {
+    reason: "database_claim_rejected",
+    sqlState: "42501",
+    retryPolicy: "explicit_recheck",
+    blockedAt: "2026-10-26T18:46:43Z",
+  },
+};
+
+// Machine reads are cached per client, so this runs before machine access is known.
+test("without machine access the same refusal reads as a permission check, with the web's words", async () => {
+  session = ownerOnlySession;
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("Permission needed");
+  expect(view.container.textContent).toContain("The next step was blocked by a permission check.");
+  await view.unmount();
+});
+
+test("a message refused on someone else's personal machine says only its owner can start work there", async () => {
+  session = ownerOnlySession;
+  machinesResponse = {
+    activeSandboxId: "owner-laptop",
+    activeEpoch: 1,
+    machines: [],
+    sessionMachineAccess: {
+      sandboxId: "owner-laptop",
+      machineName: "Kari's laptop",
+      ownerName: "Kari",
+      isOwner: false,
+      queuedTurnBlocked: true,
+    },
+  };
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("This message needs a different machine");
+  expect(view.container.textContent).toContain("Only Kari can start new work there.");
   await view.unmount();
 });

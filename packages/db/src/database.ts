@@ -6,6 +6,15 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import type { Settings } from "@opengeni/config";
 import postgres from "postgres";
 import { databaseBootConnectOptions } from "./boot-connect";
+import {
+  databaseUrlUser,
+  logDatabaseCredentialEvent,
+  rotatingDatabasePasswordFor,
+  type RotatingDatabasePassword,
+  type DatabaseCredentialEventListener,
+  type DatabasePasswordFiles,
+  withDatabaseAuthenticationRetry,
+} from "./database-credentials";
 
 import {
   DatabaseTransactionError,
@@ -280,6 +289,20 @@ export type CreateDbOptions = {
    * without mutating a shared PostgreSQL role or affecting other connections.
    */
   isolationLevel?: postgres.ConnectionParameters["default_transaction_isolation"];
+  /**
+   * Read the login's password from mounted files on every connection attempt
+   * instead of from the URL, so it can be rotated while the process runs (see
+   * `RotatingDatabasePassword`). Unset (or no file configured) → today's
+   * behavior: the URL password, no password function, no added retry. Also
+   * applies to the session-list LISTEN connection when
+   * `notificationDatabaseUrl` logs in as the same user.
+   */
+  passwordFiles?: DatabasePasswordFiles;
+  /**
+   * Content-free credential events (switches, reloads) of the pool and of its
+   * LISTEN connection; defaults to a console line.
+   */
+  onCredentialEvent?: DatabaseCredentialEventListener;
 };
 
 /**
@@ -530,6 +553,80 @@ export function databasePoolOptions(
 type PostgresSql = postgres.Sql | postgres.TransactionSql;
 const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
 
+/**
+ * Run a pool query again after its connection was refused with 28P01, on the
+ * pool's next password candidate (see `withDatabaseAuthenticationRetry`): only
+ * while another distinct candidate exists, at most once per candidate.
+ *
+ * Repeating is safe: PostgreSQL raises 28P01 only while authenticating a NEW
+ * connection, before the server has run any statement on it. postgres.js
+ * rejects only the operation that started that connection attempt (its
+ * "initial" query or BEGIN); the queries queued behind it go to the next
+ * attempt, which asks for the password again. So nothing the rejected
+ * operation asked for has run, and running it again cannot apply anything
+ * twice. At most one attempt per candidate; the last 28P01 surfaces unchanged.
+ */
+function hasDriverQueryMode(query: unknown): boolean {
+  const state = query as {
+    onlyDescribe?: unknown;
+    cursorFn?: unknown;
+    cursorRows?: unknown;
+    forEachFn?: unknown;
+    streaming?: unknown;
+  };
+  return Boolean(
+    state.onlyDescribe || state.cursorFn || state.cursorRows || state.forEachFn || state.streaming,
+  );
+}
+
+function retryingAuthentication<T extends postgres.Row[]>(
+  first: postgres.PendingQuery<T>,
+  again: () => postgres.PendingQuery<T>,
+  credential: RotatingDatabasePassword,
+): postgres.PendingQuery<T> {
+  const observe = first.then.bind(first);
+  let result: Promise<unknown> | undefined;
+  Object.defineProperty(first, "then", {
+    configurable: true,
+    writable: true,
+    value: (...args: Parameters<Promise<unknown>["then"]>) => {
+      let attempts = 0;
+      // postgres.js queries are lazy: `then` sends them, so each attempt reads
+      // the selected candidate right as it starts.
+      result ??= withDatabaseAuthenticationRetry(
+        credential,
+        () => {
+          attempts += 1;
+          let settle = observe as unknown as (
+            resolve: (value: unknown) => void,
+            reject: (reason: unknown) => void,
+          ) => unknown;
+          if (attempts > 1) {
+            const next = again();
+            // Keep the caller's result mode (`.values()` / `.raw()`) and protocol
+            // (parameterless queries default to the simple protocol; `.simple()`).
+            const original = first as unknown as {
+              isRaw?: unknown;
+              options?: { simple?: unknown };
+            };
+            const retry = next as unknown as { isRaw?: unknown; options?: { simple?: unknown } };
+            if (original.isRaw !== undefined) retry.isRaw = original.isRaw;
+            if (original.options && retry.options) retry.options.simple = original.options.simple;
+            settle = next.then.bind(next) as never;
+          }
+          return new Promise<unknown>((resolve, reject) => settle(resolve, reject));
+        },
+        // A retry re-sends the same text and parameters in the same result
+        // mode and protocol; streaming, cursor, forEach and describe queries
+        // keep the driver's own behavior (none goes through the pool today).
+        () => !hasDriverQueryMode(first),
+      );
+      return result.then(...args);
+    },
+  });
+  return first;
+}
+
 /** Only used on a reserved transaction connection. Join the protocol cancel
  * before allowing rollback/release, so it cannot reach a later pool borrower.
  * The postgres patch exposes the driver's existing cancellation completion.
@@ -581,7 +678,12 @@ function abortableQuery<T extends postgres.Row[]>(
  * still prepared and the connection lifetime bounds the accumulation. Pass a
  * list as one array parameter with `anyOf` (`./sql-arrays`) where it is hot.
  */
-function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reserved = false): T {
+function preparingUnsafe<T extends PostgresSql>(
+  target: T,
+  prepare = true,
+  reserved = false,
+  credential?: RotatingDatabasePassword,
+): T {
   const wrapScoped = (args: unknown[]) =>
     args.map((arg) =>
       typeof arg === "function"
@@ -601,16 +703,42 @@ function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reser
         return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) => {
           const signal = reserved ? databaseQuerySignal.getStore() : undefined;
           signal?.throwIfAborted();
-          const pending = traceQuery(
-            base.unsafe(query, parameters as never, { prepare, ...options }),
-            query,
-          );
+          const send = () =>
+            traceQuery(base.unsafe(query, parameters as never, { prepare, ...options }), query);
+          const pending =
+            credential && !reserved ? retryingAuthentication(send(), send, credential) : send();
           return signal ? abortableQuery(pending, signal) : pending;
         };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
+        if (property === "begin" && credential && !reserved) {
+          return (...args: unknown[]) =>
+            traceTransaction("transaction", async () => {
+              let entered = false;
+              const tracked = args.map((arg) =>
+                typeof arg === "function"
+                  ? (scoped: unknown) => {
+                      entered = true;
+                      return (arg as (scoped: unknown) => unknown)(scoped);
+                    }
+                  : arg,
+              );
+              // Only BEGIN's own connection attempt can be repeated: once the
+              // callback ran, its work is the caller's to judge.
+              let attempts = 0;
+              return withDatabaseAuthenticationRetry(
+                credential,
+                () => {
+                  // A maintenance stop that arrived meanwhile ends the retries.
+                  if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
+                  return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
+                },
+                () => !entered,
+              );
+            });
+        }
         return (...args: unknown[]) =>
           traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
             method.apply(base, wrapScoped(args)),
@@ -639,6 +767,12 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   const maxLifetime = jitteredDatabaseMaxLifetime(
     options.maxLifetimeSeconds ?? DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS,
   );
+  // No password files: undefined, so the pool uses the URL password exactly
+  // as before, without a password function or any added retry.
+  const onCredentialEvent = options.onCredentialEvent ?? logDatabaseCredentialEvent("database");
+  const credential = rotatingDatabasePasswordFor(databaseUrl, options.passwordFiles, (event) =>
+    onCredentialEvent(event, "pool"),
+  );
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
     prepare: preparedStatements,
@@ -646,6 +780,9 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     // postgres.js accepts a function here (its own default is one) but types
     // the option as a number.
     max_lifetime: maxLifetime as unknown as number,
+    // Asked on every connection attempt: re-reads the files, then returns the
+    // pool's selected candidate.
+    ...(credential ? { pass: () => credential.password() } : {}),
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
     // After a restart or failover that left the server refusing connections
@@ -680,10 +817,22 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   });
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
-  const db = drizzle(preparingUnsafe(client, preparedStatements));
-  const sessionListChanges = options.notificationDatabaseUrl
-    ? createSessionListChangeSource(options.notificationDatabaseUrl, {
+  const db = drizzle(preparingUnsafe(client, preparedStatements, false, credential));
+  const notificationDatabaseUrl = options.notificationDatabaseUrl;
+  // The LISTEN connection is its own pool with its own sticky candidate. The
+  // files hold one login's password, so they apply only to that same login.
+  const notificationCredential =
+    notificationDatabaseUrl &&
+    credential &&
+    databaseUrlUser(notificationDatabaseUrl) === databaseUrlUser(databaseUrl)
+      ? rotatingDatabasePasswordFor(notificationDatabaseUrl, options.passwordFiles, (event) =>
+          onCredentialEvent(event, "notifications"),
+        )
+      : undefined;
+  const sessionListChanges = notificationDatabaseUrl
+    ? createSessionListChangeSource(notificationDatabaseUrl, {
         ...(options.searchPath ? { searchPath: options.searchPath } : {}),
+        ...(notificationCredential ? { credential: notificationCredential } : {}),
       })
     : undefined;
   dbBindings.set(db as unknown as object, {

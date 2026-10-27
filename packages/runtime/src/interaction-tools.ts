@@ -143,6 +143,7 @@ import {
   computerOpenText,
   computerTargetsText,
 } from "./computer-model-text";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -1256,7 +1257,7 @@ export function createInteractionAttemptToolDefinitions(
           },
           (error: unknown) => {
             throw new Error(
-              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${errorMessage(error)}`.slice(
                 0,
                 8_192,
               ),
@@ -3822,7 +3823,7 @@ async function actInComputerBatch(
       return error instanceof OpenGeniApiError && error.status === 404 ? "absent" : "unknown";
     }
   };
-  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const reasonOf = (error: unknown) => errorMessage(error);
   // The two ways derive different operation IDs. The computer fixes its
   // answer for the session's life, so every try of one batch picks the same
   // way and cannot send its actions under both ways' IDs. Run as one
@@ -5759,7 +5760,7 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
 }
 
 function screenshotFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
 
@@ -5843,7 +5844,9 @@ const MISSING_SESSION_HINT_LIMIT = 5;
 
 /** The API found no session of this kind with the requested id. Read from the
  * API's own refusal in the response body, never the display message: a hint
- * already added to it lists session names, which could contain any text. */
+ * already added to it lists session names, which could contain any text.
+ * Opening a browser linked to a computer that does not exist is refused as
+ * "Linked ComputerSession not found". */
 function isMissingSessionError(
   error: unknown,
   kind: InteractionSessionKind,
@@ -5851,7 +5854,7 @@ function isMissingSessionError(
   return (
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(apiRefusalText(error))
+    new RegExp(`(?:^|: )(?:Linked )?${kind} not found\\b`, "u").test(apiRefusalText(error))
   );
 }
 
@@ -5896,7 +5899,7 @@ function missingSessionError(
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
   const nearMiss = stillListed ? null : nearMissSession(requestedId, listed);
   const sentNote = stillListed
-    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended or restarted.`
+    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended.`
     : nearMiss
       ? ` The ${parameter} you sent, ${requestedId}, is not ${nearMiss.id}: they differ in ${nearMiss.difference} character${nearMiss.difference === 1 ? "" : "s"}.`
       : "";

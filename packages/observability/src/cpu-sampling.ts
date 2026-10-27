@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * On-demand CPU sampling for live processes. Sending the configured signal
@@ -148,7 +149,7 @@ export function installCpuSamplingSignal(options: CpuSamplingSignalOptions): () 
     void captureAndReport(options)
       .catch((error: unknown) => {
         options.log("cpu sampling profile failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {

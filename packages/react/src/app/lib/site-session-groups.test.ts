@@ -192,16 +192,54 @@ test("a Site without conversations is a plain row in its creating chat's project
   expect(site.children).toEqual([]);
   expect(siteRowConversationCount(site)).toBe(0);
   expect(summarizeRailNodes([site])).toMatchObject({ total: 0 });
-  // Newer activity on it (a new version, or use of its chats) moves it above the chat.
-  const opened = buildPinnedRailSections([chat, older], new Date("2026-09-08T13:00:00Z"), {
+  // A newer published version moves it above the chat.
+  const published = buildPinnedRailSections([chat, older], new Date("2026-09-08T13:00:00Z"), {
     siteGroups: [{ ...created, updatedAt: "2026-09-08T12:30:00Z" }],
     siteRowsByProject: true,
   });
   expect(
-    channelRailSections(opened.ordinary, [{ id: "project-id", name: "Project" } as never])
+    channelRailSections(published.ordinary, [{ id: "project-id", name: "Project" } as never])
       .find((section) => section.channelId === "project-id")!
       .sessions.map((n) => n.session.id),
   ).toEqual([siteRowKey(siteId, "project-id"), "chat"]);
+});
+
+test("a loaded conversation's newer messages never move its Site row", () => {
+  const chat = session("chat", { metadata: {}, updatedAt: "2026-09-08T11:00:00Z" });
+  // The Site was last published at 09:00; one of its conversations is open and
+  // had a message at 12:00, after the chat beside it.
+  const busy = session("busy", { updatedAt: "2026-09-08T12:00:00Z" });
+  const roots = railRoots(
+    buildPinnedRailSections([chat, busy], new Date("2026-09-08T13:00:00Z"), {
+      siteGroups: [siteGroup()],
+    }),
+  );
+  expect(roots.map((n) => n.session.id)).toEqual(["chat", `site:${siteId}`]);
+  const site = roots[1]!;
+  expect(site.session.updatedAt).toBe("2026-09-08T09:00:00.000Z");
+  expect(site.children.map((n) => n.session.id)).toEqual(["busy"]);
+});
+
+test("a Site's first conversation in another project never lifts its merged row", () => {
+  const chat = session("chat", { metadata: {}, updatedAt: "2026-09-08T11:00:00Z" });
+  // A Site this viewer cannot read keeps each project's first conversation
+  // start; a rail without projects shows one row, at the earliest.
+  const roots = railRoots(
+    buildPinnedRailSections([chat], new Date("2026-09-08T13:00:00Z"), {
+      siteGroups: [
+        siteGroup({ conversations: 1, total: 1 }),
+        siteGroup({
+          channelId: "project-id",
+          conversations: 1,
+          total: 1,
+          updatedAt: "2026-09-08T12:00:00.000Z",
+          createdAt: "2026-09-08T12:00:00.000Z",
+        }),
+      ],
+    }),
+  );
+  expect(roots.map((n) => n.session.id)).toEqual(["chat", `site:${siteId}`]);
+  expect(roots[1]!.session.updatedAt).toBe("2026-09-08T09:00:00.000Z");
 });
 
 test("Site row keys round-trip their Site and project", () => {

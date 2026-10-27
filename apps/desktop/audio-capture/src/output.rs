@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 const RING_CAPACITY: usize = 1 << 19;
 
 pub enum Event<'a> {
+    /// The OS is asking the person for permission, and the start waits for
+    /// their answer. Only macOS asks.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    AwaitingPermission,
     Started {
         sample_rate: u32,
         channels: u32,
@@ -52,6 +56,7 @@ pub fn json_string(value: &str) -> String {
 
 pub fn render(event: &Event) -> String {
     match event {
+        Event::AwaitingPermission => r#"{"event":"awaiting_permission"}"#.to_string(),
         Event::Started {
             sample_rate,
             channels,
@@ -312,6 +317,10 @@ mod tests {
 
     #[test]
     fn renders_events_as_json_lines() {
+        assert_eq!(
+            render(&Event::AwaitingPermission),
+            r#"{"event":"awaiting_permission"}"#
+        );
         assert_eq!(
             render(&Event::Started {
                 sample_rate: 48_000,

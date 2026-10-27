@@ -1513,6 +1513,7 @@ impl Sim {
             zone: ZoneId(u16::try_from(index % 3).unwrap()),
             class: ClassId(0),
             huge_pages: false,
+            offers: compute_fleet::Offers::NONE,
         };
         self.fleet
             .upsert(id, info, HostState::Live, self.hosts[index].capacity());
@@ -1674,6 +1675,7 @@ impl Sim {
             memory_max_mib: SANDBOX_MIB,
             cpu_millis: 0,
             disk_mib: 1,
+            reach: compute_fleet::Offers::NONE,
             prefer: Prefer::Any,
         };
         let Some(placement) = self.fleet.place(&demand, &HashSet::new(), &mut self.rng) else {

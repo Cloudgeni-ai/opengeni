@@ -45,6 +45,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
     // same change.
     expect([...NON_RLS_RUNTIME_TABLES]).toEqual([
       "auth_identities",
+      "auth_passkeys",
       "auth_rate_limits",
       "auth_sessions",
       "auth_users",

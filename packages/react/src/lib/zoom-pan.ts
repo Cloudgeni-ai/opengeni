@@ -137,6 +137,19 @@ export function toggleAt(
   return zoomTo(view, target, point, image, viewport);
 }
 
+/**
+ * Whether a click on the image enlarges or shrinks it, taken from what
+ * `toggleAt` actually does, so the cursor always shows the click's real effect.
+ */
+export function clickZoomDirection(
+  view: ZoomView,
+  image: ZoomSize,
+  viewport: ZoomSize,
+): "in" | "out" {
+  const next = toggleAt(view, { x: 0, y: 0 }, image, viewport);
+  return next.scale > view.scale + EPSILON ? "in" : "out";
+}
+
 export function zoomPercent(view: ZoomView): number {
   return Math.round(view.scale * 100);
 }

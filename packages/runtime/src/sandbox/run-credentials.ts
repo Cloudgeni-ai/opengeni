@@ -12,6 +12,7 @@ import type {
   SandboxSessionState,
 } from "@openai/agents/sandbox";
 import { withSandboxOperationPurpose } from "./operation-purpose";
+import { isRecord } from "@opengeni/contracts/values";
 
 const MAX_ENVIRONMENT_ENTRIES = 256;
 const MAX_ENVIRONMENT_VALUE_BYTES = 64 * 1024;
@@ -70,10 +71,6 @@ export class RunCredentialValidationError extends Error {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function assertBoundedString(value: unknown, label: string, maxBytes: number): void {

@@ -908,6 +908,7 @@ const EACH_RUN: Record<ScheduledTask["runMode"], string> = {
 const IF_STILL_RUNNING: Record<ScheduledTask["overlapPolicy"], string> = {
   allow_concurrent: "Queue the next run",
   buffer_one: "Queue the next run",
+  steer: "Steer the current run",
   skip: "Skip the next run",
 };
 

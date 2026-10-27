@@ -35,7 +35,7 @@ class Page implements SystemAudioTarget {
   }
 }
 
-function captures(mode = "ok") {
+function captures(mode = "ok", startTimeoutMs?: number) {
   process.env.FAKE_CAPTURE_MODE = mode;
   return new SystemAudioCaptures({
     helperPath: process.execPath,
@@ -45,6 +45,7 @@ function captures(mode = "ok") {
     channels: { samples: "samples", ended: "ended" },
     platform: "linux",
     osRelease: "6.8.0",
+    ...(startTimeoutMs === undefined ? {} : { startTimeoutMs }),
   });
 }
 
@@ -92,6 +93,31 @@ describe("system audio", () => {
     const audio = captures("crash");
     const error = await audio.start(new Page(3)).catch((reason: unknown) => reason);
     expect(error).toMatchObject({ code: "capture_failed" });
+  });
+
+  test("a helper that doesn't start in time rejects as a failed capture", async () => {
+    const audio = captures("slow", 100);
+    const error = await audio.start(new Page(7)).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "capture_failed",
+      detail: "The helper did not start in time.",
+    });
+  });
+
+  test("while the OS asks the person, the start waits for their answer", async () => {
+    const audio = captures("ask", 100);
+    const page = new Page(8);
+    const started = await audio.start(page);
+    expect(started.sampleRate).toBe(1000);
+    audio.stop(started.captureId, page);
+    await page.whenEnded();
+    expect(page.ended?.error).toBeNull();
+  });
+
+  test("turned down in the OS prompt, the start rejects as not allowed", async () => {
+    const audio = captures("ask-denied", 100);
+    const error = await audio.start(new Page(9)).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "permission_denied" });
   });
 
   test("unavailable without a helper", async () => {

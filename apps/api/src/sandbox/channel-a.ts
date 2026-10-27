@@ -57,6 +57,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { isRetryableControllerTransport } from "../controller-data-plane";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -145,6 +146,11 @@ export type ChannelAOperation =
   | "browser.download.save"
   | "browser.recording.save"
   | "browser.attach"
+  /** The control plane renewing an agent-held browser's idle hold. It has no
+   * request grant: it reaches the controller as the person who most recently
+   * started a turn of the holding session, with that person's own machine
+   * access, and only keeps what already runs (see `channelAMachineAuthority`). */
+  | "browser.hold"
   | "computer.create"
   | "computer.end"
   | "computer.read"
@@ -486,13 +492,6 @@ export function shouldEvictChannelAHandleAfterError(
   );
 }
 
-function isRetryableControllerTransport(error: unknown): boolean {
-  return (
-    error instanceof BrowserControlTransportError ||
-    (error instanceof BrowserControlRequestError && error.retryable)
-  );
-}
-
 function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
   if (cacheKind === "read") establishedReadHandleCache.delete(key);
   if (cacheKind === "process") establishedProcessHandleCache.delete(key);
@@ -653,6 +652,11 @@ export async function withFormerConnectedMachine<T>(
  * but not the per-chat permission. Otherwise a browser opened by a chat that
  * has since gone idle, or ended from another chat, could never be stopped and
  * would keep its processes alive on the person's machine.
+ *
+ * Renewing a browser's idle hold (`browser.hold`) has no grant at all: the
+ * control plane sends it after the agent's attempt may have ended, as the
+ * person who started that session's latest turn, so it uses that person's own
+ * access. It only keeps a running browser from its idle release.
  */
 async function channelAMachineAuthority(
   db: Database,

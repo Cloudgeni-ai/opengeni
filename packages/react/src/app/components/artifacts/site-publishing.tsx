@@ -259,6 +259,8 @@ export type SitePublishPageProps = {
    * inline, in the Site's Settings, with no back link.
    */
   layout?: "page" | "panel" | undefined;
+  /** After Publish or Save changes succeeds, for a page that then goes back. */
+  onSubmitted?: (() => void) | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -353,6 +355,7 @@ function SitePublishForm({
   labelSuffix,
   isAdmin,
   layout = "page",
+  onSubmitted,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -503,15 +506,16 @@ function SitePublishForm({
       <PublishFrame
         layout={layout}
         back={{ label: site.title, onClick: onBack }}
-        title={layout === "panel" && !publishing ? "Web address" : "Publish to web"}
+        title={publishing ? "Publish to web" : "Web address"}
         description={
-          layout === "panel" && !publishing
-            ? "Its address, who can open it and its agent."
-            : `Give “${site.title}” its own address on the web.`
+          publishing
+            ? `Give “${site.title}” its own address on the web.`
+            : "Its address, who can open it and its agent."
         }
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
+        {...(onSubmitted ? { onSubmitted } : {})}
         // In Settings there is nowhere to go back to: Discard puts the saved
         // values back, so it shows only once a saved publication has changes.
         {...(layout === "panel"

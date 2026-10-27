@@ -45,12 +45,21 @@ pub(crate) fn retained_disk_len(path: &Path, may_be_open: bool) -> u64 {
     }
 }
 
+/// What a disk file may take, as [`headroom`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Headroom {
+    /// The most it may take, its [`disk_bound`].
+    pub bound: u64,
+    /// What it may still take as its guest writes to it.
+    pub left: u64,
+}
+
 /// What the disk file at `path` may still take as its guest writes to it:
 /// its [`disk_bound`] less what it holds alone. `shares` says whether the
 /// filesystem shares extents between files (see
 /// [`crate::layout::shares_extents`]): then only blocks no other file
 /// holds count, otherwise every allocated block does.
-pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<u64> {
+pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<Headroom> {
     use std::os::unix::fs::MetadataExt;
 
     let file = std::fs::File::open(path)?;
@@ -62,7 +71,11 @@ pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<u64> 
     } else {
         metadata.blocks().saturating_mul(512)
     };
-    Ok(disk_bound(metadata.len(), unit).saturating_sub(held))
+    let bound = disk_bound(metadata.len(), unit);
+    Ok(Headroom {
+        bound,
+        left: bound.saturating_sub(held),
+    })
 }
 
 /// Whether `file` is on a filesystem that writes every change to new
@@ -220,17 +233,17 @@ mod tests {
         let path = dir.path().join("disk.ext4");
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(64 * MIB).unwrap();
-        let empty = headroom(&path, 4096, false).unwrap();
+        let empty = headroom(&path, 4096, false).unwrap().left;
         assert_eq!(empty, disk_bound(64 * MIB, 4096));
         file.write_all_at(&vec![7; 8 << 20], 0).unwrap();
         file.sync_all().unwrap();
-        let written = headroom(&path, 4096, false).unwrap();
+        let written = headroom(&path, 4096, false).unwrap().left;
         assert!(
             (empty - 9 * MIB..=empty - 8 * MIB).contains(&written),
             "8 MiB written: {empty} -> {written}"
         );
         assert_eq!(
-            headroom(&path, 4096, true).unwrap(),
+            headroom(&path, 4096, true).unwrap().left,
             written,
             "nothing is shared"
         );
@@ -255,10 +268,10 @@ mod tests {
         let copy = dir.path().join("copy.ext4");
         crate::layout::copy_sparse(&base, &copy).unwrap();
         let bound = disk_bound(64 * MIB, 4096);
-        assert_eq!(headroom(&copy, 4096, true).unwrap(), bound);
+        assert_eq!(headroom(&copy, 4096, true).unwrap().left, bound);
         let copied = std::fs::OpenOptions::new().write(true).open(&copy).unwrap();
         copied.write_all_at(&vec![9; 1 << 20], 32 * MIB).unwrap();
         copied.sync_all().unwrap();
-        assert_eq!(headroom(&copy, 4096, true).unwrap(), bound - MIB);
+        assert_eq!(headroom(&copy, 4096, true).unwrap().left, bound - MIB);
     }
 }

@@ -743,6 +743,49 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("tells the controller about a wait's deadline, and treats a controller without holds as not holding", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const until = new Date("2030-01-01T00:30:00.000Z");
+    const bodies: unknown[] = [];
+    let reply: Response | null = null;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`,
+        );
+        expect(request.headers.get("authorization")).toBe(`Bearer ${adminToken}`);
+        bodies.push(await request.json());
+        return reply ?? success({ held: true });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+        exec: async () => {
+          throw new Error("must preserve the existing controller");
+        },
+      },
+      { adminToken },
+    );
+    try {
+      expect(await client.holdForWait(reference, until)).toBe(true);
+      expect(bodies).toEqual([
+        { controllerGeneration: "controller-1", until: "2030-01-01T00:30:00.000Z" },
+      ]);
+      reply = success({ held: false });
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      // An older controller has no such route; it keeps its plain idle release.
+      reply = failure(404, "resource_not_found", "route not found");
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      reply = failure(403, "permission_denied", "admin token rejected");
+      await expect(client.holdForWait(reference, until)).rejects.toMatchObject({ status: 403 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses the old observation route only when an active controller lacks target state", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-1";
@@ -1291,6 +1334,54 @@ describe("BrowserControlClient", () => {
         },
       });
       expect(JSON.stringify(created)).not.toContain("browserbase-private-key");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("returns the display the controller launched a headed browser with, dropping unknown values", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const observation = browserObservation(browserTarget(browserSessionId, controllerGeneration));
+    let display: unknown;
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        return success(
+          {
+            browserSessionId,
+            controllerGeneration,
+            observation,
+            ...(display === undefined ? {} : { display }),
+          },
+          201,
+        );
+      },
+    });
+    const placement = await localPlacement({ placementPrivateWrites: true });
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const create = async () =>
+        await client.createSession({
+          browserSessionId,
+          controllerGeneration,
+          tokenGeneration: 1,
+          controlToken,
+          viewToken,
+          headed: true,
+        });
+      display = "offscreen";
+      expect((await create()).display).toBe("offscreen");
+      display = "window";
+      expect((await create()).display).toBe("window");
+      // An older controller reports nothing; anything else is not trusted.
+      for (const value of [undefined, "headless", 1, null]) {
+        display = value;
+        expect("display" in (await create())).toBe(false);
+      }
     } finally {
       server.stop(true);
     }

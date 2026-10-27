@@ -171,6 +171,7 @@ import {
   recordScheduledTaskAccountChoiceChanges,
   scheduledTaskAccountChoiceChanges,
 } from "./scheduled-task-account-audit";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
@@ -463,7 +464,11 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
+  if (
+    knowledgeAction &&
+    input.payload.overlapPolicy !== "skip" &&
+    input.payload.overlapPolicy !== "buffer_one"
+  )
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
@@ -1694,10 +1699,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       action: knowledgeSource,
     });
   }
-  if (
-    knowledgeSource &&
-    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
-  )
+  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
+  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&
@@ -2293,7 +2296,7 @@ export class ScheduledTaskSyncError extends Error {
   readonly persistenceRestored: boolean;
 
   constructor(cause: unknown, persistenceRestored: boolean) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    super(errorMessage(cause), { cause });
     this.name = "ScheduledTaskSyncError";
     this.persistenceRestored = persistenceRestored;
   }

@@ -12023,9 +12023,14 @@ export const enrollments = pgTable(
     organizationPubkey: uniqueIndex("enrollments_organization_pubkey_idx")
       .on(table.accountId, table.pubkey)
       .where(sql`${table.authorityScope} = 'organization'`),
-    userPubkey: uniqueIndex("enrollments_user_pubkey_idx")
-      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+    // A person's machine: one enrollment per workspace it was connected from,
+    // and at most one of them live (0996).
+    userWorkspacePubkey: uniqueIndex("enrollments_user_workspace_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey, table.workspaceId)
       .where(sql`${table.authorityScope} = 'user'`),
+    userActivePubkey: uniqueIndex("enrollments_user_active_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'user' and ${table.status} = 'active'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
     sandboxGroup: index("enrollments_sandbox_group_idx")

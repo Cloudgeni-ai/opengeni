@@ -19,6 +19,7 @@ import {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -281,6 +282,14 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
   });
 
+  test("beside computer audio the live microphone is the person recording, the rest is Others", () => {
+    expect(ownerLiveLaneName(tracks, 0, "Maja Berg")).toBe("Maja Berg");
+    expect(ownerLiveLaneName(tracks, 1, "Maja Berg")).toBe("Others");
+    // A microphone alone is named by its source as before.
+    const micOnly = tracks.filter((track) => track.source === "microphone");
+    expect(ownerLiveLaneName(micOnly, 0, "Maja Berg")).toBeNull();
+  });
+
   test("a label is named only by a person or a name someone gave it", () => {
     expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
@@ -328,6 +337,41 @@ describe("transcript turns", () => {
 
 test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
+  // A missing key is one provider's, not proof that none is connected.
+  expect(transcriptErrorText("missing_provider_key")).not.toContain("No transcription provider");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      modelName: "Scribe v2",
+      providerName: "ElevenLabs",
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which isn't connected. Try another model, or an admin can connect ElevenLabs in Organization settings, under Models.",
+  );
+  const scribe = { modelName: "Scribe v2", providerName: "ElevenLabs" };
+  // A deployment with one model has no other to try.
+  const pinned = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    pinned: true,
+  });
+  expect(pinned).not.toContain("another model");
+  expect(pinned).toContain("Organization settings");
+  // The deployment's own key is for whoever runs it, not an organization admin.
+  const deployment = transcriptErrorText("missing_provider_key", undefined, {
+    ...scribe,
+    funding: "deployment",
+  });
+  expect(deployment).toContain("another model");
+  expect(deployment).toContain("whoever runs this deployment");
+  expect(deployment).not.toContain("Organization settings");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      ...scribe,
+      funding: "deployment",
+      pinned: true,
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which this deployment hasn't set up. Ask whoever runs this deployment to set up ElevenLabs.",
+  );
   expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
   expect(transcriptErrorText("something_new")).toContain("Try again");
 });

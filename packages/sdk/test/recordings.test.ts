@@ -818,8 +818,25 @@ describe("desktopSystemAudioSource", () => {
       expect(error).toMatchObject({
         code: "system_audio_unavailable",
         message: "Allow it in System Settings.",
+        reason: "permission_denied",
       });
       expect(desktop.listeners()).toBe(0);
+    });
+  });
+
+  test("a refusal without a known reason counts as a failed capture", async () => {
+    await withMediaGlobals(async () => {
+      const desktop = fakeDesktop(async () => {
+        throw new Error("helper exited");
+      });
+      const error = await desktopSystemAudioSource(desktop.bridge)!
+        .open()
+        .catch((reason: unknown) => reason);
+      expect(error).toMatchObject({
+        code: "system_audio_unavailable",
+        message: "helper exited",
+        reason: "capture_failed",
+      });
     });
   });
 });

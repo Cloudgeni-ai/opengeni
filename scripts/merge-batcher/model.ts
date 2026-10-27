@@ -191,6 +191,8 @@ export interface FollowupPull {
 export type DurableEffect = EffectState &
   (
     | { kind: "rerun"; run: Run }
+    /** Priority-lane cancellation of an abandoned candidate's running Batch CI. */
+    | { kind: "cancel"; run: Run; batchId: string }
     | { kind: "comment"; number: number; body: string; marker: string }
     | { kind: "followup"; request: FollowupRequest }
     | { kind: "disable-auto-merge"; number: number; headSha: string; parkedAt: string }
@@ -237,6 +239,8 @@ export interface Headroom {
   approvalOnlyRuns?: number;
   /** Reused verified main approval tails; absent if the scan was incomplete. */
   cachedApprovalOnlyRuns?: number;
+  /** Active Batch-attested main push runs (no test fan-out); complete scans only. */
+  attestedMainRuns?: number[];
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
   /** Slot one uses provider queueing; extra slots require clear capacity. */
@@ -347,6 +351,13 @@ export type RunnerScanHold =
 export type RunnerScan =
   | {
       ok: true;
+      /**
+       * Runs whose latest-job listing still disagreed with GitHub's reported
+       * `total_count` after one re-read; their demand uses the rows actually
+       * returned. Only with `tolerateJobCountMismatch`; otherwise such a scan holds.
+       * Absent when every listing was complete.
+       */
+      partialJobRuns?: number[];
       mainDemand: number;
       otherDemand: number;
       scannedRuns: number;
@@ -368,18 +379,84 @@ export type RunnerScan =
        * planning phase), so their current demand understates what they will request.
        */
       preFanoutMainRuns: number[];
+      /**
+       * Active main push runs proven Batch-attested (`attestedMainRun`). Their
+       * runner-holding jobs still count in `mainDemand` (real occupancy inside
+       * the main reserve), but they never count as pre-fan-out, queued main or
+       * `latestMain`: they have no test fan-out to protect.
+       */
+      attestedMainRuns: number[];
     }
   | { ok: false; hold: RunnerScanHold; scannedRuns: number; approvalOnlyRuns: number };
 /**
  * Jobs `.github/workflows/ci.yml` instantiates before `plan` completes:
- * automation-admission, merge-content and plan. Every other job needs plan,
- * directly or transitively, and is created together with the fan-out (measured:
- * 3 early jobs, then about 55 more 77-92 seconds later). A job page listing
+ * automation-admission, batch-attestation, merge-content and plan. Every other
+ * job needs plan, directly or transitively, and is created together with the
+ * fan-out (measured before batch-attestation existed: 3 early jobs, then about
+ * 55 more 77-92 seconds later). A job page listing
  * more jobs (any status, `filter=latest`) proves the fan-out exists; a drained
  * tail still lists its completed jobs. capacity.test.ts checks this constant
  * against the workflow file.
  */
-export const MAIN_PRE_FANOUT_JOBS = 3;
+export const MAIN_PRE_FANOUT_JOBS = 4;
+/**
+ * ci.yml job and step a main push runs when its exact tree already passed a
+ * trusted Batch CI attempt (scripts/ci/batch-attestation.ts). The step runs and
+ * succeeds only after the persisted proof re-verifies.
+ */
+export const MAIN_ATTESTATION_JOB = "Batch CI attestation";
+export const MAIN_ATTESTATION_STEP = "Reuse identical-tree Batch CI";
+/**
+ * Display-name prefixes of every ci.yml test lane an attested main push skips.
+ * capacity.test.ts checks them against the jobs gated on `plan.outputs.attested`.
+ */
+export const ATTESTED_SKIPPED_LANES = [
+  "Source and type contracts",
+  "Unit tests (shard",
+  "Real-service shard",
+  "Impacted E2E shard",
+  "Real-service and recovery tests",
+  "Browser and visual acceptance",
+  "Package and bundle contracts",
+  "Real Chromium browser controller",
+] as const;
+/**
+ * Fail-closed proof, from one complete job listing, that a main push reused an
+ * identical-tree Batch CI verdict: exactly one successful attestation job whose
+ * verification step succeeded, and no test lane that is anything but skipped.
+ * Lanes are absent before the fan-out exists. Anything else is a full main run.
+ */
+export function attestedMainRun(jobs: readonly unknown[]): boolean {
+  let attested = 0;
+  for (const raw of jobs) {
+    if (raw === null || typeof raw !== "object") return false;
+    const job = raw as { name?: unknown; status?: unknown; conclusion?: unknown; steps?: unknown };
+    if (typeof job.name !== "string") return false;
+    const name = job.name;
+    if (name === MAIN_ATTESTATION_JOB) {
+      if (
+        job.status !== "completed" ||
+        job.conclusion !== "success" ||
+        !Array.isArray(job.steps) ||
+        job.steps.filter(
+          (step) =>
+            step !== null &&
+            typeof step === "object" &&
+            (step as { name?: unknown }).name === MAIN_ATTESTATION_STEP &&
+            (step as { status?: unknown }).status === "completed" &&
+            (step as { conclusion?: unknown }).conclusion === "success",
+        ).length !== 1
+      )
+        return false;
+      attested++;
+    } else if (
+      ATTESTED_SKIPPED_LANES.some((lane) => name.startsWith(lane)) &&
+      (job.status !== "completed" || job.conclusion !== "skipped")
+    )
+      return false;
+  }
+  return attested === 1;
+}
 /**
  * Runner waits observed on the newest active full-main landing run. Queue
  * times are measured from each job's `created_at`: `oldestQueuedSeconds` is the
@@ -424,6 +501,13 @@ export async function scanRunnerDemand(input: {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<void>;
   };
+  /**
+   * After one strict re-read, accept a latest-job listing whose rows disagree
+   * with GitHub's reported total (for example `filter=latest` after a rerun)
+   * and report the run in `partialJobRuns`. Run listings always stay strict:
+   * they bound the Batch slots.
+   */
+  tolerateJobCountMismatch?: boolean;
 }): Promise<RunnerScan> {
   const now = input.now ?? Date.now;
   const started = now();
@@ -447,10 +531,26 @@ export async function scanRunnerDemand(input: {
     return hold("invalid-run");
   // IDs are mandatory across paginated responses so overlap cannot hide a gap.
   // Single-page job fixtures may omit IDs; run identities are always validated below.
+  // A listing whose rows disagree with its reported total (count drift, short
+  // or long pages, repeated identities) is re-read once before it holds:
+  // GitHub's count and rows can transiently differ. Malformed pages do not retry.
   async function list(path: string, key: "workflow_runs" | "jobs") {
+    const first = await read(path, key, false);
+    if (!("error" in first) || first.error !== "mismatch") return first;
+    const second = await read(path, key, key === "jobs" && input.tolerateJobCountMismatch === true);
+    return "error" in second && second.error === "mismatch"
+      ? ({ error: "incomplete" } as const)
+      : second;
+  }
+  // Lenient reads use the rows actually returned: they stop at the first short
+  // page or a page without new identities, skip repeated identities and mark
+  // the listing partial. Malformed or oversized (above per_page) pages, invalid
+  // identities and the deadline still fail.
+  async function read(path: string, key: "workflow_runs" | "jobs", lenient: boolean) {
     const items: unknown[] = [];
     const ids = new Set<number>();
     let total: number | undefined;
+    let partial = false;
     for (let pageNumber = 1; ; pageNumber++) {
       if (now() - started > deadline) return { error: "deadline" } as const;
       const page = (await input.get(`${path}&per_page=100&page=${pageNumber}`)) as Record<
@@ -464,20 +564,46 @@ export async function scanRunnerDemand(input: {
         Array.isArray(page) ||
         !Number.isSafeInteger(count) ||
         (count as number) < 0 ||
-        !Array.isArray(values) ||
-        (total !== undefined && count !== total)
+        !Array.isArray(values)
       )
         return { error: "incomplete" } as const;
+      if (lenient) {
+        if (values.length > 100) return { error: "incomplete" } as const;
+        if (total !== undefined && count !== total) partial = true;
+        total ??= count as number;
+        const before = items.length;
+        for (const value of values) {
+          const id =
+            value !== null && typeof value === "object"
+              ? (value as { id?: unknown }).id
+              : undefined;
+          if (id !== undefined) {
+            if (!Number.isSafeInteger(id) || (id as number) <= 0)
+              return { error: "incomplete" } as const;
+            if (ids.has(id as number)) {
+              partial = true;
+              continue;
+            }
+            ids.add(id as number);
+          }
+          items.push(value);
+        }
+        if (values.length < 100 || items.length === before)
+          return { items, partial: partial || items.length !== total } as const;
+        continue;
+      }
+      if (total !== undefined && count !== total) return { error: "mismatch" } as const;
       total ??= count as number;
       if (values.length !== Math.min(100, total - items.length))
-        return { error: "incomplete" } as const;
+        return { error: "mismatch" } as const;
       for (const value of values) {
         const id =
           value !== null && typeof value === "object" ? (value as { id?: unknown }).id : undefined;
         if (key === "workflow_runs" && runId(id) === null) return { error: "invalid-run" } as const;
         if (total > 100 || id !== undefined) {
-          if (!Number.isSafeInteger(id) || (id as number) <= 0 || ids.has(id as number))
+          if (!Number.isSafeInteger(id) || (id as number) <= 0)
             return { error: "incomplete" } as const;
+          if (ids.has(id as number)) return { error: "mismatch" } as const;
           ids.add(id as number);
         }
         items.push(value);
@@ -556,11 +682,13 @@ export async function scanRunnerDemand(input: {
       }
     }
   }
+  const partialJobRuns: number[] = [];
   let mainDemand = 0,
     otherDemand = 0,
     runnerRelevantRuns = 0,
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
+  const attestedMainRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
   // Bound independent read-only job observations without serializing provider
   // latency across the entire inventory. Pagination within each run remains
@@ -624,6 +752,7 @@ export async function scanRunnerDemand(input: {
             input.approvalCache &&
             eligible &&
             !("error" in page) &&
+            !("partial" in page && page.partial) &&
             publicReleaseApprovalJobs(run, page.items)
           )
             await input.approvalCache
@@ -643,6 +772,9 @@ export async function scanRunnerDemand(input: {
     if (now() - started > deadline) return hold("deadline");
     const page = pages[index]!;
     if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
+    // A partial job listing counts the rows it returned and never proves idleness.
+    const partial = "partial" in page && page.partial;
+    if (partial) partialJobRuns.push(id);
     scannedRuns++;
     if (reused.has(id)) cachedApprovalOnlyRuns++;
     const jobs = page.items;
@@ -652,7 +784,7 @@ export async function scanRunnerDemand(input: {
       observedBatchDemand += demand;
       reservedBatchDemand += Math.max(demand, CANDIDATE_SLOTS);
     }
-    const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
+    const approvalOnly = !partial && !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
     else runnerRelevantRuns++;
     const isMain =
@@ -661,6 +793,14 @@ export async function scanRunnerDemand(input: {
       run.event === "push";
     if (isMain) {
       mainDemand += demand;
+      // A Batch-attested push only builds artifacts and images for a tree
+      // Batch CI already tested. Its jobs stay in mainDemand (inside the main
+      // reserve), but it has no test fan-out to protect: it never holds a
+      // candidate as pre-fan-out or queued main and is not `latestMain`.
+      if (attestedMainRun(jobs)) {
+        attestedMainRuns.push(id);
+        continue;
+      }
       mainQueuedJobs += jobs.filter((job) =>
         RUNNER_WAIT_JOB_STATUSES.has(String((job as { status?: unknown }).status)),
       ).length;
@@ -678,6 +818,7 @@ export async function scanRunnerDemand(input: {
   if (finished - started > deadline) return hold("deadline");
   return {
     ok: true,
+    ...(partialJobRuns.length ? { partialJobRuns: partialJobRuns.sort((a, b) => a - b) } : {}),
     mainDemand,
     otherDemand,
     scannedRuns,
@@ -691,6 +832,7 @@ export async function scanRunnerDemand(input: {
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),
+    attestedMainRuns: attestedMainRuns.sort((a, b) => a - b),
   };
 }
 const RUNNER_WAIT_JOB_STATUSES = new Set(["queued", "requested"]);
@@ -766,8 +908,10 @@ export interface CapacityObservation {
  *    its imminent fan-out (up to 46 runner-holding jobs measured) would not fit
  *    beside a candidate.
  * 2. No active full-main run has a job waiting for a runner (`queued` or
- *    `requested`). Main CI is never gated, cancelled or skipped; only new
- *    candidates wait while main is short of runners.
+ *    `requested`). Main CI itself is never gated or cancelled; only new
+ *    candidates wait while main is short of runners. A Batch-attested main
+ *    push (`attestedMainRun`) is not a full-main run for rules 1 and 2; its
+ *    runner-holding jobs remain main demand for rules 3 and 4.
  * 3. The existing repository allocation: other + max(main reserve, main) +
  *    18 <= runner budget (52/30/18 in the qualified configuration).
  * 4. The provider pool: main + other + other-repository allowance + 18 <=
@@ -882,6 +1026,8 @@ export interface Observation {
   baseSha: string;
   ready: Pull[];
   excluded: { number: number; reason: string }[];
+  /** PR numbers with a trusted, timeline-backed queue-priority label. Ordering only. */
+  priority?: number[];
   candidates: Candidate[];
   stateSha: string | null;
   ledger: Ledger;

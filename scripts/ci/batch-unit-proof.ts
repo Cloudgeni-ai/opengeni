@@ -39,7 +39,7 @@ export type BatchUnitProof = {
 };
 const sha = /^[a-f0-9]{40}$/;
 function requireProof(condition: unknown, reason: string): asserts condition {
-  if (!condition) throw new Error(`Batch unit reuse rejected: ${reason}`);
+  if (!condition) throw new Error(`Batch tree proof rejected: ${reason}`);
 }
 export function sameInventory(left: unknown, right: readonly string[]): left is string[] {
   return (
@@ -80,19 +80,43 @@ export function verifyArtifactBytes(
   );
 }
 
+// Discovery and verification shared by unit reuse and main-push Batch CI
+// attestation. Both bind the exact main tree, attempt, trusted queue run,
+// canonical manifest, archive digests and complete successful Batch receipts.
+export type BatchTreeExpectation = {
+  repository: string;
+  mainSha: string;
+  tree: string;
+  runId: number;
+  attempt: number;
+};
+/** Unique test paths; an empty list is a valid (docs/control-only) Batch plan. */
+export function validInventory(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === "string" && item.length > 0) &&
+    new Set(value).size === value.length
+  );
+}
+
 // The plan job constructs this only after reading the authenticated provider
 // run, archive digests and canonical Git manifest. Unit jobs consume the same
 // run's immutable plan artifact; it is never a caller-supplied dispatch input.
 export function verifyBatchUnitProof(
   raw: unknown,
-  expected: {
-    repository: string;
-    mainSha: string;
-    tree: string;
-    runId: number;
-    attempt: number;
-    inventory: readonly string[];
-  },
+  expected: BatchTreeExpectation & { inventory: readonly string[] },
+): BatchUnitProof {
+  return verifyBatchTreeProof(raw, { ...expected, branch: /^queue\/.+/ });
+}
+
+/**
+ * With `inventory`, the Batch plan must contain exactly that complete unit
+ * inventory (unit reuse). Without it, the Batch plan's own selected inventory
+ * only has to be well formed and fully receipted (identical-tree attestation).
+ */
+export function verifyBatchTreeProof(
+  raw: unknown,
+  expected: BatchTreeExpectation & { branch: RegExp; inventory?: readonly string[] },
 ): BatchUnitProof {
   const proof = raw as BatchUnitProof;
   requireProof(proof?.schemaVersion === 1, "schema");
@@ -126,14 +150,19 @@ export function verifyBatchUnitProof(
       sha.test(run.head_sha) &&
       run.path === BATCH_WORKFLOW &&
       run.event === "push" &&
-      /^queue\/.+/.test(run.head_branch) &&
+      expected.branch.test(run.head_branch) &&
       run.repository?.full_name === expected.repository &&
       run.head_repository?.full_name === expected.repository &&
       run.status === "completed" &&
       run.conclusion === "success",
     "trusted Batch attempt",
   );
-  requireProof(sameInventory(proof.inventory, expected.inventory), "complete unit inventory");
+  requireProof(
+    expected.inventory === undefined
+      ? validInventory(proof.inventory)
+      : sameInventory(proof.inventory, expected.inventory),
+    expected.inventory === undefined ? "Batch unit inventory" : "complete unit inventory",
+  );
   const manifest = proof.manifest;
   requireProof(manifest?.tipSha === run.head_sha, "tested manifest head");
   const spec = {

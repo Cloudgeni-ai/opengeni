@@ -919,6 +919,63 @@ describe("ChatComposer while the agent is idle", () => {
     expect(slot()).toBeNull();
   });
 
+  test("a custom composer from the public parts keeps one row width when idle and working", async () => {
+    const box = (element: Element | null) =>
+      (element?.className ?? "")
+        .split(/\s+/)
+        .filter((name) => /^(?:pointer-coarse:)?size-/.test(name))
+        .sort();
+    function CustomComposer({ state }: { state: ComposerState }) {
+      const controller = Composer.useChatComposerController({
+        delivery: state,
+        draft: state,
+        control: state,
+        effectiveControl: active,
+      });
+      return (
+        <Composer.Root controller={controller}>
+          <Composer.Frame>
+            <Composer.Surface>
+              <Composer.Input />
+              <Composer.Footer>
+                <Composer.Controls>
+                  <span data-model-controls="">Model</span>
+                  <Composer.PauseButtonSlot />
+                </Composer.Controls>
+                <Composer.Actions>
+                  <Composer.PauseButton />
+                  <Composer.SendButton />
+                </Composer.Actions>
+              </Composer.Footer>
+            </Composer.Surface>
+          </Composer.Frame>
+        </Composer.Root>
+      );
+    }
+    const slot = () => mounted!.container.querySelector("[data-og-composer-pause-slot]");
+    const row = () =>
+      [slot(), pauseButton()]
+        .filter((element): element is HTMLElement => element !== null)
+        .map((element) => box(element));
+    const empty = {
+      ...composer(spy()),
+      value: "",
+      hasDraftContent: () => false,
+      canSend: false,
+    };
+    // Idle: Pause is hidden and the slot keeps exactly one Pause-sized box.
+    mounted = await renderComponent(<CustomComposer state={{ ...empty, working: false }} />);
+    expect(pauseButton()).toBeNull();
+    expect(slot()?.getAttribute("aria-hidden")).toBe("true");
+    const idle = row();
+    expect(idle).toHaveLength(1);
+    expect(idle[0]!.length).toBeGreaterThan(0);
+    // Working: Pause shows in the same box and the slot gives its room back.
+    await mounted.rerender(<CustomComposer state={{ ...empty, working: true }} />);
+    expect(slot()).toBeNull();
+    expect(row()).toEqual(idle);
+  });
+
   test("at the turn's end Steer and Send's queue wording leave together; only Pause lingers", async () => {
     const base = composer(spy());
     const render = (working: boolean) => (

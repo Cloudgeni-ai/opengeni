@@ -13,6 +13,7 @@ import { useState } from "react";
 import { toast } from "../../lib/toast";
 
 import { useSiteAudience } from "./site-audience";
+import { sitePublishFormProps } from "./site-publish-form-props";
 import { SitePublishPage, useSitePublication } from "./site-publishing";
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
@@ -25,6 +26,7 @@ import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { sitesClientConfig } from "../../lib/site-publishing";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // Stands in for the Site while it loads so the audience hook keeps its order.
 const PLACEHOLDER_SITE: WorkspaceArtifact = {
@@ -108,7 +110,7 @@ export function useSiteManagement({
       return true;
     } catch (error) {
       toast.error(status === "archived" ? "Couldn't archive Site" : "Couldn't restore Site", {
-        description: error instanceof Error ? error.message : String(error),
+        description: errorMessage(error),
       });
       return false;
     } finally {
@@ -179,20 +181,16 @@ export function SiteSettings({
           </Section>
         ) : (
           <SitePublishPage
+            {...sitePublishFormProps(management, {
+              client,
+              workspaceId,
+              site: artifact,
+              sites: sitesClientConfig(clientConfig),
+            })}
             layout="panel"
-            client={client}
-            workspaceId={workspaceId}
-            workspaceName={management.workspaceName}
-            site={artifact}
-            load={publication.load}
             onPublication={publication.setPublication}
-            onReload={() => void publication.reload()}
             onBack={() => undefined}
             canManage
-            isAdmin={management.isAdmin}
-            onShareWithWorkspace={management.showAudience ? audience.share : undefined}
-            personalWorkspace={!management.showAudience}
-            sites={sitesClientConfig(clientConfig)}
           />
         )
       ) : null}

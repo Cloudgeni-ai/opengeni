@@ -292,6 +292,9 @@ describe("TurnSummary status line", () => {
     expect(formatElapsed(englishText, 120_000)).toBe("2m");
     expect(formatElapsed(englishText, 134_000)).toBe("2m 14s");
     expect(formatElapsed(englishText, 3_900_000)).toBe("1h 05m");
+    expect(formatElapsed(englishText, 86_399_000)).toBe("23h 59m");
+    expect(formatElapsed(englishText, 86_400_000)).toBe("1d 00h");
+    expect(formatElapsed(englishText, 2_008_860_000)).toBe("23d 06h");
   });
 
   test("a settled exchange states its span once and reads as a separator", async () => {

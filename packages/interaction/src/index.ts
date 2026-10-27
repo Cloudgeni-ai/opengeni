@@ -274,12 +274,21 @@ function canonicalJsonValue(value: unknown): unknown {
   return value;
 }
 
+/** What a computer driver records on a dispatch trace when the action's raw
+ * input (a click, a key press) was delivered without any confirmation that
+ * the app acted on it. Recorded by identity. */
+export const COMPUTER_UNCONFIRMED_INPUT_TRACE: { readonly unconfirmedInput: true } = Object.freeze({
+  unconfirmedInput: true,
+});
+
 export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
   /** Drivers record on `trace` each action that acted on an element of another
-   * role than its locator named (a ComputerActionRoleStandIn). */
+   * role than its locator named (a ComputerActionRoleStandIn), and
+   * {@link COMPUTER_UNCONFIRMED_INPUT_TRACE} when the action's raw input was
+   * delivered without confirmation that the app acted on it. */
   dispatch(
     command: ComputerActionCommandValue,
     trace?: InteractionDispatchTrace,
@@ -488,10 +497,16 @@ export class ComputerInteractionController {
           });
         },
         // The computer driver records an action that acted on an element of
-        // another role than the one named (see ComputerActionRoleStandIn).
-        maxDispatchTraceItems: INTERACTION_MAX_ACTIONS_PER_BATCH,
+        // another role than the one named (see ComputerActionRoleStandIn), and
+        // raw input it could not confirm.
+        maxDispatchTraceItems: INTERACTION_MAX_ACTIONS_PER_BATCH + 1,
         attachDispatchTrace(receipt, items) {
-          return ComputerActionReceipt.parse({ ...receipt, roleStandIns: items });
+          const standIns = items.filter((item) => item !== COMPUTER_UNCONFIRMED_INPUT_TRACE);
+          return ComputerActionReceipt.parse({
+            ...receipt,
+            ...(standIns.length ? { roleStandIns: standIns } : {}),
+            ...(standIns.length < items.length ? { unconfirmedInput: true } : {}),
+          });
         },
         recoverReceipt(receipt, settledAt) {
           if (

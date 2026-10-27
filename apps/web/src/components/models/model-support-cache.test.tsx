@@ -67,7 +67,7 @@ mock.module("sonner", () => ({ toast: { error: mock(() => undefined) } }));
 const { useOrganizationModelDefaults } = await import("./use-organization-model-defaults");
 const { useModelAccountSettingsOverview, useWorkspaceModelAccountSettings } =
   await import("./model-account-settings");
-const { useOpenGeniCredits } = await import("./opengeni-credits-row");
+const { useOpenGeniCredits } = await import("@/lib/opengeni-credits");
 
 registerDom();
 let release: () => void;

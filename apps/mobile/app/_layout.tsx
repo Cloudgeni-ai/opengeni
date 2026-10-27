@@ -72,6 +72,7 @@ export default function RootLayout() {
                   <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
                   <Stack.Screen name="session/[id]" options={{ title: "" }} />
                   <Stack.Screen name="settings" options={{ title: "Settings" }} />
+                  <Stack.Screen name="wake-phrase" options={{ title: "" }} />
                   <Stack.Screen
                     name="workspaces"
                     options={{

@@ -197,7 +197,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   /**
    * Where the Site is published, for anyone who can open it in the app (the
-   * Site view's "Live" link). Reading the address needs only the Site; the
+   * Site view's Published menu). Reading the address needs only the Site; the
    * publication's settings above stay with the people who manage it.
    */
   app.get(`${base}/link`, async (context) => {

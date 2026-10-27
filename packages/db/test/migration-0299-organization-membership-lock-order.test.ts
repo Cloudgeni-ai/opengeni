@@ -456,7 +456,9 @@ describe("migration 0299 organization membership lock order", () => {
         membershipId: org.member.id,
         transition: {
           kind: "change_role",
-          role: "member",
+          // Two real changes: a role the member already holds is a no-op
+          // that leaves the revision alone (0995).
+          role: "owner",
           expectedAuthorizationRevision: org.member.authorizationRevision,
           operationId: crypto.randomUUID(),
         },

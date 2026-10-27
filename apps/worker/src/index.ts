@@ -11,7 +11,9 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePasswordFileOptions,
   databasePoolOptions,
+  logDatabaseCredentialEvent,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -1218,11 +1220,20 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
-  const poolOptions = databasePoolOptions(settings);
+  // Runtime login only: the files rotate this URL's password in place.
+  const poolOptions = {
+    ...databasePoolOptions(settings),
+    ...databasePasswordFileOptions(settings),
+  };
+  const credentialEvents = (pool: string) =>
+    logDatabaseCredentialEvent(pool, (message, attributes) =>
+      observability.warn(message, attributes),
+    );
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
     ...poolOptions,
+    onCredentialEvent: credentialEvents("worker"),
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1233,6 +1244,7 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
     ...poolOptions,
+    onCredentialEvent: credentialEvents("worker-readiness"),
     max: 1,
   });
   const databasePosture = {

@@ -34,7 +34,11 @@ export type OpenGeniSiteDataRecord<T extends Record<string, unknown> = Record<st
   id: string;
   key: string | null;
   data: T;
-  /** Principal that owns the record, such as `user:<id>`. */
+  /**
+   * Opaque id of the record's owner: for a person, `user:` followed by their
+   * subject id (for example `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`).
+   * Compare it whole; filter with `$owner: "me"` instead of building one.
+   */
   owner: string;
   createdBy: string;
   updatedBy: string;

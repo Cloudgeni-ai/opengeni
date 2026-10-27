@@ -21,6 +21,7 @@ import {
 } from "../computer-backend";
 import {
   callDesktop,
+  deliveredUnconfirmed,
   CuaFailure,
   runSteps,
   walkIncompleteness,
@@ -144,6 +145,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * checked against a fresh observation, which mints new refs, so the ref is
    * resolved in the observation it came from and CUA validates its token. */
   private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
+  /** Readings the app did not answer (see unansweredObservation). They show
+   * no focused element, so keys are not sent on them. */
+  private readonly unansweredReadings = new WeakSet<ComputerBackendObservation>();
   /** CUA's element token behind each ref of a window's latest reading. CUA
    * accepts only the tokens of a window's latest snapshot; a ref outlives
    * readings for as long as its element stays (see stabilizeRefs). */
@@ -373,6 +377,7 @@ export class CuaComputerBackend implements ComputerBackend {
   dispatch(
     command: ComputerBackendActionCommand,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null> {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
@@ -416,17 +421,20 @@ export class CuaComputerBackend implements ComputerBackend {
       const known = new Set(this.targetsById.keys());
       const fronted = await this.front(acted.windowId, operations);
       let report = "";
+      // A click or key press CUA could only send, with nothing confirming
+      // the app acted on it.
+      const rawInput =
+        command.action.type === "keyboard" ||
+        (command.action.type === "pointer" &&
+          (command.action.action === "click" || command.action.action === "double_click"));
+      let unconfirmedInput = false;
       try {
         for (let index = 0; index < operations.length; index++) {
           const operation = operations[index]!;
           try {
-            const { result } = await callDesktop(
-              this.runtime,
-              operation.name,
-              operation.args,
-              true,
-            );
-            report += openedWindowsReport(result.text);
+            const call = await callDesktop(this.runtime, operation.name, operation.args, true);
+            report += openedWindowsReport(call.result.text);
+            if (rawInput && deliveredUnconfirmed(call)) unconfirmedInput = true;
           } catch (error) {
             if (index > 0)
               throw new ComputerBackendError(
@@ -476,6 +484,7 @@ export class CuaComputerBackend implements ComputerBackend {
       } finally {
         await fronted.giveBack();
       }
+      if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -849,7 +858,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * are not on the Mac's screen. macOS keeps listing them while the screen
    * is locked or another user's session is on it, but reads of them come
    * back empty and input never reaches them. The full check runs a native
-   * helper; the quick one only notices another user owning the console. */
+   * helper that reads whose session is on the console; the quick one only
+   * notices that this user does not own the console device, which is when
+   * another session may be on screen. */
   private async assertOnScreen(full: boolean): Promise<void> {
     if (!this.macWindows || (!full && !consoleHeldByAnotherUser())) return;
     // A check that cannot run never blocks the computer.
@@ -1140,8 +1151,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const hosts = this.sheetHosts(target).slice(0, 4);
     const near = (a: number, b: number) => Math.abs(a - b) <= 2;
     const shown: Target[] = [];
+    let unread = 0;
     for (const host of hosts) {
       const reading = await this.observeTarget(host.native.id).catch(() => null);
+      if (!reading) unread += 1;
       if (
         reading?.roots.some(
           (node) =>
@@ -1155,13 +1168,21 @@ export class CuaComputerBackend implements ComputerBackend {
       )
         shown.push(host);
     }
+    const hostList = hosts.map((host) => host.native.id).join(", ");
+    // Every window it lies within was read and none shows it: pointing at
+    // them again would only lead back here.
+    if (!shown.length && hosts.length && !unread)
+      return new ComputerBackendError(
+        "target_stale",
+        `${target.native.id} cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
     return new ComputerBackendError(
       "target_stale",
       shown.length === 1
         ? `${target.native.id} is a sheet attached to the window ${shown[0]!.native.id}, and its controls are read and used through that window: observe ${shown[0]!.native.id} and act on its refs`
-        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hosts
-            .map((host) => host.native.id)
-            .join(", ")}) and act on its refs`,
+        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hostList}) and act on its refs`,
       false,
       false,
     );
@@ -1187,6 +1208,19 @@ export class CuaComputerBackend implements ComputerBackend {
     const others = [...this.targetsById.values()]
       .filter((other) => other !== target && other.pid === target.pid)
       .map((other) => other.native.id);
+    // The focused window is one of the others; when every one of them has
+    // already proven unreadable, acting on it is no way forward.
+    if (others.length && others.every((id) => this.unreadableSheets.has(id)))
+      return new ComputerBackendError(
+        code,
+        `Keys reach only the focused window of a background app, and that window (one of ${others
+          .slice(0, 5)
+          .join(
+            ", ",
+          )}) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
     return new ComputerBackendError(
       code,
       `Keys reach only the focused window of a background app, and another of its windows has focus${
@@ -1203,6 +1237,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * - an element of a bubble or popover the window shows as its own takes
    *   accessibility actions (invoke, set_value) but no pointer or key input,
    *   which would land on the window under it;
+   * - an item of a menu the app has open over the window takes invoke, and
+   *   the control that opened the menu takes set_value, but pointer and key
+   *   input would not reach the menu;
    * - an element of another window of the app is that window's to act on,
    *   pointed at only when it is a target the caller can observe. */
   private async elementWindowRefusal(
@@ -1225,6 +1262,13 @@ export class CuaComputerBackend implements ComputerBackend {
       return new ComputerBackendError(
         code,
         "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_open_menu")
+      return new ComputerBackendError(
+        code,
+        "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
         false,
         false,
       );
@@ -1289,6 +1333,13 @@ export class CuaComputerBackend implements ComputerBackend {
       max_depth: 25,
     });
     const state = WindowState.parse(data);
+    if (
+      state.pid === target.pid &&
+      state.window_id === target.windowId &&
+      !state.snapshot_id &&
+      String(data.degraded_reason ?? "").startsWith("ax_app_unresponsive")
+    )
+      return this.unansweredObservation(targetId, target, state);
     if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
       if (
         this.sheetHosts(target).length &&
@@ -1308,6 +1359,7 @@ export class CuaComputerBackend implements ComputerBackend {
       state.elements,
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown, this.identity.platform),
+      state.web_content_takes_press === true,
     );
     const shownTitle = readWindowTitle(state.elements, this.identity.platform);
     const document = documentTitle(shownTitle, target.native.title);
@@ -1418,6 +1470,56 @@ export class CuaComputerBackend implements ComputerBackend {
     this.recentObservations.set(targetId, [...recent, observation]);
     while (this.recentObservations.size > 32)
       this.recentObservations.delete(this.recentObservations.keys().next().value!);
+    return observation;
+  }
+
+  /** A reading the app did not answer in time (CUA's ax_app_unresponsive):
+   * its main thread was busy, as while it shows a menu, so nothing was read.
+   * That says nothing about the window, and CUA keeps its last snapshot, so
+   * the refs of the last reading stay the ones actions resolve. The reading
+   * itself lists no elements and says it stopped because the app answered
+   * too slowly, beside the screenshot, instead of failing. It shows no
+   * focused element, so keys are refused on it (see unansweredReadings). */
+  private unansweredObservation(
+    targetId: string,
+    target: Target,
+    state: ReturnType<typeof WindowState.parse>,
+  ): ComputerBackendObservation {
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:unanswered:${randomUUID()}`,
+      target: {
+        ...target.native,
+        bounds: state.window_bounds ?? target.native.bounds,
+        focused: false,
+      },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots: [],
+      nodeCount: 0,
+      incomplete: {
+        reason: "time_budget",
+        unreadCount: Math.min(state.nodes_pending ?? 0, 1_000_000),
+      },
+      focusedRef: null,
+      changedRegions: [],
+    };
+    const last = this.observations.get(targetId);
+    // An action naming this reading acts on the last one's elements.
+    const actedOn = last ? { ...last, observationId: observation.observationId } : observation;
+    this.unansweredReadings.add(actedOn);
+    if (last) {
+      const signs = this.progress.get(last);
+      if (signs) this.progress.set(actedOn, signs);
+      const document = this.documents.get(last);
+      if (document !== undefined) this.documents.set(actedOn, document);
+    }
+    this.observations.delete(targetId);
+    this.observations.set(targetId, actedOn);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, actedOn]);
     return observation;
   }
 
@@ -1677,7 +1779,9 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
-      throw unsupported("CUA click continuation is unavailable");
+      throw unsupported(
+        'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
+      );
     }
     const target = await this.target(command.targetId);
     if (target.native.targetGeneration !== command.expectedTargetGeneration)
@@ -2088,6 +2192,15 @@ export class CuaComputerBackend implements ComputerBackend {
         },
       ];
     }
+    // A reading the app did not answer showed no focused element: keys sent
+    // on it would go to one the caller never saw.
+    if (!laterInBatch && this.unansweredReadings.has(observed))
+      throw new ComputerBackendError(
+        "invalid_action",
+        "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        false,
+        false,
+      );
     // Window-scoped delivery never falls back to the foreground desktop. An
     // observed focused element is carried when CUA supplies that information.
     // After earlier actions of a batch the focus may have moved (clicking a
@@ -2938,9 +3051,11 @@ const CONSOLE_UNAVAILABLE: Record<Exclude<MacConsoleState, "available">, string>
     "Another user's session is on this Mac's screen, so nothing in this user's session can be read or clicked. Ask a person to switch back to this user, then try again.",
 };
 
-/** Whether another user owns the console: at the login window root does,
- * and the full check decides that case too. Microseconds, unlike the full
- * check. */
+/** Whether another user owns the console device: the user who last logged in
+ * at the console, or root at the login window. That is also the case while
+ * this session is on screen and a second user is logged in in the background,
+ * so it only says when the full check must decide (about 6 ms for the helper
+ * there). Microseconds, unlike the full check. */
 function consoleHeldByAnotherUser(): boolean {
   try {
     return statSync("/dev/console").uid !== process.getuid?.();

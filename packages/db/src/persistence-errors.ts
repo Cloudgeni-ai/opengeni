@@ -1,3 +1,5 @@
+import { isRecord } from "@opengeni/contracts/values";
+
 export type DatabaseFailureCode = "db_deadlock" | "db_serialization_failure" | "db_failure";
 
 export type PersistenceRetryOutcome = "not_retryable" | "exhausted";
@@ -76,8 +78,25 @@ const SAFE_FACT_KEYS = [
   ["routine", "routine"],
 ] as const;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object");
+/**
+ * The objects in a possibly wrapped driver error, breadth first: the error,
+ * then everything under its `cause`, `original`, `driverError`, `error` and
+ * `errors` keys. Stops after 64 distinct objects.
+ */
+export function* nestedErrorRecords(error: unknown): Generator<Record<string, unknown>> {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    yield current;
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
 }
 
 function safeFact(value: unknown): string | undefined {
@@ -87,13 +106,8 @@ function safeFact(value: unknown): string | undefined {
 
 /** Find the driver SQLSTATE even when Drizzle wrapped it under nested causes. */
 export function nestedPostgresSqlState(error: unknown): string | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
   let fallback: string | null = null;
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     for (const key of SQLSTATE_KEYS) {
       const value = current[key];
       if (typeof value !== "string" || !/^[0-9A-Z]{5}$/i.test(value)) continue;
@@ -103,11 +117,6 @@ export function nestedPostgresSqlState(error: unknown): string | null {
       if (RETRYABLE_DATABASE_TRANSPORT_CODES.has(normalized)) continue;
       if (normalized === "40P01" || normalized === "40001") return normalized;
       fallback ??= normalized;
-    }
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return fallback;
@@ -119,12 +128,7 @@ export function nestedPostgresSqlState(error: unknown): string | null {
  * refused instead of collapsing every refusal into one generic answer.
  */
 export function nestedPostgresMessage(error: unknown): string | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     const carriesSqlState = SQLSTATE_KEYS.some((key) => {
       const value = current[key];
       return (
@@ -135,11 +139,6 @@ export function nestedPostgresMessage(error: unknown): string | null {
     });
     if (carriesSqlState && typeof current.message === "string" && current.message.length > 0)
       return current.message;
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return null;
 }
@@ -175,13 +174,7 @@ export function isSchemaChangePersistenceSqlState(sqlState: string | null): bool
  * contain connection detail.
  */
 export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
-
+  for (const current of nestedErrorRecords(error)) {
     for (const key of ["code", "errno"] as const) {
       const value = current[key];
       if (
@@ -190,12 +183,6 @@ export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
       ) {
         return true;
       }
-    }
-
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return false;
@@ -256,14 +243,9 @@ export class DatabaseUnavailableError extends Error {
  * transport are not database loss.
  */
 export function isDatabaseConnectionLoss(error: unknown): boolean {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
   let transportFailure = false;
   let databaseOrigin = false;
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     if (current instanceof DatabaseUnavailableError) return true;
     for (const key of SQLSTATE_KEYS) {
       const value = current[key];
@@ -283,11 +265,6 @@ export function isDatabaseConnectionLoss(error: unknown): boolean {
     if (hasTransportCode(current)) transportFailure = true;
     if (isDatabaseOrigin(current)) databaseOrigin = true;
     if (transportFailure && databaseOrigin) return true;
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return false;
 }
@@ -324,13 +301,7 @@ export function isDatabasePersistenceFailure(error: unknown): boolean {
     return true;
   }
 
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
-
+  for (const current of nestedErrorRecords(error)) {
     if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) {
       return true;
     }
@@ -342,12 +313,6 @@ export function isDatabasePersistenceFailure(error: unknown): boolean {
     }
     if (DATABASE_DIAGNOSTIC_KEYS.some((key) => Object.hasOwn(current, key))) {
       return true;
-    }
-
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return false;
@@ -374,13 +339,8 @@ function plpgsqlLocations(where: unknown): string[] {
 }
 
 export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
   const facts: SafeDatabaseErrorFacts = {};
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     for (const [source, destination] of SAFE_FACT_KEYS) {
       if (facts[destination] !== undefined) continue;
       const value = safeFact(current[source]);
@@ -389,11 +349,6 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
     if (facts.plpgsql === undefined) {
       const locations = plpgsqlLocations(current.where);
       if (locations.length > 0) facts.plpgsql = locations;
-    }
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return facts;

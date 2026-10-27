@@ -76,6 +76,8 @@ async function fixture() {
     checkAuthorization: [] as string[],
     guidanceApp: null as number | null,
     guidanceContext: appOnlyGuidanceContext,
+    priorityLabel: false,
+    priorityEvents: [] as { __typename: string; id: string; createdAt: string; label: any }[],
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -160,6 +162,7 @@ async function fixture() {
                       createdAt: "2026-10-23T00:00:00Z",
                       label: { name: "queue-ready" },
                     },
+                    ...state.priorityEvents,
                   ],
                   pageInfo: { hasNextPage: false },
                 },
@@ -176,7 +179,10 @@ async function fixture() {
             number: 1,
             head: { sha, ref: "feature" },
             draft: false,
-            labels: state.queueReady ? [{ name: "queue-ready" }] : [],
+            labels: [
+              ...(state.queueReady ? [{ name: "queue-ready" }] : []),
+              ...(state.priorityLabel ? [{ name: "queue-priority" }] : []),
+            ],
             auto_merge: state.autoEnabled ? {} : null,
           },
         ];
@@ -492,4 +498,31 @@ test("one deleted hosted run excludes only that PR", async () => {
 });
 test("invalid ON notice fails during configuration", () => {
   expect(() => config({ BATCHER_ON_NOTICE_ID: "bad id!" })).toThrow("BATCHER_ON_NOTICE_ID");
+});
+test("queue-priority needs the current label and an actual latest LabeledEvent; it is not readiness", async () => {
+  const f = await fixture();
+  const event = (typename: string, id: string, createdAt: string) => ({
+    __typename: typename,
+    id,
+    createdAt,
+    label: { name: "queue-priority" },
+  });
+  f.state.priorityLabel = true;
+  expect((await f.reader.ready()).priority).toBeUndefined();
+  f.state.priorityEvents = [event("LabeledEvent", "p-1", "2026-10-23T00:02:00Z")];
+  const marked = await f.reader.ready();
+  expect(marked.priority).toEqual([1]);
+  // Ordering metadata never changes the readiness binding or its evidence.
+  expect(marked.ready[0]?.binding).toMatchObject({ eventId: "ready-1", source: "queue-ready" });
+  f.state.priorityEvents.push(event("UnlabeledEvent", "p-2", "2026-10-23T00:03:00Z"));
+  expect((await f.reader.ready()).priority).toBeUndefined();
+  f.state.priorityEvents = [event("LabeledEvent", "p-1", "2026-10-23T00:02:00Z")];
+  f.state.priorityLabel = false;
+  expect((await f.reader.ready()).priority).toBeUndefined();
+  // A priority label never admits a PR that lacks readiness or green evidence.
+  f.state.priorityLabel = true;
+  f.state.queueReady = false;
+  const unready = await f.reader.ready();
+  expect(unready.ready).toEqual([]);
+  expect(unready.priority).toBeUndefined();
 });

@@ -178,6 +178,7 @@ import {
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
+  type VideoGenerationUnavailableResult,
   IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS,
   firstPartyToolFamily,
   integrationToolFamily,
@@ -612,6 +613,7 @@ import type {
   SerializedHumanInputInterruption,
   SerializedInteractionInterventionInterruption,
 } from "./run-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -826,6 +828,7 @@ export {
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
+  RETAINED_REPLY_TURN_FIELD,
   hasOpaqueProviderArtifact,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -876,7 +879,10 @@ export {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   buildCompactionPromptInput,
+  buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  type CompactionReplacement,
+  type CompactionTurnContext,
   compactionAttachmentFileIds,
   type AttachmentUploadTimes,
   compactionReplacementFingerprint,
@@ -885,6 +891,7 @@ export {
   decideCompaction,
   buildSummaryItem,
   buildRemoteCompactionV2PromptInput,
+  buildRemoteV2Replacement,
   buildRemoteV2ReplacementHistory,
   extractRemoteCompactionV2OutputItem,
   findCompactionNeededError,
@@ -913,6 +920,7 @@ export {
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+  RETAINED_REPLY_MAX_TOKENS,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
@@ -2295,9 +2303,13 @@ export type BuildAgentOptions = {
           context: { toolCallId: string },
         ) => Promise<unknown>;
       };
-  /** Host-owned durable asynchronous video-generation boundary for this turn. */
+  /**
+   * Host-owned durable asynchronous video-generation boundary for this turn.
+   * Both calls read the workspace's live state, so a turn can turn video on
+   * and use it; while video can't run they return an `unavailable` result.
+   */
   videoGeneration?: {
-    capabilities: () => Promise<VideoGenerationCapabilities>;
+    capabilities: () => Promise<VideoGenerationCapabilities | VideoGenerationUnavailableResult>;
     execute: (
       input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },
@@ -4438,10 +4450,13 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
-        );
+        // A server without a connector row is always approved under its synthetic
+        // session-MCP identity, exactly as the attempt gateway and saved tool
+        // permission rules derive it. A local registration's own connection
+        // identity is for its adapter, never a substitute for that identity.
+        return server.connectionRef
+          ? resolvedMcpConnectionId(server, resolvedMcpConnectionIds)
+          : sessionMcpApprovalConnectionId(server.id, server.url);
       };
       return {
         prefix: prefixedMcpToolName(server.id, ""),
@@ -4968,7 +4983,11 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
-  /** Exact connection identity frozen while constructing the local adapter. */
+  /**
+   * Exact connection identity frozen while constructing the local adapter. It is
+   * the approval identity only for a connector-backed (`connectionRef`) server;
+   * a server without one is approved under its synthetic session-MCP identity.
+   */
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
@@ -5108,12 +5127,14 @@ export type PrepareToolsOptions = {
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
     resolveApproval?: ToolGatewayApprovalResolver;
+    /** Applied to every definition before `filterDefinition`. */
     mapDefinition?: (definition: ToolGatewayDefinition) => ToolGatewayDefinition;
     requireApproval?: (
       entry: ToolGatewayCatalogEntry,
       caller: ToolGatewayCaller,
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
+    /** Receives the `mapDefinition` result, so it sees the effective approval. */
     filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
     /** Viewer-authority secret resolution for Site and workspace HTTP calls. */
     resolveArguments?: ToolGatewayArgumentResolver;
@@ -6644,12 +6665,14 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const admittedDefinitions = options.workspaceToolGateway.filterDefinition
-    ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
+  // Map before filtering: the filter must see each tool's effective approval
+  // (a saved Allow over a recommended Ask), not only the provider default.
+  const mappedDefinitions = options.workspaceToolGateway.mapDefinition
+    ? prepared.definitions.map(options.workspaceToolGateway.mapDefinition)
     : prepared.definitions;
-  const definitions = options.workspaceToolGateway.mapDefinition
-    ? admittedDefinitions.map(options.workspaceToolGateway.mapDefinition)
-    : admittedDefinitions;
+  const definitions = options.workspaceToolGateway.filterDefinition
+    ? mappedDefinitions.filter(options.workspaceToolGateway.filterDefinition)
+    : mappedDefinitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -7667,7 +7690,7 @@ function boundedMcpToolResult(result: AttemptToolResultValue): AttemptToolResult
 
 function exactErrorMessage(error: unknown): string {
   try {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   } catch {
     return "MCP tool call failed";
   }
@@ -11387,7 +11410,7 @@ function sandboxFileDownloadFailure(
     fileId: download.fileId,
     filename: download.filename,
     path: targetPath,
-    reason: error instanceof Error ? error.message : String(error),
+    reason: errorMessage(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
   };
@@ -14193,7 +14216,7 @@ export async function runRigSetupHook(
       result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
       payload: {
@@ -14447,7 +14470,7 @@ export async function runRepositoryCloneHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;
@@ -14551,7 +14574,7 @@ export async function runAzureCliLoginHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;

@@ -50,6 +50,8 @@ export interface SystemAudioOptions {
   /** The OS kernel release, for the platform version check. */
   osRelease?: string;
   spawnProcess?: typeof spawn;
+  /** How long the helper may take to start when nobody is being asked; for tests. */
+  startTimeoutMs?: number;
 }
 
 /** Whether this OS version can record other apps' audio. */
@@ -174,7 +176,7 @@ export class SystemAudioCaptures {
       };
       const timer = setTimeout(
         () => settle(captureError("capture_failed", "The helper did not start in time.")),
-        START_TIMEOUT_MS,
+        this.options.startTimeoutMs ?? START_TIMEOUT_MS,
       );
       let lines = "";
       child.stderr?.setEncoding("utf8");
@@ -201,6 +203,10 @@ export class SystemAudioCaptures {
             capture.sampleRate = event.sampleRate;
             if (capture.pendingBytes > 0) this.flush(capture);
             settle(null);
+          } else if (event.event === "awaiting_permission") {
+            // macOS is asking the person (the first time only). Wait for their
+            // answer however long it takes, as the microphone prompt does.
+            clearTimeout(timer);
           } else if (event.event === "error") {
             lastError = captureError(event.code, event.message);
             settle(lastError);
