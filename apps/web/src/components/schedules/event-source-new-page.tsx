@@ -2,7 +2,7 @@
  * Add an event source. Without a kind it is a picker of where events can
  * come from; with one it is that kind's short form. Sources that connect by
  * pasting continue on the same page: a webhook shows its signing secret once,
- * and Linear or Sentry show the URL to paste there and take their secret.
+ * and Linear, Sentry or another app show the URL to paste there and take their secret.
  */
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -379,7 +379,9 @@ function PastedWebhookConnect({
           return false;
         }
         await client.updateEventSource(workspaceId, source.id, { signingSecret: trimmed });
-        toast.success(`${setup.app} connected`, { description: source.name });
+        toast.success(`${setup.app.charAt(0).toUpperCase()}${setup.app.slice(1)} connected`, {
+          description: source.name,
+        });
         onDone();
         return true;
       }}

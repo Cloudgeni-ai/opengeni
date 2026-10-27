@@ -5,8 +5,10 @@ import {
   formatClock,
   formatDuration,
   groupLiveTurns,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   tidyLiveText,
   tidyPartialText,
   useRecordingModels,
@@ -72,7 +74,16 @@ export type MeetingsListProps = {
    * the list refreshes when the person comes back to it.
    */
   focused?: boolean;
-  /** Space below the list, such as the bottom safe-area inset. */
+  /**
+   * Refresh your own state shown here too, such as whether recording is on. Called
+   * when the person pulls the list, comes back to the screen or returns to the app.
+   */
+  onRefresh?: () => unknown;
+  /**
+   * Extra space below the list, such as Android's bottom safe-area inset. On iOS the
+   * list already keeps clear of the bars and the home indicator, including a
+   * translucent header drawn over it.
+   */
   bottomInset?: number;
 };
 
@@ -91,6 +102,7 @@ export function MeetingsList({
   recordingOff,
   header,
   focused,
+  onRefresh,
   bottomInset = 0,
 }: MeetingsListProps) {
   const msg = useOpenGeniText();
@@ -104,16 +116,22 @@ export function MeetingsList({
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
+  const hostRefresh = useRef(onRefresh);
+  hostRefresh.current = onRefresh;
+  const refreshAll = useCallback(
+    () => Promise.all([refreshList(), Promise.resolve(hostRefresh.current?.())]),
+    [refreshList],
+  );
 
   useEffect(() => {
-    if (focused) void refreshList();
-  }, [focused, refreshList]);
+    if (focused) void refreshAll();
+  }, [focused, refreshAll]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") void refreshList();
+      if (state === "active") void refreshAll();
     });
     return () => subscription.remove();
-  }, [refreshList]);
+  }, [refreshAll]);
   // A recording that just finished uploading shows up (and starts transcribing) at once.
   const finishedCount = recorder?.finished.length ?? 0;
   useEffect(() => {
@@ -133,12 +151,13 @@ export function MeetingsList({
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: c.bg }}
+      contentInsetAdjustmentBehavior="automatic"
       refreshControl={
         <RefreshControl
           refreshing={pulling}
           onRefresh={() => {
             setPulling(true);
-            void list.refresh().finally(() => setPulling(false));
+            void refreshAll().finally(() => setPulling(false));
           }}
         />
       }
@@ -201,16 +220,22 @@ export function MeetingsList({
             overflow: "hidden",
           }}
         >
-          {list.recordings.map((recording, index) => (
-            <MeetingRow
-              key={recording.id}
-              recording={recording}
-              live={recording.id === capturingId}
-              paused={recorder?.state === "paused"}
-              first={index === 0}
-              onPress={() => onOpen(recording.id)}
-            />
-          ))}
+          {list.recordings.map((recording, index) => {
+            // Recording here until Stop; after it, Transcribing.
+            const here =
+              recording.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+            return (
+              <MeetingRow
+                key={recording.id}
+                recording={recording}
+                live={here === "recording" || here === "paused"}
+                paused={here === "paused"}
+                transcribingHere={here === "transcribing"}
+                first={index === 0}
+                onPress={() => onOpen(recording.id)}
+              />
+            );
+          })}
         </View>
       )}
       {list.hasMore ? (
@@ -234,6 +259,8 @@ function MeetingRow(props: {
   recording: Recording;
   live: boolean;
   paused: boolean;
+  /** Stopped on this phone with its last audio on its way: Transcribing, not In progress. */
+  transcribingHere: boolean;
   first: boolean;
   onPress: () => void;
 }) {
@@ -241,7 +268,12 @@ function MeetingRow(props: {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { recording } = props;
-  const status = props.live ? null : meetingStatusLabel(meetingPhase(recording), msg);
+  const status = props.live
+    ? null
+    : meetingStatusLabel(
+        props.transcribingHere ? { kind: "transcribing", version: null } : meetingPhase(recording),
+        msg,
+      );
   const facts = [
     meetingDateLabel(msg, recording.startedAt),
     recording.durationMilliseconds ? formatDuration(recording.durationMilliseconds, msg) : null,
@@ -253,7 +285,7 @@ function MeetingRow(props: {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={[
-        recording.title || msg("native.meetings.meetingsList.untitledMeeting"),
+        meetingTitle(recording, msg),
         ...facts,
         props.live ? liveLabel : status?.label,
       ]
@@ -277,7 +309,7 @@ function MeetingRow(props: {
           numberOfLines={2}
           style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
         >
-          {recording.title || msg("native.meetings.meetingsList.untitledMeeting")}
+          {meetingTitle(recording, msg)}
         </Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           {recording.visibility === "private" ? (
@@ -499,9 +531,12 @@ function RecorderCard({
                     color: c["fg-muted"],
                   }}
                 >
-                  {liveOn
-                    ? `${msg("native.meetings.meetingsList.showsWhatSSaid")} ${liveCostHint(msg, liveTranscript.usdPerHour)}`
-                    : msg("native.meetings.meetingsList.showsWhatSSaid")}
+                  {[
+                    msg("native.meetings.meetingsList.showsWhatSSaid"),
+                    liveOn ? liveCostHint(msg, liveTranscript.usdPerHour) : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                 </Text>
               </View>
               <Switch

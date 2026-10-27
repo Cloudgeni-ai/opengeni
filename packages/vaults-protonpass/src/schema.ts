@@ -54,12 +54,41 @@ const OptionalString = z
   .nullish()
   .transform((value) => value ?? "");
 
+const ByteArray = z
+  .array(z.number().int().min(0).max(255))
+  .nullish()
+  .transform((value) => value ?? []);
+
+/** A login's passkey (pass-cli writes byte strings as arrays of numbers). */
+const ProtonPasskey = z.object({
+  key_id: OptionalString,
+  content: ByteArray,
+  domain: OptionalString,
+  rp_id: OptionalString,
+  rp_name: OptionalString,
+  user_name: OptionalString,
+  user_display_name: OptionalString,
+  credential_id: ByteArray,
+  user_handle: ByteArray,
+});
+export type ProtonPasskey = z.infer<typeof ProtonPasskey>;
+
 const LoginContent = z.object({
   email: OptionalString,
   username: OptionalString,
   password: OptionalString,
   urls: z.array(z.string()).default([]),
   totp_uri: OptionalString,
+  // An unreadable passkey is left out rather than failing the whole item.
+  passkeys: z
+    .array(z.unknown())
+    .nullish()
+    .transform((value) =>
+      (value ?? []).flatMap((entry) => {
+        const parsed = ProtonPasskey.safeParse(entry);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
 });
 const SshKeyContent = z.object({
   private_key: OptionalString,

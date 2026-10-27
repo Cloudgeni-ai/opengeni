@@ -2171,38 +2171,52 @@ index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89
          return results;
      }
      catch (e) {
-@@ -285,6 +285,46 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
+@@ -285,6 +285,60 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
              : state);
      }
  }
 +/**
 + * A function tool marked `exclusiveExecution` (for example a file edit) runs in
 + * model order: it starts only after every earlier call from the same response
-+ * has settled, and every later call starts only after it has settled. Other
-+ * calls still run concurrently with each other.
++ * has settled, and every later call starts only after it has settled. A tool's
++ * `executionOrderKeys` orders only the calls that share a resource: a call
++ * starts after the earlier calls of the response whose keys conflict with its
++ * own, that is the same key or one key extending the other after a `:` (so
++ * `computer` is ordered with `computer:a`, while `computer:a` and `computer:b`
++ * stay concurrent). Other calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => (toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true)))) {
++    const exclusive = (toolRun) => toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true);
++    const keysOf = (toolRun) => {
++        const keys = typeof toolRun.tool?.executionOrderKeys === "function" ? toolRun.tool.executionOrderKeys(toolRun.toolCall) : undefined;
++        return Array.isArray(keys) && keys.length > 0 ? keys : null;
++    };
++    const runs = toolRuns.map((toolRun) => ({ toolRun, exclusive: exclusive(toolRun), keys: keysOf(toolRun) }));
++    if (!runs.some((run) => run.exclusive || run.keys)) {
 +        return executeToolRun;
 +    }
++    const conflict = (left, right) => left.some((a) => right.some((b) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`)));
 +    const gates = new Map();
 +    const settle = new Map();
 +    let barrier = Promise.resolve();
 +    let sinceBarrier = [];
-+    for (const toolRun of toolRuns) {
++    for (const run of runs) {
 +        let markSettled = () => { };
 +        const settled = new Promise((resolve) => {
 +            markSettled = resolve;
 +        });
-+        settle.set(toolRun, markSettled);
-+        if ((toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true))) {
-+            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++        settle.set(run.toolRun, markSettled);
++        if (run.exclusive) {
++            gates.set(run.toolRun, Promise.all([barrier, ...sinceBarrier.map((earlier) => earlier.settled)]));
 +            barrier = settled;
 +            sinceBarrier = [];
 +        }
 +        else {
-+            gates.set(toolRun, barrier);
-+            sinceBarrier.push(settled);
++            const keys = run.keys;
++            gates.set(run.toolRun, keys
++                ? Promise.all([barrier, ...sinceBarrier.filter((earlier) => earlier.keys && conflict(keys, earlier.keys)).map((earlier) => earlier.settled)])
++                : barrier);
++            sinceBarrier.push({ settled, keys });
 +        }
 +    }
 +    return async (toolRun, signal) => {
@@ -2231,38 +2245,52 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc7375
          return results;
      }
      catch (e) {
-@@ -242,6 +242,46 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
+@@ -242,6 +242,60 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
              : state);
      }
  }
 +/**
 + * A function tool marked `exclusiveExecution` (for example a file edit) runs in
 + * model order: it starts only after every earlier call from the same response
-+ * has settled, and every later call starts only after it has settled. Other
-+ * calls still run concurrently with each other.
++ * has settled, and every later call starts only after it has settled. A tool's
++ * `executionOrderKeys` orders only the calls that share a resource: a call
++ * starts after the earlier calls of the response whose keys conflict with its
++ * own, that is the same key or one key extending the other after a `:` (so
++ * `computer` is ordered with `computer:a`, while `computer:a` and `computer:b`
++ * stay concurrent). Other calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => (toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true)))) {
++    const exclusive = (toolRun) => toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true);
++    const keysOf = (toolRun) => {
++        const keys = typeof toolRun.tool?.executionOrderKeys === "function" ? toolRun.tool.executionOrderKeys(toolRun.toolCall) : undefined;
++        return Array.isArray(keys) && keys.length > 0 ? keys : null;
++    };
++    const runs = toolRuns.map((toolRun) => ({ toolRun, exclusive: exclusive(toolRun), keys: keysOf(toolRun) }));
++    if (!runs.some((run) => run.exclusive || run.keys)) {
 +        return executeToolRun;
 +    }
++    const conflict = (left, right) => left.some((a) => right.some((b) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`)));
 +    const gates = new Map();
 +    const settle = new Map();
 +    let barrier = Promise.resolve();
 +    let sinceBarrier = [];
-+    for (const toolRun of toolRuns) {
++    for (const run of runs) {
 +        let markSettled = () => { };
 +        const settled = new Promise((resolve) => {
 +            markSettled = resolve;
 +        });
-+        settle.set(toolRun, markSettled);
-+        if ((toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true))) {
-+            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++        settle.set(run.toolRun, markSettled);
++        if (run.exclusive) {
++            gates.set(run.toolRun, Promise.all([barrier, ...sinceBarrier.map((earlier) => earlier.settled)]));
 +            barrier = settled;
 +            sinceBarrier = [];
 +        }
 +        else {
-+            gates.set(toolRun, barrier);
-+            sinceBarrier.push(settled);
++            const keys = run.keys;
++            gates.set(run.toolRun, keys
++                ? Promise.all([barrier, ...sinceBarrier.filter((earlier) => earlier.keys && conflict(keys, earlier.keys)).map((earlier) => earlier.settled)])
++                : barrier);
++            sinceBarrier.push({ settled, keys });
 +        }
 +    }
 +    return async (toolRun, signal) => {
@@ -4152,7 +4180,7 @@ diff --git a/dist/tool.d.ts b/dist/tool.d.ts
 index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0101c1ca3 100644
 --- a/dist/tool.d.ts
 +++ b/dist/tool.d.ts
-@@ -195,6 +195,11 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput
+@@ -195,6 +195,18 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput
       * Responses API only. Hides a top-level function tool definition until tool search loads it.
       */
      deferLoading?: boolean;
@@ -4161,6 +4189,13 @@ index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0
 +     * same model response has settled, and later calls start after it settles; a function orders only the calls it returns true for.
 +     */
 +    exclusiveExecution?: boolean | ((toolCall: { name: string; arguments: string }) => boolean);
++    /**
++     * Order this tool's calls only against the calls of the same model
++     * response that use the same resource: a call starts after every earlier
++     * call whose keys conflict with its own (equal, or one extending the other
++     * after a `:`). Calls without keys, or with other keys, stay concurrent.
++     */
++    executionOrderKeys?: (toolCall: { name: string; arguments: string }) => readonly string[] | null | undefined;
      /**
       * Additional provider-specific metadata forwarded with the function tool definition.
       */

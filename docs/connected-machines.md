@@ -220,6 +220,21 @@ the reconciler cannot read which kind of runner it is, it leaves the command
 for a later pass and records nothing. A Connected Machine never sleeps, so its
 answered queries continue on each pass as before.
 
+A runner lists only operations it knows, so a command whose start never
+reached it (sent while it was offline), or that it no longer holds, would
+never be reported and would stay running forever. So when a Connected Machine
+runner reports its inventory again, the first page of each report makes the
+running commands left to that exact process due again (outcome
+`runner_reported`). The next reconciler pass asks the runner, which is
+talking: an operation it does not know answers lost and the command settles
+lost, never as a success; one it runs continues as before. A compute runner's
+report does not do this, since its running commands are never polled.
+Migration 0984 creates the database function behind this with its runtime
+grant withheld for one release (see
+[expand/contract migrations](migrations-expand-contract.md)), and makes the
+commands already stuck this way due once while it runs. Until a later
+migration grants it, a report skips the re-arm.
+
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
 the start and keeps a tombstone for the operation: a query or attach answers
@@ -1306,8 +1321,22 @@ interrupted/outcome-unknown rather than replayed automatically.
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
 workspace—even on a different Opengeni deployment—adds an independent link and
-preserves all existing links. There are two enrollment paths. Both require the
-caller to hold `enrollments:manage`.
+preserves all existing links. There are two enrollment paths. Both follow the
+machine's scope (`apps/api/src/sandbox/machine-authority.ts`, the one rule for
+every enrollment and per-machine write):
+
+- **Only me** (`user`): any teammate with `enrollments:read`, signed in as
+  themselves. The owner is always the caller. A credential acting for a person
+  (a delegated bearer, a connected agent, an organization key acting as a user)
+  keeps needing `enrollments:manage`, so a read-only delegation never connects
+  a machine; keys, services and agents acting as themselves are refused.
+- **This workspace**: `enrollments:manage`.
+- **Organization**: `enrollments:manage` and `account:admin`.
+
+The same rule covers declining a pairing code and, for an existing machine,
+removal, command policy, screen control, macOS privacy panes and agent updates.
+`list_scoped_enrollments` returns an Only me machine only to its owner, so a
+teammate reaches only their own. Refusals are plain sentences.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1648,8 +1677,10 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
   stops after ten minutes or when the inventory is not readable.
 
-Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
-moving the chat needs `sessions:control`. The card says who can act otherwise.
+Reading the list needs `enrollments:read`; connecting follows the scope rule
+above (every teammate connects an Only me machine; This workspace needs
+`enrollments:manage`); moving the chat needs `sessions:control`. The card says
+who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
 
 Embedded products supply `SessionConversation.computerConnection` (also through
@@ -1665,7 +1696,8 @@ Screen-control consent lives on the enrollment row and in the credentials the
 machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
-(`enrollments:manage`; `account:admin` for organization machines; no body)
+(the scope rule above: the owner for an Only me machine, `enrollments:manage`
+for a workspace machine, also `account:admin` for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control

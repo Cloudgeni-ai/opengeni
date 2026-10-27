@@ -64,11 +64,24 @@ precisely what it is:
   on the `private key` field makes a new key pair inside Opengeni; only the
   public key and fingerprint ever reach the agent.
 - **Passkeys** are fully usable in hosted vaults, where Opengeni holds the
-  private key and signs for agents' browsers. A passkey stored in a
-  provider's own item (a Bitwarden or 1Password login with a passkey) is kept
-  untouched by every update but not exposed: providers do not hand out
-  passkey private keys to API clients, so agents sign in with that item's
-  password or one-time password instead.
+  private key and signs for agents' browsers; a passkey an agent registers is
+  always saved there. A passkey held in a connected password manager is
+  usable too wherever the provider gives API clients its key: a Bitwarden or
+  Vaultwarden login with a passkey, a Keeper login record with a passkey, a
+  Proton Pass login with a passkey. The mirror keeps only which items hold a
+  passkey (credential id, site and account name), so those items show
+  `hasPasskey` and match a `passkey` search; the private key is read live
+  from the provider whenever a browser needs it and is never stored in
+  Opengeni. After a sign-in the signature counter is written back to
+  Bitwarden and Keeper (not through a read-only link); the Proton Pass CLI
+  cannot edit items, so Opengeni keeps the higher count itself. A collection
+  that hides passwords from the account also withholds its passkeys, and an
+  item that needs approval for each use is never loaded into a browser. Only
+  ECDSA P-256 passkeys, the kind these providers create, can be used.
+  1Password's SDK does not expose passkeys, so a 1Password login's passkey is
+  kept untouched by every update but not usable: agents sign in with that
+  item's password or one-time password, or the passkey is kept in a provider
+  that supports it.
 - **No silent fallbacks.** A vault that has no place for a type refuses it
   with `vault_operation_unsupported`, naming the types it can store in
   `details.allowedItemTypes`. A provider that can store the type but not one

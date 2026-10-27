@@ -71,7 +71,7 @@ import {
   type ApiIntegrationConnectionDescriptor,
   type ResolvedApiIntegrationPreview,
 } from "../integrations/api-integrations";
-import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
+import { createGitHubSkillSourceClient } from "@opengeni/core";
 import { parseRequestJson } from "../http/request-body";
 
 const MAX_PLUGIN_MANIFEST_BYTES = 1024 * 1024;

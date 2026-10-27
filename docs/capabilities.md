@@ -1182,3 +1182,24 @@ browser prefers those local marks for the exact built-in ids and otherwise uses
 the normal self-hosted catalog asset URL. Missing or invalid bytes still fall
 back to the same monogram. Keep this exception limited to first-party rows;
 registry marks continue to belong in the reviewed vendoring pipeline above.
+
+### Icons from connected MCP servers
+
+A workspace's own MCP server (a custom item, `source: "manual"`) takes its logo
+from the server itself. MCP 2025-11-25 lets a server list `icons` in the
+`serverInfo` of its `initialize` reply. When the server is connected through
+Connect or enabled, the verification handshake keeps that `serverInfo`, ranks
+the icons for one theme-neutral tile (no theme, then light, then dark; SVG,
+then a raster of 64 px or more, then smaller or unsized rasters, then `.ico`),
+and tries at most three. A `data:` icon is decoded in place; an `https` icon
+is fetched through the deployment's outbound network policy with a 5 second
+timeout, a 512 KB cap and at most three `https` redirects. Each candidate goes
+through the same validation as vendored logos, including the SVG active-content
+check, and the first that passes is stored digest-keyed under
+`catalog-assets/mcp-icons/<server host>/` and recorded as the item's
+`logoAssetPath`. The browser therefore never loads an icon from the server's
+host. A server without a usable icon keeps the monogram, and icon problems
+never fail the connection. Shared registry rows keep their curated logo, and
+editing a custom item keeps the logo its server supplied. An existing
+connection picks up its server's icon the next time it is connected or
+enabled.

@@ -849,7 +849,6 @@ describe("fail-closed change impact", () => {
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
-      "apps/web/src/components/personal-workspace-badge.tsx",
       "apps/web/src/components/rail/switcher-block.tsx",
       "apps/web/src/components/rail/workspace-scope-nav.tsx",
       "apps/web/src/lib/workspace-scope-context.ts",
@@ -1140,6 +1139,7 @@ function requiredResult(
     build: number;
     bakeImages?: boolean;
     preImage?: boolean;
+    attested?: boolean | undefined;
   },
 ): boolean {
   const result = spawnSync(
@@ -1179,6 +1179,10 @@ function requiredResult(
       "--argjson",
       "preImage",
       String(options.preImage ?? false),
+      // Omitted for old callers: the filter defaults to the unattested rules.
+      ...(options.attested === undefined
+        ? []
+        : ["--argjson", "attested", String(options.attested)]),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1335,6 +1339,59 @@ describe("workflow fail-closed contracts", () => {
       false,
     );
     expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
+  });
+
+  test("a Batch-attested main push requires skipped test lanes and real artifacts", () => {
+    const lanes = [
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ];
+    const results: Record<string, { result: string }> = {
+      plan: { result: "success" },
+      "artifact-runtime": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+      ...Object.fromEntries(lanes.map((name) => [name, { result: "skipped" }])),
+    };
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 900,
+      integration: 20,
+      e2e: 10,
+      browser: 4,
+      artifactRuntime: true,
+      build: 30,
+      attested: true,
+    };
+    expect(requiredResult(results, options)).toBe(true);
+    // The same skipped lanes are a failure for an ordinary or omitted-attestation run.
+    expect(requiredResult(results, { ...options, attested: false })).toBe(false);
+    expect(requiredResult(results, { ...options, attested: undefined })).toBe(false);
+    // A lane that ran (even green) means the run was not uniformly attested.
+    for (const name of lanes)
+      for (const result of ["success", "failure", "cancelled"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const name of ["plan", "artifact-runtime", "deployment", "images"])
+      for (const result of ["failure", "cancelled", "skipped"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const extra of [
+      { event: "pull_request" as const },
+      { event: "schedule" as const },
+      { event: "workflow_dispatch" as const },
+      { mode: "focused" as const },
+      { bakeImages: false },
+    ])
+      expect(requiredResult(results, { ...options, ...extra })).toBe(false);
+    const { images: _images, ...preImage } = results;
+    expect(requiredResult(preImage, { ...options, preImage: true })).toBe(true);
+    expect(requiredResult(results, { ...options, preImage: true })).toBe(false);
   });
 
   test("pre-image validation requires every non-image lane exactly and never sees images", () => {

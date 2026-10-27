@@ -1,3 +1,7 @@
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import * as schema from "@opengeni/db/schema";
+import type { Database } from "@opengeni/db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configuredModels } from "@opengeni/config";
 import type { AccessGrant, LatencyMode } from "@opengeni/contracts";
@@ -357,4 +361,58 @@ describe("new session latency defaults", () => {
     );
     expect(await turns(child.id)).toEqual(before);
   }, 30_000);
+});
+
+describe("file ownership on child creation", () => {
+  test("fileless creation retains outer ownership authority without reading it again for attachments", async () => {
+    const { deps, caller, parent } = await fixture("standard");
+    const statements: string[] = [];
+    const traced = postgres(shared.appUrl, {
+      max: 1,
+      prepare: false,
+      debug: (_connection, query) => statements.push(query),
+    });
+    const db = drizzle(traced, { schema }) as unknown as Database;
+    const create = (payload: Record<string, unknown> = {}, actor = caller) =>
+      createSessionForRequest({ ...deps, db }, actor, caller.workspaceId, {
+        initialMessage: "File ownership fixture; never execute a model",
+        sandboxBackend: "none",
+        resources: [],
+        ...payload,
+      });
+    const ownershipReads = () =>
+      statements.filter((query) => query.includes("SELECT knowledge_entry_read(")).length;
+    try {
+      await traced`select 1`;
+      statements.length = 0;
+      const child = await create();
+      expect(child.parentSessionId).toBe(parent.id);
+      expect(child.resources).toEqual([]);
+      expect(ownershipReads()).toBe(1);
+
+      statements.length = 0;
+      await expect(
+        create(
+          {},
+          {
+            ...caller,
+            metadata: { ...caller.metadata, attemptId: crypto.randomUUID() },
+          },
+        ),
+      ).rejects.toMatchObject({ reason: "caller_stale" });
+      expect(ownershipReads()).toBe(0);
+
+      // With an attachment the second read is still required. A missing file
+      // remains refused, rather than creating a child with unvalidated access.
+      deps.objectStorage = {} as NonNullable<ApiRouteDeps["objectStorage"]>;
+      const fileId = crypto.randomUUID();
+      statements.length = 0;
+      await expect(create({ resources: [{ kind: "file", fileId }] })).rejects.toThrow(
+        `unknown file resource: ${fileId}`,
+      );
+      expect(ownershipReads()).toBe(2);
+    } finally {
+      await traced.end();
+    }
+  });
 });

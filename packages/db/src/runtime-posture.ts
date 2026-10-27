@@ -48,8 +48,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * trigger dispatcher's identity-only due inventory and intake retention pass
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
- * due inventory (0935), the recording retention sweep's due inventory (0946)
- * and the lookup of whose personal machine a chat runs on (0978). Each is
+ * due inventory (0935), the recording retention sweep's due inventory (0946),
+ * the lookup of whose personal machine a chat runs on (0978), the re-arm of
+ * the running commands a returning runner did not answer for (0984) and the
+ * control worker's content-free queued-turn hold summary (0988). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -62,6 +64,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_event_source_feeds_v1(integer)",
   "list_due_recording_retention_v1(integer)",
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
 ] as const;
 
 /**
@@ -73,10 +77,35 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * the recording retention inventory and 0950 granted it. 0978 withholds the
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
+ * 0984 withholds the connected-command re-arm the same way; until it is
+ * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
+ * hold summary; until it is granted, the control worker does not publish it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+
+/**
+ * Target-schema runtime capabilities whose EXECUTE is withheld for one
+ * release, for the same reason as DEFERRED_RUNTIME_PRIVATE_ROUTINES: until a
+ * binary that knows them is the previous release, readiness accepts each with
+ * or without runtime EXECUTE (never PUBLIC). 0998 withholds the passkey
+ * mutation; until a later migration grants it, passkeys stay off.
+ */
+export const DEFERRED_RUNTIME_TARGET_ROUTINES = [
+  "mutate_managed_passkey(text, text, jsonb)",
+] as const;
+
+/**
+ * Non-RLS tables whose runtime DML is withheld for the same reason: the
+ * previous release rejects DML on an unknown non-RLS table. Each is known here
+ * with no required privileges; readiness accepts either no direct DML or
+ * exactly SELECT, INSERT, UPDATE and DELETE (never a partial grant). 0998
+ * withholds the passkey credentials table.
+ */
+export const RUNTIME_DEFERRED_FULL_DML_TABLES = ["auth_passkeys"] as const;
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
@@ -101,6 +130,8 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "enrollments",
     "organization_memberships",
   ],
+  "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -764,6 +795,7 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",
+  "mutate_managed_passkey(text, text, jsonb)",
   "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
   "replay_managed_sign_in_method(text, text, jsonb)",
   "claim_managed_sign_in_notification(uuid, text, text, integer)",
@@ -1958,6 +1990,9 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_revisions",
   "preference_registry_snapshots",
   "private_session_create_capabilities",
+  "promotion_decisions",
+  "promotion_enforcement",
+  "promotion_machine_proofs",
   "recording_chunks",
   "recording_events",
   "recording_live_segments",
@@ -2204,6 +2239,7 @@ export const FORCE_RLS_TABLES = [
  */
 export const NON_RLS_RUNTIME_TABLES = [
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -2536,6 +2572,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "plan_credit_periods",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "promotion_decisions",
+  "promotion_enforcement",
   "session_tenancy_activations",
   "session_work_claims",
   "site_hostname_holds",
@@ -2602,6 +2640,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "promotion_machine_proofs",
   "recording_events",
   "session_attempt_tool_catalogs",
   "session_content_blobs",
@@ -2868,6 +2907,8 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+const DEFERRED_TARGET_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_TARGET_ROUTINES);
+const DEFERRED_FULL_DML_TABLE_NAMES = new Set<string>(RUNTIME_DEFERRED_FULL_DML_TABLES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -4006,6 +4047,27 @@ export function evaluateRuntimeDatabasePosture(
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
+    if (!options.tablePrivileges && DEFERRED_FULL_DML_TABLE_NAMES.has(table.name)) {
+      // Withheld runtime DML (see RUNTIME_DEFERRED_FULL_DML_TABLES): none or all four.
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+      const tableGranted = new Set(
+        FULL_DML_PRIVILEGES.filter(
+          (privilege) => privileges.find(([name]) => name === privilege)?.[1] === true,
+        ),
+      );
+      // has_any_column_privilege is also true for a table-level grant, so only
+      // column privileges the table grant doesn't cover are column-only.
+      const columnOnly = (table.columnPrivileges ?? []).filter(
+        (privilege) => !tableGranted.has(privilege as (typeof FULL_DML_PRIVILEGES)[number]),
+      );
+      if (
+        (tableGranted.size > 0 && tableGranted.size < FULL_DML_PRIVILEGES.length) ||
+        columnOnly.length > 0
+      ) {
+        const partial = [...new Set([...tableGranted, ...columnOnly])];
+        violations.push(`table ${table.name} grants partial runtime DML: ${partial.join(", ")}`);
+      }
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
@@ -4676,7 +4738,7 @@ export function evaluateRuntimeDatabasePosture(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
       );
     }
-    if (!routine.execute) {
+    if (!routine.execute && !DEFERRED_TARGET_ROUTINE_NAMES.has(routine.name)) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
     const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(

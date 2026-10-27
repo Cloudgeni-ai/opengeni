@@ -31,7 +31,11 @@ import {
   viewerTimeZone,
   type AutomationDraft,
 } from "./automation-model";
-import { eventSourceChoiceName, type EventSourceChoice } from "./event-source-model";
+import {
+  eventSourceChoiceName,
+  eventSourceChoiceOf,
+  type EventSourceChoice,
+} from "./event-source-model";
 import {
   DEFAULT_EVENT_RUNS_PER_HOUR,
   emptyEventTriggersDraft,
@@ -180,8 +184,7 @@ export function automationTemplateOfSaved(saved: WorkspaceAutomationTemplate): A
 export function automationTemplateSourceChoice(
   source: AutomationTemplateEventSource,
 ): EventSourceChoice {
-  if (source.kind !== "webhook") return source.kind;
-  return source.adapter === "linear" || source.adapter === "sentry" ? source.adapter : "webhook";
+  return eventSourceChoiceOf({ kind: source.kind, adapter: source.adapter ?? null });
 }
 
 /** When a template runs, for its card: its own words, else its schedule or first trigger. */

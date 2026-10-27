@@ -26,6 +26,7 @@ import {
   readProviderVaultInventory,
   VaultProviderError,
   type ProviderItemMeta,
+  type ProviderPasskeyMeta,
   type VaultProvider,
   type VaultProviderContext,
   type VaultProviderErrorCode,
@@ -78,6 +79,11 @@ export interface ProviderMirrorItem {
   updatedAt: string | null;
   /** Set when the connected account archived the item upstream. */
   archivedAt: string | null;
+  /**
+   * The item's passkeys without key material; absent when the provider does
+   * not report passkeys (the mirror then keeps what it had).
+   */
+  passkeys?: ProviderPasskeyMeta[];
 }
 
 export interface ProviderMirrorPlan {
@@ -301,9 +307,31 @@ export function planProviderMirror(
       version: item.version,
       updatedAt: item.updatedAt,
       archivedAt: normalizedArchivedAt(item.archivedAt),
+      ...(item.passkeys !== undefined ? { passkeys: mirrorPasskeys(item.passkeys) } : {}),
     };
   });
   return { contentVersion, items: mirrored, truncated: 0 };
+}
+
+/** At most this many passkeys per item are mirrored (0986). */
+const MIRRORED_PASSKEYS_PER_ITEM = 32;
+
+/** Well-formed, unique passkey metadata in provider order. */
+function mirrorPasskeys(passkeys: readonly ProviderPasskeyMeta[]): ProviderPasskeyMeta[] {
+  const seen = new Set<string>();
+  const kept: ProviderPasskeyMeta[] = [];
+  for (const passkey of passkeys) {
+    const credentialId = passkey.credentialId.replace(/=+$/u, "");
+    const rpId = passkey.rpId.trim().toLowerCase();
+    if (!/^[A-Za-z0-9_-]{1,1366}$/u.test(credentialId) || rpId === "" || rpId.length > 253) {
+      continue;
+    }
+    if (seen.has(credentialId)) continue;
+    seen.add(credentialId);
+    kept.push({ credentialId, rpId, userName: passkey.userName?.slice(0, 512) || null });
+    if (kept.length === MIRRORED_PASSKEYS_PER_ITEM) break;
+  }
+  return kept;
 }
 
 /**
@@ -545,7 +573,8 @@ export function databaseProviderMirrorStore(
                 encryptionKey !== null && item.username !== null
                   ? encryptEnvironmentValue(encryptionKey, item.username)
                   : null,
-              // Passkeys live only in hosted vaults (D20); providers never mirror them.
+              // A provider passkey rides on its login (`passkeys` below); the
+              // `passkey` item type is kept for passkeys Opengeni hosts.
               type: item.type === "passkey" ? "login" : item.type,
               ...(item.category ? { category: item.category } : {}),
               // The base name: the routine de-duplicates against the stored mirror
@@ -554,6 +583,15 @@ export function databaseProviderMirrorStore(
               websites: item.websites,
               primaryFieldRef: item.primaryExternalFieldId,
               archivedAt: item.archivedAt,
+              ...(item.passkeys !== undefined
+                ? {
+                    passkeys: item.passkeys.map((passkey) => ({
+                      credentialId: passkey.credentialId,
+                      rpId: passkey.rpId,
+                      userName: passkey.userName ?? null,
+                    })),
+                  }
+                : {}),
               fields: item.fields.map((field) => ({
                 providerFieldRef: field.externalFieldId,
                 name: field.name,

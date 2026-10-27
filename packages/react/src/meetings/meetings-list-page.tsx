@@ -1,16 +1,26 @@
 /**
  * Meetings: the recorder on top, then every meeting this person can see,
- * newest first. A row opens the meeting's own page. Rows still uploading or
- * transcribing say so and update on their own.
+ * newest first. A row opens the meeting's own page. Rows still recording, in
+ * progress elsewhere or transcribing say so and update on their own.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
   formatDuration,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   useRecordingModels,
   useRecordings,
   useRecordingsClient,
@@ -32,8 +42,9 @@ import { RelativeTime } from "../ui/relative-time";
 import { StatusBadge } from "../ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
-import { RecorderPanel } from "./recorder-panel";
+import { RecorderPanel, useOnline } from "./recorder-panel";
 import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 function useDebounced<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -60,11 +71,11 @@ function useNarrow(): boolean {
   return narrow;
 }
 
-export function MeetingsListPage({
+function MeetingsListPageContent({
   workspaceId,
   liveTranscriptDefault = false,
   liveTranscript = true,
-  defaultLanguage = null,
+  defaultLanguage,
   recordings: recordingsClient,
   meetingHref,
   onOpen,
@@ -72,13 +83,17 @@ export function MeetingsListPage({
   notice = null,
   header = true,
   recordingOff = null,
+  viewerName = null,
 }: {
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
   liveTranscriptDefault?: boolean;
   /** Offer the live transcript preview at all; false hides it even when a live model is connected. */
   liveTranscript?: boolean;
-  /** The workspace's meeting language; null detects it. */
+  /**
+   * The language the recorder starts on; null detects it. By default the
+   * workspace's meeting language, from the server.
+   */
   defaultLanguage?: string | null;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
@@ -99,6 +114,8 @@ export function MeetingsListPage({
    * already recorded stay listed, and a recording already underway keeps its controls.
    */
   recordingOff?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null;
 }) {
   const msg = useOpenGeniText();
   const columns: RowListColumn[] = [
@@ -114,7 +131,28 @@ export function MeetingsListPage({
     ...(externalRef ? { externalRef } : {}),
   });
   const { client } = useRecordingsClient(override);
-  const { recorder, finished } = useMeetingRecorder();
+  const {
+    recorder,
+    finished,
+    workspaceId: recorderWorkspaceId,
+    openMeeting,
+  } = useMeetingRecorder();
+  const online = useOnline();
+  // A recording started in another workspace keeps going here; its meeting
+  // opens in its own workspace.
+  const openRecorded = useCallback(
+    (recordingId: string) => {
+      if (
+        recorderWorkspaceId &&
+        recorderWorkspaceId !== workspaceId &&
+        openMeeting(recordingId, recorderWorkspaceId)
+      ) {
+        return;
+      }
+      onOpen(recordingId);
+    },
+    [recorderWorkspaceId, workspaceId, openMeeting, onOpen],
+  );
   const models = useRecordingModels(override);
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   // A desktop call notification's Record waits for the live model list, so
@@ -160,12 +198,13 @@ export function MeetingsListPage({
         {showRecorder ? (
           <RecorderPanel
             recorder={recorder}
-            onStopped={onOpen}
-            onOpenNotes={onOpen}
-            defaultLanguage={defaultLanguage}
+            onStopped={openRecorded}
+            onOpenNotes={openRecorded}
+            defaultLanguage={defaultLanguage !== undefined ? defaultLanguage : models.language}
             autoStart={autoStart}
             externalRef={externalRef}
             notice={notice}
+            viewerName={viewerName}
             liveTranscript={
               liveTranscript && liveModel
                 ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
@@ -252,13 +291,24 @@ export function MeetingsListPage({
               flush
             >
               {list.recordings.map((recording) => {
-                const status = meetingStatusLabel(meetingPhase(recording), msg);
-                const isLive = recording.id === liveId && recorder?.state !== "stopped";
+                // Stopped here, its last audio is on its way: Transcribing, not In progress.
+                const here =
+                  recording.state === "capturing"
+                    ? meetingHereStatus(recorder, recording.id, online)
+                    : null;
+                const status = meetingStatusLabel(
+                  here === "transcribing"
+                    ? { kind: "transcribing", version: null }
+                    : meetingPhase(recording),
+                  msg,
+                );
+                // Recording here until Stop: after it, the row reads Transcribing.
+                const isLive = here === "recording" || here === "paused";
                 return (
                   <ListRow
                     key={recording.id}
                     leading={<LogoTile icon={<AudioLinesIcon />} />}
-                    title={recording.title}
+                    title={meetingTitle(recording, msg)}
                     titleAddon={
                       recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
@@ -270,9 +320,15 @@ export function MeetingsListPage({
                     }
                     status={
                       isLive ? (
-                        <StatusBadge variant="dot" tone="danger" pulse>
-                          {msg("meetings.listPage.recording")}
-                        </StatusBadge>
+                        here === "paused" ? (
+                          <StatusBadge variant="dot" tone="neutral">
+                            {msg("meetings.recorderPanel.paused")}
+                          </StatusBadge>
+                        ) : (
+                          <StatusBadge variant="dot" tone="danger" pulse>
+                            {msg("meetings.listPage.recording")}
+                          </StatusBadge>
+                        )
                       ) : status ? (
                         <StatusBadge
                           variant="dot"
@@ -314,7 +370,7 @@ export function MeetingsListPage({
                       </DropdownMenuItem>
                     }
                     menuLabel={msg("meetings.listPage.moreActionsForTitle", {
-                      title: recording.title,
+                      title: meetingTitle(recording, msg),
                     })}
                     href={meetingHref(recording.id)}
                     linkProps={{ onClick: inAppClick(() => onOpen(recording.id)) }}
@@ -342,7 +398,9 @@ export function MeetingsListPage({
         </div>
       </div>
       <DeleteMeetingDialog
-        recording={pendingDelete}
+        recording={
+          pendingDelete && { id: pendingDelete.id, title: meetingTitle(pendingDelete, msg) }
+        }
         onClose={() => setPendingDelete(null)}
         onDelete={async (recordingId) => {
           await client.deleteRecording(workspaceId, recordingId);
@@ -350,5 +408,13 @@ export function MeetingsListPage({
         onDeleted={() => void list.refresh()}
       />
     </>
+  );
+}
+
+export function MeetingsListPage(props: ComponentProps<typeof MeetingsListPageContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingsListPageContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

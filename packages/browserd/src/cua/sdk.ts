@@ -63,10 +63,6 @@ async function loadCuaSdk(): Promise<typeof import("@trycua/cua-driver")> {
   return sdk;
 }
 
-export async function loadCuaDriver() {
-  return (await loadCuaSdk()).CuaDriver;
-}
-
 /** Use upstream's supervised worker so AppKit owns a main-thread cursor loop.
  * The SDK is only the local transport; desktop behavior comes from the bundled
  * source-built executable. Closing the SDK also closes its private child. */

@@ -54,6 +54,7 @@ type AzureSpeechWord = {
 type AzureSpeechPhrase = {
   locale?: unknown;
   words?: unknown;
+  text?: unknown;
 };
 
 function milliseconds(value: unknown): number | null {
@@ -64,6 +65,9 @@ function milliseconds(value: unknown): number | null {
 
 /** Characters that attach to the word before them rather than starting a new one. */
 const ATTACHED_PUNCTUATION = /^[.,!?;:…%)\]}»"'’”。、，！？]+$/u;
+
+/** Locales Azure Speech reports for audio in no language it recognized. */
+const UNKNOWN_LOCALES = new Set(["unk", "und"]);
 
 /** Turn Azure Speech phrases and their words into our words. */
 export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptionResult {
@@ -76,13 +80,28 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
     combinedPhrases?: unknown;
   };
   const phrases = Array.isArray(response.phrases) ? (response.phrases as AzureSpeechPhrase[]) : [];
+  // The whole text as the service punctuates it, which dictation uses.
+  const combined = Array.isArray(response.combinedPhrases)
+    ? (response.combinedPhrases as Array<{ text?: unknown }>)
+        .map((phrase) => (typeof phrase?.text === "string" ? phrase.text.trim() : ""))
+        .filter((text) => text.length > 0)
+        .join(" ")
+    : null;
   const words: RecordingTranscribedWord[] = [];
   const languages = new Set<string>();
   for (const phrase of phrases) {
-    if (typeof phrase?.locale === "string" && phrase.locale) {
-      languages.add(canonicalLanguageTag(phrase.locale));
-    }
     const items = Array.isArray(phrase?.words) ? (phrase.words as AzureSpeechWord[]) : [];
+    // A language counts where something was said in it: the phrase has words
+    // or text, or the transcript has text and the phrase carries no words of
+    // its own. Azure labels audio it heard no language in as "unk".
+    const locale = typeof phrase?.locale === "string" ? phrase.locale.trim() : "";
+    const said =
+      items.length > 0 ||
+      (typeof phrase?.text === "string" && phrase.text.trim() !== "") ||
+      Boolean(combined);
+    if (said && locale && !UNKNOWN_LOCALES.has(locale.toLowerCase())) {
+      languages.add(canonicalLanguageTag(locale));
+    }
     for (const item of items) {
       const text = typeof item.text === "string" ? item.text.trim() : "";
       const start = milliseconds(item.offsetMilliseconds);
@@ -98,13 +117,6 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
     }
   }
   words.sort((left, right) => left.startMilliseconds - right.startMilliseconds);
-  // The whole text as the service punctuates it, which dictation uses.
-  const combined = Array.isArray(response.combinedPhrases)
-    ? (response.combinedPhrases as Array<{ text?: unknown }>)
-        .map((phrase) => (typeof phrase?.text === "string" ? phrase.text.trim() : ""))
-        .filter((text) => text.length > 0)
-        .join(" ")
-    : null;
   const audioMilliseconds = milliseconds(response.durationMilliseconds);
   return {
     languages: [...languages],

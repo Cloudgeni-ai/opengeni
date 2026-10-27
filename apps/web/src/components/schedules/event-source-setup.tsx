@@ -1,6 +1,6 @@
 /**
  * How a webhook source is connected, shared by the add flow and the source's
- * page: its URL to copy, the steps in Linear or Sentry with the secret to
+ * page: its URL to copy, the steps in Linear, Sentry or another app with the secret to
  * paste back, and how your own app signs its requests.
  */
 import { t } from "@opengeni/react/app/lib/console-text";
@@ -35,14 +35,14 @@ export function StandardWebhookHelp() {
   );
 }
 
-/** The two steps in Linear or Sentry, with the field for the secret it shows. */
+/** The two steps in Linear, Sentry or another app, with the field for the secret it shows. */
 export function PastedWebhookSteps({
   source,
   secret,
   error,
   onSecretChange,
 }: {
-  source: Pick<EventSource, "kind" | "adapter" | "webhookUrl">;
+  source: Pick<EventSource, "kind" | "adapter" | "format" | "webhookUrl">;
   secret: string;
   error?: string | undefined;
   onSecretChange: (value: string) => void;

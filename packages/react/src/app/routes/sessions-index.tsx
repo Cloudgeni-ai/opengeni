@@ -1521,6 +1521,8 @@ function SessionsIndexRouteContent({
     setValue: setMessage,
     hasDraftContent: () => message.length > 0 || attachments.attachments.length > 0,
     sending: busy,
+    // Nothing runs before the session exists: Send just sends.
+    working: false,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).

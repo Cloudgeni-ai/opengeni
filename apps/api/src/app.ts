@@ -1,3 +1,8 @@
+import {
+  oauthSignupChallengeVerified,
+  runWithSignupChallenge,
+  verifySignupChallenge,
+} from "./auth/signup-challenge";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
@@ -391,6 +396,12 @@ import {
   registerManagedSignInMethodRoutes,
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
+import {
+  managedPasskeySignInOffered,
+  managedPasskeySignUpOffered,
+  refreshManagedPasskeysOffered,
+  registerManagedPasskeyRoutes,
+} from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1184,11 +1195,25 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   registerManagedSignInMethodRoutes(app, routeDeps);
+  registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      let signupChallengeVerified = false;
+      if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
+        const state = new URL(c.req.url).searchParams.get("state");
+        const stored = state
+          ? await (await managedAuth.$context).internalAdapter.findVerificationValue(state)
+          : null;
+        if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
+          signupChallengeVerified = oauthSignupChallengeVerified(
+            stored.value,
+            oauthCallbackProvider,
+          );
+        }
+      }
       if (
         pathname === "/v1/auth/sign-up/email" &&
         c.req.method === "POST" &&
@@ -1199,6 +1224,19 @@ export function createAppComposition(deps: AppDependencies): {
         // the user-create hook remain the backstop for every other path.
         return managedAuthNewSignupsPausedResponse();
       }
+      if (
+        deps.settings.signupChallengeEnabled &&
+        pathname === "/v1/auth/sign-up/email" &&
+        c.req.method === "POST"
+      ) {
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        await verifySignupChallenge(deps.settings, input?.signupChallengeToken);
+        signupChallengeVerified = true;
+      }
+      let signupProviderRequest = c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1217,6 +1255,19 @@ export function createAppComposition(deps: AppDependencies): {
             403,
           );
         }
+      }
+      if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
+        const body = await c.req.raw.clone().json();
+        const verified = deps.settings.signupChallengeEnabled && Boolean(body.signupChallengeToken);
+        if (verified) await verifySignupChallenge(deps.settings, body.signupChallengeToken);
+        body.additionalData = {
+          ...body.additionalData,
+          opengeniSignupChallenge: verified
+            ? { provider: body.provider, expiresAt: Date.now() + 600_000 }
+            : null,
+        };
+        delete body.signupChallengeToken;
+        signupProviderRequest = new Request(c.req.raw, { body: JSON.stringify(body) });
       }
       if (oauthCallbackProvider) {
         const connectResponse = await handleManagedSignInConnectCallback(
@@ -1253,9 +1304,14 @@ export function createAppComposition(deps: AppDependencies): {
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
               oauthCallbackProvider,
-              async () => await managedAuth.handler(c.req.raw),
+              async () =>
+                await runWithSignupChallenge(signupChallengeVerified, () =>
+                  managedAuth.handler(signupProviderRequest),
+                ),
             )
-          : await managedAuth.handler(c.req.raw);
+          : await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(signupProviderRequest),
+            );
       }
       requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
@@ -1280,7 +1336,9 @@ export function createAppComposition(deps: AppDependencies): {
           attempt.transactionId,
           oauthCallbackProvider,
           async () => {
-            const response = await managedAuth.handler(isolated.request);
+            const response = await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(isolated.request),
+            );
             return {
               response,
               authSessionId: currentManagedAuthCreatedSessionId(),
@@ -1348,9 +1406,14 @@ export function createAppComposition(deps: AppDependencies): {
           deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
         providerResponse = discardProviderSession
           ? await runManagedAuthDiscardedProviderSession(
-              async () => await managedAuth.handler(providerRequest),
+              async () =>
+                await runWithSignupChallenge(signupChallengeVerified, () =>
+                  managedAuth.handler(providerRequest),
+                ),
             )
-          : await managedAuth.handler(providerRequest);
+          : await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(providerRequest),
+            );
       }
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
@@ -1544,6 +1607,7 @@ export function createAppComposition(deps: AppDependencies): {
             },
           }
         : undefined;
+    await refreshManagedPasskeysOffered(deps);
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1621,7 +1685,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(
-          deps.settings,
+          deps,
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
@@ -2291,6 +2355,7 @@ export function createAppComposition(deps: AppDependencies): {
             }
           : {}),
       }),
+    log: (event, fields) => console.warn(event, fields),
   });
   registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
@@ -2623,13 +2688,22 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
+function clientAuthConfig(
+  deps: Pick<AppDependencies, "settings" | "db">,
+  newSignupsEnabled: boolean,
+) {
+  const settings = deps.settings;
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
+      passkeySignIn: managedPasskeySignInOffered(deps),
+      passkeySignUp: managedPasskeySignUpOffered(deps, newSignupsEnabled),
+      ...(settings.signupChallengeEnabled
+        ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
+        : {}),
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)

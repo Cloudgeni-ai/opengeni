@@ -325,6 +325,18 @@ export function bindVaultProviderAuthority(
     ...(provider.createVault
       ? { createVault: async (ctx, value) => provider.createVault!(await context(ctx), value) }
       : {}),
+    ...(provider.readPasskeys
+      ? {
+          readPasskeys: async (ctx, vaultId, itemId) =>
+            provider.readPasskeys!(await context(ctx), vaultId, itemId),
+        }
+      : {}),
+    ...(provider.updatePasskeySignCount
+      ? {
+          updatePasskeySignCount: async (ctx, vaultId, itemId, update) =>
+            provider.updatePasskeySignCount!(await context(ctx), vaultId, itemId, update),
+        }
+      : {}),
   };
 }
 

@@ -71,6 +71,7 @@ function standIn(
     workspaceId,
     kind: ready.kind,
     adapter: null,
+    format: null,
     name: ready.name,
     ownerSubjectId: null,
     visibility: "private",

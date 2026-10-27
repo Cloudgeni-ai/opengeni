@@ -1,9 +1,17 @@
 // Stands in for the system audio helper in tests: reports a start, writes a
 // ramp of float samples, and stops when stdin closes. FAKE_CAPTURE_MODE=error
-// fails like a denied permission; =crash exits without saying why.
+// fails like a denied permission; =crash exits without saying why; =slow
+// starts after 300 ms; =ask says macOS is asking, then starts after 300 ms;
+// =ask-denied says macOS is asking, then fails as denied after 300 ms.
+export {};
+
 const mode = process.env.FAKE_CAPTURE_MODE ?? "ok";
 const args = process.argv.slice(2).join(" ");
-if (mode === "error") {
+if (mode === "ask" || mode === "ask-denied") {
+  process.stderr.write(`${JSON.stringify({ event: "awaiting_permission" })}\n`);
+}
+if (mode === "slow" || mode === "ask" || mode === "ask-denied") await Bun.sleep(300);
+if (mode === "error" || mode === "ask-denied") {
   process.stderr.write(
     `${JSON.stringify({ event: "error", code: "permission_denied", message: "denied" })}\n`,
   );

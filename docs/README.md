@@ -19,6 +19,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Topic | Current canonical home | Known restatement locations |
 | --- | --- | --- |
+| Signup CAPTCHA, promotional funding holds, and automatic free-credit abuse detection | `docs/signup-abuse-protection.md` | Deployment and billing docs link here for policy, evidence, and activation. |
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
 | Local development stack, manual startup, `.env` configuration, and web-app walkthrough | `docs/local-development.md` | `README.md` keeps only the one-command quick start; `CONTRIBUTING.md`, `docs-site/run-locally.mdx`, and `docs/deployment.md` § Local Development Stack (launcher internals) link here. |
 | HTTP route families | `docs/http-api.md` | `README.md`, `packages/sdk/README.md`, and topic docs link instead of re-listing routes; typed method details stay in `packages/sdk/README.md`. |

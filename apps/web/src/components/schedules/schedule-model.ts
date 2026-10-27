@@ -21,7 +21,6 @@ import {
   builtinAutomationTemplates,
   automationCadenceIssue,
   automationCadenceRepeats,
-  automationCadenceWords,
   automationNextRun,
   automationRunEventsLabel,
   automationScheduleSpec,
@@ -105,10 +104,6 @@ export interface ScheduleWords {
 
 export function scheduleWords(schedule: ScheduledTaskScheduleSpec, now: Date): ScheduleWords {
   return automationScheduleWords(t, schedule, now);
-}
-
-export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
-  return automationCadenceWords(t, cadence, now);
 }
 
 /** The next run, or null when paused, on demand, or no runs are left. */
@@ -378,7 +373,7 @@ function eventsForCreate(draft: Pick<ScheduleDraft, "events">) {
 export function overlapPolicyForCreate(
   draft: Pick<ScheduleDraft, "runMode" | "overlapPolicy">,
 ): ScheduleDraft["overlapPolicy"] {
-  return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
+  return draft.runMode === "new_session_per_run" ? "steer" : draft.overlapPolicy;
 }
 
 /** Existing chats, including one already created for a schedule, own their settings. */

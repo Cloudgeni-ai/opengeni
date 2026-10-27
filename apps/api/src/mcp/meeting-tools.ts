@@ -1,12 +1,14 @@
-// Agents find and read recorded meetings with two read-only tools. They act
-// as the person the session works for, so an agent sees exactly the meetings
+// Agents find and read recorded meetings, and write their notes. They act as
+// the person the session works for, so an agent sees exactly the meetings
 // that person can see: their own Only me recordings and everything shared
 // with the workspace. Transcripts are given as compact speaker-named lines
 // with people's corrections applied, in parts a model can page through.
 import {
   defaultRecordingSpeakerName,
+  RECORDING_NOTE_MAX_BYTES,
   type AccessGrant,
   type Recording,
+  type RecordingNote,
   type RecordingSpeaker,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
@@ -17,9 +19,12 @@ import {
   getRecordingSearchDetails,
   getRecordingTranscriptPage,
   listRecordingLiveSegments,
+  listRecordingNotes,
   listRecordings,
   listRecordingTranscriptVersions,
+  RecordingConflictError,
   RecordingNotFoundError,
+  saveRecordingNote,
   type RecordingActor,
 } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,6 +38,8 @@ export type RegisterMeetingToolsInput = {
   server: McpServer;
   deps: ApiRouteDeps;
   grant: AccessGrant;
+  /** The session whose agent saves notes, recorded with them. */
+  sessionId: string;
   authorize: () => Promise<void>;
   json: JsonResult;
 };
@@ -40,6 +47,8 @@ export type RegisterMeetingToolsInput = {
 /** How much transcript one meeting_read returns by default, in characters. */
 export const MEETING_READ_DEFAULT_CHARS = 20_000;
 export const MEETING_READ_MAX_CHARS = 60_000;
+/** The most of each note meeting_read shows; longer notes end with a cut mark. */
+export const MEETING_READ_NOTE_CHARS = 20_000;
 const TRANSCRIPT_FETCH = 2_000;
 const LIVE_FETCH = 1_000;
 
@@ -158,7 +167,7 @@ function failure(json: JsonResult, code: string, message: string) {
 }
 
 export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
-  const { server, deps, grant, authorize, json } = input;
+  const { server, deps, grant, sessionId, authorize, json } = input;
 
   /** The person the agent acts for; without one it sees only shared meetings. */
   async function actor(): Promise<RecordingActor> {
@@ -255,7 +264,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meeting_read",
     {
       description:
-        'Read a recorded meeting the person you act for can see: its details, speakers and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
+        'Read a recorded meeting the person you act for can see: its details, speakers, notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
       inputSchema: {
         meetingId: z.uuid().describe("A meeting id from meetings_search."),
         from: z
@@ -399,6 +408,62 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     },
   );
 
+  server.registerTool(
+    "meeting_notes_save",
+    {
+      description:
+        "Save a meeting's notes: its written-up summary, decisions and action items in Markdown, shown on the meeting page to everyone who can see the meeting. This replaces the notes as a whole. Read the meeting with meeting_read first and pass the notes' revision as expectedRevision (0 when it has none), so edits someone made meanwhile are not overwritten. The notepad people wrote during the meeting is never changed.",
+      inputSchema: {
+        meetingId: z.uuid().describe("A meeting id from meetings_search."),
+        notes: z
+          .string()
+          .min(1)
+          .max(RECORDING_NOTE_MAX_BYTES)
+          .describe("The complete notes, in Markdown."),
+        expectedRevision: z
+          .number()
+          .int()
+          .min(0)
+          .describe("The notes' revision from meeting_read, or 0 when it showed none."),
+      },
+    },
+    async (request) => {
+      if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
+        return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
+      }
+      const who = await actor();
+      try {
+        const saved = await saveRecordingNote(deps.db, {
+          ...who,
+          recordingId: request.meetingId,
+          kind: "notes",
+          body: request.notes,
+          expectedRevision: request.expectedRevision,
+          sessionId,
+        });
+        return json({ saved: true, revision: saved.revision });
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) {
+          return json({
+            found: false,
+            message: "No meeting with this id is visible to the person you act for.",
+          });
+        }
+        if (error instanceof RecordingConflictError && error.code === "notes_changed") {
+          const current = (
+            await listRecordingNotes(deps.db, { ...who, recordingId: request.meetingId })
+          ).find((note) => note.kind === "notes");
+          return failure(
+            json,
+            "notes_changed",
+            `Someone saved these notes since revision ${request.expectedRevision}; they are now at revision ${current?.revision ?? 0}. Read them with meeting_read, merge your changes in and save again.`,
+          );
+        }
+        throw error;
+      }
+    },
+  );
+
   async function details(
     recording: Recording,
     who: RecordingActor,
@@ -410,6 +475,9 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     const versions = (
       await listRecordingTranscriptVersions(deps.db, { ...who, recordingId: recording.id })
     ).filter((version) => version.state === "complete");
+    const notes = await listRecordingNotes(deps.db, { ...who, recordingId: recording.id });
+    const notepad = notes.find((note) => note.kind === "notepad");
+    const written = notes.find((note) => note.kind === "notes");
     const metadata = Object.keys(recording.metadata).length > 0 ? recording.metadata : null;
     return {
       id: recording.id,
@@ -434,8 +502,18 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         : {}),
       ...(recording.externalRef ? { externalRef: recording.externalRef } : {}),
       ...(metadata ? { metadata } : {}),
+      ...(notepad && notepad.body.trim() ? { notepad: noteText(notepad) } : {}),
+      notes: written
+        ? { revision: written.revision, text: noteText(written) }
+        : { revision: 0, text: null },
     };
   }
+}
+
+/** A note's text, cut at MEETING_READ_NOTE_CHARS with a mark saying so. */
+function noteText(note: RecordingNote): string {
+  if (note.body.length <= MEETING_READ_NOTE_CHARS) return note.body;
+  return `${note.body.slice(0, MEETING_READ_NOTE_CHARS)}\n\n[… ${note.body.length - MEETING_READ_NOTE_CHARS} more characters not shown]`;
 }
 
 function transcriptNote(recording: Recording): string {

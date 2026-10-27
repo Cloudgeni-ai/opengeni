@@ -9,6 +9,7 @@ GlobalRegistrator.register();
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { SpeakerNameMenu } = await import("./meeting-transcript");
+const { MeetingsOverlayScope } = await import("./overlay-scope");
 type TranscriptActions = import("./meeting-transcript").TranscriptActions;
 
 afterAll(() => {
@@ -109,5 +110,51 @@ test("a speaker can be named as yourself", async () => {
     expect(items()).not.toContain("It's me");
   } finally {
     await mine.unmount();
+  }
+});
+
+test("an embedded meeting's menus open inside Opengeni's styled root", async () => {
+  const actions = {
+    nameSpeaker: async () => {},
+    nameSelf: null,
+    rejectSuggestion: async () => {},
+    createPerson: async () => ({}) as RecordingPerson,
+    moveSegment: async () => {},
+    editSegment: async () => {},
+    voices: null,
+    viewerSubjectId: "me",
+  } satisfies TranscriptActions;
+  // A host page that styles only its own og-root and provides no portal container.
+  const page = await render(
+    <div className="og-root">
+      <MeetingsOverlayScope>
+        <MeetingsOverlayScope>
+          <SpeakerNameMenu
+            label="speaker_1"
+            displayName="Speaker 2"
+            speakers={[]}
+            people={[]}
+            actions={actions}
+            onAddNew={() => {}}
+            defaultOpen
+          >
+            <button type="button">Speaker 2</button>
+          </SpeakerNameMenu>
+        </MeetingsOverlayScope>
+      </MeetingsOverlayScope>
+    </div>,
+  );
+  try {
+    await settle(50);
+    const menu = document.querySelector<HTMLElement>('[role="menu"]');
+    expect(menu).not.toBeNull();
+    const layer = menu!.closest<HTMLElement>("[data-og-overlays]");
+    // In a styled layer of its own under <body>, outside the host page's layout.
+    expect(layer?.parentElement).toBe(document.body);
+    expect(layer?.classList.contains("og-root")).toBe(true);
+    // The nested scope shares the outer one's layer.
+    expect(document.querySelectorAll("[data-og-overlays]").length).toBe(1);
+  } finally {
+    await page.unmount();
   }
 });

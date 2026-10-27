@@ -3,6 +3,7 @@ import { parseTotpInput } from "@opengeni/contracts";
 import {
   VaultProviderError,
   type ProviderItemMeta,
+  type ProviderPasskey,
   type ProviderVault,
   type VaultProvider,
   type VaultProviderCapabilities,
@@ -23,6 +24,8 @@ export interface FakeProviderSeedItem {
   category?: string | null;
   websites?: string[];
   fields: FakeProviderSeedField[];
+  /** Passkeys the item holds; reported only when `capabilities.passkeys` is true. */
+  passkeys?: ProviderPasskey[];
 }
 export interface FakeProviderSeedVault {
   externalVaultId?: string;
@@ -34,7 +37,7 @@ export interface FakeProviderSeedVault {
 export interface FakeProviderSeed {
   accountName?: string | null;
   vaults?: FakeProviderSeedVault[];
-  capabilities?: Partial<Omit<VaultProviderCapabilities, "passkeys">>;
+  capabilities?: Partial<VaultProviderCapabilities>;
   /** Every call fails with this code (auth, outage and rate-limit tests). */
   failWith?: VaultProviderErrorCode | null;
   /** Archived items stay listed, marked with `archivedAt`, as some providers do. */
@@ -48,7 +51,9 @@ export interface FakeProviderCall {
     | "readFields"
     | "writeItem"
     | "archiveItem"
-    | "createVault";
+    | "createVault"
+    | "readPasskeys"
+    | "updatePasskeySignCount";
   connectionId: string | null;
   externalVaultId?: string;
   externalItemId?: string;
@@ -68,6 +73,7 @@ interface FakeItem {
   category: string | null;
   websites: string[];
   fields: FakeField[];
+  passkeys: ProviderPasskey[];
   version: number;
   archived: boolean;
   archivedAt: string | null;
@@ -95,7 +101,7 @@ function materialFor(field: FakeField): SecretMaterial {
   return { type: "text", value: field.value };
 }
 
-function itemMeta(item: FakeItem): ProviderItemMeta {
+function itemMeta(item: FakeItem, passkeys: boolean): ProviderItemMeta {
   return {
     externalItemId: item.externalItemId,
     name: item.name,
@@ -106,6 +112,15 @@ function itemMeta(item: FakeItem): ProviderItemMeta {
     version: String(item.version),
     updatedAt: item.updatedAt,
     ...(item.archivedAt ? { archivedAt: item.archivedAt } : {}),
+    ...(passkeys
+      ? {
+          passkeys: item.passkeys.map(({ credentialId, rpId, userName }) => ({
+            credentialId,
+            rpId,
+            userName,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -139,6 +154,7 @@ export function createFakeVaultProvider(
       type: item.type ?? "login",
       category: item.category ?? null,
       websites: item.websites ?? [],
+      passkeys: (item.passkeys ?? []).map((passkey) => ({ ...passkey })),
       version: 1,
       archived: false,
       archivedAt: null,
@@ -157,8 +173,8 @@ export function createFakeVaultProvider(
     totp: true,
     files: true,
     groupGrants: false,
-    ...seed.capabilities,
     passkeys: false,
+    ...seed.capabilities,
   };
 
   function charge(
@@ -210,7 +226,7 @@ export function createFakeVaultProvider(
       charge(ctx, { op: "listItems", connectionId: ctx.connectionId, externalVaultId }, "list");
       return vaultById(externalVaultId)
         .items.filter((item) => seed.listArchived || !item.archived)
-        .map(itemMeta);
+        .map((item) => itemMeta(item, capabilities.passkeys));
     },
     async readFields(ctx, externalVaultId, externalItemId, externalFieldIds) {
       charge(
@@ -261,6 +277,7 @@ export function createFakeVaultProvider(
           category: null,
           websites: [],
           fields: [],
+          passkeys: [],
           version: 0,
           archived: false,
           archivedAt: null,
@@ -303,7 +320,7 @@ export function createFakeVaultProvider(
       item.version += 1;
       item.updatedAt = now();
       vault.contentVersion += 1;
-      return itemMeta(item);
+      return itemMeta(item, capabilities.passkeys);
     },
     async archiveItem(ctx, externalVaultId, externalItemId) {
       charge(
@@ -331,6 +348,56 @@ export function createFakeVaultProvider(
       vaults.push(vault);
       return vaultMeta(vault);
     },
+    ...(capabilities.passkeys
+      ? {
+          async readPasskeys(
+            ctx: VaultProviderContext,
+            externalVaultId: string,
+            externalItemId: string,
+          ) {
+            charge(
+              ctx,
+              {
+                op: "readPasskeys",
+                connectionId: ctx.connectionId,
+                externalVaultId,
+                externalItemId,
+              },
+              "read",
+            );
+            const item = itemById(vaultById(externalVaultId), externalItemId);
+            return item.passkeys.map((passkey) => ({ ...passkey }));
+          },
+          async updatePasskeySignCount(
+            ctx: VaultProviderContext,
+            externalVaultId: string,
+            externalItemId: string,
+            update: { credentialId: string; signCount: number },
+          ) {
+            charge(
+              ctx,
+              {
+                op: "updatePasskeySignCount",
+                connectionId: ctx.connectionId,
+                externalVaultId,
+                externalItemId,
+              },
+              "write",
+            );
+            const vault = writableVault(externalVaultId);
+            const item = itemById(vault, externalItemId);
+            const passkey = item.passkeys.find(
+              (candidate) => candidate.credentialId === update.credentialId,
+            );
+            if (!passkey) throw new VaultProviderError("provider_not_found", "passkey not found");
+            if (update.signCount <= passkey.signCount) return;
+            passkey.signCount = update.signCount;
+            item.version += 1;
+            item.updatedAt = now();
+            vault.contentVersion += 1;
+          },
+        }
+      : {}),
   };
   return provider;
 }

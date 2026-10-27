@@ -9,6 +9,7 @@ import * as SonnerPackage from "sonner";
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
 import * as ContextModule from "@opengeni/react/app/app-context";
+import * as FormDialogModule from "@opengeni/react/ui/form-dialog";
 import * as AnalyticsModule from "@/lib/analytics";
 import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
@@ -219,6 +220,30 @@ mock.module("@tanstack/react-router", () => ({
   },
 }));
 mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
+// The identity editor renders its form in place while open, independent of
+// Radix portal mounting.
+mock.module("@opengeni/react/ui/form-dialog", () => ({
+  ...FormDialogModule,
+  FormDialog: ({
+    open,
+    onOpenChange,
+    onSubmitted,
+    size: _size,
+    ...frame
+  }: Parameters<typeof FormDialogModule.FormDialog>[0]) =>
+    open ? (
+      <div role="dialog">
+        <FormDialogModule.FormFrame
+          variant="dialog"
+          {...frame}
+          onSubmitted={() => {
+            onSubmitted?.();
+            onOpenChange(false);
+          }}
+        />
+      </div>
+    ) : null,
+}));
 mock.module("sonner", () => ({
   ...SonnerPackage,
   toast: Object.assign(
@@ -630,6 +655,68 @@ describe("organization billing StrictMode ownership", () => {
       ).toBeNull();
     } finally {
       context.clientConfig.auth.mode = priorMode;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("an owner opens the identity editor from Identity, filled with the current text", async () => {
+    listCompanyProfile.mockImplementation(
+      async () =>
+        ({
+          current: {
+            accountId,
+            revisionId: "00000000-0000-4000-8000-000000000007",
+            revision: 3,
+            contentHash: "a".repeat(64),
+            activationVersion: 4,
+            activatedAt: timestamp,
+          },
+          activeRevision: {
+            profile: {
+              identity: "A small bakery tools team.",
+              mission: "Local bakeries should thrive.",
+              products: [],
+              customers: [],
+              goals: [],
+              constraints: [],
+            },
+          },
+          revisions: [],
+          activationEvents: [],
+          nextAfterRevision: null,
+        }) as never,
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="identity" />);
+      });
+      await flush();
+      expect(container.textContent).toContain("A small bakery tools team.");
+      await act(async () => button(container, "Edit").click());
+      await flush();
+      const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+      if (!dialog) throw new Error("Missing edit dialog");
+      expect(dialog.textContent).toContain("Edit identity and mission");
+      expect(
+        dialog.querySelector<HTMLTextAreaElement>('textarea[name="organization-identity"]')!.value,
+      ).toBe("A small bakery tools team.");
+      expect(
+        dialog.querySelector<HTMLTextAreaElement>('textarea[name="organization-mission"]')!.value,
+      ).toBe("Local bakeries should thrive.");
+      // Nothing changed yet, so there is nothing to save.
+      expect(button(dialog, "Save").disabled).toBe(true);
+    } finally {
+      listCompanyProfile.mockImplementation(async () => ({
+        current: null,
+        activeRevision: null,
+        revisions: [],
+        activationEvents: [],
+        nextAfterRevision: null,
+      }));
       await act(async () => root.unmount());
       container.remove();
     }

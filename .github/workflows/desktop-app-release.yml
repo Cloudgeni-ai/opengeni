@@ -161,11 +161,21 @@ jobs:
           xcrun stapler validate "$app"
           ls -la
 
+      # For apps that embed Opengeni's meetings (docs/recordings.md); they
+      # sign it with their own bundle.
+      - name: System audio helper assets
+        working-directory: apps/desktop
+        run: |
+          for dir in mac-arm64 mac-x64; do
+            cp "build/audio-capture/$dir/opengeni-audio-capture" "release/opengeni-audio-capture-$dir"
+          done
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-macos
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.dmg
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip.blockmap
@@ -253,11 +263,19 @@ jobs:
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
 
+      - name: System audio helper assets
+        working-directory: apps/desktop
+        run: |
+          for dir in linux-x64 linux-arm64; do
+            cp "build/audio-capture/$dir/opengeni-audio-capture" "release/opengeni-audio-capture-$dir"
+          done
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-linux
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.AppImage
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
@@ -378,11 +396,19 @@ jobs:
         with:
           subject-path: apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
 
+      # The copies electron-builder signed with the app.
+      - name: System audio helper assets
+        working-directory: apps/desktop/release
+        run: |
+          cp win-unpacked/resources/audio-capture/opengeni-audio-capture.exe opengeni-audio-capture-win-x64.exe
+          cp win-arm64-unpacked/resources/audio-capture/opengeni-audio-capture.exe opengeni-audio-capture-win-arm64.exe
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-windows
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe.blockmap
             apps/desktop/release/latest.yml
@@ -407,7 +433,10 @@ jobs:
         run: |
           set -euo pipefail
           ls -la
-          sha256sum Opengeni-* > SHA256SUMS
+          for dir in mac-arm64 mac-x64 linux-x64 linux-arm64 win-x64.exe win-arm64.exe; do
+            test -f "opengeni-audio-capture-$dir"
+          done
+          sha256sum Opengeni-* opengeni-audio-capture-* > SHA256SUMS
           tag="desktop-v$VERSION"
           if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
             echo "$tag is already published; releases are immutable, so build a new version." >&2
@@ -426,6 +455,8 @@ jobs:
           - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
           - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
           - **Any Linux:** download the \`.AppImage\`, make it executable (\`chmod +x\`) and open it. It adds itself to your apps and updates itself.
+
+          \`opengeni-audio-capture-*\` is the computer audio helper, for apps that embed Opengeni's meetings ([docs/recordings.md](https://github.com/$GH_REPO/blob/main/docs/recordings.md)).
 
           Check a Windows or Linux download with \`gh attestation verify <file> --repo $GH_REPO\` or against \`SHA256SUMS\`.
           NOTES

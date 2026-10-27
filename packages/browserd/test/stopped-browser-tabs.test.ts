@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   matchReopenedTabs,
+  readBrowserTabIds,
   tabUrlHash,
   takeStoppedBrowserTabs,
+  writeBrowserTabIds,
   writeStoppedBrowserTabs,
 } from "../src/stopped-browser-tabs";
 
@@ -34,18 +36,33 @@ test("each stopped tab maps to the reopened tab showing its page", () => {
   ]);
 });
 
-test("tabs showing the same page pair up once each, the selected one with the selected one", () => {
+test("tabs showing the same page never pair, as they can't be told apart", () => {
   const url = "https://same.example.test/";
   expect(
     matchReopenedTabs(
-      [stoppedTab("old-1", url), stoppedTab("old-2", url, true), stoppedTab("old-3", url)],
-      [page("new-1", url), page("new-2", url, true)],
+      [
+        stoppedTab("old-1", url),
+        stoppedTab("old-2", url, true),
+        stoppedTab("old-3", url),
+        stoppedTab("old-unique", "https://unique.example.test/"),
+      ],
+      [
+        page("new-1", url),
+        page("new-2", url, true),
+        page("new-3", url),
+        page("new-unique", "https://unique.example.test/"),
+      ],
     ),
   ).toEqual([
-    { targetId: "old-1", replacementId: "new-1" },
-    { targetId: "old-2", replacementId: "new-2" },
+    { targetId: "old-1", replacementId: null },
+    { targetId: "old-2", replacementId: null },
     { targetId: "old-3", replacementId: null },
+    { targetId: "old-unique", replacementId: "new-unique" },
   ]);
+  // One stopped tab, two reopened tabs showing its page: still ambiguous.
+  expect(
+    matchReopenedTabs([stoppedTab("old", url, true)], [page("new-1", url), page("new-2", url)]),
+  ).toEqual([{ targetId: "old", replacementId: null }]);
 });
 
 test("a tab whose ID still exists is the same tab and is not reported", () => {
@@ -137,6 +154,35 @@ test("the record describes only the next launch and ignores anything unreadable"
     );
     expect(await takeStoppedBrowserTabs(directory)).toBeNull();
     expect(await readdir(directory)).toEqual([]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a running browser's tab IDs are kept for a reattach until a browser has none", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ogb-tab-ids-"));
+  try {
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    const tabs = [
+      { tabId: "old-a", browserTargetId: "new-a" },
+      { tabId: "old-b", browserTargetId: "new-b" },
+    ];
+    await writeBrowserTabIds(directory, tabs);
+    // Read, not taken: every reattach to the same browser needs them.
+    expect(await readBrowserTabIds(directory)).toEqual(tabs);
+    expect(await readBrowserTabIds(directory)).toEqual(tabs);
+    await writeBrowserTabIds(directory, []);
+    expect(await readdir(directory)).toEqual([]);
+
+    await writeFile(join(directory, "browser-tab-ids.json"), "{not json");
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    await writeFile(
+      join(directory, "browser-tab-ids.json"),
+      JSON.stringify({ version: 1, tabs: [{ tabId: "old-a", browserTargetId: 7 }] }),
+    );
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    await writeFile(join(directory, "browser-tab-ids.json"), JSON.stringify({ version: 2, tabs }));
+    expect(await readBrowserTabIds(directory)).toEqual([]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

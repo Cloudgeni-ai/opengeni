@@ -415,6 +415,10 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
+      // 0981–0982 promotion decisions and verified machine proofs are withheld.
+      "promotion_decisions",
+      "promotion_enforcement",
+      "promotion_machine_proofs",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
       // 0909 message search text.
@@ -586,6 +590,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
       "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
       "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
+      // 0988's queued-turn hold summary reads only tables this schema has.
+      "runtime definer summarize_queued_turns_by_hold() is missing or ambiguous",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });

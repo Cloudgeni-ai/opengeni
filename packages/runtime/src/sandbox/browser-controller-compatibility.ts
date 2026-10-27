@@ -44,6 +44,25 @@ export const NEWER_BROWSER_ACTION_OPTIONS: readonly NewerBrowserActionOption[] =
   },
 ];
 
+/**
+ * Fields of the command envelope around the action (`BrowserActionCommand`,
+ * set by the server, not chosen by the agent) added after the baseline agent
+ * release. An older controller rejects the whole command when it sees one,
+ * and the agent cannot drop it, so the server must not send it to a
+ * controller that predates it: gate it on the placement's agent version (as
+ * `secretValues` is gated in the API) or on a capability the controller
+ * reports. List each such field with how that is done; the guard test fails
+ * for an envelope field that is not listed.
+ */
+export type NewerBrowserActionEnvelopeField = {
+  /** Flattened envelope shape keys (`$.<path>`) this field added. */
+  readonly surfaceKeys: readonly string[];
+  /** How the server keeps the field from controllers that predate it. */
+  readonly olderControllers: string;
+};
+
+export const NEWER_BROWSER_ACTION_ENVELOPE_FIELDS: readonly NewerBrowserActionEnvelopeField[] = [];
+
 /** The plain refusal an agent sees when the controller rejected the action's
  * format. `controllerInAgent` is true when the controller ships inside the
  * Opengeni agent rather than a controller image. */
