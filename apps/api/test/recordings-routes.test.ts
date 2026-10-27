@@ -1002,6 +1002,10 @@ describe("recording routes", () => {
           return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
         }) as typeof fetch,
       });
+      // The workspace asks recorders to start with the live transcript on.
+      await shared.admin`
+        update workspaces set settings = settings || '{"recordings":{"liveTranscript":true}}'::jsonb
+        where id = ${scope.workspaceId}`;
       const recordingId = crypto.randomUUID();
       await scope.owner.call("POST", "/recordings", {
         recordingId,
@@ -1014,7 +1018,7 @@ describe("recording routes", () => {
       const entry = models.body.models.find(
         (model: { providerId: string }) => model.providerId === "azure-openai",
       );
-      return { minted, granted, entry };
+      return { minted, granted, entry, liveTranscript: models.body.liveTranscript };
     };
     // Meetings are declared EU; the live transcript's own route is not.
     const speech = {
@@ -1034,6 +1038,8 @@ describe("recording routes", () => {
       available: false,
       unavailableReason: "region_restricted",
     });
+    // Recorders don't start a live transcript that can't run here.
+    expect(refused.liveTranscript).toBe(false);
     const admitted = await live({
       ...speech,
       "transcription.azure-openai-realtime": { endpoint: AI, residency },
@@ -1042,6 +1048,7 @@ describe("recording routes", () => {
     expect(admitted.minted).toEqual([`${AI}/openai/v1/realtime/client_secrets`]);
     expect(admitted.entry).toMatchObject({ available: true, capabilities: { live: true } });
     expect(admitted.entry.unavailableReason).toBeUndefined();
+    expect(admitted.liveTranscript).toBe(true);
   });
 
   test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {

@@ -1089,6 +1089,16 @@ export function registerRecordingRoutes(
       }),
     );
     const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+    const liveModels = models.filter((model) =>
+      offered.some(
+        (provider) =>
+          provider.id === model.providerId &&
+          provider.models.some((spec) => spec.model === model.model && spec.capabilities.live),
+      ),
+    );
+    const liveRegionRestricted =
+      liveModels.length > 0 &&
+      liveModels.every((model) => perProvider.get(model.providerId)?.liveRegion === false);
     const preferred = voiceInput?.preferredProvider
       ? dictationProviders(deployment).find(
           (provider) =>
@@ -1109,7 +1119,8 @@ export function registerRecordingRoutes(
       dictationDefault,
       pinned: !!deployment.pinned,
       language: recordingSettings.language ?? null,
-      liveTranscript: recordingSettings.liveTranscript === true,
+      // Recorders don't start it where EU-only inference refuses every live route.
+      liveTranscript: recordingSettings.liveTranscript === true && !liveRegionRestricted,
     });
   });
 
