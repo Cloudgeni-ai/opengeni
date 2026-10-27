@@ -7327,14 +7327,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
-    "request": [],
-    "response": [],
-    "permission": "sessions:control"
-  },
-  {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
