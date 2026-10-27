@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 /// Where an image build puts the guest's files.
 pub const GUEST_DIR: &str = "/opengeni";
-/// This init. The build points `/sbin/init` at it.
+/// This init. The host boots every guest kernel with `init=` naming it,
+/// since a package the sandbox installs may replace `/sbin/init`, which
+/// the build also points at it.
 pub const INIT_PATH: &str = "/opengeni/init";
 /// envd.
 pub const ENVD_PATH: &str = "/opengeni/envd";

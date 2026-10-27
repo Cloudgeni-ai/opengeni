@@ -6,6 +6,7 @@ import type { ClientConfig, ClientVoiceInputConfig, OpenGeniClient } from "@open
 import {
   getDesktopDictation,
   type DesktopDictation,
+  type DesktopDictationAudio,
   type DesktopDictationReport,
   type DesktopDictationRequest,
 } from "@opengeni/sdk/desktop-bridge";
@@ -53,10 +54,16 @@ type Current = {
   phase: "starting" | "recording" | "transcribing" | "failed";
   /** Start returned without recording and without an error: it was declined. */
   declined: boolean;
+  /** Speech the app kept, transcribed again rather than recorded. */
+  again: boolean;
 };
+
+/** What the next render starts: a recording, or kept speech to transcribe. */
+type Pending = { id: string; audio: DesktopDictationAudio | null };
 
 const LEVEL_REPORT_MILLISECONDS = 100;
 const CONFIG_RETRY_MILLISECONDS = [2_000, 10_000, 30_000, 60_000];
+const NO_WORDS: readonly string[] = [];
 
 /**
  * Mount once on a signed-in page inside a desktop app with dictation from
@@ -81,9 +88,12 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     props.enabled,
   );
   const [language, setLanguage] = useState<string | null>(null);
-  const [pending, setPending] = useState<{ id: string } | null>(null);
+  const [vocabulary, setVocabulary] = useState<readonly string[]>(NO_WORDS);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [declined, setDeclined] = useState(0);
   const current = useRef<Current | null>(null);
+  /** The speech of the dictation being recorded, read for the app to keep. */
+  const kept = useRef<{ id: string; audio: Promise<DesktopDictationAudio | null> } | null>(null);
 
   const report = useCallback(
     (next: DesktopDictationReport) => {
@@ -107,13 +117,43 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       const active = current.current;
       if (!active) return;
       current.current = null;
-      report({ dictationId: active.id, phase: "done", text });
+      const audio = kept.current?.id === active.id ? kept.current.audio : null;
+      kept.current = null;
+      if (!audio) {
+        report({ dictationId: active.id, phase: "done", text });
+        return;
+      }
+      void audio.then((speech) =>
+        report({
+          dictationId: active.id,
+          phase: "done",
+          text,
+          ...(speech ? { audio: speech } : {}),
+        }),
+      );
     },
     focusInput: noop,
     language,
+    keyterms: vocabulary,
     beforeStart: props.beforeStart,
     // Dictations an earlier page left are for the composer to offer.
     recover: false,
+    // The app keeps each dictation's speech with its text, to play or transcribe again.
+    onAudio: ({ audio, durationMilliseconds }) => {
+      const active = current.current;
+      if (!active || active.again) return;
+      kept.current = {
+        id: active.id,
+        audio: audio.arrayBuffer().then(
+          (buffer) => ({
+            mimeType: audio.type || "audio/webm",
+            bytes: new Uint8Array(buffer),
+            durationMilliseconds,
+          }),
+          () => null,
+        ),
+      };
+    },
     recordings: props.recordings,
     platform: props.platform,
   });
@@ -129,7 +169,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const handle = useCallback((request: DesktopDictationRequest) => {
     const voiceNow = voiceRef.current;
     const { t: text, report: send } = words.current;
-    if (request.kind === "start") {
+    if (request.kind === "start" || request.kind === "transcribe") {
       if (!availableRef.current) {
         send({
           dictationId: request.dictationId,
@@ -142,9 +182,12 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       // A dictation still held here (failed, or cancelled after a few
       // seconds) stays saved for the composer; this one starts fresh.
       if (voiceNow.status !== "idle") voiceNow.release();
-      current.current = { id: request.dictationId, phase: "starting", declined: false };
+      const again = request.kind === "transcribe";
+      current.current = { id: request.dictationId, phase: "starting", declined: false, again };
+      kept.current = null;
       setLanguage(request.language);
-      setPending({ id: request.dictationId });
+      setVocabulary(request.vocabulary ?? NO_WORDS);
+      setPending({ id: request.dictationId, audio: again ? request.audio : null });
       return;
     }
     const active = current.current;
@@ -155,13 +198,19 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
         return;
       case "cancel":
         current.current = null;
-        // A start shorter than a few seconds is deleted; real speech stays saved.
-        voiceNow.cancel();
+        if (active.again) {
+          // The app still has the speech: nothing here needs keeping.
+          void voiceNow.discard();
+        } else {
+          // A start shorter than a few seconds is deleted; real speech stays saved.
+          voiceNow.cancel();
+        }
         send({ dictationId: active.id, phase: "cancelled" });
         return;
       case "dismiss":
         current.current = null;
-        voiceNow.release();
+        if (active.again) void voiceNow.discard();
+        else voiceNow.release();
         return;
       case "retry":
         voiceNow.retry();
@@ -192,12 +241,17 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
     };
   }, [dictation, handle, listening, workspaceId]);
 
-  // Start after the render that applied the dictation's language.
+  // Start after the render that applied the dictation's language and vocabulary.
   useEffect(() => {
     if (!pending) return;
     setPending(null);
-    const { id } = pending;
-    void voiceRef.current.start().then(
+    const { id, audio } = pending;
+    const starting = audio
+      ? voiceRef.current.transcribe(new Blob([audio.bytes as BlobPart], { type: audio.mimeType }), {
+          durationMilliseconds: audio.durationMilliseconds,
+        })
+      : voiceRef.current.start();
+    void starting.then(
       (started) => {
         const active = current.current;
         if (started || active?.id !== id) return;

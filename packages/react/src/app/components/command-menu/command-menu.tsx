@@ -242,8 +242,11 @@ function useServerTitleSearch(
         }));
       };
       targets.forEach((workspaceId, index) => {
-        client
-          .listSessionPage(workspaceId, {
+        // The menu needs list rows, not each session's full tool/configuration payload.
+        // Older embedded clients may not expose the optional summary method yet.
+        const listPage = client.listSessionSummaryPage ?? client.listSessionPage;
+        listPage
+          .call(client, workspaceId, {
             search: trimmed,
             archiveStatus: "all",
             // This workspace first and fullest; a few from each of the others.
@@ -251,6 +254,7 @@ function useServerTitleSearch(
             signal: controller.signal,
           })
           .then((page) => {
+            if (controller.signal.aborted) return;
             const rows = [...(page.pinned ?? []), ...page.sessions];
             rememberChats(subjectId, rows);
             settle(rows);

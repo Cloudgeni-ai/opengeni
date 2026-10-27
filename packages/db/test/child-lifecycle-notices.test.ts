@@ -41,11 +41,6 @@ import {
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
-import {
-  armCodexCapacityWait,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
-} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -1306,21 +1301,18 @@ describe("child lifecycle notices", () => {
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
   });
 
-  test("codex and xai capacity waits enqueue child_waiting_capacity", async () => {
+  test("subscription capacity waits enqueue child_waiting_capacity", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const codexChild = await startSession(grant, { parent, message: "codex work" });
-    await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-    await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
-    const codex = await armCodexCapacityWait(client.db, {
+    const codex = await armSubscriptionCoreCapacityWait(client.db, "codex", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: codexChild.session.id,
       turnId: codexChild.turn.id,
       attemptId: codexChild.attemptId,
-      workflowId: `session-${codexChild.session.id}`,
+      waitReason: "capacity",
       earliestResetAt: new Date(Date.now() + 5 * 60_000),
-      resetKind: "authoritative",
       failurePayload: { error: "all connected Codex subscriptions are unavailable" },
     });
     if (codex.action !== "waiting") throw new Error(`codex wait not armed: ${codex.action}`);
@@ -1329,7 +1321,7 @@ describe("child lifecycle notices", () => {
         grant,
         childWaitingCapacityDedupeKey({
           childSessionId: codexChild.session.id,
-          waiterId: codex.waiter.id,
+          waiterId: codex.waiter.waiterId,
         }),
       ),
     ).toMatchObject({
@@ -1345,7 +1337,6 @@ describe("child lifecycle notices", () => {
       },
     });
 
-    // Claude uses the same provider-neutral waiter and child notice writer.
     const claudeChild = await startSession(grant, { parent, message: "claude work" });
     const claude = await armSubscriptionCoreCapacityWait(client.db, "claude", {
       accountId: grant.accountId,
@@ -1722,17 +1713,14 @@ describe("child lifecycle notices", () => {
           }),
         ),
       ).toBeNull();
-      await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-      await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
-      const codex = await armCodexCapacityWait(client.db, {
+      const codex = await armSubscriptionCoreCapacityWait(client.db, "codex", {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: child.session.id,
         turnId: child.turn.id,
         attemptId: child.attemptId,
-        workflowId: `session-${child.session.id}`,
+        waitReason: "capacity",
         earliestResetAt: null,
-        resetKind: "authoritative",
         failurePayload: { error: "unavailable" },
       });
       if (codex.action !== "waiting") throw new Error("codex wait not armed");
@@ -1741,7 +1729,7 @@ describe("child lifecycle notices", () => {
           grant,
           childWaitingCapacityDedupeKey({
             childSessionId: child.session.id,
-            waiterId: codex.waiter.id,
+            waiterId: codex.waiter.waiterId,
           }),
         ),
       ).toBeNull();

@@ -1369,6 +1369,9 @@
 :where(.og-root).-ml-2\.5,:where(.og-root) .-ml-2\.5 {
     margin-left: calc(var(--spacing) * -2.5);
   }
+:where(.og-root).-ml-3,:where(.og-root) .-ml-3 {
+    margin-left: calc(var(--spacing) * -3);
+  }
 :where(.og-root).-ml-4,:where(.og-root) .-ml-4 {
     margin-left: calc(var(--spacing) * -4);
   }
@@ -4830,6 +4833,9 @@
 :where(.og-root).pl-16,:where(.og-root) .pl-16 {
     padding-left: calc(var(--spacing) * 16);
   }
+:where(.og-root).pl-20,:where(.og-root) .pl-20 {
+    padding-left: calc(var(--spacing) * 20);
+  }
 :where(.og-root).pl-\[18px\],:where(.og-root) .pl-\[18px\] {
     padding-left: 18px;
   }
@@ -6618,6 +6624,12 @@
       left: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).before\:inline-block,:where(.og-root) .before\:inline-block {
+    &::before {
+      content: var(--tw-content);
+      display: inline-block;
+    }
+  }
 :where(.og-root).before\:h-0\.5,:where(.og-root) .before\:h-0\.5 {
     &::before {
       content: var(--tw-content);
@@ -6634,6 +6646,12 @@
     &::before {
       content: var(--tw-content);
       width: calc(var(--spacing) * 0.5);
+    }
+  }
+:where(.og-root).before\:w-3,:where(.og-root) .before\:w-3 {
+    &::before {
+      content: var(--tw-content);
+      width: calc(var(--spacing) * 3);
     }
   }
 :where(.og-root).before\:-translate-y-1\/2,:where(.og-root) .before\:-translate-y-1\/2 {
@@ -6674,6 +6692,18 @@
       background-color: transparent;
     }
   }
+:where(.og-root).before\:text-center,:where(.og-root) .before\:text-center {
+    &::before {
+      content: var(--tw-content);
+      text-align: center;
+    }
+  }
+:where(.og-root).before\:text-og-fg-muted,:where(.og-root) .before\:text-og-fg-muted {
+    &::before {
+      content: var(--tw-content);
+      color: var(--og-color-fg-muted);
+    }
+  }
 :where(.og-root).before\:transition-colors,:where(.og-root) .before\:transition-colors {
     &::before {
       content: var(--tw-content);
@@ -6692,6 +6722,12 @@
 :where(.og-root).before\:content-\[\'\'\],:where(.og-root) .before\:content-\[\'\'\] {
     &::before {
       --tw-content: '';
+      content: var(--tw-content);
+    }
+  }
+:where(.og-root).before\:content-\[\'·\'_\/_\'\'\],:where(.og-root) .before\:content-\[\'·\'_\/_\'\'\] {
+    &::before {
+      --tw-content: '·' / '';
       content: var(--tw-content);
     }
   }
@@ -11129,6 +11165,11 @@
       visibility: hidden;
     }
   }
+:where(.og-root).pointer-coarse\:static,:where(.og-root) .pointer-coarse\:static {
+    @media (pointer: coarse) {
+      position: static;
+    }
+  }
 :where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {
     @media (pointer: coarse) {
       top: calc(var(--spacing) * 13);
@@ -11157,6 +11198,11 @@
 :where(.og-root).pointer-coarse\:-left-5\.5,:where(.og-root) .pointer-coarse\:-left-5\.5 {
     @media (pointer: coarse) {
       left: calc(var(--spacing) * -5.5);
+    }
+  }
+:where(.og-root).pointer-coarse\:order-last,:where(.og-root) .pointer-coarse\:order-last {
+    @media (pointer: coarse) {
+      order: 9999;
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {
@@ -11300,6 +11346,11 @@
       width: auto;
     }
   }
+:where(.og-root).pointer-coarse\:min-w-0,:where(.og-root) .pointer-coarse\:min-w-0 {
+    @media (pointer: coarse) {
+      min-width: calc(var(--spacing) * 0);
+    }
+  }
 :where(.og-root).pointer-coarse\:min-w-11,:where(.og-root) .pointer-coarse\:min-w-11 {
     @media (pointer: coarse) {
       min-width: calc(var(--spacing) * 11);
@@ -11308,6 +11359,39 @@
 :where(.og-root).pointer-coarse\:min-w-\[44px\],:where(.og-root) .pointer-coarse\:min-w-\[44px\] {
     @media (pointer: coarse) {
       min-width: 44px;
+    }
+  }
+:where(.og-root).pointer-coarse\:flex-1,:where(.og-root) .pointer-coarse\:flex-1 {
+    @media (pointer: coarse) {
+      flex: 1;
+    }
+  }
+:where(.og-root).pointer-coarse\:shrink-0,:where(.og-root) .pointer-coarse\:shrink-0 {
+    @media (pointer: coarse) {
+      flex-shrink: 0;
+    }
+  }
+:where(.og-root).pointer-coarse\:items-start,:where(.og-root) .pointer-coarse\:items-start {
+    @media (pointer: coarse) {
+      align-items: flex-start;
+    }
+  }
+:where(.og-root).pointer-coarse\:rounded-og-md,:where(.og-root) .pointer-coarse\:rounded-og-md {
+    @media (pointer: coarse) {
+      border-radius: var(--og-radius-md);
+    }
+  }
+:where(.og-root).pointer-coarse\:bg-og-surface-1\/70,:where(.og-root) .pointer-coarse\:bg-og-surface-1\/70 {
+    @media (pointer: coarse) {
+      background-color: var(--og-color-surface-1);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--og-color-surface-1) 70%, transparent);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:bg-transparent,:where(.og-root) .pointer-coarse\:bg-transparent {
+    @media (pointer: coarse) {
+      background-color: transparent;
     }
   }
 :where(.og-root).pointer-coarse\:p-1\.5,:where(.og-root) .pointer-coarse\:p-1\.5 {

@@ -1726,6 +1726,20 @@ function SessionsIndexRouteContent({
 
   // A transient outage is covered by the updating notice instead.
   const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
+  // With no usable credit, the notice above the composer carries the one
+  // Add credits action, so the heading's top-up button steps aside. Hosts that
+  // turn off addCredits (side panes) get the notice's billing link instead of
+  // the dialog.
+  const canTopUpCredits =
+    addCredits &&
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspace?.accountId) &&
+    hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:manage");
+  const noUsableCredit =
+    creditGap !== null ||
+    (modelUsesCredits(selectedPolicyRow?.catalog) &&
+      selectedPolicyRow?.catalog.creditFunding === "unavailable");
+  const openCreditTopup = () => setCreditTopupOpen(true);
 
   return createElement(
     LightboxProvider,
@@ -1743,21 +1757,20 @@ function SessionsIndexRouteContent({
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
-          {addCredits &&
-          context.clientConfig.billingMode === "stripe" &&
-          workspace?.accountId &&
-          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+          {canTopUpCredits && workspace?.accountId ? (
             <>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="mt-2"
-                onClick={() => setCreditTopupOpen(true)}
-              >
-                <CreditCardIcon className="size-4" />
-                Add credits
-              </Button>
+              {noUsableCredit ? null : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={openCreditTopup}
+                >
+                  <CreditCardIcon className="size-4" />
+                  Add credits
+                </Button>
+              )}
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
@@ -1766,6 +1779,7 @@ function SessionsIndexRouteContent({
                   accountId={workspace.accountId}
                   canBuyCredits
                   onOpenChange={setCreditTopupOpen}
+                  beforeLeave={newSessionDraft.flush}
                 />
               </Suspense>
             </>
@@ -1787,6 +1801,12 @@ function SessionsIndexRouteContent({
               gap={creditGap}
               message={refusedCreate?.message}
               workspaceId={workspaceId}
+              accountId={workspace?.accountId ?? null}
+              canReadBilling={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:read",
+              )}
               canBuyCredits={
                 context.clientConfig.billingMode === "stripe" &&
                 hasAccountPermission(
@@ -1801,6 +1821,7 @@ function SessionsIndexRouteContent({
                 "connections:write",
               )}
               onChooseModel={busy ? undefined : chooseCoveredModel}
+              {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
             />
           </div>
@@ -1822,6 +1843,7 @@ function SessionsIndexRouteContent({
                   "billing:manage",
                 )}
                 canReadBilling
+                {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               />
             </Suspense>
           </div>
@@ -2170,7 +2192,13 @@ function SessionsIndexRouteContent({
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
-            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            set={signupStarterSet(
+              context.authSession?.user.email,
+              workspace?.accountId,
+              context.managedSelfContext?.memberships.find(
+                (membership) => membership.organizationId === workspace?.accountId,
+              )?.signupUseCase,
+            )}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);

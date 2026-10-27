@@ -79,7 +79,15 @@ type Frame = {
   windowHeight: number;
 };
 type Operation = {
-  name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key" | "hotkey";
+  name:
+    | "click"
+    | "drag"
+    | "scroll"
+    | "set_value"
+    | "type_text"
+    | "press_key"
+    | "hotkey"
+    | "bring_to_front";
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
@@ -432,6 +440,7 @@ export class CuaComputerBackend implements ComputerBackend {
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
       if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
+      if (command.action.type === "focus") return await this.dispatchFocus(command);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -683,6 +692,34 @@ export class CuaComputerBackend implements ComputerBackend {
         opened.length ? ` and ${opened.slice(0, 5).join(", ")} opened` : ""
       }, so it likely took effect; list the app's windows and observe the one to act on`,
     );
+  }
+
+  /** macOS: brings a window to the front, activating its app, and leaves it
+   * there, for what works only in the front app (a toolbar button that opens
+   * its menu only while its app is active). CUA reports it done only once
+   * the window is the front app's focused window. */
+  private async dispatchFocus(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
+    if (command.action.type !== "focus") throw new Error("not a focus action");
+    const [operation] = await this.operations(command);
+    const targetId = command.action.targetId;
+    const acted = await this.target(targetId);
+    const known = new Set(this.targetsById.keys());
+    const observed = this.observations.get(targetId);
+    this.observations.delete(targetId);
+    try {
+      await callDesktop(this.runtime, operation!.name, operation!.args, "caller-settles");
+    } catch (error) {
+      if (error instanceof ComputerBackendError && !error.dispatched) throw error;
+      throw new ComputerBackendError(
+        "outcome_unknown",
+        "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
+        false,
+        true,
+      );
+    }
+    return await this.observeAfter(targetId, acted, known, "", observed);
   }
 
   /** Each action of a batch as its CUA steps, and the action each step
@@ -1379,7 +1416,10 @@ export class CuaComputerBackend implements ComputerBackend {
    *   the control that opened the menu takes set_value, but pointer and key
    *   input would not reach the menu;
    * - an element of another window of the app is that window's to act on,
-   *   pointed at only when it is a target the caller can observe. */
+   *   pointed at only when it is a target the caller can observe;
+   * - a window no longer on screen takes no input: an earlier action (often
+   *   the one before it in a batch) closed or hid it, and the app's other
+   *   windows are the ones to act on. */
   private async elementWindowRefusal(
     targetId: string,
     cuaCode: string | null | undefined,
@@ -1407,6 +1447,13 @@ export class CuaComputerBackend implements ComputerBackend {
       return new ComputerBackendError(
         code,
         "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "off_space_or_ax_unresolved" || cuaCode === "window_not_on_screen")
+      return new ComputerBackendError(
+        code,
+        "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
         false,
         false,
       );
@@ -2048,10 +2095,26 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       throw unsupported("CUA's move_cursor controls its overlay, not native hover input");
     }
-    if (action.type === "focus")
-      throw unsupported(
-        "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
-      );
+    if (action.type === "focus") {
+      if (this.identity.platform !== "macos")
+        throw unsupported(
+          "CUA acts on windows in the background without bringing them to the front, so it has no focus action: act on the window itself",
+        );
+      // macOS brings the window to the front and leaves it there: a focus
+      // action asks for exactly that (see dispatchFocus).
+      const focused = await this.target(action.targetId);
+      // Not while someone else is using the computer: the front app is the
+      // one they are working in.
+      const personInputSecondsAgo = this.recentPersonInput();
+      if (personInputSecondsAgo !== undefined)
+        throw new ComputerBackendError(
+          "invalid_action",
+          `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${personInputSecondsAgo} s ago, so this window was not brought to the front: ask them first, or keep working in the background`,
+          false,
+          false,
+        );
+      return [{ name: "bring_to_front", args: { pid: focused.pid, window_id: focused.windowId } }];
+    }
     if (action.type !== "semantic" && action.type !== "keyboard")
       throw unsupported("This CUA operation is not admitted by the desktop adapter");
     const observed = this.observations.get(command.targetId);

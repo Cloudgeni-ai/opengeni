@@ -14,6 +14,7 @@ import {
 } from "../src/recording-transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
 import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
+import { createOpenAiTranscriptionProvider } from "../src/transcription-service/providers/openai";
 
 const azure = {
   recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
@@ -413,6 +414,53 @@ describe("dictation over the shared providers", () => {
     // The language a dictation names reaches the provider.
     await service.transcribe({ ...request, preferredProvider: "elevenlabs", language: "nb" });
     expect(heard.at(-1)?.language).toBe("nb");
+  });
+
+  test("the vocabulary reaches a model that takes keyterms, and no other", async () => {
+    const heard: Array<readonly string[] | undefined> = [];
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const listening = fakeTextProvider("elevenlabs", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    listening.models[0]!.capabilities = { ...listening.models[0]!.capabilities, keyterms: true };
+    const deaf = fakeTextProvider("xai_subscription", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    const service = createTranscriptionService({
+      settings,
+      db: {} as never,
+      deployment: createSpeechToTextDeployment(
+        { settings },
+        { providers: [listening, deaf], loadWorkspaceKey: async () => "workspace-key" },
+      ),
+    });
+    const keyterms = ["Kubernetes", "Ada Lovelace"];
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", keyterms });
+    await service.transcribe({ ...request, preferredProvider: "xai_subscription", keyterms });
+    expect(heard).toEqual([keyterms, undefined]);
+  });
+
+  test("OpenAI hears the vocabulary as its prompt", async () => {
+    const forms: FormData[] = [];
+    const provider = createOpenAiTranscriptionProvider({
+      apiKey: "key",
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4o-transcribe",
+      fetch: (async (_url: string, init: RequestInit) => {
+        forms.push(init.body as FormData);
+        return Response.json({ text: "Kubernetes" });
+      }) as unknown as typeof fetch,
+    });
+    expect(provider.models[0]!.capabilities.keyterms).toBe(true);
+    const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav" };
+    await provider.transcribe(
+      { audio, model: "gpt-4o-transcribe", diarize: false, keyterms: ["Kubernetes", " Ada "] },
+      {},
+    );
+    await provider.transcribe({ audio, model: "gpt-4o-transcribe", diarize: false }, {});
+    expect(forms.map((form) => form.get("prompt"))).toEqual(["Kubernetes, Ada", null]);
   });
 
   test("an unauthorized provider falls back to the next one before any text", async () => {
