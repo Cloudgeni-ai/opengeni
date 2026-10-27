@@ -80,6 +80,12 @@ The chat API defaults to private chats with `agentAccess: "session"` (`chats: "s
 
 The sidebar groups sessions by project or creator. **Active** hides archived sessions; **All** shows them in a collapsed **Archived** folder. Archiving offers **Undo** for a few seconds, and you can restore later from **Archived**.
 
+## Bots
+
+A bot is a long-lived session with a job: its title is its name, and any session can also have a one-line description and an avatar (an emoji, an icon, letters, or an image from the workspace). Set them from the session header or the sidebar menu, or ask the agent to; the agent can change them itself, for example to an image it generated. They are display-only and never sent to the model. `PATCH /v1/workspaces/{workspaceId}/sessions/{sessionId}` accepts `title`, `description` and `avatar`, and `createSession` accepts the same under `profile`.
+
+A **bot template** is a name, description, avatar and setup instructions. Starting a bot from one opens a new session with the instructions as its first message; the agent then installs Skills, requests connections and creates schedules itself, asking the person only when setup differs per person. Ask a bot to save itself as a template, or create one under **Bot templates**; templates can be exported as a file and imported into another workspace. Forking a bot copies it with its history.
+
 ## Model settings
 
 Follow-ups without an explicit choice reuse the model, reasoning effort, and speed of the latest turn. Child sessions inherit the parent's model and reasoning effort but start at **Standard** speed.

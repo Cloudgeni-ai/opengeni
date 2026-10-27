@@ -217,6 +217,9 @@ import {
 } from "./sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
+import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
+import { useBotTemplates } from "../lib/bot-templates";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -328,6 +331,50 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  // ?botTemplateId= starts this chat as a bot: the template's setup
+  // instructions fill the composer (to read and change before sending), and
+  // the chat is created with its name, description and avatar, kept live.
+  const launchBotTemplateId = launch.botTemplateId;
+  const workspaceBotTemplates = useBotTemplates(workspaceId);
+  const [botLaunch, setBotLaunch] = useState<{
+    id: string;
+    state: BotLaunchState;
+  } | null>(null);
+  useEffect(() => {
+    if (!launchBotTemplateId) {
+      setBotLaunch(null);
+      return;
+    }
+    let live = true;
+    setBotLaunch({ id: launchBotTemplateId, state: { kind: "loading" } });
+    context.client.getBotTemplate(workspaceId, launchBotTemplateId).then(
+      (template) => {
+        if (live)
+          setBotLaunch({
+            id: launchBotTemplateId,
+            state: { kind: "ready", template },
+          });
+      },
+      (error: unknown) => {
+        if (live)
+          setBotLaunch({
+            id: launchBotTemplateId,
+            state: { kind: "error", message: userErrorText(error) },
+          });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [context.client, launchBotTemplateId, workspaceId]);
+  const botTemplate = botLaunch?.state.kind === "ready" ? botLaunch.state.template : null;
+  const newSessionBot = botTemplate
+    ? {
+        name: botTemplate.name,
+        description: botTemplate.description,
+        avatar: botTemplate.avatar,
+      }
+    : undefined;
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -1229,6 +1276,7 @@ function SessionsIndexRouteContent({
                     installedSkillIds: launch.skillCapabilityId
                       ? [launch.skillCapabilityId]
                       : undefined,
+                    bot: newSessionBot,
                     startMode: "realtime",
                     expectedNewSessionDraftRevision: flushed.revision,
                     newSessionDraftToolPolicy: persistedToolPolicy,
@@ -1308,6 +1356,7 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
+                  bot: newSessionBot,
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1430,6 +1479,66 @@ function SessionsIndexRouteContent({
     },
   );
 
+  // A bot template's setup instructions fill an empty composer once its saved
+  // draft has loaded, so the remote draft cannot overwrite them. Text the
+  // person already typed stays; they can still start the bot with it.
+  const prefilledBotTemplateRef = useRef<string | null>(null);
+  // The instructions this page put in the composer, so leaving the bot launch
+  // (dismissing it, or a link without the template) takes them out again
+  // instead of leaving them behind as an ordinary chat's first message.
+  const prefilledBotInstructionsRef = useRef<string | null>(null);
+  const fillBotInstructions = useCallback((instructions: string) => {
+    prefilledBotInstructionsRef.current = instructions;
+    setMessage(instructions);
+  }, []);
+  useEffect(() => {
+    if (!botTemplate || newSessionDraft.loading) return;
+    if (prefilledBotTemplateRef.current === botTemplate.id) return;
+    prefilledBotTemplateRef.current = botTemplate.id;
+    if (message.trim().length === 0 || message === botTemplate.setupInstructions) {
+      fillBotInstructions(botTemplate.setupInstructions);
+    } else {
+      toast.info("Kept your unsent message", {
+        description: "Clear it to use the template's setup instructions instead.",
+        action: {
+          label: "Use setup instructions",
+          onClick: () => fillBotInstructions(botTemplate.setupInstructions),
+        },
+      });
+    }
+  }, [botTemplate, fillBotInstructions, message, newSessionDraft.loading]);
+  useEffect(() => {
+    if (launchBotTemplateId) return;
+    prefilledBotTemplateRef.current = null;
+    const prefilled = prefilledBotInstructionsRef.current;
+    prefilledBotInstructionsRef.current = null;
+    if (prefilled !== null) setMessage((current) => (current === prefilled ? "" : current));
+  }, [launchBotTemplateId]);
+  // After a reload the page no longer knows it filled the composer, but the
+  // saved draft still holds the instructions. Untouched instructions of a
+  // template, without that template's launch, are taken out the same way.
+  const leftoverBotInstructionsCheckedRef = useRef(false);
+  useEffect(() => {
+    if (leftoverBotInstructionsCheckedRef.current) return;
+    if (newSessionDraft.loading || workspaceBotTemplates.templates === undefined) return;
+    leftoverBotInstructionsCheckedRef.current = true;
+    if (launchBotTemplateId || message.length === 0) return;
+    if (workspaceBotTemplates.templates.some((entry) => entry.setupInstructions === message)) {
+      setMessage("");
+    }
+  }, [launchBotTemplateId, message, newSessionDraft.loading, workspaceBotTemplates.templates]);
+  const dismissBotLaunch = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      search: (previous: Record<string, unknown>) => {
+        const { botTemplateId: _dropped, ...rest } = previous;
+        return rest;
+      },
+      replace: true,
+    });
+  }, [navigate, workspaceId]);
+
   // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
   // creates a realtime-first session and autostarts voice on the session page.
   // Wait for the durable new-session draft so remote hydrate cannot stomp the
@@ -1469,6 +1578,7 @@ function SessionsIndexRouteContent({
         search: {
           ...(launch.channelId ? { channelId: launch.channelId } : {}),
           ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+          ...(launch.botTemplateId ? { botTemplateId: launch.botTemplateId } : {}),
         },
         replace: true,
       });
@@ -1503,6 +1613,7 @@ function SessionsIndexRouteContent({
     launchRealtime,
     launchSkillCapabilityId,
     launchKey,
+    launch.botTemplateId,
     launch.channelId,
     navigate,
     newSessionDraft.loading,
@@ -1982,14 +2093,25 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              chatList ? (
-                <SessionSetupStrip
-                  disabled={busy || newSessionDraft.loading}
-                  channels={channelsQuery.channels}
-                  selectedChannelId={selectedChannelId}
-                  onChannelChange={selectProject}
-                  onCreateProject={() => setProjectDialogOpen(true)}
-                />
+              chatList || botLaunch ? (
+                <>
+                  {botLaunch ? (
+                    <BotLaunchStrip
+                      state={botLaunch.state}
+                      workspaceId={workspaceId}
+                      onDismiss={dismissBotLaunch}
+                    />
+                  ) : null}
+                  {chatList ? (
+                    <SessionSetupStrip
+                      disabled={busy || newSessionDraft.loading}
+                      channels={channelsQuery.channels}
+                      selectedChannelId={selectedChannelId}
+                      onChannelChange={selectProject}
+                      onCreateProject={() => setProjectDialogOpen(true)}
+                    />
+                  ) : null}
+                </>
               ) : undefined
             }
           />
@@ -2059,6 +2181,13 @@ function SessionsIndexRouteContent({
           />
         </div>
 
+        {!botLaunch ? (
+          <BotTemplateShortcuts
+            workspaceId={workspaceId}
+            templates={workspaceBotTemplates.templates}
+            disabled={busy}
+          />
+        ) : null}
         {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
         {starters ? (
           <NewSessionStarters

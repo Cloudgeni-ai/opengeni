@@ -245,6 +245,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -31194,6 +31195,23 @@ export async function getSessionEventSequence(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     return row.lastSequence;
+  });
+}
+
+/** Who can open a chat: the workspace, or only its owner. Null when it does not exist. */
+export async function getSessionVisibility(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<"workspace_shared" | "user_private" | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ visibility: schema.sessions.visibility })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    const visibility = row?.visibility ?? null;
+    return visibility === "workspace_shared" || visibility === "user_private" ? visibility : null;
   });
 }
 
@@ -70409,6 +70427,111 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** A stored avatar, or null for one this version cannot read. */
+export function storedSessionAvatar(value: unknown): SessionAvatar | null {
+  if (value === null || value === undefined) return null;
+  const parsed = SessionAvatarSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Set a chat's description and/or avatar (display metadata) and append its
+ * public `session.profile_set` event under the canonical session event-write
+ * lock, like {@link updateSessionTitleWithEvent}. Only the named fields change;
+ * null clears one. Writing the values it already has is a no-op with no event.
+ */
+export async function updateSessionProfileWithEvent(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    description?: string | null;
+    avatar?: SessionAvatar | null;
+    source: "user" | "agent";
+  },
+): Promise<{
+  updated: boolean;
+  description: string | null;
+  avatar: SessionAvatar | null;
+  events: SessionEvent[];
+}> {
+  return await retryWorkspaceSessionEventActivityPersistence(
+    db,
+    input.workspaceId,
+    true,
+    {
+      stage: "session_profile.update_with_event",
+      eventTypes: ["session.profile_set"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return { updated: false, description: null, avatar: null, events: [] };
+        const [current] = await tx
+          .select({
+            description: schema.sessions.description,
+            avatar: schema.sessions.avatar,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        const currentDescription = current?.description ?? null;
+        const currentAvatar = storedSessionAvatar(current?.avatar);
+        const description =
+          input.description !== undefined ? input.description : currentDescription;
+        const avatar = input.avatar !== undefined ? input.avatar : currentAvatar;
+        if (
+          description === currentDescription &&
+          JSON.stringify(avatar) === JSON.stringify(currentAvatar)
+        ) {
+          return { updated: false, description, avatar, events: [] };
+        }
+        const now = new Date();
+        const sequence = session.lastSequence + 1;
+        await tx
+          .update(schema.sessions)
+          .set({ description, avatar, lastSequence: sequence, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence,
+                type: "session.profile_set",
+                payload: { description, avatar, source: input.source },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append session.profile_set event");
+        return { updated: true, description, avatar, events: [mapEvent(event)] };
+      }),
+  );
+}
+
 /** Read-only admission at a locked paused-to-active transition. */
 export type SessionGoalResumeValidation = (
   tx: Database,
@@ -90570,6 +90693,8 @@ function mapSession(
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: cleanStoredSessionTitle(row.title, row.titleSource),
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
+    description: row.description ?? null,
+    avatar: storedSessionAvatar(row.avatar),
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),
@@ -91766,6 +91891,7 @@ export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
 export * from "./automation-templates";
+export * from "./bot-templates";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";

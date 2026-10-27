@@ -5580,6 +5580,8 @@ export const englishMessages = {
   "timeline.toolStep.runCommand.running": "Running a command",
   "timeline.toolStep.runSchedule.done": "Ran an automation",
   "timeline.toolStep.runSchedule.running": "Running an automation",
+  "timeline.toolStep.saveBotTemplate.done": "Saved a bot template",
+  "timeline.toolStep.saveBotTemplate.running": "Saving a bot template",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

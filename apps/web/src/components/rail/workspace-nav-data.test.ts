@@ -31,6 +31,7 @@ describe("workspace rail destinations", () => {
       "/workspaces/$workspaceId/plugins",
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/automations",
+      "/workspaces/$workspaceId/bot-templates",
       "/workspaces/$workspaceId/meetings",
       "/workspaces/$workspaceId/artifacts",
     ]);
