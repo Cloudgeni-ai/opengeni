@@ -19,17 +19,16 @@ methods and events retain their shapes (SUB-COMPAT-02).
 
 ## Included allowance and extra credits
 
-Codex chat, compaction and chat-owned image generation check included allowance
-immediately before each provider request in `agent-turn/codex-credit-policy.ts`,
-independently of account selection. The default protects extra credits.
-Exhausted response-header observations stop dispatch immediately; otherwise a
-bounded `/wham/usage` read is required for each request. A successful check is
-never reused for the next request. Weekly-only plans use their reported window,
-without inventing a five-hour cap. Missing or unreadable allowance gives that
-account a one-minute local admission hold, then re-places the checkpointed turn
-or waits. It neither authorizes extra credits nor marks the account unhealthy.
-Reported exhausted feature allowances also block spending conservatively;
-provider feature identifiers have no authoritative model mapping yet.
+Codex chat, compaction, session titles and chat-owned image generation check
+included allowance immediately before each provider request in
+`agent-turn/codex-credit-policy.ts`, independently of account selection. The
+default protects extra credits. The check reads no usage endpoint. It uses the
+usage every earlier response in the turn reported (HTTP headers, or the
+WebSocket rate-limit event): once any reported window is fully used and not yet
+reset, the next dispatch is refused. Every reported window counts, whether or
+not its duration identifies it, so weekly-only plans are protected without
+inventing a five-hour cap. Unknown usage admits the request. Accounts the shared
+core already knows are exhausted are not leased to a turn in the first place.
 
 Observed exhaustion is a local admission refusal, not a fabricated HTTP error.
 Core placement checkpoints durable progress before switching the same turn.
