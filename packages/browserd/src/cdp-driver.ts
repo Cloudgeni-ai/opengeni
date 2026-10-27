@@ -234,6 +234,13 @@ const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
  * even when the server used up most of NAVIGATION_COMMIT_TIMEOUT_MS. */
 const NAVIGATION_COMMIT_GRACE_MS = 2_000;
 const NAVIGATION_COMMIT_POLL_MS = 25;
+/** Back passes over at most this many history entries whose page navigates
+ * on by itself as soon as it opens (a redirect step of a sign-in flow, say). */
+const HISTORY_REDIRECT_SKIPS = 3;
+/** After a Back step's page is ready, how long its load may take, and then
+ * how long it is watched for a navigation it starts by itself. */
+const HISTORY_LOAD_WAIT_MS = 1_000;
+const HISTORY_REDIRECT_WATCH_MS = 250;
 /** Chromium's load error for an HTTP error status whose response had no body. */
 const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /** Recent main-frame loaders remembered per tab, to recognize a navigation's
@@ -655,6 +662,9 @@ type TargetState = {
   /** Counts main-frame commits, cross- and same-document alike, so a history
    * traversal can wait for the entry it asked for to commit. */
   mainFrameCommits: number;
+  /** Counts the main-frame documents the tab switched to, so a Back step can
+   * tell the page it opened from one that page went on to by itself. */
+  documentCommits: number;
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
@@ -3748,6 +3758,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       committedLoaders: [frame.loaderId],
       abandonedLoaders: [],
       mainFrameCommits: 0,
+      documentCommits: 0,
       inputFence: null,
       accessibility: null,
       accessibilityRebuiltAt: 0,
@@ -5587,6 +5598,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     state.frame = frame;
     state.mainFrameCommits += 1;
+    state.documentCommits += 1;
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
       state.authorityGeneration,
@@ -8906,26 +8918,96 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Lightpanda does not support safe Back/Forward history; navigate to an explicit URL",
       );
     }
-    const history = await this.sendActionTarget<{
-      currentIndex?: unknown;
-      entries?: unknown;
-    }>(state, "Page.getNavigationHistory", {});
-    const nextIndex =
-      typeof history.currentIndex === "number"
-        ? history.currentIndex + (direction === "back" ? -1 : 1)
-        : -1;
-    const entries = Array.isArray(history.entries) ? history.entries : [];
-    const entry = entries[nextIndex];
-    if (!isRecord(entry) || typeof entry.id !== "number") {
+    const startedAt = Date.now();
+    const deadline = startedAt + DEFAULT_ACTION_TIMEOUT_MS;
+    const effectsBefore = state.actionEffectCount;
+    const history = await this.navigationHistory(state);
+    const start = history.entries[history.index];
+    let index = history.index + (direction === "back" ? -1 : 1);
+    // A page can add entries for the URL it already shows without the
+    // person's input, as some sign-in pages do as they open. Going back to
+    // one changes nothing visible, so Back passes over them, as Chromium's
+    // own Back button does. Entries made after input (a dialog that closes
+    // on Back) stay single steps.
+    if (
+      direction === "back" &&
+      start &&
+      history.entries[index]?.url === start.url &&
+      !(await this.documentActivated(state))
+    ) {
+      while (history.entries[index]?.url === start.url) index -= 1;
+    }
+    if (!Number.isFinite(history.entries[index]?.id)) {
       throw new InteractionDefiniteDriverError(
         "invalid_action",
         `browser target has no ${direction} history entry`,
       );
     }
+    for (let skipped = 0; ; skipped += 1) {
+      const entry = history.entries[index]!;
+      const documentsBefore = state.documentCommits;
+      await this.stepToHistoryEntry(state, entry.id, skipped === 0 ? startedAt : Date.now());
+      if (direction === "forward") return;
+      if (!(await this.leftHistoryEntry(state, documentsBefore, index, entry))) return;
+      // The page went on to another one by itself as soon as it opened: it is
+      // a redirect step, so going back to it returns where Back started. Go
+      // to the entry before it instead. A redirect only adds or replaces
+      // entries from this one on, so the earlier ones are unchanged.
+      const earlier = history.entries[index - 1];
+      if (!earlier || skipped + 1 >= HISTORY_REDIRECT_SKIPS || Date.now() >= deadline) {
+        // The outcome is known: the tab went on to a page by itself, and the
+        // failure's observation shows which. Nothing is left to replay.
+        state.actionEffectCount = effectsBefore;
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `going back opened ${entry.url}, which went on to ${state.frame.url} by itself; ${
+            earlier
+              ? `navigate to the page before it, ${earlier.url}, instead`
+              : "there is no earlier page in this tab's history, so navigate to a URL instead"
+          }`,
+        );
+      }
+      index -= 1;
+    }
+  }
+
+  /** The tab's history entries and the index of the one it shows. */
+  private async navigationHistory(
+    state: TargetState,
+  ): Promise<{ index: number; entries: { id: number; url: string }[] }> {
+    const history = await this.sendActionTarget<{
+      currentIndex?: unknown;
+      entries?: unknown;
+    }>(state, "Page.getNavigationHistory", {});
+    const entries = (Array.isArray(history.entries) ? history.entries : []).map((entry) =>
+      isRecord(entry) && typeof entry.id === "number"
+        ? { id: entry.id, url: typeof entry.url === "string" ? entry.url : "" }
+        : { id: Number.NaN, url: "" },
+    );
+    const index = typeof history.currentIndex === "number" ? history.currentIndex : -1;
+    return { index, entries };
+  }
+
+  /** Whether the page has had the person's (or the agent's) input since it
+   * loaded. Unknown counts as yes, so Back then takes a single step. */
+  private async documentActivated(state: TargetState): Promise<boolean> {
+    try {
+      return (
+        (await this.evaluate(state, "navigator.userActivation?.hasBeenActive ?? true")) !== false
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private async stepToHistoryEntry(
+    state: TargetState,
+    entryId: number,
+    startedAt: number,
+  ): Promise<void> {
     const commitsBefore = state.mainFrameCommits;
     const loaderBefore = state.frame.loaderId;
-    const startedAt = Date.now();
-    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId });
     // The entry commits after Chromium answered: a new document, a page the
     // back/forward cache restores, or a same-document entry (pushState).
     const committed = () => state.mainFrameCommits !== commitsBefore;
@@ -8939,6 +9021,45 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+  }
+
+  /**
+   * Whether the page a Back step opened went on to another page by itself
+   * right away: a second document committed after the step's own, for a
+   * different entry or URL. A page that reloads itself as it is shown again
+   * stays where it is.
+   */
+  private async leftHistoryEntry(
+    state: TargetState,
+    documentsBefore: number,
+    index: number,
+    entry: { id: number; url: string },
+  ): Promise<boolean> {
+    const wentOn = () => state.documentCommits - documentsBefore > 1;
+    const loadDeadline = Date.now() + HISTORY_LOAD_WAIT_MS;
+    try {
+      while (
+        Date.now() < loadDeadline &&
+        !state.navigationPending &&
+        !wentOn() &&
+        (await this.evaluate(state, "document.readyState")) !== "complete"
+      ) {
+        await delay(NAVIGATION_COMMIT_POLL_MS);
+      }
+    } catch {
+      // A document replaced meanwhile has no context to read; the checks
+      // below see the new one.
+    }
+    const watchDeadline = Date.now() + HISTORY_REDIRECT_WATCH_MS;
+    while (Date.now() < watchDeadline && !state.navigationPending && !wentOn() && !state.dialog) {
+      await delay(NAVIGATION_COMMIT_POLL_MS);
+    }
+    if (state.dialog) return false;
+    if (state.navigationPending) await this.settleActionNavigation(state);
+    await this.refreshFrame(state);
+    if (!wentOn()) return false;
+    const now = await this.navigationHistory(state);
+    return now.index !== index || now.entries[now.index]?.url !== entry.url;
   }
 
   private async waitForCondition(
