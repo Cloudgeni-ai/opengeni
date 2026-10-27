@@ -21,10 +21,7 @@ import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
 import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
 import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
-import {
-  knowledgeEmbeddingTarget,
-  sideFeatureAllowedForWorkspace,
-} from "../side-feature-availability";
+import { knowledgeEmbeddingTarget, sideFeatureAllowedForWorkspace } from "../side-feature-routes";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable

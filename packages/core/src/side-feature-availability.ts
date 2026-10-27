@@ -1,23 +1,19 @@
 import {
   decisionModelRoute,
   resolveWebSearchProvider,
-  sideFeatureRouteAllowed,
   sideFeatureRouteIsEu,
   webSearchEndpointTarget,
-  type CodeOwnedSideFeatureRouteId,
-  type SideFeatureResidencySettings,
   type SideFeatureTarget,
   type Settings,
 } from "@opengeni/config";
 import {
   INFERENCE_FEATURE_IDS,
   REGION_RESTRICTED,
-  REGION_RESTRICTED_MESSAGE,
   type InferenceFeatureAvailability,
   type InferenceFeatureId,
 } from "@opengeni/contracts";
-import { isWorkspaceEuOnly, type Database } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
+import { knowledgeEmbeddingTarget } from "./side-feature-routes";
 import { createSpeechToTextDeployment } from "./transcription-service/deployment";
 
 /** What the deployment runs that settings alone do not describe. */
@@ -25,13 +21,6 @@ export type InferenceFeatureSources = {
   /** The deployment's Knowledge embedder (local embedders send nothing). */
   embedder?: Pick<DocumentEmbedder, "local" | "endpoint"> | null;
 };
-
-/** The route a Knowledge embedder sends texts to, with its endpoint. */
-export function knowledgeEmbeddingTarget(
-  embedder: Pick<DocumentEmbedder, "endpoint">,
-): SideFeatureTarget {
-  return { route: "knowledge.embeddings", endpoint: embedder.endpoint };
-}
 
 /**
  * The routes this deployment is configured to use for a feature that could
@@ -124,30 +113,4 @@ export function inferenceFeatureAvailability(
     const available = inferenceFeatureRegionAllowed(settings, id, sources);
     return { id, available, unavailableReason: available ? null : REGION_RESTRICTED };
   });
-}
-
-/** The unavailable reason for a code-owned route under these settings, or null when it may run. */
-export function sideFeatureRouteUnavailableReason(
-  settings: SideFeatureResidencySettings,
-  route: CodeOwnedSideFeatureRouteId,
-): typeof REGION_RESTRICTED_MESSAGE | null {
-  return sideFeatureRouteAllowed(settings, route) ? null : REGION_RESTRICTED_MESSAGE;
-}
-
-/**
- * Whether a side-feature call for this workspace may use the route, for
- * calls that run outside a turn: the workspace's EU-only setting is read
- * (a failed read throws), and under EU only a route with an EU residency
- * record for the endpoint it calls passes.
- */
-export async function sideFeatureAllowedForWorkspace(
-  db: Database,
-  settings: SideFeatureResidencySettings | undefined,
-  scope: { accountId: string; workspaceId: string },
-  target: SideFeatureTarget,
-  isEuOnly: typeof isWorkspaceEuOnly = isWorkspaceEuOnly,
-): Promise<boolean> {
-  const euOnly = settings?.requiredModelGeography === "eu" || (await isEuOnly(db, scope));
-  if (!euOnly) return true;
-  return sideFeatureRouteAllowed({ ...settings, requiredModelGeography: "eu" }, target);
 }
