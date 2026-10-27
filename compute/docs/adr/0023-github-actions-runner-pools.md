@@ -44,8 +44,10 @@ delivery can be late or missed.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
   in its environment and its runner's name and id in its metadata, with
-  the pool's key: its name and its scale set's id. Pools of one name in
-  different runner groups are different scale sets and may share a
+  the pool's key: its name and a digest of its scale set's id and the
+  server and scope that number it (GitHub Enterprise Server numbers its
+  scale sets as github.com does). Pools of one name in different runner
+  groups, scopes or servers are different scale sets and may share a
   compute team and a bucket, so the pool finds its sandboxes, templates
   and cache by the key, never by its name alone. The
   image's command starts the runner; the reference image is
@@ -79,8 +81,8 @@ delivery can be late or missed.
   runs the prepare command there (install dependencies, build once to fill
   caches), and saves the sandbox as a template (ADR 22) named by the
   pool's key, the time and the commit, which fit compute's 64 characters
-  while the key is at most 40 long (the service refuses to start
-  otherwise). New runners start from the newest; older templates of the
+  while the key is at most 40 long, so a warm pool's name is at most 29
+  (the service refuses to start otherwise). New runners start from the newest; older templates of the
   pool are deleted, and an image stays while a sandbox still uses it. A
   failed refresh leaves the last good template in use. The clone's token
   is given to that one command, never written to the disk the template

@@ -97,8 +97,8 @@ struct Serve {
     compute_ca: Option<PathBuf>,
 
     /// Keep a warm template of this repository (`owner/repo`). Its names
-    /// begin with the pool's name and its scale set's id, which together
-    /// may then be at most 40 long.
+    /// begin with the pool's key, its name and an 11-character digest, so
+    /// a warm pool's name is at most 29 long.
     #[arg(long)]
     warm_repo: Option<String>,
     /// The branch it follows; the repository's default when not given.
@@ -199,6 +199,13 @@ async fn run(serve: Serve) -> Result<()> {
             serve.name
         );
     }
+    // A key's length is its name's and a fixed digest's, whatever its set.
+    if serve.warm_repo.is_some() && !warm::fits(&pool::key(&serve.name, "", 0)) {
+        bail!(
+            "--name {:?}: too long for warm templates' names, which begin with it and 11 more",
+            serve.name
+        );
+    }
     let (github, compute) = clients(&serve)?;
     let stop = CancellationToken::new();
     let (leading_tx, leading) = watch::channel(false);
@@ -215,14 +222,7 @@ async fn run(serve: Serve) -> Result<()> {
     );
     let set = github.ensure_scale_set(group, &serve.name, &labels).await?;
     tracing::info!(set = set.id, name = %set.name, ?labels, "the pool's scale set");
-    let key = pool::key(&serve.name, set.id);
-    if serve.warm_repo.is_some() && !warm::fits(&key) {
-        bail!(
-            "--name {:?} with scale set {}: too long for warm templates' names",
-            serve.name,
-            set.id
-        );
-    }
+    let key = pool::key(&serve.name, github.page(), set.id);
 
     let mut env: BTreeMap<String, String> = serve.env.iter().cloned().collect();
     let mut app = axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }));

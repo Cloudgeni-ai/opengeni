@@ -94,12 +94,24 @@ fn now_s() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// What the pool named `name`, of scale set `set`, finds its sandboxes,
-/// templates and cache by. Pools of one name in different runner groups
-/// are different scale sets, and may share a compute team and a bucket.
+/// How many bytes of its scale set's digest a pool's key keeps.
+const KEY_BYTES: usize = 5;
+
+/// What the pool named `name` finds its sandboxes, templates and cache by:
+/// its name and a digest of its scale set `set` on the scope whose page is
+/// `page` ([`Github::page`]), the server and scope that number scale sets.
+/// Pools of one name in different runner groups, scopes or servers are
+/// different scale sets, and may share a compute team and a bucket. As
+/// long as its name plus 11.
 #[must_use]
-pub fn key(name: &str, set: u64) -> String {
-    format!("{name}-{set}")
+pub fn key(name: &str, page: &str, set: u64) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, format!("{page}\n{set}").as_bytes());
+    digest.as_ref()[..KEY_BYTES]
+        .iter()
+        .fold(format!("{name}-"), |mut key, byte| {
+            let _ = write!(key, "{byte:02x}");
+            key
+        })
 }
 
 /// Whether `name` is one this pool gives its runners: `<pool>-` and
@@ -125,10 +137,10 @@ impl Pool {
         template: watch::Receiver<String>,
     ) -> Self {
         Self {
+            key: key(&settings.name, github.page(), set),
             github,
             compute,
             set,
-            key: key(&settings.name, set),
             settings,
             template,
             runners: BTreeMap::new(),

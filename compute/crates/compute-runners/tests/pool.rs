@@ -32,12 +32,13 @@ fn github(fake: &Fake) -> Arc<Github> {
 }
 
 async fn pool(fake: &Fake, min_idle: u32) -> Pool {
-    pool_in(fake, 1, min_idle).await
+    pool_in(fake, fake, 1, min_idle).await
 }
 
-/// A pool named `ci` in runner group `group`.
-async fn pool_in(fake: &Fake, group: u64, min_idle: u32) -> Pool {
-    let github = github(fake);
+/// A pool named `ci` in runner group `group` of the GitHub `at` fakes, on
+/// the compute `on` fakes.
+async fn pool_in(at: &Fake, on: &Fake, group: u64, min_idle: u32) -> Pool {
+    let github = github(at);
     let set = github
         .ensure_scale_set(group, "ci", &["ci".into()])
         .await
@@ -52,13 +53,29 @@ async fn pool_in(fake: &Fake, group: u64, min_idle: u32) -> Pool {
         retry: Duration::from_millis(100),
     };
     let (_, template) = watch::channel("runner-base".to_owned());
-    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let compute = Compute::new(reqwest::Client::new(), &on.base, "key");
     Pool::new(github, compute, set.id, settings, template)
 }
 
-/// The key of the first pool made: `ci` and its scale set.
+/// The key of the first pool made: `ci` and a digest of its scale set.
 fn key(fake: &Fake) -> String {
-    pool::key("ci", fake.world().sets[0]["id"].as_u64().unwrap())
+    let set = fake.world().sets[0]["id"].as_u64().unwrap();
+    pool::key("ci", github(fake).page(), set)
+}
+
+#[test]
+fn a_pools_key_tells_scale_sets_apart() {
+    let key = pool::key("ci", "https://github.com/acme", 7);
+    assert_eq!(key.len(), "ci".len() + 11);
+    assert!(key.starts_with("ci-"), "{key}");
+    assert_eq!(key, pool::key("ci", "https://github.com/acme", 7));
+    for other in [
+        pool::key("ci", "https://github.com/acme", 8),
+        pool::key("ci", "https://github.com/acme/web", 7),
+        pool::key("ci", "https://git.example.com/acme", 7),
+    ] {
+        assert_ne!(key, other);
+    }
 }
 
 async fn listening(fake: Fake, min_idle: u32) -> Running {
@@ -388,26 +405,32 @@ async fn registrations_without_a_sandbox_go() {
     assert_eq!(world.sandboxes.len(), 1, "the kept runner is the idle one");
 }
 
-/// Pools of one name in different runner groups are different scale
-/// sets: sharing one compute team, each keeps to its own runners.
+/// Pools of one name in different runner groups, or on different GitHub
+/// servers (which may number their scale sets alike), are different
+/// scale sets: sharing one compute team, each keeps to its own runners.
 #[tokio::test]
 async fn a_pool_leaves_the_runners_of_its_namesake_in_another_group() {
     let fake = Fake::start().await;
-    let mut first = pool_in(&fake, 1, 0).await;
-    let mut second = pool_in(&fake, 2, 1).await;
-    second.reconcile().await.unwrap();
-    {
-        let mut world = fake.world();
-        assert_eq!((world.runners.len(), world.sandboxes.len()), (1, 1));
-        // Settled long ago, so a pool that took it on could remove it.
-        for sandbox in world.sandboxes.values_mut() {
-            sandbox.metadata.insert(BORN_KEY.into(), "1000".into());
+    let other_server = Fake::start().await;
+    for (at, group) in [(&fake, 2), (&other_server, 1)] {
+        let mut first = pool_in(&fake, &fake, 1, 0).await;
+        let mut second = pool_in(at, &fake, group, 1).await;
+        second.reconcile().await.unwrap();
+        {
+            let mut world = fake.world();
+            assert_eq!(world.sandboxes.len(), 1);
+            // Settled long ago, so a pool that took it on could remove it.
+            for sandbox in world.sandboxes.values_mut() {
+                sandbox.metadata.insert(BORN_KEY.into(), "1000".into());
+            }
         }
+        first.reconcile().await.unwrap();
+        let mut world = fake.world();
+        assert_eq!(world.sandboxes.len(), 1, "group {group} at {}", at.base);
+        assert_eq!(world.killed, Vec::<String>::new());
+        world.sandboxes.clear();
     }
-    first.reconcile().await.unwrap();
-    let world = fake.world();
-    assert_eq!((world.runners.len(), world.sandboxes.len()), (1, 1));
-    assert_eq!(world.killed, Vec::<String>::new());
+    assert_eq!(other_server.world().runners.len(), 1);
 }
 
 #[tokio::test]

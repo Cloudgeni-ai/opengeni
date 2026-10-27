@@ -159,6 +159,13 @@ impl Github {
         &self.scope
     }
 
+    /// The scope's page, `https://github.com/owner[/repo]`: its server and
+    /// scope, which the actions service numbers its scale sets within.
+    #[must_use]
+    pub fn page(&self) -> &str {
+        &self.page
+    }
+
     /// A token for GitHub's REST API: the one given, or the App
     /// installation's.
     pub async fn token(&self) -> Result<String> {
