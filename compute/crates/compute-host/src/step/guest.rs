@@ -47,7 +47,8 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// saved beside it, as when its host is lost (see
     /// [`crate::restore_notice::ask_sync`]). A guest that does not answer
     /// in [`SYNC_LIMIT`] is paused anyway. `false` once the step is
-    /// cancelled meanwhile, with nothing changed.
+    /// cancelled meanwhile: the VM is not paused, though its guest may
+    /// already have trimmed its disk (and so changed the disk's file).
     pub(super) async fn sync_guest(&self) -> bool {
         let Some(port) = self.restore_notice_port else {
             return true;

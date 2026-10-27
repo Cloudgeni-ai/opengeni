@@ -91,7 +91,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         // The disk it copies must hold what the guest wrote: after a lost
         // host the copy boots from its disk alone.
         if !self.sync_guest().await {
-            self.untouched = true;
+            // Cancelled while the guest was asked to write its disks out,
+            // which trims them too: it may have freed space it can take
+            // again, so the step counts as one that wrote, and the core
+            // keeps what it booked until a reading measures the disk.
             return (Outcome::Cancelled, After::Kept(live));
         }
         notes::phase("settle");
