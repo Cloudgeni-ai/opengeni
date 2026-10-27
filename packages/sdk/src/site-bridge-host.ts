@@ -10,10 +10,18 @@
  * a document teardown aborts exactly the requests it owns. A second load of
  * the same frame (a navigation inside the Site) revokes the bridge instead of
  * handing a fresh port to an unknown document.
+ *
+ * Location: a host that offers `location` answers the Site's address and
+ * moves it with history entries of its own (the frame document never
+ * reloads), and calls `notifyLocation` when the address changes so every
+ * connected client hears about it.
  */
 import type { SiteViewer } from "@opengeni/contracts";
 import {
   OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
+  OPENGENI_SITE_BRIDGE_EVENT,
+  OPENGENI_SITE_BRIDGE_LOCATION_METHOD,
+  OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD,
   OPENGENI_SITE_BRIDGE_READY,
   OPENGENI_SITE_BRIDGE_RESPONSE,
   OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD,
@@ -22,11 +30,15 @@ import {
   isOpenGeniSiteBridgeCancelMessage,
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
+  openGeniSiteLocationValue,
+  resolveOpenGeniSiteLocation,
   sanitizeOpenGeniSiteToolCallRequest,
   sanitizeOpenGeniSiteToolInvokeRequest,
+  type OpenGeniSiteBridgeEventMessage,
   type OpenGeniSiteBridgeReadyMessage,
   type OpenGeniSiteBridgeRequestMessage,
   type OpenGeniSiteBridgeResponseMessage,
+  type OpenGeniSiteLocationValue,
   type OpenGeniSiteSignInResult,
   type OpenGeniSiteToolCatalog,
 } from "./site";
@@ -42,6 +54,12 @@ import type {
 } from "./types";
 
 export type { SiteHttpRequest } from "./site-http";
+export {
+  openGeniSiteLocationHref,
+  openGeniSiteLocationValue,
+  resolveOpenGeniSiteLocation,
+  type OpenGeniSiteLocationValue,
+} from "./site";
 
 /** Tool and Site HTTP handlers a host supplies. Credentials stay inside these functions. */
 export type SiteBridgeToolHandlers = {
@@ -77,6 +95,26 @@ export type SiteBridgeViewerHandlers = {
   }) => Promise<OpenGeniSiteSignInResult> | OpenGeniSiteSignInResult;
 };
 
+/**
+ * The Site's address, answered by the host itself (advertised as `location: 1`).
+ * The bridge resolves a Site's `navigate(to)` against `get()` and refuses
+ * addresses outside the Site before `navigate` is called.
+ */
+export type SiteBridgeLocationHandlers = {
+  get: () => OpenGeniSiteLocationValue;
+  /** The Site's own origin when it has one (a published Site), so full addresses on it resolve too. */
+  origin?: string;
+  /**
+   * Move the Site to `to` (already resolved within the Site) and return
+   * where it is now. Throw (with a `code`) to refuse an address the host
+   * keeps for itself. The host should call `SiteBridgeHost.notifyLocation`.
+   */
+  navigate: (
+    to: OpenGeniSiteLocationValue,
+    options: { replace: boolean },
+  ) => OpenGeniSiteLocationValue | Promise<OpenGeniSiteLocationValue>;
+};
+
 export type SiteBridgeRequestValue =
   | OpenGeniSiteToolCatalog
   | ToolGatewayCallResponse
@@ -84,12 +122,14 @@ export type SiteBridgeRequestValue =
   | ToolGatewayResolvedTool
   | ToolGatewayInvokeResponse
   | SiteViewer
-  | OpenGeniSiteSignInResult;
+  | OpenGeniSiteSignInResult
+  | OpenGeniSiteLocationValue;
 
 /** Capabilities the host advertises when a Site connects; Sites never ask for more. */
 export function siteBridgeReadyMessage(
   bridge: SiteBridgeToolHandlers | undefined,
   viewer?: SiteBridgeViewerHandlers,
+  location?: SiteBridgeLocationHandlers,
 ): OpenGeniSiteBridgeReadyMessage {
   return {
     type: OPENGENI_SITE_BRIDGE_READY,
@@ -97,6 +137,7 @@ export function siteBridgeReadyMessage(
     ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
     ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
     ...(viewer ? { viewer: 1 as const } : {}),
+    ...(location ? { location: 1 as const } : {}),
   };
 }
 
@@ -138,6 +179,7 @@ export type SiteBridgeHostSource = {
   /** Read on every request, so a host can swap handlers without reconnecting the Site. */
   tools: () => SiteBridgeToolHandlers | undefined;
   viewer?: () => SiteBridgeViewerHandlers | undefined;
+  location?: () => SiteBridgeLocationHandlers | undefined;
 };
 
 /**
@@ -166,6 +208,25 @@ export class SiteBridgeHost {
 
   close(): void {
     this.lease.close();
+  }
+
+  /** Tell every connected client of the current document that the Site's address changed. */
+  notifyLocation(location: OpenGeniSiteLocationValue): void {
+    const value = openGeniSiteLocationValue(location);
+    if (!value) return;
+    const message: OpenGeniSiteBridgeEventMessage = {
+      type: OPENGENI_SITE_BRIDGE_EVENT,
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+      event: "location",
+      location: value,
+    };
+    for (const port of this.requests.ports()) {
+      try {
+        port.postMessage(message);
+      } catch {
+        // A port that can no longer post is cleaned up with its document.
+      }
+    }
   }
 
   private attachToolPort(data: unknown, ports: readonly MessagePort[]): void {
@@ -218,6 +279,7 @@ export class SiteBridgeHost {
         message,
         controller.signal,
         this.source.viewer?.(),
+        this.source.location?.(),
       )
         .then((value) => {
           if (!controller.signal.aborted) {
@@ -245,12 +307,19 @@ export class SiteBridgeHost {
     });
     port.addEventListener("messageerror", () => requests.closePort(port));
     port.start();
-    port.postMessage(siteBridgeReadyMessage(this.source.tools(), this.source.viewer?.()));
+    port.postMessage(
+      siteBridgeReadyMessage(this.source.tools(), this.source.viewer?.(), this.source.location?.()),
+    );
   }
 }
 
 export class SiteBridgeRequestRegistry {
   private readonly controllersByPort = new Map<MessagePort, Map<string, AbortController>>();
+
+  /** The connected ports of the current document. */
+  ports(): MessagePort[] {
+    return [...this.controllersByPort.keys()];
+  }
 
   addPort(port: MessagePort): void {
     // Several SDK clients may share one document bootstrap. Document teardown,
@@ -348,6 +417,7 @@ export async function handleSiteBridgeRequest(
   message: OpenGeniSiteBridgeRequestMessage,
   signal: AbortSignal,
   viewer?: SiteBridgeViewerHandlers,
+  location?: SiteBridgeLocationHandlers,
 ): Promise<SiteBridgeRequestValue> {
   if (message.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD) {
     if (!viewer) throw siteBridgeHostError("viewer_unavailable", "This Site host has no viewer");
@@ -357,6 +427,29 @@ export async function handleSiteBridgeRequest(
     if (!viewer?.signIn) return { started: false };
     const result = await viewer.signIn({ signal });
     return { started: result?.started === true };
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD) {
+    if (!location)
+      throw siteBridgeHostError("location_unsupported", "This Site host has no location");
+    return location.get();
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD) {
+    if (!location)
+      throw siteBridgeHostError(
+        "location_unsupported",
+        "This Site host does not support navigation",
+      );
+    const to = resolveOpenGeniSiteLocation(
+      location.get(),
+      message.payload.to,
+      ...(location.origin ? [location.origin] : []),
+    );
+    if (!to)
+      throw siteBridgeHostError(
+        "invalid_location",
+        "Navigate only to addresses of this Site; open other addresses with a link or window.open",
+      );
+    return await location.navigate(to, { replace: message.payload.replace === true });
   }
   if (!bridge) throw new Error("Site tool bridge is unavailable");
   if (message.method === "resolve") {

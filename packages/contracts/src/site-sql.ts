@@ -138,12 +138,18 @@ export const SITE_SQL_RESERVED_PREFIXES: readonly string[] = Object.freeze(["_cf
 /**
  * Parameters the API binds from the verified viewer; a Site may never supply
  * them. `:viewer` is the viewer's stable per-Site principal (`user:<id>`,
- * `guest:<visitor>`, ...), `:viewer_kind` its kind, `:viewer_signed_in` 1 or 0.
+ * `guest:<visitor>`, ...), `:viewer_kind` its principal kind (`user`,
+ * `guest`, ...), `:viewer_signed_in` 1 or 0, `:viewer_access` how the viewer
+ * reaches the Site (`member`, `invited`, `user` or `guest`; NULL for callers
+ * with no person behind them) and `:viewer_email` the viewer's verified email
+ * address in lowercase (NULL for guests and people without one).
  */
 export const SITE_SQL_PRINCIPAL_PARAMS: readonly string[] = Object.freeze([
   "viewer",
   "viewer_kind",
   "viewer_signed_in",
+  "viewer_access",
+  "viewer_email",
 ]);
 
 /** `viewer` and every `viewer_*` name are reserved for the API. */
@@ -740,7 +746,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
     sql: primitives.nonEmptyString
       .max(SITE_SQL_MAX_NAMED_LENGTH)
       .describe(
-        "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind and :viewer_signed_in are bound by Opengeni from the signed-in viewer.",
+        "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind, :viewer_signed_in, :viewer_access (member, invited, user or guest) and :viewer_email (verified, lowercase, or NULL) are bound by Opengeni from the signed-in viewer.",
       ),
     audience: SiteSqlQueryAudience.optional().describe(
       "everyone (including anonymous guests of public Sites), signed_in (default: viewers signed in as a person) or managers.",
