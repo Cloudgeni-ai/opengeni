@@ -1,5 +1,6 @@
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
+import { currentBotSuggestion } from "../lib/bot-suggestions";
 import {
   BotMentionMenu,
   botMentionContext,
@@ -297,6 +298,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const BotSuggestionCard = lazy(() =>
+  import("../components/bots/bot-suggestion-card").then((module) => ({
+    default: module.BotSuggestionCard,
+  })),
+);
 const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
@@ -2700,6 +2706,10 @@ function SessionChatPane(props: {
         connectionAccounts.loading ||
         connectionAccounts.error !== null,
     });
+  const hasBotSuggestion = useMemo(
+    () => currentBotSuggestion(props.session, props.events) !== null,
+    [props.session, props.events],
+  );
   // Bots picked from the @mention list; their chat ids travel with the message.
   const mentionedBotsRef = useRef<MentionedBot[]>([]);
   const mentionTextRef = useRef("");
@@ -3663,6 +3673,11 @@ function SessionChatPane(props: {
                                 events={props.events}
                               />
                             </Suspense>
+                            {hasBotSuggestion ? (
+                              <Suspense fallback={null}>
+                                <BotSuggestionCard session={props.session} events={props.events} />
+                              </Suspense>
+                            ) : null}
                             {props.humanInput.requests.length > 0 &&
                             props.session.status === "requires_action" ? (
                               <div className="pb-1" data-human-input-timeline-surface="">

@@ -19,6 +19,7 @@ export type {
   BotTemplateResponse,
   SessionAvatar,
   SessionAvatarIcon,
+  SessionBotSuggestion,
   CreateBotTemplateRequest,
   ListBotTemplatesResponse,
   UpdateBotTemplateRequest,

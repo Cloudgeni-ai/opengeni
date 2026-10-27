@@ -380,4 +380,124 @@ describe("bots through the API (real PostgreSQL)", () => {
     const stored = await listBotTemplates(client.db, workspace.workspaceId);
     expect(stored.map((template) => template.id)).toEqual([saved.body.template.id]);
   }, 180_000);
+
+  test("the agent suggests a bot, and only records it on the chat", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots suggest");
+    const auth = await bearer(workspace, "bots-person", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    const plain = await call(auth, "POST", base, {
+      initialMessage: "Check this invoice against the PO",
+      model: "scripted-model",
+    });
+    const sessionId = plain.json.id as string;
+    const existing = await call(auth, "POST", base, {
+      initialMessage: "Watch production",
+      model: "scripted-model",
+      keepLive: true,
+      profile: { title: "SRE bot", avatar: { kind: "icon", icon: "shield-check", hue: 200 } },
+    });
+    const botId = existing.json.id as string;
+    const template = await call(
+      auth,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/bot-templates`,
+      {
+        name: "Release owner",
+        setupInstructions: "Own releases.",
+      },
+    );
+    const templateId = template.json.template.id as string;
+    const server = buildOpenGeniMcpServer(deps, {
+      ...agentGrant(workspace, sessionId),
+      metadata: { delegated: true, sessionId, firstPartyMcpTools: ["bot_suggest"] },
+    });
+
+    const created = await callTool(server, "bot_suggest", {
+      kind: "create",
+      name: "Invoice checker",
+      description: "Checks supplier invoices against purchase orders",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+      setupInstructions: "Check each invoice against its PO and list mismatches.",
+      reason: "You have asked for three invoice checks in this chat.",
+    });
+    expect(created.isError).toBe(false);
+    expect(created.body).toMatchObject({
+      type: "bot_suggestion",
+      status: "suggested",
+      kind: "create",
+      name: "Invoice checker",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+    });
+    // Recorded as display state only: the chat keeps its name and look.
+    const after = await getSession(client.db, workspace.workspaceId, sessionId);
+    expect(after?.botSuggestion).toMatchObject({ id: created.body.id, name: "Invoice checker" });
+    expect(after?.avatar).toBeNull();
+    expect(after?.description).toBeNull();
+    expect(after?.updatedAt).toBe(plain.json.updatedAt);
+
+    // A taken name points the agent at what already exists.
+    const taken = await callTool(server, "bot_suggest", {
+      kind: "create",
+      name: "sre BOT",
+      reason: "Production keeps coming up.",
+    });
+    expect(taken.body).toMatchObject({ status: "not_suggested", code: "name_taken" });
+    expect(taken.body.bots).toEqual([
+      expect.objectContaining({ sessionId: botId, name: "SRE bot" }),
+    ]);
+    expect(taken.body.templates).toEqual([
+      expect.objectContaining({ templateId, name: "Release owner" }),
+    ]);
+
+    // Reuse points at a bot chat or a template, never at a plain chat.
+    const reuseBot = await callTool(server, "bot_suggest", {
+      kind: "reuse",
+      sessionId: botId,
+      reason: "The SRE bot already watches production.",
+    });
+    expect(reuseBot.body).toMatchObject({
+      status: "suggested",
+      kind: "reuse",
+      sessionId: botId,
+      name: "SRE bot",
+      avatar: { kind: "icon", icon: "shield-check", hue: 200 },
+    });
+    const reuseTemplate = await callTool(server, "bot_suggest", {
+      kind: "reuse",
+      templateId,
+      reason: "Releases have a template.",
+    });
+    expect(reuseTemplate.body).toMatchObject({ kind: "reuse", templateId, name: "Release owner" });
+    expect((await getSession(client.db, workspace.workspaceId, sessionId))?.botSuggestion?.id).toBe(
+      reuseTemplate.body.id,
+    );
+    expect(
+      (await callTool(server, "bot_suggest", { kind: "reuse", sessionId, reason: "x" })).body,
+    ).toMatchObject({ code: "already_here" });
+    expect(
+      (
+        await callTool(server, "bot_suggest", {
+          kind: "reuse",
+          sessionId: botId,
+          templateId,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "invalid_target" });
+
+    // A chat that is already a bot is not offered one.
+    const botServer = buildOpenGeniMcpServer(deps, {
+      ...agentGrant(workspace, botId),
+      metadata: { delegated: true, sessionId: botId, firstPartyMcpTools: ["bot_suggest"] },
+    });
+    expect(
+      (await callTool(botServer, "bot_suggest", { kind: "create", name: "Ops", reason: "x" })).body,
+    ).toMatchObject({ code: "already_a_bot" });
+  }, 180_000);
 });

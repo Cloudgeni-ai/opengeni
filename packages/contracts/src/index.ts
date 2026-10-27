@@ -7,7 +7,7 @@ export * from "./workspace-control-event";
 export * from "./secret-value";
 export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
-import { SessionAvatar, SessionDescription } from "./bots";
+import { SessionAvatar, SessionBotSuggestion, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
@@ -1089,6 +1089,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_human_input_respond",
   "set_other_session_title",
   "bot_template_save",
+  "bot_suggest",
   "interaction_discover",
   "browser_open",
   "browser_tabs",
@@ -16458,6 +16459,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     description: primitives.nullableString.default(null),
     /** Avatar shown with the title; display metadata, never sent to the model. */
     avatar: SessionAvatar.nullable().default(null),
+    /** The newest bot suggestion the agent made here (`bot_suggest`); detail reads only. */
+    botSuggestion: SessionBotSuggestion.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
