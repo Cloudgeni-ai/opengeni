@@ -484,6 +484,8 @@ function serverDefaultTitle(startedAt: Date): string {
 export type LiveTranscriptLine = {
   trackNumber: number;
   startMilliseconds: number;
+  /** When it ended; without it the line is taken as a moment at its start. */
+  endMilliseconds?: number;
   text: string;
 };
 
@@ -517,6 +519,66 @@ export function groupLiveTurns(lines: readonly LiveTranscriptLine[]): LiveTransc
     });
   }
   return turns;
+}
+
+/** How far apart a microphone line and computer audio may be and still be one sound. */
+const LIVE_ECHO_SLACK_MILLISECONDS = 2_000;
+/** Matching words an echoed line needs, so one shared "ja" or "okay" stays. */
+const LIVE_ECHO_MIN_MATCHED_WORDS = 2;
+/** The share of a microphone line's words heard in computer audio for it to be an echo. */
+const LIVE_ECHO_MIN_SHARE = 0.7;
+
+/** A line's words as compared across tracks: letters and digits only, any case. */
+function liveWordKeys(text: string): string[] {
+  return text
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .split(/\s+/u)
+    .map((word) => word.replace(/[^\p{L}\p{N}]+/gu, ""))
+    .filter(Boolean);
+}
+
+/**
+ * Without headphones the microphone also hears the others in a call from the
+ * speakers, so the live preview would show their words twice: from computer
+ * audio, and again as if the person recording said them. Leave out a
+ * microphone line when most of its words (at least two, and 70%) were heard
+ * in computer audio at the same moment. The preview's text comes a sentence
+ * at a time, so a line that also holds the person's own words stays whole.
+ * The transcript does the same word by word once the recording is done.
+ */
+export function withoutLiveMicrophoneEchoes<Line extends LiveTranscriptLine>(
+  lines: readonly Line[],
+  tracks: readonly { trackNumber: number; source: RecordingTrack["source"] }[],
+): Line[] {
+  if (!recordingMicrophoneIsOwner(tracks)) return [...lines];
+  const sourceOf = (trackNumber: number) =>
+    tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  const computer = lines
+    .filter((line) => sourceOf(line.trackNumber) === "system")
+    .map((line) => ({
+      start: line.startMilliseconds,
+      end: Math.max(line.startMilliseconds, line.endMilliseconds ?? line.startMilliseconds),
+      keys: new Set(liveWordKeys(line.text)),
+    }));
+  if (computer.length === 0) return [...lines];
+  return lines.filter((line) => {
+    if (sourceOf(line.trackNumber) !== "microphone") return true;
+    const keys = liveWordKeys(line.text);
+    if (keys.length < LIVE_ECHO_MIN_MATCHED_WORDS) return true;
+    const start = line.startMilliseconds;
+    const end = Math.max(start, line.endMilliseconds ?? start);
+    const heard = computer.filter(
+      (other) =>
+        other.start <= end + LIVE_ECHO_SLACK_MILLISECONDS &&
+        other.end >= start - LIVE_ECHO_SLACK_MILLISECONDS,
+    );
+    if (heard.length === 0) return true;
+    const matched = keys.filter((key) => heard.some((other) => other.keys.has(key))).length;
+    return !(
+      matched >= LIVE_ECHO_MIN_MATCHED_WORDS && matched / keys.length >= LIVE_ECHO_MIN_SHARE
+    );
+  });
 }
 
 /**

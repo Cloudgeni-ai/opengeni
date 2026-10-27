@@ -1005,9 +1005,10 @@ function MeetingDetailPageForRecording({
   const here =
     recording.state === "capturing" ? meetingHereStatus(recorder, recording.id, online) : null;
   const capturingHere = here === "recording" || here === "paused";
-  // Recorded on this device: one page with the bar, the notepad and the live
-  // preview, as before. Otherwise Summary · Transcript · Notepad.
-  const tabbed = !(capturingHere || recordingHere);
+  // Recording on this device: one page with the bar, the notepad and the live
+  // preview. Once it stops (and everywhere else), Summary · Transcript · Notepad,
+  // with this recorder's live text in Transcript until the transcript is ready.
+  const tabbed = !capturingHere;
   const askable = Boolean(onAsk);
   const segments = transcript.segments;
   const speakerLabels = [...slots.keys()];
@@ -1366,6 +1367,7 @@ function MeetingDetailPageForRecording({
                 trackNumber: track.trackNumber,
                 text: track.partial,
               }))}
+              tracks={recorder.tracks}
               speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, ownerName)}
               status={liveStatus(recorder.live, msg)}
               empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
@@ -1374,6 +1376,7 @@ function MeetingDetailPageForRecording({
             <LiveTranscript
               heading={false}
               lines={savedLive.segments}
+              tracks={recording.tracks}
               speakerName={(trackNumber) => {
                 const source = defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg);
                 return (
