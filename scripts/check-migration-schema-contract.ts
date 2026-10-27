@@ -22,6 +22,7 @@ import { join } from "node:path";
 
 import {
   ContractParseError,
+  FORWARD_MIGRATIONS_DIR,
   MIGRATIONS_DIR,
   RELEASE_CONTRACT_TEST,
   type BaseLedger,
@@ -122,7 +123,9 @@ async function main(): Promise<void> {
 
   const plural = violations.length === 1 ? "migration is" : "migrations are";
   console.error(
-    `[migration-schema-contract] ${violations.length} new ${plural} not fully registered in ${RELEASE_CONTRACT_TEST} (base ${base.ref}):`,
+    `[migration-schema-contract] ${violations.length} new ${plural} not fully registered in ${
+      registration.forwardDirectory ? `${FORWARD_MIGRATIONS_DIR}/` : RELEASE_CONTRACT_TEST
+    } (base ${base.ref}):`,
   );
   for (const violation of violations) {
     console.error(`  - ${violation.file}  (missing: ${violation.missing.join(", ")})`);

@@ -749,6 +749,27 @@ describe("directory forward registration", () => {
     expect(parsed.forward).toContain("0003_new.sql");
   });
 
+  test("accepts the unfiltered loader call but no other call", () => {
+    const source = directoryContract();
+    const bare = source.replace(
+      /readForwardMigrationRegistrations\(\)\.filter\(\(path\) => paths\.has\(path\)\);/,
+      "readForwardMigrationRegistrations();",
+    );
+    expect(bare).not.toBe(source);
+    expect(parseContractRegistration(bare, () => ["0003_new.sql"]).forward).toContain(
+      "0003_new.sql",
+    );
+    expect(() =>
+      parseContractRegistration(
+        bare.replace(
+          "readForwardMigrationRegistrations();",
+          "readForwardMigrationRegistrations().slice();",
+        ),
+        () => ["0003_new.sql"],
+      ),
+    ).toThrow(ContractParseError);
+  });
+
   test("the fix text adds one registration file instead of editing a shared list", () => {
     const text = registrationFixLines(
       [
@@ -785,6 +806,9 @@ describe("check-migration-schema-contract CLI", () => {
     await writeRegistrations(root, ["0003_new.sql"]);
     const missing = await run(root, guard);
     expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain(
+      `1 new migration is not fully registered in ${FORWARD_MIGRATIONS_DIR}/ (base origin/main)`,
+    );
     expect(missing.stderr).toContain("- 0004_next.sql  (missing: forward-list)");
     expect(missing.stderr).toContain(
       `printf '%s\\n' 0004_next.sql > ${FORWARD_MIGRATIONS_DIR}/0004_next.txt`,

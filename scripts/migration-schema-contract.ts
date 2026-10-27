@@ -428,10 +428,9 @@ function readForwardMigrations(
     let array = astNode(declarations[0]?.init);
     if (array?.type === "CallExpression") {
       const callee = astNode(array.callee);
-      array =
-        callee?.type === "MemberExpression" && astNode(callee.property)?.name === "filter"
-          ? astNode(callee.object)
-          : undefined;
+      if (callee?.type === "MemberExpression" && astNode(callee.property)?.name === "filter") {
+        array = astNode(callee.object);
+      }
     }
     // The directory form: `readForwardMigrationRegistrations()` (optionally
     // filtered), called with no arguments so it reads this repository's own
