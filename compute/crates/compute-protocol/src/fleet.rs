@@ -87,6 +87,12 @@ pub struct HostInfo {
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
+    /// What it offers sandboxes that ask to reach it
+    /// ([`crate::host::SandboxConfig::reach`]), by name, sorted: placement
+    /// puts such a sandbox only on a host that offers all it asks for.
+    /// Missing from what a host of an earlier release sends: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<String>,
     /// The boot of its machine it registers from. A restart ends every VM
     /// on the machine: once this registration has lapsed, a machine its
     /// cloud says runs a later boot (on Compute Engine, the instance's

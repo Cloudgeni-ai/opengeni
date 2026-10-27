@@ -117,6 +117,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -914,6 +915,40 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
     }
+  }
+
+  /**
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+        },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
   }
 
   async endComputerSession(
@@ -4323,8 +4358,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

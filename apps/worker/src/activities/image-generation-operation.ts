@@ -20,6 +20,7 @@ import {
   type GeneratedImageOutput,
   type GeneratedImageReceipt,
 } from "./generated-images";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export class ImageGenerationOutcomeUnknownError extends Error {
   constructor(readonly operationId: string) {
@@ -179,7 +180,7 @@ export async function executeImageGenerationOperation(
           workspaceId: input.workspaceId,
           operationId: identity.operationId,
           operationKey: identity.operationKey,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         })
         .catch(() => undefined);
       throw error;
@@ -190,7 +191,7 @@ export async function executeImageGenerationOperation(
         workspaceId: input.workspaceId,
         operationId: identity.operationId,
         operationKey: identity.operationKey,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       })
       .catch(() => undefined);
     throw error;
@@ -228,7 +229,7 @@ export async function executeImageGenerationOperation(
         workspaceId: input.workspaceId,
         operationId: identity.operationId,
         operationKey: identity.operationKey,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       })
       .catch(() => undefined);
     throw new ImageGenerationRetentionFailedError(identity.operationId, error);

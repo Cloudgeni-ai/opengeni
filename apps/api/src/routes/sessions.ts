@@ -427,6 +427,7 @@ import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discov
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { measureSessionCreatePhase } from "../session-create-observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -554,7 +555,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         realtimeId: input.realtimeId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return null;
     }

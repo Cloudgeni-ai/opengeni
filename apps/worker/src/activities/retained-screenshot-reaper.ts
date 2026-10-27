@@ -7,6 +7,7 @@ import {
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const RETAINED_SCREENSHOT_PENDING_GRACE_MS = 15 * 60 * 1_000;
 export const RETAINED_SCREENSHOT_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -101,7 +102,7 @@ export function createRetainedScreenshotMaintenanceActivities(
           sessionId: claim.sessionId,
           artifactId: claim.artifactId,
           action: claim.action,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }

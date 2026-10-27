@@ -36,6 +36,7 @@ import type {
   JsonSchema,
 } from "./types";
 import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export interface GraphqlOperationBinding {
   readonly kind: "query" | "mutation";
@@ -634,8 +635,4 @@ function normalizeMcpSchema(schema: JsonSchema): LocalMcpTool["inputSchema"] {
       : [],
     additionalProperties: schema.additionalProperties === true,
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

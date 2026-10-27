@@ -8,6 +8,7 @@ import {
   readSnapshotFile,
   type NormalizedCatalogSnapshot,
 } from "./import-integrations-catalog";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const DEFAULT_SOURCE_URL = "https://integrations.sh/api.json";
 const DEFAULT_OUTPUT_PATH = "data/catalog/integrations-snapshot.json";
@@ -243,7 +244,7 @@ export async function hydrateSurfaceDocs(
         seenDomains.add(resolvedDomain);
         surfaceDocs.push({ ...doc, domain: resolvedDomain });
       } catch (error) {
-        failed.push({ domain, reason: error instanceof Error ? error.message : String(error) });
+        failed.push({ domain, reason: errorMessage(error) });
       }
     }
   }
@@ -296,9 +297,9 @@ function committedRowUrl(row: UnknownRecord): string {
     return canonicalMcpUrl(row.mcpUrl);
   } catch (error) {
     throw new Error(
-      `committed snapshot row for ${domain} has an invalid mcpUrl ${JSON.stringify(row.mcpUrl)}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `committed snapshot row for ${domain} has an invalid mcpUrl ${JSON.stringify(row.mcpUrl)}: ${errorMessage(
+        error,
+      )}`,
       { cause: error },
     );
   }
@@ -328,12 +329,9 @@ export function parseCommittedRows(text: string, path: string): UnknownRecord[] 
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    throw new Error(
-      `committed snapshot ${path} is not valid JSON: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      { cause: error },
-    );
+    throw new Error(`committed snapshot ${path} is not valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   const rows = asRecord(parsed)?.importRows;
   if (!Array.isArray(rows)) {

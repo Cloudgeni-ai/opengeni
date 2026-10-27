@@ -26,6 +26,7 @@ import {
   parseLsTree,
   type MigrationName,
 } from "./migration-ordinals";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function git(root: string, ...command: string[]) {
   const child = Bun.spawn(["git", ...command], { cwd: root, stdout: "pipe", stderr: "pipe" });
@@ -108,6 +109,6 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

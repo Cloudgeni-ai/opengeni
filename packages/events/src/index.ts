@@ -38,6 +38,7 @@ import {
   type Status,
 } from "nats";
 import { recoveringRequest } from "./recovering-request";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent | WorkspaceControlEvent>();
 
@@ -717,7 +718,7 @@ export async function createNatsEventBus(
           (options.logger?.warn ?? silentLogger.warn)("NATS reconnect observer failed", {
             label: "event-bus",
             reconnectGeneration,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       }
@@ -793,7 +794,7 @@ export async function createNatsEventBus(
           {
             workspaceId,
             sessionId,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           },
         );
         return;
@@ -819,7 +820,7 @@ export async function createNatsEventBus(
           {
             workspaceId,
             revision: event.revision,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           },
         );
         return;

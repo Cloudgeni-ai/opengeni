@@ -22,6 +22,7 @@ import {
   type SitePlatformUsageRecord,
 } from "@opengeni/db";
 import { ApiHttpError } from "../http/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Site platform usage: what published Sites cost the platform apart from
@@ -252,7 +253,7 @@ export async function settleSitePlatformCharges(
   } catch (error) {
     console.warn("[site-platform] could not settle platform charges", {
       workspaceId: scope.workspaceId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -401,7 +402,7 @@ export async function requireSitePlatformOpen(
     engaged = await sitePlatformBrakeEngaged(deps);
   } catch (error) {
     console.warn("[site-platform] could not read the platform brake", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   if (engaged) throw sitePlatformBrakeError(action);
@@ -469,7 +470,7 @@ export async function afterSitePlatformUsage(
     .then(() => undefined)
     .catch((error: unknown) => {
       console.warn("[site-platform] could not evaluate the platform limit", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     })
     .finally(() => {

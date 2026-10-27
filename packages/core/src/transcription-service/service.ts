@@ -27,6 +27,7 @@ import {
   type SpeechToTextDeploymentOptions,
 } from "./deployment";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Dictation's view of a provider: the provider and the one model dictation
@@ -644,5 +645,5 @@ function settlementAttributes(settlement: {
 }
 
 function boundedErrorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  return errorMessage(error).slice(0, 500);
 }

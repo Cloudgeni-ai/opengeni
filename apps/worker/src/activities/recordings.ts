@@ -107,6 +107,7 @@ import {
   recordingAlignerConfig,
   recordingSpeakersConfig,
 } from "./recording-speakers";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** One recording's work: a transcript version, or the recording's deletion. */
 export type RecordingWorkInput = {
@@ -710,7 +711,7 @@ export function createRecordingActivities(
                     recordingId: input.recordingId,
                     versionId: input.versionId,
                     trackNumber: plan.trackNumber,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: errorMessage(error),
                   });
                   return null;
                 })
@@ -798,7 +799,7 @@ export function createRecordingActivities(
             observability.warn("couldn't read the recording owner's name", {
               workspaceId: input.workspaceId,
               recordingId: input.recordingId,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
             return null;
           });

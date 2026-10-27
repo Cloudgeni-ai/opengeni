@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { pinnedFetch, readResponseJsonBounded } from "@opengeni/network";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type PublicSkillSearchInput = Readonly<{
   query: string;
@@ -204,10 +205,6 @@ function normalizeResponse(
     });
   }
   return { provider: "skills_sh", query, items: items.slice(0, limit), nextCursor: null };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseRetryAfter(value: string | null): number | null {

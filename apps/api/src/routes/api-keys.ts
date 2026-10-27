@@ -43,6 +43,7 @@ import {
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 export { organizationApiKeyAccess } from "@opengeni/core";
 
@@ -408,11 +409,4 @@ function generateApiKeyToken(): string {
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return `ogk_${secret}`;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

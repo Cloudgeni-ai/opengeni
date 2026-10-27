@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
+import { isRecord } from "@opengeni/contracts/values";
 
 export interface OpenSandboxClusterVerificationArgs {
   expectZero: boolean;
@@ -185,10 +186,6 @@ function stringAt(value: unknown, path: string[]): string | null {
   let current: unknown = value;
   for (const key of path) current = isRecord(current) ? current[key] : undefined;
   return typeof current === "string" ? current : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requiredNext(argv: string[], index: number, flag: string): string {

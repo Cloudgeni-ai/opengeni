@@ -432,6 +432,7 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -5337,7 +5338,7 @@ function registerWorkspaceOrchestrationTools(
       });
     } catch (error) {
       deps.observability?.warn("Failed to record a consumed child answer", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };

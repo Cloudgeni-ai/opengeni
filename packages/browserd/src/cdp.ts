@@ -1,4 +1,5 @@
 import { WebSocket as SizedWebSocket } from "ws";
+import { isRecord } from "@opengeni/contracts/values";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -544,10 +545,6 @@ function boundedMessage(value: unknown): string {
       .trim()
       .slice(0, 2_048) || "CDP command failed"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type RefusedMessageFields = {
