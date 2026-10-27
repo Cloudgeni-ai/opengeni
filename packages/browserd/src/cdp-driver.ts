@@ -121,6 +121,7 @@ import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
 import { errorMessage, isRecord } from "@opengeni/contracts/values";
+import { nameContainsWords } from "./locator-name";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -9794,7 +9795,7 @@ function accessibilityLocatorMatches(
         (locator.name === undefined ||
           (locator.exact
             ? sameAccessibleName(entry.name, locator.name)
-            : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
+            : nameContainsWords(entry.name, locator.name))),
     );
   }
   if (locator.kind === "label") {
@@ -9811,7 +9812,7 @@ function accessibilityLocatorMatches(
       entry.role === "text" &&
       (locator.exact
         ? sameAccessibleName(entry.name, locator.text)
-        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
+        : nameContainsWords(entry.name, locator.text)),
   );
 }
 

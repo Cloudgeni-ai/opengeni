@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { ComputerLocator, InteractionSemanticNodeValue } from "@opengeni/contracts";
 import { ComputerBackendError } from "../computer-backend";
+import { nameContainsWords } from "../locator-name";
 import { Element } from "./wire";
 
 const roles: Record<string, string> = {
@@ -663,7 +664,7 @@ export function locate(
     const match = (value: string | undefined, query: string, exact = false) =>
       exact
         ? value !== undefined && normalized(value) === normalized(query)
-        : (value ?? "").toLowerCase().includes(query.toLowerCase());
+        : nameContainsWords(value, query);
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;
