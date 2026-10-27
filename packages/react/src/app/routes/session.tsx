@@ -1,6 +1,11 @@
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
 import {
+  BotMentionMenu,
+  botMentionContext,
+  type MentionedBot,
+} from "../components/bots/bot-mention";
+import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
@@ -1477,11 +1482,10 @@ export function SessionRoute({
 }
 
 /** The embedding page's per-message context, as a send extra. */
-function withHostMessageContext(messageContext: (() => string | undefined) | undefined): {
-  modelContext?: string;
-} {
-  const value = messageContext?.();
-  return value ? { modelContext: value } : {};
+/** Joins the host's message context with the chat's own (mentioned bots). */
+function withMessageContexts(...contexts: Array<string | undefined>): { modelContext?: string } {
+  const joined = contexts.filter((context): context is string => Boolean(context)).join("\n\n");
+  return joined ? { modelContext: joined } : {};
 }
 
 /** The latest agent-settings change, and whether a turn has started since. */
@@ -2696,10 +2700,16 @@ function SessionChatPane(props: {
         connectionAccounts.loading ||
         connectionAccounts.error !== null,
     });
+  // Bots picked from the @mention list; their chat ids travel with the message.
+  const mentionedBotsRef = useRef<MentionedBot[]>([]);
+  const mentionTextRef = useRef("");
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
-      ...withHostMessageContext(hostMessageContext),
+      ...withMessageContexts(
+        hostMessageContext?.(),
+        botMentionContext(mentionTextRef.current, mentionedBotsRef.current, props.session.id),
+      ),
       resources: [...attachments.readyResources, ...repositories.pendingResources],
       connectionAccounts: [
         ...connectionAccounts.selections,
@@ -2770,6 +2780,7 @@ function SessionChatPane(props: {
       }
     },
   });
+  mentionTextRef.current = composer.value;
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
   const composerView = useComposerWithStreamState(
@@ -3933,34 +3944,49 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
-                  unavailableModelNotice ||
-                  usageLimitNotice ||
-                  creditRefusalNotice ||
-                  (machineAccess && !machineAccess.isOwner) ? (
-                    <>
-                      {!sessionAdmissionNeedsDifferentMachine(
-                        sessionAdmissionReason(props.session),
-                        machineAccess,
-                      ) ? (
-                        <SessionMachineAccessNotice
-                          access={machineAccess}
-                          action={
-                            <SessionMachinePickerAction
-                              runsOn={runsOn}
-                              workspaceId={props.session.workspaceId}
-                              rigId={props.session.rigId}
-                              move={moveRunsOn}
-                            />
-                          }
-                        />
-                      ) : null}
-                      {unavailableModelNotice}
-                      {usageLimitNotice}
-                      {creditRefusalNotice ? (
-                        <div className="px-2 pt-2">{creditRefusalNotice}</div>
-                      ) : null}
-                    </>
-                  ) : null
+                  <>
+                    <BotMentionMenu
+                      composer={composer}
+                      workspaceId={props.session.workspaceId}
+                      currentSessionId={props.session.id}
+                      onPick={(bot) => {
+                        mentionedBotsRef.current = [
+                          bot,
+                          ...mentionedBotsRef.current.filter(
+                            (picked) => picked.sessionId !== bot.sessionId,
+                          ),
+                        ];
+                      }}
+                    />
+                    {unavailableModelNotice ||
+                    usageLimitNotice ||
+                    creditRefusalNotice ||
+                    (machineAccess && !machineAccess.isOwner) ? (
+                      <>
+                        {!sessionAdmissionNeedsDifferentMachine(
+                          sessionAdmissionReason(props.session),
+                          machineAccess,
+                        ) ? (
+                          <SessionMachineAccessNotice
+                            access={machineAccess}
+                            action={
+                              <SessionMachinePickerAction
+                                runsOn={runsOn}
+                                workspaceId={props.session.workspaceId}
+                                rigId={props.session.rigId}
+                                move={moveRunsOn}
+                              />
+                            }
+                          />
+                        ) : null}
+                        {unavailableModelNotice}
+                        {usageLimitNotice}
+                        {creditRefusalNotice ? (
+                          <div className="px-2 pt-2">{creditRefusalNotice}</div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
                 }
                 commandContext={commandContext}
                 onClearView={props.onClearView}

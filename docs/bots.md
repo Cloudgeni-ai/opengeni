@@ -43,6 +43,18 @@ Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
 is the simple way to clone one together with its history.
 
+## Mentioning a bot
+
+Typing `@` at the end of a message in a running chat lists the workspace's
+bots (chats with a description or avatar, found by name), and picking one
+writes `@Name`. When the message is sent, each mentioned bot's chat id travels
+as the message's context (`modelContext`), with one line telling the agent to
+send the request to that bot's chat with `session_send_message` and follow its
+result. The bot does the work in its own chat, with its own history and setup,
+instead of the sender starting over. A mention grants nothing: the agent's
+ordinary session authority applies, and a bot mentioned in its own chat simply
+does the work there. See `packages/react/src/app/components/bots/bot-mention.tsx`.
+
 ## Bot templates
 
 A bot template is where a new bot starts: a name, description, avatar and
