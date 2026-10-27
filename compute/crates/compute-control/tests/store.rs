@@ -1695,6 +1695,90 @@ async fn captured_images_are_collected_only_once_nothing_has_used_them_for_a_whi
     each(collection, collection).await;
 }
 
+/// A build of a captured image's bytes, recorded while a collector holds
+/// the image unclaimed (its check for uses made, its claim not yet), waits
+/// for the claim and is not recorded: a claim never forgets an image a
+/// build names.
+#[tokio::test]
+async fn a_build_racing_a_claim_waits_for_it() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let (watch, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_claim_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}' application_name={schema}");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let team = format!("team-{:x}", random());
+    let at = now_ms();
+    let image = unused_image(&store, &team, at).await;
+
+    // The collector holds the image's row, having found nothing using it.
+    let holder = client.transaction().await.unwrap();
+    holder
+        .execute(
+            &format!("select 1 from {schema}.compute_captured_images where image = $1 for update"),
+            &[&image.to_string()],
+        )
+        .await
+        .unwrap();
+    let source = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let delayed = {
+        let store = store.clone();
+        let source = source.clone();
+        tokio::spawn(async move { store.record_built(&source, "sandbox", image, 1).await })
+    };
+    let waiting = "select count(*) from pg_stat_activity where application_name = $1 \
+                   and wait_event_type = 'Lock' and query like '%compute_captured_images%'";
+    let mut waited = 0;
+    while watch
+        .query_one(waiting, &[&schema])
+        .await
+        .unwrap()
+        .get::<_, i64>(0)
+        == 0
+    {
+        assert!(
+            waited < 500 && !delayed.is_finished(),
+            "the build never waited on the collector"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited += 1;
+    }
+
+    // Then it claims the image, as it would.
+    holder
+        .execute(
+            &format!(
+                "update {schema}.compute_captured_images \
+                 set collector = 'collector', claimed_ms = $2 where image = $1"
+            ),
+            &[&image.to_string(), &i64::try_from(at).unwrap()],
+        )
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    assert_eq!(delayed.await.unwrap().unwrap(), None);
+    assert_eq!(store.image_built(&source).await.unwrap(), None);
+    assert!(store.collecting(image, "collector").await.unwrap());
+
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
 async fn sandboxes_from_templates<S: Store>(store: S) {
     let team = format!("team-{:x}", random());
     let row = template(&team, image_id(), None, 1);

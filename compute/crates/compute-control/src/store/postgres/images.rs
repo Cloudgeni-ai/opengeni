@@ -51,17 +51,20 @@ impl PostgresStore {
             .map_err(database)?;
         // A captured image of the same bytes a collector claimed is being
         // forgotten: not recorded. Locked after the insert, so a claim
-        // either sees it, once committed, or is seen here.
+        // either sees it, once committed, or is seen here. The row is
+        // locked whoever holds it: a collector holding it unclaimed may
+        // be about to claim it, not having seen this insert, so this
+        // waits for it and reads what it committed.
         if inserted == 1
             && tx
                 .query_opt(
-                    "select 1 from compute_captured_images \
-                     where image = $1 and collector is not null for share",
+                    "select collector is not null from compute_captured_images \
+                     where image = $1 for share",
                     &[&image],
                 )
                 .await
                 .map_err(database)?
-                .is_some()
+                .is_some_and(|row| row.get::<_, bool>(0))
         {
             return Ok(None);
         }
