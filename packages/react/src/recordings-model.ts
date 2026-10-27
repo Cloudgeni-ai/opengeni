@@ -199,15 +199,23 @@ export function transcriptFixModel(
   if (!code || (!credits && !PROVIDER_FAILURES.has(code) && !MODEL_FAILURES.has(code))) {
     return null;
   }
+  const charged = (entry: RecordingTranscriptionModel) =>
+    entry.chargedInCredits ?? (entry.funding === "deployment" && entry.usdPerHour !== null);
   const rank = (entry: RecordingTranscriptionModel) =>
-    entry.funding === "workspace_subscription" ? 0 : entry.usdPerHour === null ? 1 : 2;
+    entry.funding === "workspace_subscription"
+      ? 0
+      : charged(entry)
+        ? 3
+        : entry.usdPerHour === null
+          ? 1
+          : 2;
   const candidates = models.filter((entry) => {
     if (!entry.available || !entry.capabilities.batch) return false;
     if (failed && entry.providerId === failed.providerId) {
       if (!MODEL_FAILURES.has(code) || entry.model === failed.model) return false;
     }
-    // A deployment's model is charged in credits wherever it has a price.
-    return !credits || entry.funding !== "deployment" || entry.usdPerHour === null;
+    // The server says which models are charged in credits.
+    return !credits || !charged(entry);
   });
   return [...candidates].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }

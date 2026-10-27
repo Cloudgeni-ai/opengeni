@@ -869,6 +869,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;

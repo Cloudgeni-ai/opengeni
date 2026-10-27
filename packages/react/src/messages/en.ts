@@ -2354,6 +2354,8 @@ export const englishMessages = {
   "meetings.detailPage.saving": "Saving…",
   "meetings.detailPage.setItWhenTheMeeting": "Pick one if the transcript got the language wrong.",
   "meetings.detailPage.settings": "Settings",
+  "meetings.detailPage.couldnTTryAgainReload":
+    "Couldn't try again from here. Reload the page and the upload carries on.",
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
@@ -2675,7 +2677,7 @@ export const englishMessages = {
   "meetings.recordings.errorInsufficientCreditsFor":
     "{modelName} uses credits, and this organization is out of them. Add credits, or transcribe with a model that doesn't use them.",
   "meetings.recordings.errorAllowanceExhausted":
-    "This workspace has used its credit allowance for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
+    "The credit allowance is used up for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
   "meetings.recordings.errorMonthlyCostLimit":
     "This organization has reached its monthly spending limit. An admin can raise it, or transcribe with a model that doesn't use credits.",
   "meetings.recordings.errorPolicyBlocked":

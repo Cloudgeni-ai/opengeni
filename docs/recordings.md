@@ -68,7 +68,7 @@ never loses audio.
    model that costs the payer nothing (a connected subscription or the
    workspace's own key) transcribes it instead; otherwise version 1 fails at
    once with the refusal's code (`insufficient_credits`,
-   `allowance_exhausted`, `monthly_model_cost_limit`, `policy_blocked`), and
+   `allowance_exhausted` or `monthly_model_cost_limit`), and
    the meeting can be transcribed again once that is fixed.
 
 The SDK's `RecordingUploader` keeps a recording's chunks on the device until

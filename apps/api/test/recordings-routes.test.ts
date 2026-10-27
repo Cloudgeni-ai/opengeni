@@ -332,6 +332,26 @@ describe("recording routes", () => {
     });
     expect(retried.status).toBe(202);
     expect(retried.body).toMatchObject({ state: "queued", providerId: "elevenlabs" });
+
+    // An allowance that counts free work at list price, used up during the
+    // meeting: the free model is not a way around it, so the transcript
+    // fails saying so.
+    const capped = await capturedRecording(scope);
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 0,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const cappedRun = await finalize(capped);
+    expect(cappedRun.body.transcript).toMatchObject({
+      state: "failed",
+      errorCode: "allowance_exhausted",
+    });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([automatic, chosen]);
   });
 
   test("a used-up usage allowance refuses new recordings and re-runs", async () => {
@@ -1102,12 +1122,14 @@ describe("recording routes", () => {
     const settings = { recordingWordAlignment: true } as const;
     const free = await fixture({ settings });
     const charged = await fixture({ settings: { ...settings, usageLimitsMode: "managed" } });
-    const priceOf = async (scope: Awaited<ReturnType<typeof fixture>>) =>
+    const openai = async (scope: Awaited<ReturnType<typeof fixture>>) =>
       (await scope.owner.call("GET", "/recording-models")).body.models.find(
         (model: { providerId: string }) => model.providerId === "openai",
-      ).usdPerHour;
-    expect(await priceOf(free)).toBeNull();
-    expect(await priceOf(charged)).toBeGreaterThan(0);
+      );
+    expect(await openai(free)).toMatchObject({ usdPerHour: null, chargedInCredits: false });
+    const priced = await openai(charged);
+    expect(priced.usdPerHour).toBeGreaterThan(0);
+    expect(priced.chargedInCredits).toBe(true);
   });
 
   test("a deployment that aligns words itself offers text-only models for meetings", async () => {

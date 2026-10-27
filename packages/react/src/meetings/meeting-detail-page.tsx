@@ -581,7 +581,12 @@ function PhaseNotice({
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => recorder.retryUpload(recording.id)}
+            onClick={() => {
+              // The uploader holding it was closed: reloading starts a new one.
+              if (!recorder.retryUpload(recording.id)) {
+                toast.error(msg("meetings.detailPage.couldnTTryAgainReload"));
+              }
+            }}
           >
             {msg("meetings.detailPage.tryAgain")}
           </Button>

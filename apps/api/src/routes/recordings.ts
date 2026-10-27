@@ -413,6 +413,21 @@ export function registerRecordingRoutes(
       const found = free
         ? findRecordingTranscriptionModel(registry, free.providerId, free.model)
         : null;
+      // Work that spends no credits still counts against a usage allowance
+      // that prices it at list price; a used-up one is the refusal instead.
+      const overAllowance =
+        free && found
+          ? await admitRecordingUsage(actor).then(
+              () => null,
+              (error: unknown) => {
+                if (error instanceof ApiHttpError) return error;
+                throw error;
+              },
+            )
+          : null;
+      if (overAllowance) {
+        return { ...choice, creditAttribution: actor.creditAttribution, refused: overAllowance };
+      }
       if (free && found) {
         return {
           ...choice,
@@ -1144,6 +1159,12 @@ export function registerRecordingRoutes(
             provider.id === pinned.providerId ||
             (liveDefault?.providerId === provider.id && liveDefault.model === spec.model));
         if (!meeting && !live) return [];
+        // The same test the worker charges by.
+        const chargedInCredits = Boolean(
+          provider.funding === "deployment" &&
+          voiceInputCreditBillingActive(deps.settings) &&
+          spec.creditPricing,
+        );
         return [
           {
             providerId: provider.id,
@@ -1156,12 +1177,8 @@ export function registerRecordingRoutes(
             // A price only where this workspace pays it: its own key, or credits
             // charged for a deployment's model. Otherwise the hour costs it nothing.
             usdPerHour:
-              provider.funding === "workspace_key" ||
-              (provider.funding === "deployment" &&
-                voiceInputCreditBillingActive(deps.settings) &&
-                spec.creditPricing)
-                ? spec.usdPerHour
-                : null,
+              provider.funding === "workspace_key" || chargedInCredits ? spec.usdPerHour : null,
+            chargedInCredits,
           },
         ];
       }),

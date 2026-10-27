@@ -136,7 +136,10 @@ export type RecordingTranscriptOutcome = (
   expireAfterMilliseconds?: number;
 };
 
-/** A version lease outlives the longest provider call; retries reclaim it by owner. */
+/**
+ * A version lease outlives a provider call; a retry reclaims it by owner, so
+ * it may be shorter than the activity's 12-hour start-to-close.
+ */
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
 
 const MINUTE_MILLISECONDS = 60_000;
@@ -583,19 +586,21 @@ export function createRecordingActivities(
     };
     let finished: RecordingTranscriptOutcome | null = null;
     let retryCode = "unknown";
+    // Set once the transcript is being charged and saved. From then on the
+    // budget waits for that to end, so a charged transcript is never failed.
+    let finishing = false;
     try {
-      // A step that doesn't listen for the abort still can't outlast the budget.
-      const outOfTime = new Promise<RecordingTranscriptOutcome>((resolve, reject) => {
-        budget.signal.addEventListener(
-          "abort",
-          () => fail("timed_out", budget.signal.reason).then(resolve, reject),
-          { once: true },
-        );
-      });
       finished = await withRecordingUsage(usage, () => {
         const work = transcribeClaimed();
         // The losing side of the race must not become an unhandled rejection.
         work.catch(() => undefined);
+        // A step that doesn't listen for the abort still can't outlast the budget.
+        const outOfTime = new Promise<RecordingTranscriptOutcome>((resolve, reject) => {
+          const timedOut = () =>
+            (finishing ? work : fail("timed_out", budget.signal.reason)).then(resolve, reject);
+          if (budget.signal.aborted) timedOut();
+          else budget.signal.addEventListener("abort", timedOut, { once: true });
+        });
         return Promise.race([work, outOfTime]);
       });
       return finished;
@@ -860,6 +865,10 @@ export function createRecordingActivities(
           }
         }
         return await measureRecordingStage("finish", async () => {
+          // Past the budget the version has failed: work that kept going
+          // regardless is neither charged nor saved.
+          budget.signal.throwIfAborted();
+          finishing = true;
           const creditCostMicros = charge
             ? await settleMeetingCredits({
                 billing: billingFor(settings, db),

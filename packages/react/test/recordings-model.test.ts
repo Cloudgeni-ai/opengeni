@@ -298,6 +298,18 @@ describe("fixing a failed transcript", () => {
     // A deployment's model it doesn't charge for is free here too.
     const covered = model("openai", "deployment", { usdPerHour: null });
     expect(transcriptFixModel("insufficient_credits", failedOn, [mai, covered])).toBe(covered);
+    // The server's word wins: charged in credits without a known price is still charged.
+    const unpriced = model("openai", "deployment", { usdPerHour: null, chargedInCredits: true });
+    expect(transcriptFixModel("insufficient_credits", failedOn, [mai, unpriced])).toBeNull();
+    // For a provider's failure, a model that costs no credits comes first.
+    const charged = model("openai", "deployment", { chargedInCredits: true });
+    const ownKey = model("elevenlabs", "workspace_key", { chargedInCredits: false });
+    expect(
+      transcriptFixModel("provider_unauthorized", { providerId: "azure-speech", model: "x" }, [
+        charged,
+        ownKey,
+      ]),
+    ).toBe(ownKey);
   });
 
   test("a provider's failure offers another provider; other failures offer none", () => {
