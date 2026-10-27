@@ -31,7 +31,13 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
   },
   {
     test: "scripts/release-schema-contract.test.ts",
-    areas: ["packages/db/drizzle/", "scripts/release-schema-contract", "scripts/migration-schema"],
+    areas: [
+      "packages/db/drizzle/",
+      "scripts/release-schema-contract",
+      // Forward-migration registrations and their loader.
+      "scripts/release-schema-forward",
+      "scripts/migration-schema",
+    ],
   },
 ];
 
