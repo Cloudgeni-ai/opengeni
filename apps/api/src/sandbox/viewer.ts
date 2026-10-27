@@ -1121,6 +1121,11 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
+  /** True when the route verified `terminal:attach` for this viewer: the token
+   *  then claims `control`, so the relay forwards its keystrokes to the PTY.
+   *  Omitted or false mints a watch-only (`view`) token. Independent of the
+   *  desktop stream-control setting. */
+  terminalInput?: boolean;
   /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
@@ -1152,6 +1157,7 @@ export async function mintTerminalStream(
   // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
   // so StreamTokenPayload.parse never throws an uncaught 500.
   const viewerId = viewerIdAsUuid(input.viewerId);
+  const mode = input.terminalInput === true ? "control" : "view";
 
   // GATE 1: the terminal pty-ws plane requires the toggle ON, a real-PTY backend
   // (desktop-capable images bake ttyd), and a resolvable stream-token secret.
@@ -1202,6 +1208,7 @@ export async function mintTerminalStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
+          mode,
           sandbox: active,
           viewerAuthority,
         },
@@ -1263,6 +1270,7 @@ export async function mintTerminalStream(
         activeEpoch: lease.leaseEpoch,
         viewerAuthority,
         port: TERMINAL_STREAM_PORT,
+        mode,
         session: established.session as RelayResolvableSession,
       });
       return relayed ? { ...relayed, transport: "relay-pty" } : null;
@@ -1294,6 +1302,7 @@ export async function mintTerminalStream(
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
         port: TERMINAL_STREAM_PORT,
+        mode,
         ...viewerAuthority,
       });
     } catch (error) {
@@ -1372,6 +1381,8 @@ async function tryMintActiveSelfhostedStream(
     workspaceId: string;
     resourceSubjectId?: string;
     port: number;
+    /** Input authority the route granted; defaults to watch-only. */
+    mode?: "view" | "control";
     sandbox: SandboxRecord;
     /** 0281 viewer authority claims stamped into the relay stream token. */
     viewerAuthority?: { subjectId?: string; authorityEpoch: number };
@@ -1439,6 +1450,7 @@ async function tryMintActiveSelfhostedStream(
     activeEpoch: session.activeEpoch,
     ...(input.viewerAuthority ? { viewerAuthority: input.viewerAuthority } : {}),
     port,
+    ...(input.mode ? { mode: input.mode } : {}),
     session: shSession,
   });
 }
@@ -1461,6 +1473,9 @@ export type MintSelfhostedStreamInput = {
   viewerAuthority?: { subjectId?: string; authorityEpoch: number };
   /** The exposed stream port (6080 desktop / 7681 terminal). */
   port: number;
+  /** Input authority the route granted (the relay forwards viewer input only
+   *  for `control`). Defaults to watch-only `view`. */
+  mode?: "view" | "control";
   /** The resolvable selfhosted session (the routing proxy resolves the active
    *  selfhosted backend; its `resolveExposedPort` returns the relay endpoint). */
   session: RelayResolvableSession;
@@ -1502,6 +1517,7 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
+      mode: input.mode ?? "view",
       ...(input.viewerAuthority ?? {}),
     });
     return {

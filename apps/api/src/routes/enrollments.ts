@@ -582,29 +582,38 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained
 // rate. Buckets are created lazily and reset their tokens by elapsed time on each
 // take, so an idle key fully refills without a background timer.
-class TokenBucket {
+// The map is bounded: a new key first drops buckets that have fully refilled
+// (they carry no state), and if every tracked key is still active, the least
+// recently used one.
+export class TokenBucket {
   private readonly capacity: number;
   private readonly refillPerSecond: number;
+  private readonly maxKeys: number;
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  private lastSweepAt = Number.NEGATIVE_INFINITY;
 
-  constructor(options: { capacity: number; refillPerSecond: number }) {
+  constructor(options: { capacity: number; refillPerSecond: number; maxKeys?: number }) {
     this.capacity = options.capacity;
     this.refillPerSecond = options.refillPerSecond;
+    this.maxKeys = options.maxKeys ?? 10_000;
+  }
+
+  get size(): number {
+    return this.buckets.size;
   }
 
   take(key: string, now = Date.now()): boolean {
-    const bucket = this.buckets.get(key) ?? {
-      tokens: this.capacity,
-      updatedAt: now,
-    };
+    let bucket = this.buckets.get(key);
+    if (bucket) {
+      // Re-inserting keeps the map in least-recently-used order.
+      this.buckets.delete(key);
+    } else {
+      this.makeRoom(now);
+      bucket = { tokens: this.capacity, updatedAt: now };
+    }
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
     bucket.updatedAt = now;
-    // Prune the map opportunistically so it never grows unbounded: a fully-refilled
-    // bucket carries no state worth keeping.
-    if (bucket.tokens >= this.capacity && this.buckets.size > 10_000) {
-      this.buckets.delete(key);
-    }
     if (bucket.tokens < 1) {
       this.buckets.set(key, bucket);
       return false;
@@ -612,5 +621,26 @@ class TokenBucket {
     bucket.tokens -= 1;
     this.buckets.set(key, bucket);
     return true;
+  }
+
+  private makeRoom(now: number): void {
+    if (this.buckets.size < this.maxKeys) return;
+    // Under a flood of more than maxKeys distinct sources, evicting the least
+    // recently used bucket resets that source's limit. That is acceptable: an
+    // attacker who controls that many sources already has that aggregate rate.
+    // At most one full sweep per second keeps a flood of new keys linear.
+    if (now - this.lastSweepAt >= 1_000) {
+      this.lastSweepAt = now;
+      for (const [key, bucket] of this.buckets) {
+        const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
+        if (bucket.tokens + elapsedSeconds * this.refillPerSecond >= this.capacity) {
+          this.buckets.delete(key);
+        }
+      }
+    }
+    for (const key of this.buckets.keys()) {
+      if (this.buckets.size < this.maxKeys) break;
+      this.buckets.delete(key);
+    }
   }
 }

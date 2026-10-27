@@ -4484,7 +4484,7 @@ export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
     viewerId: primitives.uuid,
     // Fence: the token logically dies when the box is re-elected (epoch++).
     leaseEpoch: primitives.nonnegativeInteger,
-    // v1 is always "view"; "control" is the never-granted raw-input plane.
+    // "view" only watches; "control" lets the relay forward the viewer's input.
     mode: z.enum(["view", "control"]),
     // 6080 (noVNC); pins the token to ONE exposed port.
     port: primitives.positiveInteger,

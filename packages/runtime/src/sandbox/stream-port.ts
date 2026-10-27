@@ -77,6 +77,9 @@ export type ExposeStreamPortInput = {
   resolution?: [number, number];
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** Input authority the API route granted this viewer. `view` (the default)
+   *  only watches; `control` lets the relay forward the viewer's input. */
+  mode?: "view" | "control";
   /** The authenticated viewer subject the token is minted for (0281). */
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
@@ -316,7 +319,7 @@ export async function exposeStreamPort(
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
-    mode: "view",
+    mode: input.mode ?? "view",
     port,
     ttlSeconds,
     nowSeconds,
