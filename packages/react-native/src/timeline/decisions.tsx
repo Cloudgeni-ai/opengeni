@@ -834,7 +834,13 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     {facts.shown.map((field) => (
                       <View key={field.path} style={{ gap: 1 }}>
                         <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
-                        <Text numberOfLines={6} style={{ ...body, color: c.fg }}>
+                        {/* Like the web card: a field reads in full (the body
+                            scrolls), and only a value cut short by the server is
+                            clamped, with all of it under Show details. */}
+                        <Text
+                          numberOfLines={field.truncated ? 6 : undefined}
+                          style={{ ...body, color: c.fg }}
+                        >
                           {field.preview}
                         </Text>
                       </View>
