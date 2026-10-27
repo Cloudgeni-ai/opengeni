@@ -12,6 +12,7 @@ import {
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   OBJECT_STORAGE_FIXTURE_BUCKET,
 } from "./object-storage-fixture";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TestServices = {
   projectName: string;
@@ -172,7 +173,7 @@ async function startTestServicesAttempt(
       cleanupFailure = `\ncompose cleanup also failed: ${String(cleanupError)}`;
     }
     throw new Error(
-      `test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}${cleanupFailure}`,
+      `test services failed to become ready: ${errorMessage(error)}\n${logs}${cleanupFailure}`,
       { cause: error },
     );
   }
@@ -419,7 +420,7 @@ function testServiceImages(options: {
 }
 
 function isRetryableComposeStartupError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return (
     message.includes("address already in use") ||
     message.includes("port is already allocated") ||

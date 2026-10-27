@@ -19,6 +19,7 @@ import {
   parseDollars,
 } from "@/lib/usage-allowances";
 import type { BudgetDraft } from "./use-workspace-budget";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type MemberMode = "equal_share" | "none";
 
@@ -116,7 +117,7 @@ export function BudgetForm({
       });
       toast.success(config ? "Budget saved" : `${workspaceName} now has a monthly budget`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setSaving(false);
     }

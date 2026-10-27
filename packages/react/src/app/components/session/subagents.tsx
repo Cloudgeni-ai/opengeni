@@ -20,7 +20,7 @@ import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../timeli
 import { sessionAgentAttention } from "../../../session-agents-model";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "../../lib/navigation";
-import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
+import { BotIcon, ChevronLeftIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { STATUS_META, StatusDot, type StatusTone } from "../../../ui/status-dot";
@@ -223,28 +223,26 @@ export function SubagentsLabel({ count }: { count: number }) {
 /* --- "spawned by" breadcrumb (child sessions link back to their parent) ----- */
 
 /**
- * The header gives the breadcrumb and the title equal shares of a crowded
- * row, so neither squeezes the other to nothing; the parent's name truncates
- * within its share. Phones, narrow headers and a narrow title area
- * (`titlegroup`) show only an arrow back to the parent.
+ * A small line above the child chat's title, so the header keeps one height
+ * with or without it and the title keeps its row. Phones and narrow headers
+ * show "‹ Parent"; wider ones show the parent with earlier sessions in a menu
+ * before it.
  */
-const CRUMB_NAV = "flex min-w-0 items-center text-xs";
-const WIDE_CRUMB =
-  "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden! @max-[20rem]/titlegroup:hidden!";
-const NARROW_CRUMB =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:size-11 sm:hidden @max-[34rem]/titlebar:inline-flex! @max-[20rem]/titlegroup:inline-flex!";
+const CRUMB_NAV =
+  "relative z-10 flex h-4 min-w-0 items-center gap-0.5 text-2xs leading-4 text-fg-muted";
+const WIDE_CRUMB = "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden!";
+const NARROW_CRUMB = "sm:hidden @max-[34rem]/titlebar:inline-flex!";
 const CRUMB_LINK =
-  "block min-w-0 max-w-40 truncate outline-hidden transition-colors hover:text-fg focus-visible:text-fg";
+  "inline-flex min-w-0 max-w-60 items-center gap-0.5 rounded-sm outline-hidden transition-colors hover:text-fg focus-visible:ring-1 focus-visible:ring-ring/55";
 
 function CrumbSeparator() {
   return <ChevronRightIcon aria-hidden className="size-3 shrink-0 text-fg-subtle" />;
 }
 
 /**
- * Where a child chat came from, leading into its title on the header's single
- * row: "… › Release manager ›" before the title. The direct parent is a link
- * and earlier ancestors sit in a menu; narrow headers keep a back arrow named
- * for the parent.
+ * Where a child chat came from, on a small line above its title: "‹ Release
+ * manager" on phones, "… › Release manager" with the earlier sessions in a
+ * menu on wider screens.
  */
 export function SessionAncestryBreadcrumb({
   workspaceId,
@@ -263,34 +261,25 @@ export function SessionAncestryBreadcrumb({
 }): ReactNode {
   if (parentSessionId && (loading || error)) {
     const state = error ? "unavailable" : "loading";
-    const href = { workspaceId, sessionId: parentSessionId };
     return (
       <nav aria-label="Session ancestry" className={CRUMB_NAV}>
         <Link
           to="/workspaces/$workspaceId/sessions/$sessionId"
-          params={href}
+          params={{ workspaceId, sessionId: parentSessionId }}
           aria-label={`Back to parent session; ancestry ${state}`}
-          className={NARROW_CRUMB}
+          className={cn(CRUMB_LINK, error && "text-status-failed")}
         >
-          <ChevronRightIcon aria-hidden className="size-3.5 rotate-180" />
+          <ChevronLeftIcon aria-hidden className="size-3 shrink-0" />
+          <span className="truncate">Parent {state}</span>
         </Link>
-        <span className={WIDE_CRUMB}>
-          <Link
-            to="/workspaces/$workspaceId/sessions/$sessionId"
-            params={href}
-            aria-label={`Back to parent session; ancestry ${state}`}
-            className={cn(CRUMB_LINK, error ? "text-status-failed" : "text-fg-muted")}
-          >
-            Parent {state}
-          </Link>
-          <CrumbSeparator />
-        </span>
       </nav>
     );
   }
   if (error) {
     return (
-      <span className="shrink-0 text-xs text-status-failed">Session ancestry unavailable</span>
+      <span className="flex h-4 items-center text-2xs text-status-failed">
+        Session ancestry unavailable
+      </span>
     );
   }
   if (ancestors.length === 0) {
@@ -300,15 +289,18 @@ export function SessionAncestryBreadcrumb({
   const parentLabel = lineageLabel(parent);
   const earlier = ancestors.slice(0, -1);
   return (
-    <nav aria-label="Session ancestry" className={cn(CRUMB_NAV, "text-fg-muted")}>
+    <nav aria-label="Session ancestry" className={CRUMB_NAV}>
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: parent.id }}
         aria-label={`Back to ${parentLabel}`}
         title={parentLabel}
-        className={NARROW_CRUMB}
+        className={cn(CRUMB_LINK, NARROW_CRUMB)}
       >
-        <ChevronRightIcon aria-hidden className="size-3.5 rotate-180" />
+        <ChevronLeftIcon aria-hidden className="size-3 shrink-0" />
+        <bdi dir="auto" className="min-w-0 truncate">
+          {parentLabel}
+        </bdi>
       </Link>
       <div className={WIDE_CRUMB}>
         {earlier.length > 0 ? (
@@ -317,7 +309,7 @@ export function SessionAncestryBreadcrumb({
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  className="inline-flex size-5 shrink-0 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-fg-subtle hover:bg-surface-2 hover:text-fg"
                   aria-label={
                     earlier.length === 1
                       ? "1 earlier session"
@@ -346,7 +338,6 @@ export function SessionAncestryBreadcrumb({
           </>
         ) : null}
         <BreadcrumbLink workspaceId={workspaceId} session={parent} />
-        <CrumbSeparator />
       </div>
     </nav>
   );
@@ -365,10 +356,11 @@ function BreadcrumbLink({
       to="/workspaces/$workspaceId/sessions/$sessionId"
       params={{ workspaceId, sessionId: session.id }}
       title={label}
-      dir="auto"
       className={CRUMB_LINK}
     >
-      {label}
+      <bdi dir="auto" className="min-w-0 truncate">
+        {label}
+      </bdi>
     </Link>
   );
 }

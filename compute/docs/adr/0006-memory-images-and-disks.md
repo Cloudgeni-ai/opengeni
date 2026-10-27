@@ -56,3 +56,36 @@ restore depend on every earlier link.
   names, which a power loss ends.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.
+- A disk's file gives back what its guest frees. Writable drives take the
+  guest's discards, which punch holes in the file, and before every pause
+  (the `sync` request, so also before every save and checkpoint) the guest
+  trims its root file system's free runs of 1 MiB or more. A sleeping
+  sandbox's disk, its archive and its next wake then hold little more than
+  its files use (free runs shorter than 1 MiB stay held), not the most they
+  ever held. Discarded blocks read as zeros,
+  which a memory image never needs back: the guest's file system had freed
+  them. The device's snapshot state keeps the feature, so a VM keeps the
+  drive it booted with across every save and wake: one booted before
+  discards were turned on, or whose image has an older guest that does not
+  trim, keeps holding what it freed until it boots fresh. Templates are
+  rebuilt with the feature, so clones have it. A running VM's disk books
+  its whole length less what it holds alone either way, so trimming changes
+  admission only for disks at rest: space a running guest frees stays booked
+  for it to write again. A guest may free and write at any moment, and the
+  host's free space and its disks cannot be read at one instant, so the
+  agent reads each running disk after the free space, and also books what
+  its VMM wrote from just before the free-space reading until every write
+  it had started by the disk's read has returned (one API request: the VMM
+  answers it on the thread that does its drives' synchronous I/O), with
+  1 MiB per write call for rounding. It also books 256 KiB per file page
+  the VMM dirtied meanwhile: a discard over part of a block makes no write
+  call, but zeroes the rest of the block in its page, and XFS writes a
+  shared block's page to a new copy-on-write extent (128 KiB by default).
+  Pages that write calls dirty count twice, a bound for a window of
+  milliseconds. Space a guest freed before the free-space reading is then
+  booked as its own whatever it writes after, and a disk that cannot be
+  read that way books its whole length for that reading. A pause has the
+  guest trim first and holds the VM, so no reading of its disk comes while
+  it runs: from a pause's start until a reading measures the disk again,
+  the sandbox books its disk's whole length, also for a wake that comes
+  before that reading.

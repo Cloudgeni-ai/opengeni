@@ -49,6 +49,7 @@ import {
   type DocumentTableStyle,
   type DocumentTextStyle,
 } from "./document";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 export {
   DOCX_MEDIA_TYPE,
@@ -2205,13 +2206,6 @@ function denseDataArray(value: unknown, maximum: number, label: string): unknown
 
 async function documentModelDigest(document: Document): Promise<string> {
   return sha256Hex(new TextEncoder().encode(JSON.stringify(document.toJSON())));
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const ownedBytes = new Uint8Array(bytes.byteLength);
-  ownedBytes.set(bytes);
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", ownedBytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function semanticNamespace(value: ImportedDocument): Promise<string> {

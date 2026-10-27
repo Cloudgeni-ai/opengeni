@@ -39,6 +39,7 @@ import {
 import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
@@ -1492,9 +1493,7 @@ describe("P1.4 GATED live-Modal viewer-keep-warm (opt-in)", () => {
         try {
           await box?.delete?.();
         } catch (error) {
-          console.error(
-            `[p14 live teardown] ${error instanceof Error ? error.message : String(error)}`,
-          );
+          console.error(`[p14 live teardown] ${errorMessage(error)}`);
         }
       }
     },

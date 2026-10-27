@@ -37,6 +37,7 @@ import {
   type ComputeHostClaims,
   type ComputeTicketClaims,
 } from "./compute-link-tokens";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The claim store the gateway opens, renews and releases sessions with
  * (`@opengeni/db` openSandboxAgentLink and friends in production). */
@@ -428,7 +429,7 @@ export class ComputeAgentGateway {
         errorCode: "compute_link_power_failed",
         workspaceId: session.claim.workspaceId,
         agentId: session.claim.agentId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     } finally {
       session.powerSyncing = false;

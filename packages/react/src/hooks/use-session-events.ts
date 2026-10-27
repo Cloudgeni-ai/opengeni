@@ -1,5 +1,5 @@
 import {
-  isPresentedSessionToolName,
+  isPresentedSessionToolCall,
   isRetryableStreamError,
   isSessionModelResponsePhase,
   isTransientRequestError,
@@ -34,6 +34,7 @@ import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { isToolOutputPreviewEvent, useToolOutputReads } from "./tool-output-reads";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -1139,10 +1140,7 @@ export function useSessionEvents(
         // Not a read failure: end the stream visibly instead of letting the
         // SDK retry it forever.
         if (!isRetryableStreamError(cause)) throw cause;
-        throw new Error(
-          `rejoining the live session failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          { cause },
-        );
+        throw new Error(`rejoining the live session failed: ${errorMessage(cause)}`, { cause });
       }
       if (!isCurrent()) throw abortError();
       if (typeof result === "object") {
@@ -2076,7 +2074,7 @@ export function useSessionEvents(
         typeof callId !== "string" ||
         resolved.has(callId) ||
         requested.has(callId) ||
-        !isPresentedSessionToolName(payload?.name)
+        !isPresentedSessionToolCall(payload)
       ) {
         continue;
       }
@@ -2920,7 +2918,7 @@ export function isConversationHistoryEvent(
   if (!CONTENT_STEP_TYPES.has(event.type)) return true;
   const payload = event.payload as Record<string, unknown> | null;
   // Presented results stay, with or without a turn (the server keeps them too).
-  if (event.type === "agent.toolCall.created") return isPresentedSessionToolName(payload?.name);
+  if (event.type === "agent.toolCall.created") return isPresentedSessionToolCall(payload);
   if (event.type === "agent.toolCall.output") {
     return typeof payload?.id === "string" && presentedCallIds.has(payload.id);
   }
@@ -3036,14 +3034,14 @@ function isCompatConversationEvent(event: SessionEvent): boolean {
   // Turnless output too: the sandbox terminal reads it itself.
   if (COMPAT_EXCLUDED_TYPES.has(event.type)) return false;
   if (event.type !== "agent.toolCall.created") return true;
-  return isPresentedSessionToolName((event.payload as Record<string, unknown> | null)?.name);
+  return isPresentedSessionToolCall(event.payload);
 }
 
 function notePresentedCalls(events: readonly SessionEvent[], ids: Set<string>): void {
   for (const event of events) {
     if (event.type !== "agent.toolCall.created") continue;
     const payload = event.payload as Record<string, unknown> | null;
-    if (typeof payload?.id === "string" && isPresentedSessionToolName(payload.name)) {
+    if (typeof payload?.id === "string" && isPresentedSessionToolCall(payload)) {
       ids.add(payload.id);
     }
   }

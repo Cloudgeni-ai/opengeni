@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
+  isPresentedSessionToolCall,
   isPresentedSessionToolName,
 } from "@opengeni/contracts/session-history";
 import {
@@ -547,6 +549,77 @@ test("SQL tool-name classification equals isPresentedSessionToolName, named or n
       and (payload ->> 'name') ~ ${previousFilter}
     order by sequence`;
   expect(previous.map((row) => row.sequence)).toEqual(expected);
+}, 120_000);
+
+test("SQL keeps app action calls that open a payment page, like isPresentedSessionToolCall", async () => {
+  const { grant, session } = await seedToolNameSession();
+  const turnId = crypto.randomUUID();
+  const calls: Array<{ name: string; arguments: unknown }> = [
+    {
+      name: "opengeni__admin_action_call",
+      arguments: '{"id":"createBillingCheckout","body":{"amountUsd":20}}',
+    },
+    { name: "admin_action_call", arguments: { id: "createSubscriptionCheckout", body: {} } },
+    {
+      name: "mcp__opengeni__admin_action_call",
+      arguments: '{ "id" : "createBillingPortalSession" }',
+    },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"createSubscriptionPortalSession"}' },
+    // The "METHOD /path" naming, with surrounding whitespace (what the action
+    // runner trims, Unicode included), as text and as an object.
+    { name: "opengeni__admin_action_call", arguments: '{"id":" POST /v1/billing/checkout\\n"}' },
+    {
+      name: "admin_action_call",
+      arguments: {
+        id: `\t${SESSION_EVENT_PRESENTED_APP_ACTIONS.createBillingPortalSession.route} `,
+      },
+    },
+    {
+      name: "opengeni__admin_action_call",
+      arguments: '{"id":"\\u00a0createBillingCheckout\\u3000"}',
+    },
+    // Other actions, other tools and look-alike ids stay steps.
+    { name: "opengeni__admin_action_call", arguments: '{"id":"getBilling"}' },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"createBillingCheckoutX"}' },
+    { name: "opengeni__admin_action_describe", arguments: '{"id":"createBillingCheckout"}' },
+    { name: "opengeni__admin_action_call", arguments: "not json" },
+    { name: "x__admin_action_callX", arguments: '{"id":"createBillingCheckout"}' },
+    // Only the top-level id counts: a nested one, a non-string one, or an array don't.
+    {
+      name: "opengeni__admin_action_call",
+      arguments: '{"id":"getBilling","body":{"id":"createBillingCheckout"}}',
+    },
+    {
+      name: "admin_action_call",
+      arguments: { id: "getBilling", body: { id: "createBillingCheckout" } },
+    },
+    { name: "opengeni__admin_action_call", arguments: '{"id":{"id":"createBillingCheckout"}}' },
+    { name: "opengeni__admin_action_call", arguments: '["createBillingCheckout"]' },
+    { name: "opengeni__admin_action_call", arguments: '"createBillingCheckout"' },
+    // Not whitespace (a zero-width space), a NUL escape, or the path in another case: no match.
+    { name: "opengeni__admin_action_call", arguments: '{"id":"\\u200bcreateBillingCheckout"}' },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"createBillingCheckout\\u0000"}' },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"post /v1/billing/checkout"}' },
+  ];
+  for (const [index, call] of calls.entries()) {
+    await shared.admin`
+      insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+      values (${grant.accountId},${grant.workspaceId},${session.id},${turnId},${index + 1},
+        'agent.toolCall.created',${shared.admin.json({ id: `p${index}`, ...call } as never)})`;
+  }
+  const kept = await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
+    listSessionEvents(tx, grant.workspaceId, session.id, {
+      after: 0,
+      limit: 100,
+      excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+      retainPresentedToolCalls: true,
+    }),
+  );
+  const expected = calls.flatMap((call, index) =>
+    isPresentedSessionToolCall(call) ? [index + 1] : [],
+  );
+  expect(expected).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  expect(kept.map((event) => event.sequence)).toEqual(expected);
 }, 120_000);
 
 test("the application writer fills tool_name under row-level security", async () => {

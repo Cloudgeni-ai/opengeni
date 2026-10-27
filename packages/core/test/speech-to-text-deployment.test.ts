@@ -13,6 +13,7 @@ import {
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
+import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
 
 const azure = {
   recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
@@ -178,6 +179,102 @@ describe("speech-to-text deployment", () => {
       }),
     ).toThrow(/does not offer/u);
   });
+
+  test("the live transcript defaults to ElevenLabs, else a pinned provider's own live model, else none", () => {
+    expect(createSpeechToTextDeployment({ settings: testSettings({}) }).liveDefault).toEqual({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+    });
+    expect(
+      createSpeechToTextDeployment({
+        settings: testSettings({ speechToTextPinned: "elevenlabs/scribe_v2" }),
+      }).liveDefault,
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2_realtime" });
+    expect(
+      createSpeechToTextDeployment({
+        settings: testSettings({ ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" }),
+      }).liveDefault,
+    ).toBeNull();
+    // The named model must stream.
+    expect(() =>
+      createSpeechToTextDeployment({
+        settings: testSettings({ recordingLiveTranscription: "openai/gpt-transcribe" }),
+      }),
+    ).toThrow(/live transcript/u);
+  });
+
+  test("a pinned deployment can stream the live transcript to its Azure OpenAI deployment, signed in with its identity", async () => {
+    const minted: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const deployment = createSpeechToTextDeployment(
+      {
+        settings: testSettings({
+          ...azure,
+          speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+          recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+          voiceInputProviderOrder: "azure-openai",
+          voiceInputAzureEndpoint: "https://ai.example.cognitiveservices.azure.com/",
+          voiceInputAzureDeployment: "gpt-4o-transcribe",
+          azureTenantId: "tenant",
+          azureClientId: "client",
+          azureClientSecret: "secret",
+        }),
+      },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          if (String(url).includes("/oauth2/")) {
+            return Response.json({ access_token: "entra", expires_in: 3_600 });
+          }
+          minted.push({
+            url: String(url),
+            authorization: new Headers(init?.headers).get("authorization"),
+            body: JSON.parse(String(init?.body)),
+          });
+          return Response.json({ value: "ek_live", expires_at: 1_900_000_000 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    expect(deployment.liveDefault).toEqual({
+      providerId: "azure-openai",
+      model: "gpt-4o-transcribe",
+    });
+    // Meetings and dictation stay on the pin.
+    expect(speechToTextModelFor(deployment, "dictation", null)).toEqual(deployment.pinned);
+    expect(
+      await deployment.credentials("azure-openai", { accountId: "a", workspaceId: "w" }),
+    ).toEqual({ credentials: null });
+    const grant = await deployment.registry.get("azure-openai")!.createLiveSession!(
+      { model: "gpt-4o-transcribe", language: "nb-NO" },
+      null,
+    );
+    expect(grant).toEqual({
+      protocol: "openai.realtime",
+      url: "wss://ai.example.cognitiveservices.azure.com/openai/v1/realtime?intent=transcription",
+      token: "ek_live",
+      webrtcUrl: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/calls",
+      audio: { encoding: "pcm_s16le", sampleRate: 24_000 },
+      expiresAt: new Date(1_900_000_000_000),
+    });
+    expect(minted).toEqual([
+      {
+        url: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/client_secrets",
+        authorization: "Bearer entra",
+        body: {
+          expires_after: { anchor: "created_at", seconds: 600 },
+          session: {
+            type: "transcription",
+            audio: {
+              input: {
+                format: { type: "audio/pcm", rate: 24_000 },
+                // Bokmål is transcribed as Norwegian.
+                transcription: { model: "gpt-4o-transcribe", language: "no" },
+                turn_detection: { type: "server_vad", silence_duration_ms: 500 },
+              },
+            },
+          },
+        },
+      },
+    ]);
+  });
 });
 
 describe("the model a workspace's meetings run", () => {
@@ -261,14 +358,19 @@ describe("dictation over the shared providers", () => {
   };
 
   test("a key provider hears dictation with the workspace's key and is never charged", async () => {
-    const heard: Array<{ model: string; key: unknown; scope: unknown }> = [];
+    const heard: Array<{ model: string; key: unknown; scope: unknown; language?: string }> = [];
     const settings = testSettings({ voiceInputProviderOrder: "openai", billingMode: "stripe" });
     const deployment = createSpeechToTextDeployment(
       { settings },
       {
         providers: [
           fakeTextProvider("elevenlabs", "workspace_key", async (input, credentials) => {
-            heard.push({ model: input.model, key: credentials, scope: input.scope });
+            heard.push({
+              model: input.model,
+              key: credentials,
+              scope: input.scope,
+              ...(input.language ? { language: input.language } : {}),
+            });
             return {
               languages: ["en"],
               audioMilliseconds: null,
@@ -308,6 +410,9 @@ describe("dictation over the shared providers", () => {
         },
       },
     ]);
+    // The language a dictation names reaches the provider.
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", language: "nb" });
+    expect(heard.at(-1)?.language).toBe("nb");
   });
 
   test("an unauthorized provider falls back to the next one before any text", async () => {
@@ -376,6 +481,27 @@ describe("dictation over the shared providers", () => {
 });
 
 describe("transcript text", () => {
+  test("OpenAI models hear ISO 639-1 codes, with Bokmål and Nynorsk as Norwegian", () => {
+    expect(
+      ["nb", "nn", "nob", "nor", "no", "en", "eng", "en-US", "sv_SE", "zzzz", "", undefined].map(
+        (tag) => openAiLanguage(tag),
+      ),
+    ).toEqual([
+      "no",
+      "no",
+      "no",
+      "no",
+      "no",
+      "en",
+      "en",
+      "en",
+      "sv",
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   test("a result's text is the model's own, else its words joined", () => {
     expect(
       transcriptText({

@@ -38,6 +38,30 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 log() { printf '[guest-build %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 fail() { echo "guest-build: $*" >&2; exit 1; }
+# fetch NAME SHA256 URL...: prints the path of NAME's verified download.
+# The pinned checksum makes every source as good as the first, so each is
+# tried in turn, and a verified copy is kept in $TOOLS so later builds need
+# no network for it.
+fetch() {
+  local name=$1 sum=$2 url dest=$TOOLS/downloads/$1
+  shift 2
+  if [ -f "$dest" ] && echo "$sum  $dest" | sha256sum -c --quiet >/dev/null 2>&1; then
+    printf '%s\n' "$dest"
+    return 0
+  fi
+  mkdir -p "$TOOLS/downloads"
+  for url in "$@"; do
+    if curl -fsSL --connect-timeout 20 --retry 3 --retry-all-errors -o "$dest.part" "$url" &&
+      echo "$sum  $dest.part" | sha256sum -c --quiet >/dev/null 2>&1; then
+      mv "$dest.part" "$dest"
+      printf '%s\n' "$dest"
+      return 0
+    fi
+    log "no good $name from $url" >&2
+  done
+  rm -f "$dest.part"
+  fail "no source gave $name with its pinned checksum"
+}
 versions=$(printf 'envd %s %s\nbash %s\n' "$ENVD_VERSION" "$ENVD_COMMIT" "$BASH_VERSION_PINNED")
 
 for tool in cargo git curl strip; do
@@ -73,10 +97,11 @@ if ! go_new_enough; then
   if [ ! -x "$TOOLS/go-$GO_VERSION/bin/go" ]; then
     log "fetching Go $GO_VERSION"
     mkdir -p "$TOOLS"
-    curl -fsSL --retry 5 --retry-all-errors -o "$work/go.tar.gz" "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
-    echo "$GO_SHA256  $work/go.tar.gz" | sha256sum -c --quiet || fail "Go's checksum does not match"
+    go_tar=$(fetch "go$GO_VERSION.linux-amd64.tar.gz" "$GO_SHA256" \
+      "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz" \
+      "https://dl.google.com/go/go$GO_VERSION.linux-amd64.tar.gz")
     rm -rf "$TOOLS/go-$GO_VERSION.part" && mkdir "$TOOLS/go-$GO_VERSION.part"
-    tar -xzf "$work/go.tar.gz" -C "$TOOLS/go-$GO_VERSION.part" --strip-components=1
+    tar -xzf "$go_tar" -C "$TOOLS/go-$GO_VERSION.part" --strip-components=1
     mv "$TOOLS/go-$GO_VERSION.part" "$TOOLS/go-$GO_VERSION"
   fi
   PATH=$TOOLS/go-$GO_VERSION/bin:$PATH
@@ -103,9 +128,11 @@ if [ "$version" != "$ENVD_VERSION" ]; then
 fi
 
 log "bash $BASH_VERSION_PINNED"
-curl -fsSL --retry 5 --retry-all-errors -o "$work/bash.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$BASH_VERSION_PINNED.tar.gz"
-echo "$BASH_SHA256  $work/bash.tar.gz" | sha256sum -c --quiet
-tar -xzf "$work/bash.tar.gz" -C "$work"
+bash_tar=$(fetch "bash-$BASH_VERSION_PINNED.tar.gz" "$BASH_SHA256" \
+  "https://ftp.gnu.org/gnu/bash/bash-$BASH_VERSION_PINNED.tar.gz" \
+  "https://ftpmirror.gnu.org/bash/bash-$BASH_VERSION_PINNED.tar.gz" \
+  "https://mirrors.kernel.org/gnu/bash/bash-$BASH_VERSION_PINNED.tar.gz")
+tar -xzf "$bash_tar" -C "$work"
 (cd "$work/bash-$BASH_VERSION_PINNED" &&
   CC=musl-gcc CFLAGS="-Os" ./configure -q --enable-static-link --without-bash-malloc \
     --disable-nls >/dev/null &&

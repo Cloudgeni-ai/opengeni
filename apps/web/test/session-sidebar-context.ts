@@ -189,8 +189,13 @@ export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
 export const pricingSiteId = "00000000-0000-4000-a000-000000000003";
 export const checklistSiteId = "00000000-0000-4000-a000-000000000004";
 /**
+ * When each Site with conversations last got a new version. A Site row's
+ * time is its newest publish; its conversations' messages never move it.
+ */
+const sitePublishedAt = new Map<string, string>();
+/**
  * Sites a listed chat created that have no conversations yet. Each sits in
- * its creating chat's project, ordered by its own latest activity.
+ * its creating chat's project, ordered by its newest publish.
  */
 const createdSites: Array<{
   siteId: string;
@@ -231,6 +236,10 @@ if (sitesScenario) {
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
   );
+  // "Opengeni usage" was last published well before its newest conversation
+  // (2 minutes ago), so it sits below "Slack community connection test".
+  sitePublishedAt.set(usageSiteId, timeBefore(90));
+  sitePublishedAt.set(ipoSiteId, timeBefore(300));
   // "Pricing page copy" (Website redesign) and "Workspace Site planning"
   // (Default) each made a Site nobody has asked anything yet.
   createdSites.push(
@@ -542,7 +551,9 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       current.conversations += 1;
       current.total += 1;
       current.active += active;
-      if (row.updatedAt > current.updatedAt) current.updatedAt = row.updatedAt;
+      // Without a publish the row keeps its first conversation's start.
+      if (!sitePublishedAt.has(origin.siteId) && row.createdAt < current.updatedAt)
+        current.updatedAt = row.createdAt;
       if (row.createdAt > current.createdAt) current.createdAt = row.createdAt;
       continue;
     }
@@ -551,7 +562,8 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       channelId: row.channelId ?? null,
       title: origin.title,
       conversations: 1,
-      updatedAt: row.updatedAt,
+      // The newest publish, never its conversations' messages.
+      updatedAt: sitePublishedAt.get(origin.siteId) ?? row.createdAt,
       createdAt: row.createdAt,
       total: 1,
       attention: 0,

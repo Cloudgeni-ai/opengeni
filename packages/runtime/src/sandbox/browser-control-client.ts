@@ -16,6 +16,7 @@ import {
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -116,6 +117,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -298,6 +300,9 @@ export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
   notice?: string;
+  /** How a headed managed browser shows on its machine as launched: in a
+   * native window, or offscreen with none. An older controller omits it. */
+  display?: "window" | "offscreen";
 };
 
 export type PlacementComputerSessionReference = {
@@ -836,6 +841,7 @@ export class BrowserControlClient {
       observation: BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
+      ...creationDisplay(data.display),
     };
   }
 
@@ -909,6 +915,40 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
     }
+  }
+
+  /**
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+        },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
   }
 
   async endComputerSession(
@@ -2590,8 +2630,9 @@ export class ComputerControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate role stand-ins ignore this parameter.
-            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
+            // Controllers that predate role stand-ins or unconfirmed input
+            // ignore these parameters.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1&${COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER}=1`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -3161,6 +3202,12 @@ function creationNotice(value: unknown): { notice?: string } {
   if (typeof value !== "string") return {};
   const notice = value.replace(/\s+/gu, " ").trim();
   return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
+}
+
+/** The launched display is a report, not authority: anything but a known
+ * value is dropped, as from an older controller that sends none. */
+function creationDisplay(value: unknown): { display?: "window" | "offscreen" } {
+  return value === "window" || value === "offscreen" ? { display: value } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {
@@ -4311,8 +4358,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

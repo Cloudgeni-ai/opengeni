@@ -2,6 +2,12 @@
 //! execution. A delivery is admitted once, and a successor socket can retrieve
 //! its exact reply. Expiry rejects delayed buffered requests, not just cached
 //! replies, so collecting a receipt cannot license another execution.
+//!
+//! An in-place update keeps answering the same subject, so the successor
+//! image takes over the tokens this image issued and never admitted
+//! ([`Registry::hand_over_unused`], [`Registry::adopt`]). The hand-off is
+//! exclusive: a token is either still here, admitted here, or carried, so it
+//! is admitted at most once across both images.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -9,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use opengeni_agent_platform::WorkReservation;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 tokio::task_local! {
@@ -32,6 +39,17 @@ struct Lease {
     issued_at: Duration,
     expires_at: Duration,
     receipt: Option<Arc<Receipt>>,
+}
+
+/// An issued delivery identity no delivery has used yet, carried into the
+/// successor image of an in-place update. Both times are on this boot's
+/// elapsed clock, which the successor (the same process, replaced by `exec`)
+/// shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedLease {
+    pub token: String,
+    pub issued_at: Duration,
+    pub expires_at: Duration,
 }
 
 pub enum Admission {
@@ -97,6 +115,58 @@ impl Registry {
 
     fn collect_at(&mut self, now: Duration) {
         self.entries.retain(|_, entry| entry.expires_at > now);
+    }
+
+    /// Removes and returns every unexpired token no delivery has used, for the
+    /// successor image of an in-place update. This image refuses them from
+    /// now on; a token it already admitted stays here, because only this
+    /// image knows whether that delivery ran.
+    pub fn hand_over_unused(&mut self) -> Vec<CarriedLease> {
+        match Self::now() {
+            Ok(now) => self.hand_over_unused_at(now),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn hand_over_unused_at(&mut self, now: Duration) -> Vec<CarriedLease> {
+        let mut carried = Vec::new();
+        self.entries.retain(|token, lease| {
+            if lease.receipt.is_some() {
+                return true;
+            }
+            if lease.expires_at > now {
+                carried.push(CarriedLease {
+                    token: token.clone(),
+                    issued_at: lease.issued_at,
+                    expires_at: lease.expires_at,
+                });
+            }
+            false
+        });
+        carried
+    }
+
+    /// Takes over the unused tokens a predecessor image handed over, with
+    /// their original issuance and expiry. A token that has expired, was
+    /// issued after this image's present (a clock this image does not share)
+    /// or is already known here is not taken.
+    pub fn adopt(&mut self, leases: Vec<CarriedLease>) {
+        if let Ok(now) = Self::now() {
+            self.adopt_at(leases, now);
+        }
+    }
+
+    fn adopt_at(&mut self, leases: Vec<CarriedLease>, now: Duration) {
+        for lease in leases {
+            if lease.issued_at > now || lease.expires_at <= now {
+                continue;
+            }
+            self.entries.entry(lease.token).or_insert(Lease {
+                issued_at: lease.issued_at,
+                expires_at: lease.expires_at,
+                receipt: None,
+            });
+        }
     }
 
     /// The receiver issues the identity before execution. An absent identity is
@@ -362,6 +432,100 @@ mod tests {
         );
         assert_eq!(registry.issue(Duration::MAX), Err(Rejection::InvalidWindow));
         assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn unused_tokens_move_to_the_successor_image_and_are_admitted_once() {
+        let start = Duration::from_secs(100);
+        let mut predecessor = Registry::default();
+        let used = predecessor
+            .issue_at(Duration::from_secs(240), start)
+            .unwrap();
+        let unused = predecessor
+            .issue_at(Duration::from_secs(240), start)
+            .unwrap();
+        let lapsed = predecessor.issue_at(Duration::from_secs(5), start).unwrap();
+        let now = start + Duration::from_secs(10);
+        assert!(matches!(
+            predecessor.admit_at(&used, b"read", now),
+            Admission::New(_)
+        ));
+
+        let carried = predecessor.hand_over_unused_at(now);
+        assert_eq!(
+            carried,
+            vec![CarriedLease {
+                token: unused.clone(),
+                issued_at: start,
+                expires_at: start + Duration::from_secs(240),
+            }],
+            "only the unused, unexpired token is carried"
+        );
+        // The hand-off is exclusive: this image refuses what it carried and
+        // keeps answering what it admitted.
+        assert!(matches!(
+            predecessor.admit_at(&unused, b"read", now),
+            Admission::Rejected(Rejection::ExpiredOrUnknown)
+        ));
+        assert!(matches!(
+            predecessor.admit_at(&used, b"read", now),
+            Admission::Existing(_)
+        ));
+
+        let mut successor = Registry::default();
+        successor.adopt_at(carried, now);
+        // A prefetched call keeps its timing: the age is measured from the
+        // original issuance, not from the hand-off.
+        let delivery = format!("{unused}.9000.120000");
+        let Admission::New(receipt) = successor.admit_at(&delivery, b"read", now) else {
+            panic!("the carried token is admitted by the successor")
+        };
+        assert_eq!(receipt.issued_at, start + Duration::from_secs(9));
+        assert!(matches!(
+            successor.admit_at(&delivery, b"read", now),
+            Admission::Existing(_)
+        ));
+        // A delivery the predecessor admitted may have run there.
+        assert!(matches!(
+            successor.admit_at(&used, b"read", now),
+            Admission::Rejected(Rejection::ExpiredOrUnknown)
+        ));
+        assert!(matches!(
+            successor.admit_at(&lapsed, b"read", now),
+            Admission::Rejected(Rejection::ExpiredOrUnknown)
+        ));
+    }
+
+    #[test]
+    fn a_successor_refuses_tokens_it_cannot_place_on_its_clock() {
+        let now = Duration::from_secs(100);
+        let mut successor = Registry::default();
+        let known = successor.issue_at(Duration::from_secs(60), now).unwrap();
+        successor.adopt_at(
+            vec![
+                CarriedLease {
+                    token: "from-the-future".into(),
+                    issued_at: now + Duration::from_secs(1),
+                    expires_at: now + Duration::from_secs(120),
+                },
+                CarriedLease {
+                    token: "expired".into(),
+                    issued_at: Duration::from_secs(40),
+                    expires_at: now,
+                },
+                CarriedLease {
+                    token: known.clone(),
+                    issued_at: Duration::ZERO,
+                    expires_at: now + Duration::from_secs(600),
+                },
+            ],
+            now,
+        );
+        assert!(!successor.entries.contains_key("from-the-future"));
+        assert!(!successor.entries.contains_key("expired"));
+        let kept = successor.entries.get(&known).unwrap();
+        assert_eq!(kept.issued_at, now, "a known token keeps its own lease");
+        assert_eq!(kept.expires_at, now + Duration::from_secs(60));
     }
 
     #[test]

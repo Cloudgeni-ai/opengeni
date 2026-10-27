@@ -2,7 +2,7 @@ import { storedAnalyticsConsent } from "./analytics-consent";
 import type { AuthSession } from "../types";
 
 const KEY = "opengeni.analyticsLoginAttempt";
-type Method = "email" | "google" | "github";
+type Method = "email" | "google" | "github" | "passkey";
 type Receipt = { userId: string; method: Method; eventId: string };
 let pending: Receipt | null = null;
 

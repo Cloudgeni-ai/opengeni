@@ -96,6 +96,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     ? (machines.machines.find((m) => m.sandboxId === detailId) ?? null)
     : null;
   const selectedEnrollmentId = selectedMachine?.enrollmentId ?? null;
+  // Your own Only me machine is yours to change; others need machine management.
+  const canChangeSelected = selectedMachine ? machines.canManageMachine(selectedMachine) : false;
   const subjectId = accessContext?.subjectId ?? null;
   const workspaceAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
   const audienceMachine =
@@ -271,7 +273,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             {...(machines.canManage && subjectId
               ? { onChangeAudience: () => setAudienceOpen(true) }
               : {})}
-            {...(machines.canUpdateAgent
+            {...(machines.canUpdateAgent && canChangeSelected
               ? {
                   onUpdateAgent: requestAgentUpdate,
                   updatingAgent:
@@ -279,7 +281,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                     machines.updatingEnrollmentId === selectedMachine.enrollmentId,
                 }
               : {})}
-            {...(machines.canRemove
+            {...(machines.canRemove && canChangeSelected
               ? {
                   onRemove: (machine: MachineView) => {
                     machines.clearMutationError();
@@ -289,7 +291,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                   },
                 }
               : {})}
-            {...(machines.canUpdateOperationPolicy
+            {...(machines.canUpdateOperationPolicy && canChangeSelected
               ? {
                   onUpdateOperationPolicy: async (machine, request) => {
                     if (!machine.enrollmentId) return;
@@ -321,10 +323,11 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
               onOpenDetail={(m) => setDetailId(m.sandboxId)}
               now={now}
               onRefresh={() => void machines.refresh()}
-              onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
+              onEnroll={machines.canConnect ? () => setEnrollOpen(true) : undefined}
               {...(machines.canUpdateAgent
                 ? {
                     onUpdateAgent: requestAgentUpdate,
+                    canUpdateMachine: machines.canManageMachine,
                     updatingEnrollmentId: machines.updatingEnrollmentId,
                   }
                 : {})}
@@ -354,7 +357,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         </Notice>
       ) : null}
 
-      {machines.canManage ? (
+      {machines.canConnect ? (
         <ConnectMachineDialog
           open={enrollOpen}
           onOpenChange={setEnrollOpen}
@@ -364,11 +367,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           machinesLoading={machines.loading}
           machinesError={machines.error}
           personalWorkspace={personalWorkspace}
+          canShareWithWorkspace={machines.canManage}
         />
       ) : null}
 
       <ConfirmDialog
-        open={removeTarget !== null && machines.canManage}
+        open={removeTarget !== null && machines.canManageMachine(removeTarget)}
         onOpenChange={(open) => {
           if (!open) {
             setRemoveTarget(null);
@@ -388,7 +392,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         }
         onConfirm={async () => {
           const target = removeTarget;
-          if (!target?.enrollmentId || !machines.canManage) return false;
+          if (!target?.enrollmentId || !machines.canManageMachine(target)) return false;
           if (removeBlocked?.code === "active_route" && !machines.canControl) return true;
           const sessionsToMove =
             removeBlocked?.code === "active_route" ? removeBlocked.dependentSessions : [];

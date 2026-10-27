@@ -166,6 +166,11 @@ export async function loadVerifiedAttemptToolCatalogTx(
     byteLength <= VERIFIED_CATALOG_CACHE_MAX_BYTES
   ) {
     deepFreeze(catalog);
+    // Another read may have filled this key while hydration was in flight.
+    // Count only the retained entry, and make this completed fill most recent.
+    const previous = verifiedCatalogs.get(key);
+    if (previous) verifiedCatalogBytes -= previous.byteLength;
+    verifiedCatalogs.delete(key);
     verifiedCatalogs.set(key, { catalog, byteLength });
     verifiedCatalogBytes += byteLength;
     for (const [oldestKey, oldest] of verifiedCatalogs) {

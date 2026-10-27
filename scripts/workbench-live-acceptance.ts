@@ -15,6 +15,7 @@ import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
 import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
+import { isRecord } from "@opengeni/contracts/values";
 
 const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
@@ -2933,10 +2934,6 @@ function safePath(value: string): string {
 
 function sha256(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 if (import.meta.main) await main();

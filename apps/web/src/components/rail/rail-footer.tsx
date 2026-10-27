@@ -3,6 +3,7 @@
 // menu; the collapse toggle lives at the top of the rail with the wordmark.
 // Collapsed, the avatar and the gear stack.
 import { LockIcon, LogOutIcon, UserIcon } from "lucide-react";
+import { isPasskeyOnlyAccountEmail } from "@opengeni/contracts/passkey-only-account";
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
@@ -52,12 +53,18 @@ export function RailFooter() {
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
+  // An account created with only a passkey has no email address to show.
+  const sessionEmail = context.authSession?.user.email;
+  const passkeyOnly = isPasskeyOnlyAccountEmail(sessionEmail);
+  const shownEmail = passkeyOnly ? undefined : sessionEmail;
   const displayName =
-    context.authSession?.user.name ??
-    context.authSession?.user.email ??
-    context.accessContext.subjectLabel ??
+    context.authSession?.user.name ||
+    shownEmail ||
+    context.accessContext.subjectLabel ||
     context.accessContext.subjectId;
-  const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
+  const secondary = passkeyOnly
+    ? "Signs in with a passkey"
+    : (shownEmail ?? context.accessContext.subjectId);
   const image = context.authSession?.user.image ?? undefined;
   const canSendFeedback = hasWorkspacePermission(
     context.accessContext,

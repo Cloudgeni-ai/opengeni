@@ -142,6 +142,8 @@ export function activeSessionHistoryCompactionPressure(
 export type ActiveSessionHistoryRow = {
   id: string;
   position: number;
+  /** The turn that wrote this row; null for rows a compaction rewrote without one. */
+  turnId: string | null;
   item: Record<string, unknown>;
   providerArtifactInvalidatedAt: Date | null;
 };
@@ -615,6 +617,7 @@ async function pageActiveHistory(
     const page: Array<{
       id: string;
       position: number;
+      turnId: string | null;
       item: Record<string, unknown>;
       elided: boolean;
       itemCodecVersion: number | null;
@@ -623,6 +626,7 @@ async function pageActiveHistory(
       .select({
         id: history.id,
         position: history.position,
+        turnId: history.turnId,
         item,
         elided,
         itemCodecVersion: history.itemCodecVersion,

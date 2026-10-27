@@ -221,7 +221,10 @@ impl Images {
     /// The network `record` was given, if any.
     pub fn link(record: &Record) -> Option<Link> {
         let Allocation { uid, gid, link, .. } = record.allocation;
-        link.map(|addresses| Link::new(record.host(), record.ordinal, addresses, uid, gid))
+        link.map(|addresses| {
+            Link::new(record.host(), record.ordinal, addresses, uid, gid)
+                .reaching(&record.config.reach)
+        })
     }
 }
 

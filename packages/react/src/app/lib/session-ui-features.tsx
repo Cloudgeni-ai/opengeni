@@ -29,6 +29,12 @@ export type SessionUiFeatures = Readonly<{
    * Slack, GitHub or Linear, schedule a brief, and so on).
    */
   starters: boolean;
+  /**
+   * The "Add credits" button on the new-chat page, for people who manage
+   * billing where Opengeni bills by card. Off, the credits notice still shows
+   * when the chosen model's credits run out.
+   */
+  addCredits: boolean;
 }>;
 
 export type SessionUiPreset = "app" | "companion" | "embed";
@@ -42,10 +48,11 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: true,
     brand: true,
     starters: true,
+    addCredits: true,
   },
   /**
-   * First-party side panes (the Excel add-in): everything but admin access and
-   * page-wide keyboard shortcuts.
+   * First-party side panes (the Excel add-in): everything but admin access,
+   * page-wide keyboard shortcuts and the new-chat page's "Add credits" button.
    */
   companion: {
     chatList: true,
@@ -54,6 +61,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: true,
     starters: true,
+    addCredits: false,
   },
   /**
    * A customer product page (the default): the chat list, chats and composer,
@@ -67,6 +75,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: false,
     starters: false,
+    addCredits: true,
   },
 };
 

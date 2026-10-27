@@ -10,6 +10,22 @@ import { GitHubAuth, GitHubReader, GitHubMutations, ProviderError } from "./gith
 import { ObservationJournal } from "./journal";
 import { assertSha, config, type Config, type Observation } from "./model";
 
+const OWNER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * Durable lease owner for this process. A supervisor that never runs two
+ * children at once passes one BATCHER_OWNER_ID per control generation so each
+ * sequential child can renew its predecessor's lease instead of waiting it out.
+ * Every write still uses the state-ref CAS and epoch fence. Without the
+ * variable each process keeps its own random owner.
+ */
+export function controllerOwner(env: Record<string, string | undefined>): string {
+  const supplied = env.BATCHER_OWNER_ID?.trim().toLowerCase();
+  if (!supplied) return randomUUID();
+  if (!OWNER_ID.test(supplied)) throw new Error("BATCHER_OWNER_ID must be a UUID");
+  return supplied;
+}
+
 export async function recoverLocalMissing(
   journal: ObservationJournal,
   observation: Observation,
@@ -77,7 +93,7 @@ export async function main(
   await git.init();
   const github = new GitHubReader(settings, auth);
   const reader = new LiveReader(github, git, settings);
-  const owner = randomUUID();
+  const owner = controllerOwner(env);
   const writer = new AtomicGitWriter(
     git,
     `https://github.com/${settings.repository}.git`,

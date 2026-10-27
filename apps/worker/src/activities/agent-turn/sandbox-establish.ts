@@ -87,6 +87,7 @@ import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
@@ -838,7 +839,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                 },
               },
             ],
@@ -1280,7 +1281,7 @@ export async function bindLazySandboxProvisioner(
                 type: "sandbox.operation.failed",
                 payload: {
                   name: "sandbox.provision",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   provisionId: settlement.provisionId,
                   internalAttempts: settlement.internalAttempts,
                   failureCategory: failure.category,

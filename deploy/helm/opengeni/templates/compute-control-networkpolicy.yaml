@@ -38,6 +38,21 @@ spec:
     - ports:
         - protocol: TCP
           port: 8443
+    {{- if .Values.computeControl.e2b.enabled }}
+    # The E2B front door admits the release's runner pools, and the peers
+    # the operator names.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: compute-runners
+        {{- with .Values.computeControl.e2b.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ int64 .Values.computeControl.e2b.port }}
+    {{- end }}
     {{- if and (.Values.computeControl.metrics).port .Values.networkPolicy.monitoring }}
     # The metrics listener admits only the scraper.
     - from:

@@ -121,13 +121,15 @@ const laterCapabilities = new Set([
   "target-schema runtime capability preview_connected_machine_audience_change(uuid, uuid, uuid, text, text, boolean) is missing or ambiguous",
   "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
   "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
+  "target-schema runtime capability mutate_managed_passkey(text, text, jsonb) is missing or ambiguous",
 ]);
 
 /**
  * A fixture stopped before 0761, 0768, 0769, the machine-audience migration,
- * 0978 and 0984 has no exhausted-schedule outbox, predicate, visibility
- * preview, foreign authority inventory, audience change, machine-owner lookup
- * or connected-command re-arm, so current readiness reports them missing.
+ * 0978, 0984 and 0998 has no exhausted-schedule outbox, predicate, visibility
+ * preview, foreign authority inventory, audience change, machine-owner lookup,
+ * connected-command re-arm or managed passkey mutation, so current readiness
+ * reports them missing.
  * Drop exactly those messages (and only that table from a combined
  * "... tables are missing" line).
  */

@@ -1,6 +1,7 @@
 // Preview-only wiring. SessionHeader and its styles are real; the sessions are sample data.
 // Serve with test/session-sidebar-preview.vite.config.ts.
 import { createRoot } from "react-dom/client";
+import { MenuIcon } from "lucide-react";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -18,6 +19,8 @@ import "../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);
 const previewTheme = params.get("theme");
+// `keyAuth=1` adds the access-key control, the most crowded phone row.
+const keyAuthRequired = params.get("keyAuth") === "1";
 if (previewTheme === "dark" || previewTheme === "light") {
   document.documentElement.classList.toggle("dark", previewTheme === "dark");
   document.documentElement.dataset.ogTheme = previewTheme;
@@ -226,6 +229,24 @@ const states: {
     } as Session,
   },
   {
+    label: "Pinned chat from a Site, with an automation",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004009",
+      title: "Customer intake",
+      pinned: true,
+      metadata: {
+        _opengeniSiteOrigin: {
+          siteId: "22222222-2222-4222-8222-222222222222",
+          title: "Intake portal",
+        },
+      },
+      hasSchedules: true,
+      waitingForEvents: true,
+      automationWait: { nextRunAt: null, event: mail, events: [mail], automations: 1 },
+    } as Session,
+  },
+  {
     label: "Only paused or past one-time schedules",
     session: {
       ...base,
@@ -275,6 +296,18 @@ const root = createRootRoute({
           <section
             key={session.id}
             data-header-state={label}
+            // The parts this header has, so the check can find each one in
+            // the row or in the "…" menu.
+            data-header-parts={[
+              "panel",
+              "access",
+              "fullAccess",
+              session.hasSchedules ? "automations" : null,
+              session.metadata?._opengeniSiteOrigin ? "site" : null,
+              keyAuthRequired ? "accessKey" : null,
+            ]
+              .filter(Boolean)
+              .join(" ")}
             className={`rounded-lg border border-border bg-surface ${frame ?? ""}`}
           >
             <p className="border-b border-border px-4 py-2 text-xs text-fg-muted">{label}</p>
@@ -283,7 +316,17 @@ const root = createRootRoute({
               ancestors={ancestors}
               connectionState="live"
               status="idle"
-              keyAuthRequired={false}
+              keyAuthRequired={keyAuthRequired}
+              leading={
+                // Phones open the sessions list from the header, as the app does.
+                <button
+                  type="button"
+                  aria-label="Open navigation"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded-md sm:hidden"
+                >
+                  <MenuIcon aria-hidden className="size-4" />
+                </button>
+              }
               onForgetAccessKey={() => undefined}
               inspectorOpen={false}
               onToggleInspector={() => undefined}

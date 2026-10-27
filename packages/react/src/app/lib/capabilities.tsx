@@ -9,6 +9,7 @@ import type {
   CreateCapabilityInput,
   SocialConnection,
 } from "../types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -196,7 +197,7 @@ export function capabilityErrorToast(
  * into the credential form instead of showing the raw API string.
  */
 export function isMissingCredentialsError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return /requires credentials/i.test(message) && /headers|credential|connection/i.test(message);
 }
 

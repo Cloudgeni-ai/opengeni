@@ -33,6 +33,14 @@ not cookies, IndexedDB, service-worker storage, downloads, or total profile size
 Chromium manages eviction; this is not a hard filesystem quota and does not
 retroactively clean running profiles. Attached human browsers are unchanged.
 
+On Linux, managed Chrome stderr drains through a FIFO and retains its final
+65,536 diagnostic bytes. Browserd prefers `gnutail` on PATH when installed,
+then uses `tail` on PATH or the existing `/usr/bin/tail` / `/bin/tail`
+fallbacks. The selected implementation must correctly bound pipe/FIFO input:
+uutils coreutils 0.8.0 can exceed that cap; hosts using it need a working GNU
+`gnutail` on PATH (or a corrected `tail`). Browserd does not install tools or
+probe their versions at launch.
+
 One `BrowserSupervisor` hosts many independently fenced `BrowserSession`s on a
 placement. Each session has its own browser/profile/socket directories, driver,
 target queues, and SQLite WAL operation journal. A prepared receipt is durable

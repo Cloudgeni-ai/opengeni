@@ -248,3 +248,145 @@ test("a tab opened before an operator paused sign-ups switches to the paused vie
     host.remove();
   }
 });
+
+function withPasskeyBrowser<T>(run: () => Promise<T>): Promise<T> {
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const previous = scope.PublicKeyCredential;
+  scope.PublicKeyCredential = function PublicKeyCredential() {};
+  if (!navigator.credentials) {
+    Object.defineProperty(navigator, "credentials", {
+      configurable: true,
+      value: { get: async () => null, create: async () => null },
+    });
+  }
+  return run().finally(() => {
+    scope.PublicKeyCredential = previous;
+  });
+}
+
+test("signs in with a passkey and explains a dismissed prompt without blaming the person", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const calls: Array<{ mode: string; input: unknown }> = [];
+    let dismiss = true;
+    const button = (name: string) =>
+      Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            passkeySignIn
+            onPasskeySubmit={async (mode, input) => {
+              calls.push({ mode, input });
+              if (dismiss) throw new DOMException("The operation was cancelled", "NotAllowedError");
+            }}
+            onSubmit={async () => {
+              throw new Error("must not use a password");
+            }}
+          />,
+        ),
+      );
+      await act(async () => button("Sign in with a passkey")!.click());
+      expect(calls).toEqual([{ mode: "signin", input: undefined }]);
+      expect(host.textContent).toContain("No passkey was used.");
+      dismiss = false;
+      await act(async () => button("Sign in with a passkey")!.click());
+      expect(calls).toHaveLength(2);
+      expect(host.textContent).not.toContain("No passkey was used.");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));
+
+test("creates an account with only a name and a passkey, and offers sign-in for a known passkey", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const calls: Array<{ mode: string; input: unknown }> = [];
+    const button = (name: string) =>
+      Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === name);
+    const submit = () =>
+      act(async () =>
+        host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            initialMode="signup"
+            passkeySignIn
+            passkeySignUp
+            onPasskeySubmit={async (mode, input) => {
+              calls.push({ mode, input });
+              throw new AuthApiError(
+                409,
+                "PASSKEY_ALREADY_REGISTERED",
+                null,
+                "This passkey already belongs to an account; sign in with it",
+              );
+            }}
+            onSubmit={async () => {
+              throw new Error("must not use email");
+            }}
+          />,
+        ),
+      );
+      expect(host.querySelector("#managed-auth-email")).not.toBeNull();
+      await act(async () => button("Create account with a passkey")!.click());
+      // Name only: no email address or password is asked for.
+      expect(host.querySelector("#managed-auth-email")).toBeNull();
+      expect(host.querySelector('input[type="password"]')).toBeNull();
+      expect(host.querySelector("#managed-auth-name")).not.toBeNull();
+      await submit();
+      expect(calls).toHaveLength(0);
+      expect(host.textContent).toContain("Enter your name.");
+      const input = host.querySelector<HTMLInputElement>("#managed-auth-name")!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({ target: { value: "  Ada Lovelace  " } });
+      });
+      await submit();
+      expect(calls).toEqual([{ mode: "signup", input: { name: "Ada Lovelace" } }]);
+      expect(host.textContent).toContain("This passkey already belongs to an account here.");
+      await act(async () => button("Sign in")!.click());
+      expect(button("Sign in with a passkey")).toBeDefined();
+      await act(async () => button("Sign up")!.click());
+      await act(async () => button("Create account with a passkey")!.click());
+      await act(async () => button("Use email instead")!.click());
+      expect(host.querySelector("#managed-auth-email")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));
+
+test("offers no passkeys where the deployment or the browser can't use them", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          passkeySignIn
+          passkeySignUp
+          onPasskeySubmit={async () => undefined}
+          onSubmit={async () => undefined}
+        />,
+      ),
+    );
+    // This test browser has no WebAuthn.
+    expect(host.textContent).not.toContain("passkey");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

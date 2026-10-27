@@ -261,6 +261,7 @@ function SessionsIndexRouteContent({
   const api = useAppApi();
   const page = usePage();
   const starters = useSessionUiFeature("starters");
+  const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
   const chatList = useSessionUiFeature("chatList");
@@ -1631,7 +1632,8 @@ function SessionsIndexRouteContent({
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
-          {context.clientConfig.billingMode === "stripe" &&
+          {addCredits &&
+          context.clientConfig.billingMode === "stripe" &&
           workspace?.accountId &&
           hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
             <>
@@ -1923,6 +1925,13 @@ function SessionsIndexRouteContent({
                   models={voiceSelection.models}
                   selectedModel={voiceSelection.selectedModel}
                   onSelectModel={voiceSelection.selectModel}
+                  // While the chat models load, "choose supported model settings"
+                  // is not a real blocker yet.
+                  loadState={
+                    voiceSelection.loadState === "ready" && modelCatalog.loading
+                      ? "loading"
+                      : voiceSelection.loadState
+                  }
                   modelMenu="split"
                   disabled={
                     busy ||

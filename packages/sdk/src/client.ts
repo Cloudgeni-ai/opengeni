@@ -837,6 +837,7 @@ import {
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 function sessionListQuery(options: {
   siteAccessId?: string;
@@ -1229,6 +1230,8 @@ export type TranscribeAudioInput = {
   audio: Blob | File | Uint8Array;
   mimeType: string;
   durationSeconds?: number | undefined;
+  /** ISO 639-1 or 639-3 code of what is spoken ("nb", "en"); omitted means detect. */
+  language?: string | undefined;
   signal?: AbortSignal | undefined;
 };
 
@@ -1395,6 +1398,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
+    if (input.language) form.append("language", input.language);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
@@ -11287,7 +11291,7 @@ export class OpenGeniClient {
    */
   async getBillingCheckout(
     checkoutSessionId: string,
-    options: { accountId?: string } = {},
+    options: { accountId?: string; signal?: AbortSignal } = {},
   ): Promise<BillingCheckoutStatus> {
     return await this.requestJson(
       "GET",
@@ -11296,6 +11300,7 @@ export class OpenGeniClient {
       {
         ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 
@@ -12407,12 +12412,6 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
         ? new Uint8Array(await body.arrayBuffer())
         : new Uint8Array(body);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const owned = Uint8Array.from(bytes);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

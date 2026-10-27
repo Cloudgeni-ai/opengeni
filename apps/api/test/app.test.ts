@@ -61,6 +61,7 @@ import {
   type CapabilityInstallation,
   type SessionEvent,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API helpers", () => {
   test("rejects embedded query setup transport without the edge-sanitization proof", () => {
@@ -1274,7 +1275,10 @@ describe("API helpers", () => {
     expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
     expect(params.cancel_url).toContain("checkout=cancelled");
     expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
-      "http://127.0.0.1:3000/billing?checkout=success",
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=success",
+    );
+    expect(stripeCheckoutSessionCreateParams(base).cancel_url).toBe(
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=cancelled",
     );
     expect(() =>
       stripeCheckoutSessionCreateParams({
@@ -1686,7 +1690,7 @@ describe("API helpers", () => {
         );
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
 
     expect(message).toContain("the workspace could not initialize configured.example");

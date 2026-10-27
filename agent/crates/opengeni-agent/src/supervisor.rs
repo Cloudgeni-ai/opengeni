@@ -1016,11 +1016,58 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// The handover a finished update run must carry into its successor.
+    /// Every link has stopped serving by then, so this image also hands the
+    /// successor the control delivery tokens no delivery used: it answers the
+    /// same subjects, and Opengeni keeps calling with the tokens it holds.
     #[cfg(unix)]
     pub fn take_pending_handover(&self) -> Option<PendingHandover> {
-        self.handover
-            .as_ref()
-            .and_then(|handover| handover.pending.lock().expect("pending handover").take())
+        let handover = self.handover.as_ref()?;
+        let pending = handover.pending.lock().expect("pending handover").take()?;
+        let leases = self.hand_over_reply_leases();
+        if !leases.is_empty() {
+            if let Err(error) = crate::handover::carry_reply_leases(&handover.manifest, leases) {
+                // Opengeni's next call with one of them gets an unknown
+                // outcome, as after a restart.
+                warn!(%error, "could not hand control delivery tokens to the updated agent");
+            }
+        }
+        Some(pending)
+    }
+
+    /// Removes every reply scope's unused tokens. This image refuses them from
+    /// now on, so each is admitted at most once across both images.
+    #[cfg(unix)]
+    fn hand_over_reply_leases(&self) -> Vec<crate::handover::CarriedReplyLeases> {
+        self.reply_journals
+            .lock()
+            .expect("reply scopes")
+            .iter()
+            .filter_map(|((api_url, connection_id, subject_prefix), journal)| {
+                let leases = journal.lock().expect("control receipts").hand_over_unused();
+                (!leases.is_empty()).then(|| crate::handover::CarriedReplyLeases {
+                    api_url: api_url.clone(),
+                    connection_id: connection_id.clone(),
+                    subject_prefix: subject_prefix.clone(),
+                    leases,
+                })
+            })
+            .collect()
+    }
+
+    /// Takes over the control delivery tokens a predecessor image handed
+    /// over, in the reply scope each link with that exact subject joins. Call
+    /// before running.
+    #[cfg(unix)]
+    pub fn restore_reply_leases(&self, carried: Vec<crate::handover::CarriedReplyLeases>) {
+        let mut journals = self.reply_journals.lock().expect("reply scopes");
+        for scope in carried {
+            journals
+                .entry((scope.api_url, scope.connection_id, scope.subject_prefix))
+                .or_default()
+                .lock()
+                .expect("control receipts")
+                .adopt(scope.leases);
+        }
     }
 
     /// Keeps the gone-op markers a predecessor image carried, so a start it
@@ -1920,20 +1967,6 @@ impl<P: Platform + 'static> Supervisor<P> {
                     let _ = client.flush().await;
                 }));
             }
-            Route::LegacyGit(git) => {
-                let resource_policy = request.resource_policy;
-                self.spawn_git_adapter(
-                    link,
-                    client,
-                    &request,
-                    git,
-                    resource_policy,
-                    reply,
-                    label,
-                    reservation.expect("work reservation"),
-                    rpc_tasks,
-                );
-            }
             Route::Work(class) => {
                 let client = client.clone();
                 let platform = link.platform.clone();
@@ -2423,47 +2456,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         self.update_drain.accept_update(operation_id)
     }
 
-    /// Spawns a request/reply Git op as an engine job on its own task. The
-    /// adapter path fences epochs before the engine, exactly like the dispatch
-    /// table does for every other op.
-    #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
-    fn spawn_git_adapter(
-        &self,
-        link: &WorkspaceLink<P>,
-        client: &async_nats::Client,
-        request: &ControlRequest,
-        git: v1::GitRequest,
-        resource_policy: Option<v1::OperationResourcePolicy>,
-        reply: async_nats::Subject,
-        label: &'static str,
-        reservation: WorkReservation,
-        rpc_tasks: &mut JoinSet<()>,
-    ) {
-        let max_payload = client.server_info().max_payload;
-        let client = client.clone();
-        let platform = link.platform.clone();
-        let engine = self.engine.clone();
-        let scope = link.connection_id.clone();
-        let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
-        let request_id = request.request_id.clone();
-        spawn_admitted_rpc(rpc_tasks, reservation, async move {
-            let response = if request_epoch != 0 && request_epoch < held_epoch {
-                dispatch::fenced_reply(request_id, request_epoch, held_epoch)
-            } else {
-                crate::legacy::serve_git_scoped_with_policy(
-                    &engine,
-                    &platform,
-                    &scope,
-                    request_id,
-                    git,
-                    resource_policy,
-                )
-                .await
-            };
-            publish_response(&client, reply, response, label, max_payload).await;
-        });
-    }
-
     /// Spawns an `OpStart` onto its own task (admission may park) with the
     /// frame sink bound to the op's subject on the link's CURRENT bulk lane
     /// (`None` between generations — frames drop and OpAttach replay heals;
@@ -2912,8 +2904,6 @@ impl<P: Platform + 'static> Supervisor<P> {
 enum Route {
     /// Answered inline on the serve loop — liveness never enters admission.
     Liveness,
-    /// Runs as an engine job through the legacy git adapter.
-    LegacyGit(v1::GitRequest),
     /// Starts an op-stream job (admission may park; runs on its own task).
     OpStart(v1::OpStart),
     /// Op-control (cancel/query/attach): engine state + routing only — served
@@ -2927,14 +2917,12 @@ enum Route {
     Work(JobClass),
 }
 
-/// Classifies a decoded RPC. Request/reply Git is heavy (long-running and
-/// resource-owning); everything else platform-backed is light; `ping` bypasses
-/// admission entirely (liveness ⊥ work — invariant #4).
+/// Classifies a decoded RPC. Request/reply platform work is light; `ping`
+/// bypasses admission entirely (liveness ⊥ work — invariant #4).
 fn classify(request: &ControlRequest) -> Route {
     use v1::control_request::Op;
     match &request.op {
         Some(Op::Ping(_)) => Route::Liveness,
-        Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::OpRelease(_)) => {
             Route::OpControl
@@ -3275,7 +3263,6 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::FsMove(_)) => "fs_move",
         Some(Op::FsStat(_)) => "fs_stat",
         Some(Op::FsRemove(_)) => "fs_remove",
-        Some(Op::Git(_)) => "git",
         Some(Op::PtyOpen(_)) => "pty_open",
         Some(Op::PtyWrite(_)) => "pty_write",
         Some(Op::PtyResize(_)) => "pty_resize",
@@ -3404,6 +3391,9 @@ async fn hand_over_for_update<P: Platform>(
             .into_iter()
             .map(crate::handover::CarriedMarker::from)
             .collect(),
+        // Added once every link has stopped serving: see
+        // `Supervisor::take_pending_handover`.
+        reply_leases: Vec::new(),
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
@@ -5128,7 +5118,6 @@ mod tests {
         let cases = [
             Op::Ping(v1::PingRequest::default()),
             Op::FsRead(v1::FsReadRequest::default()),
-            Op::Git(v1::GitRequest::default()),
             Op::Metrics(v1::MetricsRequest::default()),
         ];
         for op in cases {
@@ -5145,7 +5134,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_routes_liveness_git_and_classed_work() {
+    fn classify_routes_liveness_and_classed_work() {
         use v1::control_request::Op;
 
         let request = |op| ControlRequest {
@@ -5162,11 +5151,7 @@ mod tests {
             }))),
             Route::Liveness
         ));
-        // Git runs as an engine job through its adapter; fs ops are light.
-        assert!(matches!(
-            classify(&request(Op::Git(v1::GitRequest::default()))),
-            Route::LegacyGit(_)
-        ));
+        // Fs ops are light.
         assert!(matches!(
             classify(&request(Op::FsRead(v1::FsReadRequest::default()))),
             Route::Work(JobClass::Light)
@@ -7460,6 +7445,8 @@ mod tests {
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
                 supervisor.restore_lost_markers(manifest.lost_markers);
+                assert_eq!(manifest.reply_leases.len(), 1, "unused tokens handed over");
+                supervisor.restore_reply_leases(manifest.reply_leases);
                 supervisor.adopt_handed_over(&platform, manifest.ops);
                 let owned = supervisor.update_drain.snapshot().unwrap();
                 assert_eq!(
@@ -7654,6 +7641,50 @@ mod tests {
                 break;
             }
         }
+        // Opengeni prefetches delivery tokens from the predecessor and uses
+        // one of them before the update.
+        let replay_ping = |request_id: &str| ControlRequest {
+            request_id: request_id.into(),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 0,
+            })),
+            ..Default::default()
+        };
+        let lease_request = ControlRequest {
+            request_id: "handover-lease".into(),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 240_000,
+            })),
+            ..Default::default()
+        };
+        let leased = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(link.rpc_subject(), lease_request.encode_to_vec().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(leased.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
+        let delivery = |token: &str| format!("{}.replay.{token}", link.rpc_subject());
+        let used = delivery(&lease.control_replay_tokens[0]);
+        let before = replay_ping("used-before-update").encode_to_vec();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(used.clone(), before.clone().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(reply.error.is_none(), "{reply:?}");
         std::fs::write(directory.path().join("hand-over-now"), b"").unwrap();
         let online = directory.path().join("successor-online");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -7688,6 +7719,40 @@ mod tests {
             })
             .await,
             "successor online"
+        );
+        // The successor admits a token the predecessor issued and no
+        // delivery used, so a call right after the update just works...
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(
+                delivery(&lease.control_replay_tokens[1]),
+                replay_ping("first-after-update").encode_to_vec().into(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(
+            reply.error.is_none(),
+            "a carried token is admitted: {reply:?}"
+        );
+        // ...while one the predecessor admitted stays refused: only that
+        // image knew whether its delivery ran.
+        let reply =
+            tokio::time::timeout(Duration::from_secs(10), client.request(used, before.into()))
+                .await
+                .unwrap()
+                .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert_eq!(
+            reply
+                .error
+                .as_ref()
+                .and_then(|error| error.detail.get("failure_code"))
+                .map(String::as_str),
+            Some("control_delivery_expired"),
+            "{reply:?}"
         );
         // As after any reconnect, the server re-attaches the op; the
         // continued job replays what it retained (seq-idempotent).

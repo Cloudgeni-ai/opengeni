@@ -21,6 +21,7 @@ import {
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
+import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   decideVoiceDeployment,
@@ -990,6 +991,35 @@ export async function signInEmail(input: {
   });
 }
 
+/** Signs in with a passkey the browser offers; leaves the session cookie set. */
+export async function signInPasskey(): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-in/options", {
+    method: "POST",
+    body: "{}",
+  });
+  const response = await askForPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-in", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
+/** Creates an account with only a name and a new passkey, and signs in to it. */
+export async function signUpPasskey(input: {
+  name: string;
+  signupChallengeToken?: string;
+}): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-up/options", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  const response = await createPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-up", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
 /**
  * Where sign-in returns: home, or the agent, app or Site sign-in page a
  * signed-out person started from, so the pending sign-in continues instead of
@@ -1256,7 +1286,8 @@ export function mountApiUpdateNotice(container: HTMLElement | null): void {
   }
 }
 
-function showApiUpdateNotice(willReload: boolean): void {
+/** Exported for the desktop notices fixture (apps/web/test/desktop-notices-fixture.tsx). */
+export function showApiUpdateNotice(willReload: boolean): void {
   if (typeof document === "undefined") {
     return;
   }
@@ -1264,18 +1295,24 @@ function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  notice.textContent = willReload
-    ? "Opengeni updated — reloading…"
-    : "Opengeni updated. Reload this tab to continue.";
-  Object.assign(notice.style, {
-    width: "100%",
-    boxSizing: "border-box",
-    borderBottom: "1px solid var(--og-color-border)",
-    background: "var(--og-color-surface-1)",
-    color: "var(--og-color-fg)",
-    font: "500 14px/1.4 Inter, system-ui, sans-serif",
-    padding: "10px 14px",
-  });
+  // A notice across the top of the app: in the desktop app it is the window's
+  // top row, so it keeps clear of the window controls and moves the window
+  // (apps/web/src/styles.css).
+  notice.setAttribute("data-app-notice", "");
+  notice.setAttribute("data-window-drag", "");
+  const message = document.createElement("span");
+  message.textContent = willReload ? "Opengeni updated — reloading…" : "Opengeni updated.";
+  if (willReload) {
+    notice.replaceChildren(message);
+  } else {
+    // The same words in a browser tab and in the desktop app: Reload is the
+    // one action, so the notice needs no instructions.
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.textContent = "Reload";
+    reload.addEventListener("click", () => window.location.reload());
+    notice.replaceChildren(message, reload);
+  }
   if (!existing) {
     (apiUpdateNoticeContainer ?? document.body).append(notice);
   }

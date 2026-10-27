@@ -223,6 +223,8 @@ export type ConnectMachineDialogProps = {
   machinesError?: unknown | undefined;
   /** A personal workspace: "This workspace" is still only its owner. */
   personalWorkspace?: boolean | undefined;
+  /** Whether this person may connect a machine for the whole workspace. */
+  canShareWithWorkspace?: boolean | undefined;
   /** Who can use it, to start with (a reconnect keeps the machine's access). */
   defaultScope?: ConnectMachineScope | undefined;
   /** Screen control's starting value (on when reconnecting to turn it on). */
@@ -268,13 +270,16 @@ function ConnectMachineBody({
   machinesLoading,
   machinesError = null,
   personalWorkspace = false,
+  canShareWithWorkspace = true,
   defaultScope = "user",
   defaultAllowScreenControl = false,
   onConnected,
   useInChat,
   onClose,
 }: Omit<ConnectMachineDialogProps, "open" | "onOpenChange"> & { onClose: () => void }) {
-  const [scope, setScope] = useState<ConnectMachineScope>(defaultScope);
+  const [scope, setScope] = useState<ConnectMachineScope>(
+    canShareWithWorkspace ? defaultScope : "user",
+  );
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
   const [advanced, setAdvanced] = useState(defaultAllowScreenControl);
   const desktop = useDesktopThisComputer();
@@ -301,6 +306,7 @@ function ConnectMachineBody({
       workspaceId={workspaceId}
       origin={origin}
       personalWorkspace={personalWorkspace}
+      canShareWithWorkspace={canShareWithWorkspace}
       scope={scope}
       onScopeChange={setScope}
       allowScreenControl={allowScreenControl}
@@ -347,6 +353,7 @@ function ConnectMachineBody({
           workspaceId={workspaceId}
           origin={origin}
           personalWorkspace={personalWorkspace}
+          canShareWithWorkspace={canShareWithWorkspace}
           scope={scope}
           onScopeChange={setScope}
           allowScreenControl={allowScreenControl}
@@ -487,6 +494,7 @@ function ConnectSetup({
   workspaceId,
   origin,
   personalWorkspace,
+  canShareWithWorkspace,
   scope,
   onScopeChange,
   allowScreenControl,
@@ -495,6 +503,7 @@ function ConnectSetup({
   workspaceId: string;
   origin: string;
   personalWorkspace: boolean;
+  canShareWithWorkspace: boolean;
   scope: ConnectMachineScope;
   onScopeChange: (scope: ConnectMachineScope) => void;
   allowScreenControl: boolean;
@@ -545,6 +554,8 @@ function ConnectSetup({
               ? "Only in this personal workspace."
               : "Everyone in this workspace can run chats on it."
           }
+          disabled={!canShareWithWorkspace}
+          disabledReason="Only workspace admins can choose this."
         />
       </ChoiceCards>
 

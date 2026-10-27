@@ -3,6 +3,7 @@ import {
   seedOrganizationClaudeDefaultModels,
   seedWorkspaceClaudeDefaultModels,
 } from "@opengeni/db";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type ClaudeConnectionScope =
   | { organizationId: string; workspaceId?: undefined }
@@ -31,7 +32,7 @@ export async function offerClaudeDefaultModels(
     console.warn("[api] could not add the default Claude models", {
       providerKind: scope.providerKind,
       scope: scope.workspaceId === undefined ? "organization" : "workspace",
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }

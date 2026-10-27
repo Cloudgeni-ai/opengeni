@@ -4,6 +4,7 @@ import {
 } from "./provider-recovery-clock";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
 import {
@@ -122,6 +123,7 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  BROWSER_WAIT_HOLD_MAX_MS,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -242,6 +244,7 @@ export {
   type SubscriptionCoreCodexRefreshResult,
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -937,6 +940,9 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_APP_ACTION_CALL_LEAF,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
   SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
@@ -1432,6 +1438,36 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export {
+  DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
+  DATABASE_CREDENTIAL_METRICS,
+  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  DATABASE_LOGIN_ATTEMPT,
+  databaseCredentialEventAttributes,
+  databaseCredentialEventMessage,
+  databaseLoginAttemptOf,
+  databasePasswordFileOptions,
+  databasePasswordFileOptionsFromEnvironment,
+  rotatingDatabasePasswordFor,
+  databaseUrlPassword,
+  databaseUrlUser,
+  isDatabaseAuthenticationFailure,
+  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
+  RotatingDatabasePassword,
+  tagDatabaseLoginAttempt,
+  withDatabaseAuthenticationRetry,
+  type DatabaseAuthenticationRefusal,
+  type DatabaseCredentialEvent,
+  type DatabaseCredentialEventListener,
+  type DatabaseCredentialExhaustion,
+  type DatabaseCredentialObserver,
+  type DatabaseCredentialPosition,
+  type DatabasePasswordFiles,
+  type RotatingDatabasePasswordOptions,
+} from "./database-credentials";
 export type {
   SessionListChangeSource,
   SessionListDatabaseChange,
@@ -2251,6 +2287,35 @@ export async function resolveNamedManagedPersonalWorkspaceGrant(
   };
 }
 
+/**
+ * Whether this turn's app actions can change the workspace's settings right
+ * now: the turn may make changes (full access, or each change confirmed by the
+ * person who sent it), its access includes workspace:admin, and the person it
+ * acts as still holds the grant the settings routes accept (workspace:admin
+ * here, or ownership of this Personal workspace). The route still decides.
+ */
+export async function turnCanChangeWorkspaceSettings(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<boolean> {
+  const authority = await resolveSessionAppActionAuthority(db, input);
+  if (authority.kind === "unavailable" || authority.kind === "read_only") return false;
+  if (authority.kind === "confirm" && !authority.permissions.includes("workspace:admin")) {
+    return false;
+  }
+  const { subjectId } = authority;
+  return await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
+    const membership = await getWorkspaceGrant(tx, subjectId, input.workspaceId);
+    if (membership?.accountId === input.accountId) {
+      return membership.permissions.includes("workspace:admin");
+    }
+    return (
+      subjectId.startsWith("user:") &&
+      (await resolveNamedManagedPersonalWorkspaceGrant(tx, { ...input, subjectId })) !== null
+    );
+  });
+}
+
 export const allAccountPermissions: Permission[] = [
   "account:read",
   "account:admin",
@@ -2709,7 +2774,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
-  const subjectLabel = input.email || input.name;
+  const subjectLabel = accountContactEmail(input.email) || input.name;
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
@@ -31473,6 +31538,27 @@ export async function getSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
+export async function getSessionModelGate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "model" | "codexCompactionMode"> | null> {
+  const session = await readSession(db, workspaceId, sessionId, "model_gate");
+  return session
+    ? { model: session.model, codexCompactionMode: session.codexCompactionMode }
+    : null;
+}
+
+async function readSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  presentation: "full" | "model_gate",
+): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -31489,8 +31575,21 @@ export async function getSession(
       false,
     );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
-    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
+    const grouped =
+      presentation === "full"
+        ? await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id])
+        : null;
+    return await mapSessionWithControl(
+      scopedDb,
+      session,
+      grouped?.get(row.id) ?? [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      presentation,
+    );
   });
 }
 
@@ -33806,7 +33905,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{
     needsYouCount: number;
     groups: SessionListTotals["groups"];
-    sites: SiteConversationGroup[] | null;
+    sites: Array<SiteConversationGroup & { rankAt?: string | null }> | null;
   }>(
     db,
     sql`
@@ -33979,9 +34078,10 @@ async function sessionListTotalsInScope(
       }
     ), site_conv_totals as (
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
-        max(updated_at) as updated_at, max(created_at) as created_at,
+        min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
-          filter (where origin_title is not null))[1] as origin_title
+          filter (where origin_title is not null))[1] as origin_title,
+        max(updated_at) as activity_at
       from site_conv group by site_id, row_channel_id
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
@@ -34029,38 +34129,37 @@ async function sessionListTotalsInScope(
     ), site_keys as (
       select * from site_conv_totals
       union all
-      select site_id, channel_id, 0, null, null, null from site_home
+      select site_id, channel_id, 0, null, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
-      -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its newest published version (creation
-      -- is version 1) and the chats that published its versions (the chat
-      -- that created it and any used to edit it), as far as this viewer can
-      -- see them. Opening a Site is not activity, as opening a chat is not;
-      -- an open only lists it. Archive, restore, rollback and other updates
-      -- to the Site's record are not activity either, so they never lift a
-      -- Site for everyone. One extra row reports truncation.
+      -- conversations needs a live Site the viewer can see. A row's time is
+      -- the Site's newest published version (creation is version 1) and
+      -- nothing else: messages and turns in its conversations, or in the chat
+      -- that created or published it, never move it, nor does opening it (an
+      -- open only lists it). Archive, restore, rollback (Undo) and other
+      -- updates to the Site's record add no version, so they never lift it
+      -- either. A viewer who cannot read the Site sees no publishes, so its
+      -- row keeps the time its first conversation here started, which
+      -- messages do not change. Which rows the bound keeps is a separate
+      -- question: pinned rows first, then the later of the newest publish and
+      -- conversation activity, so a Site whose conversation runs or needs this
+      -- person is never cut for an old publish. One extra row reports
+      -- truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
-        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt",
+        greatest(site.published_at, key.activity_at, key.first_created_at) as "rankAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at,
-          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
-            join ${schema.sessions} source
-              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-            join ${schema.sessions} editor
-              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
-            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
-            as edited_at
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
@@ -34074,7 +34173,7 @@ async function sessionListTotalsInScope(
       -- This person's archived Sites leave their sidebar; pinned ones lead.
       where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 7 desc, 5 desc, 1, 2
+      order by 7 desc, 9 desc nulls last, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -34104,7 +34203,8 @@ async function sessionListTotalsInScope(
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
       coalesce((select jsonb_agg(to_jsonb(site_grouped)
-        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        order by site_grouped.pinned desc, site_grouped."rankAt" desc nulls last,
+          site_grouped."siteId", site_grouped."channelId")
         from site_grouped), '[]'::jsonb) as sites
   `,
   );
@@ -34117,21 +34217,37 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
-      ...site,
-      updatedAt: iso(site.updatedAt)!,
-      createdAt: iso(site.createdAt)!,
-      attentionSince: iso(site.attentionSince),
-      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
-      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
-    })),
+    // The bound keeps rows in rank order; the kept rows then sort by their
+    // time, the newest publish.
+    sites: sites
+      .slice(0, SITE_CONVERSATION_GROUP_LIMIT)
+      .map(({ pinned, pinnedAt, rankAt: _rankAt, ...site }) => ({
+        ...site,
+        updatedAt: iso(site.updatedAt)!,
+        createdAt: iso(site.createdAt)!,
+        attentionSince: iso(site.attentionSince),
+        // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+        ...(pinned ? { pinned: true as const, pinnedAt: iso(pinnedAt ?? null) } : {}),
+      }))
+      .sort(
+        (a, b) =>
+          compareCodePoints(b.updatedAt, a.updatedAt) ||
+          compareCodePoints(a.siteId, b.siteId) ||
+          // As SQL orders it: a Site's Default row (no project) last.
+          compareCodePoints(a.channelId ?? "\uffff", b.channelId ?? "\uffff"),
+      ),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
- * for a long time fall past it; the Artifacts page lists every Site.
+ * Bound on Site rows per read. Pinned rows are kept first, then by the later of
+ * the newest publish and conversation activity, so Sites nobody touched for a
+ * long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
@@ -37940,10 +38056,10 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
-   * Keep `agent.toolCall.created` rows of presented tools (see
-   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
-   * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY and
+   * Keep `agent.toolCall.created` rows of presented calls (see
+   * isPresentedSessionToolCall) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files, Skill
+   * changes and payment pages without loading every step. Excluded rows without a turn (PTY and
    * background command output) stay excluded: the sandbox dock reads them
    * itself. No effect unless `agent.toolCall.created` is excluded.
    */
@@ -37977,6 +38093,12 @@ const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap
   return [literal, `%\\_\\_${literal}`];
 });
 
+/** The same LIKE patterns for the app action call tool. */
+const APP_ACTION_CALL_NAME_PATTERNS = [SESSION_EVENT_APP_ACTION_CALL_LEAF].flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -37993,11 +38115,40 @@ function sessionEventExcludeTypesFilter(
     PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
     sql`, `,
   );
+  const appActionPatterns = sql.join(
+    APP_ACTION_CALL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
+  const toolName = sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name')`;
+  // An app action call's arguments are an object or its JSON text; only their
+  // top-level "id" counts, trimmed and matched exactly as presentedAppActionId does.
+  // Text is read as json (not jsonb) and skipped if it escapes a NUL, which
+  // Postgres can't turn into text: no stored call can make this query fail.
+  const payload = schema.sessionEvents.payload;
+  const actionId = sql`btrim(case jsonb_typeof(${payload} -> 'arguments')
+    when 'object' then ${payload} -> 'arguments' ->> 'id'
+    when 'string' then case
+      when (${payload} ->> 'arguments') is json object
+        and strpos(${payload} ->> 'arguments', ${"\\u0000"}::text) = 0
+      then (${payload} ->> 'arguments')::json ->> 'id' end
+  end, ${SESSION_EVENT_APP_ACTION_ID_SPACE}::text)`;
+  const presentedActions = sql.join(
+    SESSION_EVENT_PRESENTED_APP_ACTION_NAMES.map((name) => sql`${name}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
+      or(
+        sql`${toolName} like any (array[${patterns}])`,
+        // Payment pages: only app action calls (whose payload is their short
+        // arguments) are read past the name, for the action id.
+        and(
+          sql`${toolName} like any (array[${appActionPatterns}])`,
+          sql`${actionId} = any (array[${presentedActions}])`,
+        ),
+      ),
     ),
   )!;
 }
@@ -42762,12 +42913,29 @@ export type ApplyContextCompactionResult =
     }
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
+const RETAINED_ROW_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function retainedRowTurnId(
+  turnId: string | null | undefined,
+  sessionTurnIds: ReadonlySet<string>,
+): string | null {
+  return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
  * existing row. A paused, replaced, recovered, or terminal attempt cannot
  * mutate conversation truth.
+ *
+ * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
+ * retained message came from, so a later compaction can still pair a request
+ * with its own turn's answer. (Retained reply copies are passed as null and
+ * record their turn in the item, so turn-keyed readers such as message forks
+ * never see two rows of one reply.) An id that is not a turn of
+ * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(
   db: Database,
@@ -42779,12 +42947,19 @@ export async function applyContextCompaction(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
+    replacementTurnIds?: ReadonlyArray<string | null | undefined>;
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
+  if (
+    input.replacementTurnIds !== undefined &&
+    input.replacementTurnIds.length !== input.replacementItems.length
+  ) {
+    throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -42838,6 +43013,30 @@ export async function applyContextCompaction(
               eq(schema.sessionHistoryItems.active, true),
             ),
           );
+        const requestedTurnIds = [
+          ...new Set(
+            (input.replacementTurnIds ?? []).filter(
+              (turnId): turnId is string =>
+                typeof turnId === "string" && RETAINED_ROW_TURN_ID_PATTERN.test(turnId),
+            ),
+          ),
+        ];
+        const sessionTurnIds = new Set(
+          requestedTurnIds.length === 0
+            ? []
+            : (
+                await tx
+                  .select({ id: schema.sessionTurns.id })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                      eq(schema.sessionTurns.sessionId, input.sessionId),
+                      inArray(schema.sessionTurns.id, requestedTurnIds),
+                    ),
+                  )
+              ).map((row) => row.id),
+        );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
             withLosslessContentWriteVersion(
@@ -42845,7 +43044,7 @@ export async function applyContextCompaction(
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: null,
+                turnId: retainedRowTurnId(input.replacementTurnIds?.[index], sessionTurnIds),
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
                 active: true,
@@ -54821,6 +55020,63 @@ export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+/** A browser an agent session holds while it works or waits. */
+export type AgentHeldBrowserSession = {
+  accountId: string;
+  workspaceId: string;
+  browserSessionId: string;
+  /** The person to reach its controller as: the most recent person who
+   * started a turn of a holding session, or null when no person did. */
+  routeSubjectId: string | null;
+};
+
+const LIST_AGENT_HELD_BROWSER_SESSIONS =
+  "opengeni_private.list_agent_held_browser_sessions(integer, bigint)";
+
+/**
+ * The browsers that agent sessions hold right now, across workspaces: active,
+ * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
+ * that is still working (a turn queued, running, recovering, waiting for
+ * capacity or waiting on a person) or has an armed input wait. The same rule
+ * as the box release below; the API renews each one's hold on its controller.
+ * Most recently used first, at most `limit`.
+ *
+ * 1002 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this lists nothing. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function listAgentHeldBrowserSessions(
+  db: Database,
+  input: { limit: number },
+): Promise<AgentHeldBrowserSession[]> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${LIST_AGENT_HELD_BROWSER_SESSIONS})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return [];
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    browser_session_id: string;
+    route_subject_id: string | null;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_agent_held_browser_sessions(
+      ${input.limit}::integer, ${BROWSER_WAIT_HOLD_MAX_MS}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    browserSessionId: row.browser_session_id,
+    routeSubjectId: row.route_subject_id,
+  }));
+}
+
 /**
  * An idle browser or desktop does not keep its Modal box warm. Activity is
  * deliberate and durable: the newest of the interaction holder heartbeat and
@@ -54830,6 +55086,14 @@ const INTERACTION_HOLDER_RESOURCE =
  * tab or a closed view stops counting within seconds. An in-flight lifecycle
  * operation counts too. Interventions waiting for a person do not: a wait is
  * not use (see `sandboxGroupIdleForCommandContainmentTx`).
+ *
+ * One kind of pause does keep a browser: an agent session that
+ * created or is using it and is still working (a turn queued, running,
+ * recovering, waiting for capacity or waiting on a person) or deliberately
+ * waiting (an armed input wait) keeps it, page state and all, but never
+ * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
+ * browser's own controller keeps it by the same rule;
+ * `list_idle_interaction_leases` (migration 1002) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
@@ -54976,7 +55240,20 @@ export async function releaseIdleInteractionHolders(
       tx,
       sql`
       select id, lifecycle, controller_generation,
-        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true)
+          and not exists (
+            select 1 from browser_session_associations association
+            join sessions waiting on waiting.id = association.session_id
+              and waiting.workspace_id = association.workspace_id
+            where association.workspace_id = browser_sessions.workspace_id
+              and association.browser_session_id = browser_sessions.id
+              and association.relationship in ('created', 'using')
+              and (waiting.status in ('queued', 'running', 'requires_action', 'recovering',
+                  'waiting_capacity')
+                or waiting.input_wait_until > now())
+              and browser_sessions.last_used_at
+                > now() - (${BROWSER_WAIT_HOLD_MAX_MS}::bigint * interval '1 millisecond')
+          )) as idle,
         (placement_kind = 'sandbox_group'
           and controller_host_sandbox_group_id = ${input.sandboxGroupId}
           and placement_instance_id = ${lease.instance_id}
@@ -55513,6 +55790,74 @@ export async function summarizeSessionRecoveryBacklog(
       count: Number(row.count),
       scheduled: Number(row.scheduled),
       oldestOverdueSeconds: Number(row.oldest_overdue_seconds),
+    };
+  }
+  return summary;
+}
+
+/** What currently holds a durable queued turn, from its session's own state. */
+export const QUEUED_TURN_HOLDS = [
+  "ready",
+  "behind_active_turn",
+  "paused",
+  "failed",
+  "requires_action",
+  "waiting_capacity",
+  "cancelled",
+] as const;
+
+export type QueuedTurnHold = (typeof QUEUED_TURN_HOLDS)[number];
+
+export type QueuedTurnHoldSummary = {
+  count: number;
+  /** Age of the oldest queued turn in this class; 0 when the class is empty. */
+  oldestAgeSeconds: number;
+};
+
+const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
+
+/**
+ * Content-free cross-workspace classification of every `status = 'queued'`
+ * turn by what holds it (migration 0988). The classes sum to
+ * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
+ * the rest wait for a running turn, Resume, a new message, or a person.
+ *
+ * 0988 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this returns null. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function summarizeQueuedTurnsByHold(
+  db: Database,
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return null;
+  const summary = Object.fromEntries(
+    QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
+  ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const rows = await rawRows<{
+    hold: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select hold, count, oldest_age_seconds
+      from opengeni_private.summarize_queued_turns_by_hold()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.hold in summary)) continue;
+    summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
     };
   }
   return summary;
@@ -90453,6 +90798,7 @@ async function mapSessionWithControl(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
+  presentation: "full" | "model_gate" = "full",
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -90473,6 +90819,7 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
     // Temporal acknowledgement proves that a worker has admitted a turn.

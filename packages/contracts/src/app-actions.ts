@@ -1,5 +1,10 @@
 import { ACTION_CATALOG } from "./app-action-catalog.gen";
 import type { ActionCatalogEntry } from "./app-action-catalog-types";
+import {
+  presentedAppActionId,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  type PresentedAppActionPage,
+} from "./session-history";
 
 /* ----------------------------------------------------------------------------
    App actions: every public API action, the same ones the organization MCP
@@ -64,6 +69,47 @@ export function appActionCallChangesState(args: unknown): boolean {
 }
 
 /**
+ * Actions that only open a payment page (Stripe Checkout or the billing
+ * portal); the chat shows the page as a button. See
+ * {@link appActionNeedsConfirmation} for which of them still ask first.
+ */
+export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set(
+  Object.keys(SESSION_EVENT_PRESENTED_APP_ACTIONS),
+);
+
+/** The payment page the action opens (see {@link PAYMENT_PAGE_ACTIONS}), if it opens one. */
+export function appActionPaymentPage(
+  entry: ActionCatalogEntry,
+): PresentedAppActionPage | undefined {
+  const id = presentedAppActionId(entry.id);
+  return id ? SESSION_EVENT_PRESENTED_APP_ACTIONS[id].page : undefined;
+}
+
+/**
+ * Whether running the action needs the person's confirmation in the chat
+ * first, and so can't run where the chat can only read: every change, except
+ * opening a checkout page. A checkout charges nothing until the person pays
+ * on it, so the page is its own confirmation. A billing portal link is
+ * different: whoever holds it can change the payment method or cancel the
+ * plan, so it keeps the confirmation.
+ */
+export function appActionNeedsConfirmation(entry: ActionCatalogEntry): boolean {
+  const page = appActionPaymentPage(entry);
+  return appActionChangesState(entry) && page !== "credits" && page !== "subscription";
+}
+
+/**
+ * The same, for an admin_action_call's arguments: also true for anything that
+ * can't be recognised (unknown action, bad input).
+ */
+export function appActionCallNeedsConfirmation(args: unknown): boolean {
+  const id = callArguments(args)?.id;
+  if (typeof id !== "string") return true;
+  const entry = findAppAction(id);
+  return entry === undefined || appActionNeedsConfirmation(entry);
+}
+
+/**
  * Whether the action can create, show, copy or rotate a key, password, token
  * or other secret, or hand one to the app (its catalog entry lists where).
  */
@@ -121,6 +167,8 @@ function filled(value: unknown): boolean {
 // Values put into a confirmation's words are checked first, so an argument can
 // never write its own question. Anything else falls back to the generic text.
 const PLAIN_EMAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
+// A tool's exact name, as integrations name them ("send_message", "gmail.send").
+const PLAIN_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 
 /**
  * The question the person answers before a change runs, in plain words, from
@@ -165,6 +213,13 @@ export function appActionConfirmationTitle(
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":
       return "Change your organization's default models?";
+    case "createBillingPortalSession":
+    case "createSubscriptionPortalSession":
+      return "Open your billing page? It can change your payment method or plan.";
+    case "updateConnectorToolPermissions":
+      return `${toolApprovalQuestion(body, "this integration's")} in ${workspace}?`;
+    case "updateSessionMcpToolPermissions":
+      return `${toolApprovalQuestion(body, "this MCP server's")} in ${workspace}?`;
     default: {
       // Name where it applies; the card's next line shows the key values.
       const target =
@@ -177,6 +232,41 @@ export function appActionConfirmationTitle(
               : "";
       return `${sentence(entry)}${target}?`;
     }
+  }
+}
+
+/**
+ * "Let send_message run without asking", from a tool approval change: the
+ * tools it names (only plain tool names, at most three, else a count) and the
+ * approval it sets, or the default for tools without their own approval.
+ */
+function toolApprovalQuestion(body: Record<string, unknown> | null, owner: string): string {
+  const label = { allow: "Allow", ask: "Ask", block: "Block" } as const;
+  const permission = body?.permission;
+  const known = permission === "allow" || permission === "ask" || permission === "block";
+  if (body?.target === "default") {
+    if (known) return `Set ${owner} default tool approval to ${label[permission]}`;
+    return permission === null ? `Clear ${owner} default tool approval` : "Change tool approvals";
+  }
+  const names = Array.isArray(body?.toolNames) ? body.toolNames : [];
+  if (body?.target !== "tools" || names.length === 0) return "Change tool approvals";
+  const plain =
+    names.length <= 3 &&
+    names.every((name) => typeof name === "string" && PLAIN_TOOL_NAME.test(name));
+  const tools = plain
+    ? names.join(names.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, ", and $1")
+    : `${names.length} tool${names.length === 1 ? "" : "s"}`;
+  switch (permission) {
+    case "allow":
+      return `Let ${tools} run without asking`;
+    case "ask":
+      return `Ask before ${tools} ${names.length === 1 ? "runs" : "run"}`;
+    case "block":
+      return `Block ${tools}`;
+    case null:
+      return `Reset ${tools} to the default approval`;
+    default:
+      return "Change tool approvals";
   }
 }
 

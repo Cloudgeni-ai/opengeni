@@ -24,7 +24,7 @@ import {
   type FollowupPull,
   type BatchReservation,
 } from "./model";
-import { latestRun, infrastructureRetryReason } from "./planner";
+import { latestRun, infrastructureRetryReason, unseenRunHoldsSlot } from "./planner";
 import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 import { proveHeadRefresh } from "./head-refresh";
 
@@ -56,6 +56,18 @@ export interface ActiveWrites {
   announce(number: number, body: string): Promise<void>;
   createFollowup(request: FollowupRequest): Promise<void>;
 }
+/** Upper bound on comment effects processed in one maintenance tick. */
+export const COMMENTS_PER_TICK = 8;
+/** processEffect outcomes after which the same tick may drain another comment. */
+const COMMENT_DRAIN_CONTINUES = new Set([
+  "durable REST effect submitted",
+  "durable REST intent reconciled from provider evidence",
+  "base batch-suite evidence holds pending culprit announcement",
+]);
+const COMMENT_DRAIN_STOPS = new Set([
+  "REST effect deferred with bounded backoff",
+  "REST effect blocked by explicit provider rejection",
+]);
 interface State {
   sha: string | null;
   ledger: Ledger;
@@ -407,10 +419,7 @@ export class GitHubActiveExecutor implements Executor {
         (item) => item.workflow === this.config.workflow && item.status !== "completed",
       ))
         reservations.push({ branch, headSha: sha, runId: run.id });
-      if (
-        !latestRun(candidate, this.config) &&
-        ledger.missingRuns[manifest.batchId]?.status !== "released"
-      )
+      if (unseenRunHoldsSlot(candidate, ledger, this.config))
         reservations.push({ branch, headSha: sha });
     }
     return reservations;
@@ -1010,20 +1019,59 @@ export class GitHubActiveExecutor implements Executor {
       if (!this.available(state)) return "ON notice staged by current owner";
     }
     // Bound work per tick. Completed effects are immutable history; blocked
-    // effects remain visible without starving candidate planning.
-    const effect = Object.values(state.ledger.effects)
-      .sort(
-        (a, b) =>
-          Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
-          Number(b.kind === "followup") - Number(a.kind === "followup") ||
-          Date.parse(a.nextAt) - Date.parse(b.nextAt),
-      )
-      .find(
-        (item) =>
-          !["done", "blocked"].includes(item.status) &&
-          Date.parse(item.nextAt) <= Date.parse(this.now()),
-      );
+    // effects remain visible without starving candidate planning. Candidate
+    // reruns unblock the batch slot, so they go first; a rerun held by busy main
+    // is due again every tick, so it never uses up the tick's other effect.
+    const due = (ledger: Ledger) =>
+      Object.values(ledger.effects)
+        .sort(
+          (a, b) =>
+            Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
+            Number(b.kind === "followup") - Number(a.kind === "followup") ||
+            Number(b.kind === "rerun") - Number(a.kind === "rerun") ||
+            Date.parse(a.nextAt) - Date.parse(b.nextAt),
+        )
+        .filter(
+          (item) =>
+            !["done", "blocked"].includes(item.status) &&
+            Date.parse(item.nextAt) <= Date.parse(this.now()),
+        );
+    const effect = due(state.ledger)[0];
     if (effect) messages.push(await this.processEffect(state, effect));
+    const processed = new Set(effect ? [effect.id] : []);
+    if (effect?.kind === "rerun") {
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ") || null;
+      const next = due(state.ledger).find((item) => item.kind !== "rerun");
+      if (next) {
+        processed.add(next.id);
+        messages.push(await this.processEffect(state, next));
+      }
+    }
+    // Batch landings stage one comment per member, so one comment per tick
+    // falls behind. Drain further due comments up to a bounded total. Each one
+    // reloads state, rechecks the lease and goes through the same durable
+    // claim, final lease read and reconciliation as any other REST effect.
+    let comments = [...processed].filter(
+      (id) => state.ledger.effects[id]?.kind === "comment",
+    ).length;
+    // A provider error or throttle earlier in this tick also skips the drain.
+    if (messages.some((m) => COMMENT_DRAIN_STOPS.has(m))) comments = COMMENTS_PER_TICK;
+    while (comments < COMMENTS_PER_TICK) {
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ") || null;
+      const next = due(state.ledger).find(
+        (item) => item.kind === "comment" && !processed.has(item.id),
+      );
+      if (!next) break;
+      processed.add(next.id);
+      comments++;
+      const message = await this.processEffect(state, next);
+      messages.push(message);
+      // Throttling, provider errors or a changed claim end this tick's drain;
+      // the remaining backlog keeps its order for the next tick.
+      if (!COMMENT_DRAIN_CONTINUES.has(message)) break;
+    }
     state = await this.load();
     if (!this.available(state)) return messages.join("; ") || null;
     const entry = Object.entries(state.ledger.landings)

@@ -1321,8 +1321,22 @@ interrupted/outcome-unknown rather than replayed automatically.
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
 workspace—even on a different Opengeni deployment—adds an independent link and
-preserves all existing links. There are two enrollment paths. Both require the
-caller to hold `enrollments:manage`.
+preserves all existing links. There are two enrollment paths. Both follow the
+machine's scope (`apps/api/src/sandbox/machine-authority.ts`, the one rule for
+every enrollment and per-machine write):
+
+- **Only me** (`user`): any teammate with `enrollments:read`, signed in as
+  themselves. The owner is always the caller. A credential acting for a person
+  (a delegated bearer, a connected agent, an organization key acting as a user)
+  keeps needing `enrollments:manage`, so a read-only delegation never connects
+  a machine; keys, services and agents acting as themselves are refused.
+- **This workspace**: `enrollments:manage`.
+- **Organization**: `enrollments:manage` and `account:admin`.
+
+The same rule covers declining a pairing code and, for an existing machine,
+removal, command policy, screen control, macOS privacy panes and agent updates.
+`list_scoped_enrollments` returns an Only me machine only to its owner, so a
+teammate reaches only their own. Refusals are plain sentences.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1624,7 +1638,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
-  on a question is moved and keeps the question;
+  on a question is moved and keeps the question. No machine is promoted: every
+  reachable machine gets the same quiet button (only a machine that just
+  connected from the card's own dialog gets the primary one), because the card
+  can't know which computer the person means;
+- ends the card with an **Another computer** row (its own list, after the
+  machines and any screen control and Chrome rows) whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't connected yet is a
+  peer of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts
@@ -1656,15 +1677,19 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   that was offline, comes online the same dialog shows its name, **Connected**
   and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
   chat** (the same attach path as the list). Closing the dialog stops the watch;
-- once a machine with a screen is reachable (the chat's own machine first),
-  offers the
+- once this chat runs on a reachable machine with a screen, shows that
+  machine's screen control and offers the
   [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
-  stops after ten minutes or when the inventory is not readable.
+  stops after ten minutes or when the inventory is not readable. Before the
+  chat runs on a machine these rows stay hidden, so steps about a machine the
+  person may not mean don't compete with choosing or connecting the right one.
 
-Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
-moving the chat needs `sessions:control`. The card says who can act otherwise.
+Reading the list needs `enrollments:read`; connecting follows the scope rule
+above (every teammate connects an Only me machine; This workspace needs
+`enrollments:manage`); moving the chat needs `sessions:control`. The card says
+who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
 
 Embedded products supply `SessionConversation.computerConnection` (also through
@@ -1680,7 +1705,8 @@ Screen-control consent lives on the enrollment row and in the credentials the
 machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
-(`enrollments:manage`; `account:admin` for organization machines; no body)
+(the scope rule above: the owner for an Only me machine, `enrollments:manage`
+for a workspace machine, also `account:admin` for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -2030,7 +2056,7 @@ expecting transactional support. Changing transport limits is not required.
 
 ## Run as another local user
 
-Exec (including op-stream and background commands), git, PTY open and every file
+Exec (including op-stream and background commands), PTY open and every file
 request, transactional uploads included, carry an optional `run_as`: a local user
 name, else a decimal uid, which must exist in the machine's password database.
 The agent honors it only when it advertises `Capabilities.run_as`, which it does
