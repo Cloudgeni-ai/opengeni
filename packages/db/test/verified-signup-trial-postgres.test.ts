@@ -3,7 +3,6 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
-import { readFileSync } from "node:fs";
 
 import {
   applyCreditDebitAfterUse,
@@ -131,20 +130,6 @@ describe("verified signup eligibility and post-use credit settlement", () => {
     });
     expect(general).toMatchObject({ debitedMicros: 1_000_000, grantDebitedMicros: 0 });
   }, 180_000);
-
-  test("launch flag and one-shot receipt trigger are the only grant authority", () => {
-    const migration = readFileSync(
-      new URL("../drizzle/0509_verified_signup_trial_credits.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(migration).toContain("IS DISTINCT FROM 'on'");
-    expect(migration).toContain("AFTER INSERT ON self_service_organization_setup_receipts");
-    expect(migration).toContain("'verified-signup-trial:v1:' || NEW.auth_user_id");
-    expect(migration).toContain(
-      "REVOKE ALL ON FUNCTION opengeni_private.grant_verified_signup_trial_credit() FROM PUBLIC",
-    );
-  });
 
   test("rejects an unverified user without creating an organization or trial ledger entry", async () => {
     if (!owned || !client) return;

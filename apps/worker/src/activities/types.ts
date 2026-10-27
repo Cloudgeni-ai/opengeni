@@ -248,12 +248,6 @@ export type SettleSessionInterruptionsInput = {
   sessionId: string;
   attemptId: string;
   workflowId: string;
-  /**
-   * Replay-only compatibility for session workflow histories created before
-   * the receipt-gated cancellation v2 patch. New histories never send this
-   * phase; the exact activity writes the authoritative receipt itself.
-   */
-  phase?: "logical" | "attempt_quiesced";
 };
 
 export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;

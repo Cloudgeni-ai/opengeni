@@ -196,10 +196,8 @@ fn persist_completed_update_receipt_at(
 /// Returns a human-facing error string on any fetch/verify/apply failure.
 pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let install_path = installed_executable()?;
-    let legacy_api_url =
-        std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    let connections = config::load_connections(&legacy_api_url)
-        .map_err(|e| format!("could not load connections: {e}"))?;
+    let connections =
+        config::load_connections().map_err(|e| format!("could not load connections: {e}"))?;
 
     // The binary is process-global, so update policy is process-global too. Never
     // silently let whichever connection sorts first choose the channel for every
@@ -543,14 +541,6 @@ fn resolve_update_bases(explicit: Option<&str>, connections: &[StoredConnection]
     }
     let bases: BTreeSet<_> = connections
         .iter()
-        // A pre-multi-connection credentials file did not persist its control-
-        // plane origin. `load_connections` keeps the caller/default URL only as
-        // a visibly unverified hint so the runtime transport remains usable.
-        // Never turn that hint into update authority: on a private deployment it
-        // is commonly the public default and would query the wrong server. The
-        // public signed channel remains the safe fallback until one explicit
-        // reconnect confirms the deployment origin.
-        .filter(|connection| !connection.legacy_origin)
         .map(|connection| connection.api_url.trim_end_matches('/').to_string())
         .collect();
     if bases.is_empty() {
@@ -966,22 +956,6 @@ mod tests {
         assert_eq!(
             resolve_update_bases(None, &[]),
             vec![DEFAULT_BASE_URL.to_string()]
-        );
-    }
-
-    #[test]
-    fn unverified_legacy_origin_is_never_an_update_source() {
-        let mut legacy = connection("stable");
-        legacy.api_url = "https://possibly-wrong.example".to_string();
-        legacy.legacy_origin = true;
-
-        assert_eq!(
-            resolve_update_bases(None, &[legacy.clone()]),
-            vec![DEFAULT_BASE_URL.to_string()]
-        );
-        assert_eq!(
-            resolve_update_bases(Some("https://operator.example/"), &[legacy]),
-            vec!["https://operator.example".to_string()]
         );
     }
 }

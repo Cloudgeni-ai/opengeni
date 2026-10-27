@@ -62,6 +62,9 @@ import {
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
+import type { Dictation } from "./dictation";
+import { createDesktopDictation } from "./dictation/electron";
+import { handleDictationIpc } from "./dictation/ipc";
 import { ComputerCapabilities, ComputerSettingsStore } from "./computer-capabilities";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
@@ -179,6 +182,8 @@ export class DesktopShell {
   private readonly inbox: InboxNotifier;
   /** The shortcut that sends the window in front into the composer. */
   private readonly appShots: AppShots;
+  /** Dictation from anywhere: shortcuts that type speech where the person types. */
+  private readonly dictation: Dictation;
   /** Other apps' audio for the web app's meeting recorder. */
   private readonly systemAudio: SystemAudioCaptures;
   /** Offers to record when a call starts, and to stop when it ends. */
@@ -410,6 +415,30 @@ export class DesktopShell {
       onChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
       log: (message, caught) => console.warn(message, caught),
     });
+    this.dictation = createDesktopDictation({
+      productName: config.productName,
+      dataDir: app.getPath("userData"),
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+      guide: (id, granted) => {
+        if (id && granted) this.permissionGuide.granted();
+        else if (id) this.permissionGuide.show(id);
+        else this.permissionGuide.hide();
+      },
+      // The account the window shows records, when its page listens.
+      chooseTarget: (targets) => {
+        const accountId = this.window?.accountId;
+        const shown = accountId ? this.window?.contentsFor(accountId) : null;
+        return targets.find((target) => target === shown);
+      },
+      log: (message, caught) => console.warn(message, caught ?? ""),
+      wake: () => {
+        const active = this.store.active();
+        if (!this.window && active && !active.signedOut) this.openWindow(false);
+      },
+    });
     this.inbox = new InboxNotifier({
       accounts: () => {
         const signedIn = this.store.snapshot().accounts.filter((account) => !account.signedOut);
@@ -485,6 +514,7 @@ export class DesktopShell {
     this.registerIpc();
     this.appShots.start();
     this.meetings.start();
+    this.dictation.start();
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -517,6 +547,7 @@ export class DesktopShell {
     app.on("will-quit", () => {
       this.appShots.stop();
       this.systemAudio.stopAll();
+      this.dictation.stop();
       this.meetings.stop();
       this.computer.shutdownNow();
     });
@@ -647,7 +678,8 @@ export class DesktopShell {
 
   // --- Window -------------------------------------------------------------------------------------
 
-  private openWindow(): void {
+  /** `show` false loads the account page without showing it (dictation from the menu bar). */
+  private openWindow(show = true): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
       connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
@@ -684,6 +716,7 @@ export class DesktopShell {
       flushMarks();
       if (measuring()) void recordMemory();
     });
+    if (!show) return;
     window.reveal();
     mark("window-shown");
   }
@@ -1288,6 +1321,11 @@ export class DesktopShell {
     handleSystemAudioIpc({
       ipcMain,
       captures: this.systemAudio,
+      allow: (event) => void this.senderAccount(event),
+    });
+    handleDictationIpc({
+      ipcMain,
+      dictation: this.dictation,
       allow: (event) => void this.senderAccount(event),
     });
     handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());

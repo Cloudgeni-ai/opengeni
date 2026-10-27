@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
+import { historicalKnowledgeSql } from "./knowledge-historical";
 
 /** Clone the unchanged reader chain, using the exact preceding SQL graph helper. */
 export async function installKnowledgeVisibilityPlanBaseline(admin: postgres.Sql, appUrl: string) {
-  const migration = await readFile(new URL("../../drizzle/0902_batched_knowledge_visibility.sql", import.meta.url), "utf8");
+  const migration = await historicalKnowledgeSql("knowledge_revisions_visible_sql");
   const begin = migration.indexOf("CREATE FUNCTION knowledge_revisions_visible(");
   const end = migration.indexOf("\n$$;", begin);
   if (begin < 0 || end < begin) throw Error("Original SQL visibility helper missing");
