@@ -36339,14 +36339,19 @@
       "createOpenGeniSiteClient": "value",
       "createSiteToolBridge": "value",
       "CreateSiteToolBridgeOptions": "type",
+      "isOpenGeniReservedSitePath": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
+      "isOpenGeniSiteBridgeEventMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
       "isSiteCatalogStaleError": "value",
       "isSiteHttpRequest": "value",
       "OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL": "value",
       "OPENGENI_SITE_BRIDGE_CANCEL": "value",
       "OPENGENI_SITE_BRIDGE_CONNECT": "value",
+      "OPENGENI_SITE_BRIDGE_EVENT": "value",
+      "OPENGENI_SITE_BRIDGE_LOCATION_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_READY": "value",
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
@@ -36354,6 +36359,7 @@
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
       "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
       "OPENGENI_SITE_LOCAL_CODEMODE_PATH": "value",
+      "OPENGENI_SITE_LOCATION_MAX_LENGTH": "value",
       "OpenGeniSiteAi": "type",
       "OpenGeniSiteAiOptions": "type",
       "OpenGeniSiteAiRequest": "type",
@@ -36361,6 +36367,7 @@
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
       "OpenGeniSiteBridgeError": "value",
+      "OpenGeniSiteBridgeEventMessage": "type",
       "OpenGeniSiteBridgeReadyMessage": "type",
       "OpenGeniSiteBridgeRequestMessage": "type",
       "OpenGeniSiteBridgeResponseMessage": "type",
@@ -36381,6 +36388,13 @@
       "OpenGeniSiteDataWriteResult": "type",
       "OpenGeniSiteFile": "type",
       "OpenGeniSiteFiles": "type",
+      "openGeniSiteLinkTarget": "value",
+      "OpenGeniSiteLocation": "type",
+      "openGeniSiteLocationHref": "value",
+      "openGeniSiteLocationValue": "value",
+      "OpenGeniSiteLocationValue": "type",
+      "OpenGeniSiteNavigateOptions": "type",
+      "openGeniSitePath": "value",
       "OpenGeniSiteSignInResult": "type",
       "OpenGeniSiteSql": "type",
       "OpenGeniSiteSqlError": "value",
@@ -36391,6 +36405,7 @@
       "OpenGeniSiteToolCatalog": "type",
       "OpenGeniSiteViewer": "type",
       "OpenGeniSiteWorkspaceTools": "type",
+      "resolveOpenGeniSiteLocation": "value",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "sanitizeOpenGeniSiteToolInvokeRequest": "value",
       "serveSiteHttp": "value",
@@ -36409,12 +36424,19 @@
     "@opengeni/sdk/site-bridge-host": {
       "handleSiteBridgeRequest": "value",
       "injectSiteBridgeBootstrap": "value",
+      "isOpenGeniReservedSitePath": "value",
       "openGeniSiteBridgePortFromBootstrap": "value",
+      "openGeniSiteLocationHref": "value",
+      "openGeniSiteLocationValue": "value",
+      "OpenGeniSiteLocationValue": "type",
+      "openGeniSitePath": "value",
+      "resolveOpenGeniSiteLocation": "value",
       "SITE_BRIDGE_BOOTSTRAP_SCRIPT": "value",
       "SiteBridgeDocumentLease": "value",
       "siteBridgeError": "value",
       "SiteBridgeHost": "value",
       "SiteBridgeHostSource": "type",
+      "SiteBridgeLocationHandlers": "type",
       "siteBridgeReadyMessage": "value",
       "SiteBridgeRequestRegistry": "value",
       "SiteBridgeRequestValue": "type",
@@ -42474,7 +42496,8 @@
     ],
     "SiteBridgeHost": [
       "close",
-      "load"
+      "load",
+      "notifyLocation"
     ],
     "SiteBridgeRequestRegistry": [
       "addPort",
@@ -42482,6 +42505,7 @@
       "closeAll",
       "closePort",
       "complete",
+      "ports",
       "start"
     ],
     "SiteToolConnectionRequiredError": [
@@ -55430,6 +55454,9 @@
       ],
       "load": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "notifyLocation": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteLocationValue\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ]
     },
     "@opengeni/sdk/site-bridge-host:SiteBridgeRequestRegistry": {
@@ -55447,6 +55474,9 @@
       ],
       "complete": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "ports": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}}"
       ],
       "start": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}}]}}"

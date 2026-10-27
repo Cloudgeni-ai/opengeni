@@ -1530,7 +1530,7 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
+  const { conversation, new: startNew, page } = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
@@ -1538,6 +1538,7 @@ function SiteViewPage() {
       siteId={siteId}
       conversation={conversation}
       startNew={startNew === true}
+      page={page}
     />
   );
 }

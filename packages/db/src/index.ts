@@ -4077,6 +4077,32 @@ export async function getManagedUserProfilesByIds(
 }
 
 /**
+ * A person's verified email address in lowercase, or null when the subject is
+ * not a managed user (`user:<id>`), has no email, or has not verified it.
+ * Embedded hosts answer through their `userProfileLookup`; their address
+ * counts only when the profile says `emailVerified: true`.
+ */
+export async function getVerifiedSubjectEmail(
+  db: Database,
+  subjectId: string,
+): Promise<string | null> {
+  if (!subjectId.startsWith("user:")) return null;
+  const userId = subjectId.slice("user:".length);
+  if (!userId) return null;
+  const binding = dbBindingFor(db);
+  if (binding?.userProfileLookup) {
+    const [profile] = await binding.userProfileLookup(db, [userId]);
+    if (profile?.emailVerified !== true) return null;
+    return profile.email?.trim().toLowerCase() || null;
+  }
+  const [row] = await rawRows<{ email: string | null }>(
+    db,
+    sql`select email from auth_users where id = ${userId} and email_verified is true limit 1`,
+  );
+  return row?.email?.trim().toLowerCase() || null;
+}
+
+/**
  * A workspace member's name as the workspace's people list shows it: their
  * profile name, else the label their membership was given, else their email.
  * Null when none is known.
