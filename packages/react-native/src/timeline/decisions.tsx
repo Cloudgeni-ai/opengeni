@@ -316,6 +316,18 @@ function HumanInputForm({
       ...(secret.secretAnswers.length > 0 ? { secretAnswers: secret.secretAnswers } : {}),
     });
   };
+  // The agent asked for a yes/no decision in its own words: two buttons, the
+  // action first and the way out second.
+  const confirm = confirmDecision(questions);
+  const [choice, setChoice] = useState<string | null>(null);
+  const decide = (optionId: string) => {
+    if (!confirm) return;
+    setChoice(optionId);
+    void submit({
+      outcome: "answered",
+      answers: [{ questionId: confirm.question.id, values: [optionId] }],
+    });
+  };
   // Editing a question clears its validation message, as on web.
   const clearError = (id: string) =>
     setErrors((existing) => {
@@ -416,8 +428,30 @@ function HumanInputForm({
             gap: 16,
           }}
         >
+          {confirm
+            ? confirm.options.map((option) =>
+                option.description ? (
+                  <Text
+                    key={option.id}
+                    style={{
+                      ...fontStyle(theme),
+                      fontSize: theme.size.base,
+                      lineHeight: 20,
+                      color: c["fg-muted"],
+                    }}
+                  >
+                    <Text style={{ ...fontStyle(theme, 500), color: c.fg }}>{option.label}</Text>
+                    {" \u00b7 "}
+                    {option.description}
+                  </Text>
+                ) : null,
+              )
+            : null}
           {questions.map((question, index) => (
-            <View key={question.id} style={index === current ? null : { display: "none" }}>
+            <View
+              key={question.id}
+              style={index === current && !confirm ? null : { display: "none" }}
+            >
               <QuestionControls
                 question={question}
                 draft={drafts[question.id] ?? emptyDraft()}
@@ -455,18 +489,35 @@ function HumanInputForm({
           ) : null}
           <DecisionActions
             primary={
-              <DecisionButton
-                kind="primary"
-                label={
-                  last ? (busy ? messages.submitting : messages.submit) : t("humanInputForm.next")
-                }
-                busy={last && busy}
-                disabled={busy}
-                onPress={last ? send : next}
-              />
+              confirm ? (
+                <DecisionButton
+                  kind="primary"
+                  label={confirm.accept.label}
+                  busy={busy && choice === confirm.accept.id}
+                  disabled={busy}
+                  onPress={() => decide(confirm.accept.id)}
+                />
+              ) : (
+                <DecisionButton
+                  kind="primary"
+                  label={
+                    last ? (busy ? messages.submitting : messages.submit) : t("humanInputForm.next")
+                  }
+                  busy={last && busy}
+                  disabled={busy}
+                  onPress={last ? send : next}
+                />
+              )
             }
             secondary={
-              current > 0 ? (
+              confirm ? (
+                <DecisionButton
+                  label={confirm.decline.label}
+                  busy={busy && choice === confirm.decline.id}
+                  disabled={busy}
+                  onPress={() => decide(confirm.decline.id)}
+                />
+              ) : current > 0 ? (
                 <DecisionButton
                   label={t("humanInputForm.back")}
                   disabled={busy}
@@ -492,6 +543,30 @@ function HumanInputForm({
       )}
     </DecisionCard>
   );
+}
+
+/** An agent-marked yes/no decision: one single-choice question with two options. */
+function confirmDecision(questions: readonly HumanInputQuestion[]): {
+  question: HumanInputQuestion;
+  options: HumanInputQuestion["options"];
+  accept: HumanInputQuestion["options"][number];
+  decline: HumanInputQuestion["options"][number];
+} | null {
+  const question = questions.length === 1 ? questions[0]! : null;
+  if (
+    !question ||
+    question.confirm !== true ||
+    question.kind !== "single_select" ||
+    question.skillReview ||
+    question.options.length !== 2
+  )
+    return null;
+  return {
+    question,
+    options: question.options,
+    accept: question.options[0]!,
+    decline: question.options[1]!,
+  };
 }
 
 function QuestionControls({
@@ -626,8 +701,54 @@ function QuestionControls({
                   >
                     {option.label}
                   </Text>
+                  {option.recommended ? (
+                    <View
+                      style={{
+                        alignSelf: "flex-start",
+                        marginTop: 2,
+                        paddingHorizontal: 8,
+                        paddingVertical: 1,
+                        borderRadius: 999,
+                        backgroundColor: c["accent-soft"],
+                      }}
+                    >
+                      <Text
+                        style={{
+                          ...fontStyle(theme, 500),
+                          fontSize: theme.size.sm,
+                          lineHeight: 18,
+                          color: c["accent-strong"],
+                        }}
+                      >
+                        {t("humanInputForm.recommended")}
+                      </Text>
+                    </View>
+                  ) : null}
                   {option.description ? (
                     <QuestionText text={option.description} tone="muted" style={secondary} />
+                  ) : null}
+                  {option.preview ? (
+                    <ScrollView
+                      nestedScrollEnabled
+                      style={{
+                        marginTop: 6,
+                        maxHeight: 160,
+                        borderRadius: theme.radius.md,
+                        backgroundColor: withAlpha(c.fg, 0.04),
+                      }}
+                      contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 8 }}
+                    >
+                      <Text
+                        style={{
+                          ...fontStyle(theme, 400, "mono"),
+                          fontSize: theme.size.sm,
+                          lineHeight: 18,
+                          color: c.fg,
+                        }}
+                      >
+                        {option.preview}
+                      </Text>
+                    </ScrollView>
                   ) : null}
                 </View>
               </Pressable>

@@ -2527,6 +2527,10 @@
     --tw-translate-y: -100%;
     translate: var(--tw-translate-x) var(--tw-translate-y);
   }
+:where(.og-root).-translate-y-px,:where(.og-root) .-translate-y-px {
+    --tw-translate-y: -1px;
+    translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
 :where(.og-root).translate-y-\[2px\],:where(.og-root) .translate-y-\[2px\] {
     --tw-translate-y: 2px;
     translate: var(--tw-translate-x) var(--tw-translate-y);
@@ -3872,6 +3876,12 @@
       background-color: color-mix(in oklab, var(--og-color-accent) 10%, transparent);
     }
   }
+:where(.og-root).bg-og-accent\/12,:where(.og-root) .bg-og-accent\/12 {
+    background-color: var(--og-color-accent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-accent) 12%, transparent);
+    }
+  }
 :where(.og-root).bg-og-accent\/15,:where(.og-root) .bg-og-accent\/15 {
     background-color: var(--og-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -3963,6 +3973,12 @@
     background-color: var(--og-color-fg);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--og-color-fg) 8%, transparent);
+    }
+  }
+:where(.og-root).bg-og-fg\/\[0\.04\],:where(.og-root) .bg-og-fg\/\[0\.04\] {
+    background-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-fg) 4%, transparent);
     }
   }
 :where(.og-root).bg-og-fg\/\[0\.06\],:where(.og-root) .bg-og-fg\/\[0\.06\] {
