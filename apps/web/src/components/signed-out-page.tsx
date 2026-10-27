@@ -90,7 +90,11 @@ export function SignedOutPage({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
-        <header className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10">
+        <header
+          data-signed-out-header
+          data-window-drag
+          className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
+        >
           <div className="flex items-center gap-2.5 text-fg">
             <BrandMark className="w-[31px]" />
             <Wordmark className="text-[23px]" />

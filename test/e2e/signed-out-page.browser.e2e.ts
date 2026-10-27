@@ -185,6 +185,58 @@ describe("signed-out homepage on the real app route", () => {
     }
   }, 90_000);
 
+  test("in the macOS app the brand row clears the window controls and sharing badge", async () => {
+    const browserBrandLeft = new Map<number, number>();
+    for (const platform of ["browser", "macos"] as const) {
+      const context = await browser.newContext();
+      try {
+        await installApi(context, "legacy");
+        if (platform === "macos")
+          await context.addInitScript(() => {
+            Object.assign(window, {
+              opengeniDesktop: {
+                version: 1,
+                platform: "macos",
+                capabilities: [],
+                setAppearance: () => {},
+                openExternal: () => {},
+              },
+            });
+          });
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(baseUrl);
+        await signedOutHeading(page).waitFor();
+        const header = page.locator("[data-signed-out-header]");
+        const brand = header.locator("> div").first();
+        for (const width of [720, 900, 1100, 1128, 1280]) {
+          await page.setViewportSize({ width, height: 800 });
+          const box = (await brand.boundingBox())!;
+          // The brand sits in the window's top row, where macOS draws the
+          // traffic lights (ending about 70px in) or the sharing badge (80px).
+          expect(box.y).toBeLessThan(40);
+          if (platform === "browser") {
+            browserBrandLeft.set(width, box.x);
+          } else {
+            expect(box.x).toBe(Math.max(84, browserBrandLeft.get(width)!));
+            expect(
+              await header.evaluate((element) =>
+                getComputedStyle(element).getPropertyValue("-webkit-app-region"),
+              ),
+            ).toBe("drag");
+          }
+        }
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+    // The web page itself is unchanged: 16px in a 720px window, then the
+    // 1040px column's 40px inset.
+    expect([...browserBrandLeft.values()]).toEqual([16, 40, 70, 84, 160]);
+  }, 90_000);
+
   test("broker registration stays embedded and social providers remain in the isolated popup", async () => {
     const context = await browser.newContext();
     try {

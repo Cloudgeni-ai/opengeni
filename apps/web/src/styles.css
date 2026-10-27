@@ -170,6 +170,14 @@ html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-ch
   padding-left: 84px;
 }
 
+/* The signed-out page has no rail: its brand row is the window's top row. Its
+   1040px column is centred, so in a window narrower than about 1128px the
+   brand would reach the controls and the sharing badge; it starts 84px in
+   there, and keeps its usual inset in wider windows. */
+html[data-desktop="macos"] [data-signed-out-header] {
+  padding-left: clamp(2.5rem, calc(84px - (100% - 1040px) / 2), 84px);
+}
+
 /* Expanded Sites escape the rail into the modal top layer. Their own header
    must reserve the native controls, independently of the rail underneath.
    Inline previews and browser/embedded viewers keep their normal spacing. */
