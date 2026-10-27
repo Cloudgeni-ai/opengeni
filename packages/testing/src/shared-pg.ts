@@ -2084,7 +2084,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     const rows = (await sql`
       SELECT d.oid::text AS oid, d.datname, d.datistemplate,
              shobj_description(d.oid, 'pg_database') AS comment,
-             (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datid = d.oid) AS connections,
+             -- Autovacuum is not a user (it visits any database that was ever
+             -- connected to, and DROP DATABASE stops it); anything else counts.
+             (SELECT count(*)::int FROM pg_stat_activity a
+               WHERE a.datid = d.oid
+                 AND a.backend_type IS DISTINCT FROM 'autovacuum worker') AS connections,
              coalesce(s.sessions, 0)::text AS sessions
         FROM pg_database d
         LEFT JOIN pg_stat_database s ON s.datid = d.oid
@@ -2558,7 +2562,7 @@ async function dropTemplate(
   const [current] = await sql`
     SELECT shobj_description(d.oid, 'pg_database') AS comment,
            (SELECT count(*)::int FROM pg_stat_activity a
-             WHERE a.datid = d.oid
+             WHERE (a.datid = d.oid AND a.backend_type IS DISTINCT FROM 'autovacuum worker')
                 OR (position(d.datname IN coalesce(a.query, '')) > 0
                     AND a.state = 'active' AND a.pid <> pg_backend_pid())) AS busy
       FROM pg_database d
