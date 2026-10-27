@@ -10164,8 +10164,16 @@ function parseKey(input: string, mac: boolean): ParsedKey {
   // A digit or symbol is the key that gives it on a US keyboard, with Shift
   // held when that key needs it, as typed text is.
   const symbol = /[a-z]/iu.test(rawKey) ? undefined : US_SYMBOL_KEY_BY_CHARACTER.get(rawKey);
+  // A letter in a key combination is the key a browser reports for it:
+  // lowercase unless Shift is held, whichever case was written.
+  const letterKey =
+    /^[a-z]$/iu.test(rawKey) && modifiers !== 0
+      ? (modifiers & SHIFT_MODIFIER) !== 0
+        ? upper
+        : rawKey.toLowerCase()
+      : rawKey;
   return {
-    key: rawKey,
+    key: letterKey,
     code: symbol ? symbol.code : /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
     keyCode: symbol ? symbol.keyCode : (upper.codePointAt(0) ?? 0),
     modifiers: symbol?.shift ? modifiers | SHIFT_MODIFIER : modifiers,
@@ -11545,14 +11553,16 @@ const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
   "the target is not a text field, so inserted text would not arrive and nothing was typed; type into a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
 
 const TYPE_KEYS_TEXT_ONLY_MESSAGE =
-  "keys were sent, but these characters have no key on a US keyboard and went as text only, which a canvas or remote desktop that reads key presses may not receive; check the screen: ";
+  "keys were sent, but these characters have no US keyboard key, so a canvas or remote desktop reading key presses may not have received them: ";
 
 /** Whether inserted text can reach an element: true for a text field,
  * editable content or an EditContext element (code editors), false for an
  * element that takes no text (the page itself, a canvas, a button), null
  * for a frame, a plugin or a shadow host whose focused part this document
  * cannot see. With `focused`, `this` is a document's active element and the
- * check follows focus into open shadow roots and same-origin frames. */
+ * check follows focus into open shadow roots and same-origin frames. Without
+ * it, `this` is about to be focused, and an element holding a text field is
+ * null: focusing it may move focus into that field. */
 const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
   let element = this;
   while (focused && element) {
@@ -11562,12 +11572,14 @@ const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
   }
   if (!element || element.nodeType !== 1) return false;
   const owner = element.ownerDocument;
-  if (owner.designMode === "on" || element.isContentEditable || element.editContext) return true;
+  const textField = (node) => node.isContentEditable || !!node.editContext || node.localName === "textarea" || (node.localName === "input" && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(node.type));
+  const holdsTextField = (root) => [...root.querySelectorAll("*")].some((node) => textField(node) || (node.shadowRoot && holdsTextField(node.shadowRoot)));
+  if (owner.designMode === "on" || textField(element)) return true;
   if (element === owner.body || element === owner.documentElement) return false;
   const tag = element.localName;
-  if (tag === "textarea") return true;
-  if (tag === "input") return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(element.type);
+  if (tag === "input") return false;
   if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-") || element.shadowRoot) return null;
+  if (!focused && holdsTextField(element)) return null;
   // An element focused in its own right takes no text. A shadow host focused
   // for a field inside its closed shadow root is not focusable itself.
   return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;

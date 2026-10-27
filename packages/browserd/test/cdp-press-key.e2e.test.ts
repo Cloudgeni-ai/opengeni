@@ -370,9 +370,13 @@ e2e(
       globalThis.context = new EditContext();
       editor.editContext = context;
       context.addEventListener("textupdate", (e) => context.updateSelection(e.selectionEnd, e.selectionEnd));
+      const box = document.querySelector("#box");
+      box.addEventListener("focus", () => box.querySelector("input").focus());
+      globalThis.chords = [];
+      document.addEventListener("keydown", (e) => { if (e.ctrlKey && e.key.length === 1) chords.push(e.key); });
       editor.focus();`;
     const fixture = `data:text/html,${encodeURIComponent(
-      `<!doctype html><title>Edges</title><canvas tabindex="0" width="200" height="100" aria-label="Remote screen"></canvas><div id="editor" tabindex="0" aria-label="Code"></div><button>Save</button><input aria-label="Note"><script>${script}</script>`,
+      `<!doctype html><title>Edges</title><canvas tabindex="0" width="200" height="100" aria-label="Remote screen"></canvas><div id="editor" tabindex="0" aria-label="Code"></div><button>Save</button><input aria-label="Note"><div id="box" tabindex="0" aria-label="Amount box"><input aria-label="Amount"></div><script>${script}</script>`,
     )}`;
     try {
       const initial = await driver.start(fixture);
@@ -444,6 +448,22 @@ e2e(
       await evaluate('remote = ""');
       expect((await run({ type: "press", key: "!" })).state).toBe("completed");
       expect(await evaluate("remote")).toBe("!");
+
+      // A focusable wrapper that moves focus into its own field takes text:
+      // the field that ends up focused decides, not the wrapper.
+      const wrapped = await run({
+        type: "type",
+        locator: { kind: "css", selector: "#box" },
+        text: "Hi",
+      });
+      expect(wrapped.state).toBe("completed");
+      expect(await evaluate('document.querySelector("#box input").value')).toBe("Hi");
+
+      // A letter in a key combination is reported lowercase unless Shift is
+      // held, as a browser reports it.
+      await run({ type: "press", key: "Ctrl+A" });
+      await run({ type: "press", key: "Ctrl+Shift+a" });
+      expect(await evaluate("chords")).toEqual(["a", "A"]);
 
       // A key that fails to send still releases the modifiers pressed for it.
       const internals = driver as unknown as {
