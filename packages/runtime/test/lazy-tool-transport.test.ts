@@ -2429,6 +2429,42 @@ describe("OpenAI/Azure native client tool search", () => {
     }
   });
 
+  test("attaching the video tools leaves the first request byte-identical on every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const firstRequest = async (withVideo: boolean) => {
+        const agent = new Agent({
+          name: "lazy-test",
+          instructions: "Use tools.",
+          model: "scripted",
+          tools: [
+            ...(withVideo
+              ? [
+                  firstPartyTool(
+                    "get_video_generation_capabilities",
+                    "Return the video-generation models currently enabled",
+                  ),
+                  firstPartyTool(
+                    "generate_video",
+                    "Start one durable asynchronous video generation",
+                  ),
+                ]
+              : []),
+            firstPartyTool("exec_command", "Run a shell command in the sandbox"),
+          ],
+        });
+        const runtime = installLazyToolRuntime(agent, transport, new Set());
+        const visible = await agent.getAllTools(undefined as never);
+        const inner = new CapturingModel();
+        const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel(
+          "test",
+        );
+        await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+        return JSON.stringify(inner.requests[0]);
+      };
+      expect(await firstRequest(true)).toBe(await firstRequest(false));
+    }
+  });
+
   test("hides image and video adapter schemas behind search on every transport", async () => {
     for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
       const image = firstPartyTool("generate_image", "Generate or edit exactly one image");

@@ -1141,6 +1141,34 @@ describe("Live transcript", () => {
         }),
       );
       expect(view.container.textContent).toContain("Transcribing");
+      // Stopped, it is a meeting like any other, with its tabs, even while
+      // this recorder still holds the live text it heard.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          state: "stopped",
+          upload: { ...recorder.upload!, pendingChunks: 0, finalized: true },
+          live: [
+            {
+              trackNumber: 0,
+              state: "closed",
+              partial: "",
+              segments: [
+                {
+                  trackNumber: 0,
+                  segmentNumber: 0,
+                  startMilliseconds: 1_000,
+                  endMilliseconds: 3_000,
+                  text: "Morning, everyone.",
+                },
+              ],
+              error: null,
+            },
+          ],
+        }),
+      );
+      expect(view.container.querySelector('[data-slot="segmented-control"]')).not.toBeNull();
+      expect(view.container.querySelector('section[aria-label="Recording"]')).toBeNull();
 
       // Only a lost connection keeps it from transcribing, and it says so.
       await act(async () =>
@@ -1393,5 +1421,51 @@ describe("Live transcript", () => {
       [0, "Hi all."],
       [1, "Morning. Release went out."],
     ]);
+  });
+
+  test("the microphone's echo of the call is left out; what the person says stays", async () => {
+    const { withoutLiveMicrophoneEchoes } = await import("../recordings");
+    const tracks = [
+      { trackNumber: 0, source: "microphone" as const },
+      { trackNumber: 1, source: "system" as const },
+    ];
+    const lines = [
+      // Kari, in the call, heard from the speakers too.
+      {
+        trackNumber: 1,
+        startMilliseconds: 4_000,
+        endMilliseconds: 9_000,
+        text: "Elektrikerne kommer mandag klokken åtte.",
+      },
+      {
+        trackNumber: 0,
+        startMilliseconds: 4_300,
+        endMilliseconds: 9_200,
+        text: "Elektrikerne kommer mandag, klokka åtte.",
+      },
+      // The person recording answers.
+      {
+        trackNumber: 0,
+        startMilliseconds: 10_000,
+        endMilliseconds: 13_000,
+        text: "Da må gipsen vente til tirsdag.",
+      },
+      // A word of their own while Kari speaks stays, as does an echo-like line much later.
+      { trackNumber: 0, startMilliseconds: 5_000, endMilliseconds: 5_400, text: "Mandag?" },
+      {
+        trackNumber: 0,
+        startMilliseconds: 40_000,
+        endMilliseconds: 43_000,
+        text: "Elektrikerne kommer mandag klokken åtte.",
+      },
+    ];
+    expect(withoutLiveMicrophoneEchoes(lines, tracks).map((line) => line.text)).toEqual([
+      "Elektrikerne kommer mandag klokken åtte.",
+      "Da må gipsen vente til tirsdag.",
+      "Mandag?",
+      "Elektrikerne kommer mandag klokken åtte.",
+    ]);
+    // A microphone alone is a room: nothing is an echo.
+    expect(withoutLiveMicrophoneEchoes(lines, [tracks[0]!])).toHaveLength(lines.length);
   });
 });

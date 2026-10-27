@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { RunContext } from "@openai/agents";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
@@ -138,5 +139,61 @@ describe("video generation runtime surface", () => {
       message: "Use the exact current /workspace path and try again.",
       operationCreated: false,
     });
+  });
+
+  test("returns an unavailable answer from both tools as normal tool output", async () => {
+    const off = {
+      schemaVersion: 1 as const,
+      status: "unavailable" as const,
+      code: "video_generation_off" as const,
+      message: "Video generation is off in this workspace.",
+      operationCreated: false as const,
+    };
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", webSearchEnabled: false }),
+      [],
+      {
+        humanInputEnabled: false,
+        videoGeneration: { capabilities: async () => off, execute: async () => off },
+      },
+    );
+    const tools = (
+      agent as unknown as {
+        tools: Array<{
+          name: string;
+          invoke: (context: unknown, input: string, details: unknown) => Promise<unknown>;
+        }>;
+      }
+    ).tools;
+    const invoke = async (name: string, input: unknown) =>
+      await tools
+        .find((candidate) => candidate.name === name)!
+        .invoke(undefined, JSON.stringify(input), { toolCall: { callId: `call-${name}` } });
+    await expect(invoke("get_video_generation_capabilities", {})).resolves.toEqual(off);
+    await expect(invoke("generate_video", { prompt: "animate" })).resolves.toEqual(off);
+  });
+
+  test("attaching the video tools leaves the system prompt byte-identical", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const prompt = async (withVideo: boolean) =>
+      await buildOpenGeniAgent(settings, [], {
+        humanInputEnabled: false,
+        skillCatalog: [],
+        ...(withVideo
+          ? {
+              videoGeneration: {
+                capabilities: async () => capabilities,
+                execute: async (_input, context) => ({
+                  schemaVersion: 1 as const,
+                  status: "accepted" as const,
+                  operationId: context.toolCallId,
+                }),
+              },
+            }
+          : {}),
+      }).getSystemPrompt(new RunContext({}));
+    const without = await prompt(false);
+    expect(without).toBeTruthy();
+    expect(await prompt(true)).toBe(without);
   });
 });

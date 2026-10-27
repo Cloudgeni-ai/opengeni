@@ -27,6 +27,7 @@ old one; old records stay as history.
 | 19 | [An E2B-compatible front door and our own guest init](0019-e2b-compatible-front-door-and-guest-init.md) | Accepted, in progress |
 | 20 | [Opengeni runs on compute through its e2b backend](0020-opengeni-runs-on-compute-through-its-e2b-backend.md) | Superseded by 21 for Opengeni |
 | 21 | [Opengeni runs natively: its machine agent in every sandbox, behind the host's link](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) | Accepted |
+| 23 | [GitHub Actions runner pools: a fresh sandbox per job](0023-github-actions-runner-pools.md) | Accepted |
 
 ## Format
 

@@ -1554,8 +1554,28 @@ computeControl:
     hostMemoryMib: 0
     min: 1
     max: 10
+  # The E2B-compatible front door (compute/docs/adr/0019): E2B's REST API and
+  # the sandboxes' envd behind it, on a port of its own of the pods and of
+  # the API Service. Clients name a sandbox with E2b-Sandbox-Id and
+  # E2b-Sandbox-Port headers, as runner pools do; reaching one by host name
+  # (<port>-<id>.<domain>) needs a certificate for *.<domain> and DNS the
+  # chart does not make. With apiTls it serves HTTPS with the API's
+  # certificate; without it plain HTTP. Network policy admits the release's
+  # runner pools (computeRunners) and the peers in ingressFrom.
+  e2b:
+    enabled: false
+    port: 3000
+    # Default: the API's host name (apiTls.host, or the Service's).
+    domain: ""
+    # Templates by id, as `image:VCPUSxMEMORY_MIB`, or with a disk size
+    # `image:VCPUSxMEMORY_MIBxDISK_MIB` (default diskMib), for example
+    # {base: "base:2x1024", github-runner: "runner:4x8192x30720"}. Empty:
+    # `base`, the default image at 2x1024.
+    templates: {}
+    # More NetworkPolicy peers that may reach it.
+    ingressFrom: []
   # Further `compute-control serve` flags, for example --scale-* settings
-  # or the E2B front door's --e2b-* ones.
+  # or other --e2b-* ones.
   extraArgs: []
   extraEnv: []
   extraVolumes: []
@@ -1608,6 +1628,81 @@ computeControl:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# GitHub Actions runner pools on Opengeni compute (compute/docs/adr/0023):
+# each pool is a Deployment of `compute-runners serve`, from the compute
+# control image, that registers a runner scale set with GitHub and gives
+# every job a fresh sandbox from the pool's template, deleted after the job.
+# Pools reach compute through its E2B front door, so they need
+# computeControl.enabled and computeControl.e2b.enabled. Optionally a pool
+# keeps a warm template of a repository (cloned and prepared, refreshed from
+# its branch) and serves a Turborepo remote cache from object storage that
+# its runners reach at cache.url. Every job of a pool shares its cache:
+# workflows from untrusted forks need a pool of their own.
+computeRunners:
+  # Default: computeControl.image.
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    # A ServiceAccount of its own, for the cloud identity that reads and
+    # writes the pools' caches.
+    create: true
+    name: ""
+    annotations: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  podSecurityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  pools: []
+  # - name: ci                  # the scale set, and `runs-on: ci`
+  #   scope: my-org             # an organization, or owner/repo
+  #   runnerGroup: default
+  #   labels: []
+  #   template: github-runner   # a computeControl.e2b.templates id
+  #   minIdle: 0
+  #   max: 10
+  #   timeoutSeconds: 21600
+  #   env: {}                   # more environment for every runner
+  #   replicaCount: 1           # more stand by to take over the scale set
+  #   github:
+  #     url: https://github.com
+  #     apiUrl: https://api.github.com
+  #     existingSecret: ci-github
+  #     tokenKey: GITHUB_TOKEN  # an admin token, or with appId:
+  #     appId: ""
+  #     appInstallation: ""
+  #     appKeyKey: app.pem      # the App's private key in the same Secret
+  #   compute:
+  #     existingSecret: ci-compute
+  #     key: COMPUTE_API_KEY    # a key of computeControl.keys
+  #   warm:
+  #     repo: my-org/monorepo
+  #     branch: ""              # default: the repository's default branch
+  #     prepare: bun install --frozen-lockfile
+  #     everySeconds: 3600
+  #     withinSeconds: 3600
+  #   cache:
+  #     store: gs://bucket/runner-cache
+  #     url: https://runner-cache.example.com
+  #     existingSecret: ci-cache
+  #     tokenKey: COMPUTE_RUNNERS_CACHE_TOKEN
+  #     days: 14
+  #     service:                # how runners, outside the cluster, reach it
+  #       type: ClusterIP
+  #       port: 8080
+  #       annotations: {}
+  #       loadBalancerSourceRanges: []
+  #   resources: {}             # default: computeRunners.resources
 
 # Optional self-hosted HashiCorp Terraform MCP server. Agents reach it by adding
 # an OPENGENI_MCP_SERVERS entry that points at
