@@ -450,6 +450,39 @@ test("a slow full-page screenshot does not end the live view of its tab", async 
   }
 }, 20_000);
 
+test("a frame capture the renderer never answers still ends the live view", async () => {
+  // Only a capture still within its own deadline holds frames back without
+  // counting; one past it is a renderer that stopped drawing.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    fixture.stallNext("Page.captureScreenshot");
+    await fixture.waitUntilStalled();
+    const ended = (async () => {
+      try {
+        while (!(await iterator.next()).done);
+        return "closed";
+      } catch (error) {
+        return error;
+      }
+    })();
+    // Before the connection gives up on the stalled capture at 10 s.
+    const outcome = await Promise.race([
+      ended,
+      new Promise((resolve) => setTimeout(() => resolve("still streaming"), 9_000)),
+    ]);
+    expect(outcome).toBeInstanceOf(Error);
+  } finally {
+    fixture.replyToStalled();
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
 test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
   // The wait for the frame comes out of the screenshot's own 3 s, not on top.
   const fixture = await captureFixture(undefined, "chrome");
