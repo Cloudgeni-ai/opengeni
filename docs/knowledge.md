@@ -297,7 +297,7 @@ too. A collection's is the newest of its own and that of any non-archived entry 
 sub-collection below it that the reader can see in the selected scope; the walk
 descends through sub-collections by membership. Collection rows show that date.
 Writes keep each collection's newest change, and the member it came through, up
-to date (migration 1014), so a list follows that chain and checks it for the
+to date (migration 1032), so a list follows that chain and checks it for the
 reader instead of walking every member. The walk still answers any collection
 whose chain passes a member the reader cannot see or the scope filter excludes,
 the Review queue, and organizations not yet built by their first Knowledge write.

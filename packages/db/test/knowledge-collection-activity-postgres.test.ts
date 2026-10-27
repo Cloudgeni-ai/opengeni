@@ -4,7 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { createDb, deleteWorkspace, saveKnowledgeEntry } from "../src";
 import type { KnowledgeActor } from "../src/knowledge-entries";
 
-/* Newest-first lists keep each collection's newest change (migration 1014)
+/* Newest-first lists keep each collection's newest change (migration 1032)
    instead of walking every member on every read. The kept time must always
    equal a full rebuild, and a read that uses it must return exactly what the
    walk returns, for every reader, scope, view and page. */
