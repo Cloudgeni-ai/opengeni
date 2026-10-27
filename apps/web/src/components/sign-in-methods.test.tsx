@@ -205,3 +205,72 @@ test("changing a password requires the current password and clears both secrets 
   expect((document.getElementById("signin-current-password") as HTMLInputElement).value).toBe("");
   expect((document.getElementById("signin-new-password") as HTMLInputElement).value).toBe("");
 });
+
+const passkey = {
+  id: "0b6f4d2e-6c1d-4f0a-9a43-2f1a7c3c9d10",
+  name: "iCloud Keychain",
+  createdAt: "2026-10-01T10:00:00.000Z",
+  lastUsedAt: null,
+  backedUp: true,
+};
+
+test("lists passkeys, adds one, and removes one only after confirmation", async () => {
+  let adds = 0;
+  const removed: string[] = [];
+  await mount({
+    passkeys: {
+      items: [passkey],
+      available: true,
+      supported: true,
+      canRemove: true,
+      onlyMethod: false,
+    },
+    onAddPasskey() {
+      adds++;
+    },
+    async onRemovePasskey(id) {
+      removed.push(id);
+      return true;
+    },
+  });
+  expect(host.textContent).toContain("iCloud Keychain");
+  expect(host.textContent).toContain("Synced passkey");
+  expect(host.textContent).toContain("Not used yet");
+  await click("Add passkey");
+  expect(adds).toBe(1);
+  await click("Remove passkey iCloud Keychain");
+  expect(removed).toHaveLength(0);
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("can no longer sign in");
+  const confirm = [...document.querySelectorAll('[role="dialog"] button')].find(
+    (node) => node.textContent === "Remove passkey",
+  ) as HTMLButtonElement;
+  await act(async () => confirm.click());
+  expect(removed).toEqual([passkey.id]);
+});
+
+test("an account without an email address shows only its passkeys and keeps the last one", async () => {
+  await mount({
+    methods: [],
+    showPassword: false,
+    passkeys: {
+      items: [passkey],
+      available: true,
+      supported: true,
+      canRemove: false,
+      onlyMethod: true,
+    },
+  });
+  expect(host.textContent).not.toContain("Password");
+  expect(host.textContent).not.toContain("Sign-in methods");
+  expect(host.textContent).toContain("these passkeys are how you sign in");
+  expect(button("Remove passkey iCloud Keychain").disabled).toBe(true);
+  expect(host.textContent).toContain("Add another passkey before removing this one");
+});
+
+test("a browser without WebAuthn can't start adding a passkey", async () => {
+  await mount({
+    passkeys: { items: [], available: true, supported: false, canRemove: false, onlyMethod: false },
+  });
+  expect(button("Add passkey").disabled).toBe(true);
+  expect(host.textContent).toContain("This browser can't create passkeys.");
+});

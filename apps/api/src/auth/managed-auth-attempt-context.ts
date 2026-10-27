@@ -1,13 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
+/** The sign-in method behind a provider session; a passkey is its own method. */
+export type ManagedAuthProviderId = "credential" | "google" | "github" | "passkey";
+
 type ManagedAuthAttemptContext =
   | {
       kind: "isolated_transaction";
       transactionId: string;
-      providerId: "credential" | "google" | "github";
+      providerId: ManagedAuthProviderId;
       createdAuthSessionId: string | null;
     }
-  | { kind: "provider"; providerId: "credential" | "google" | "github" }
+  | { kind: "provider"; providerId: ManagedAuthProviderId }
   | { kind: "discard_provider_session" };
 
 const managedAuthAttemptStorage = new AsyncLocalStorage<ManagedAuthAttemptContext>();
@@ -23,7 +26,7 @@ export function currentManagedSignInConnectIntent(): string | undefined {
 
 export function runManagedAuthAttempt<T>(
   transactionId: string,
-  providerId: "credential" | "google" | "github",
+  providerId: ManagedAuthProviderId,
   action: () => T,
 ): T {
   return managedAuthAttemptStorage.run(
@@ -32,10 +35,7 @@ export function runManagedAuthAttempt<T>(
   );
 }
 
-export function runManagedAuthProvider<T>(
-  providerId: "credential" | "google" | "github",
-  action: () => T,
-): T {
+export function runManagedAuthProvider<T>(providerId: ManagedAuthProviderId, action: () => T): T {
   return managedAuthAttemptStorage.run({ kind: "provider", providerId }, action);
 }
 
@@ -48,7 +48,7 @@ export function currentManagedAuthAttemptId(): string | null {
   return context?.kind === "isolated_transaction" ? context.transactionId : null;
 }
 
-export function currentManagedAuthProviderId(): "credential" | "google" | "github" {
+export function currentManagedAuthProviderId(): ManagedAuthProviderId {
   const context = managedAuthAttemptStorage.getStore();
   return context?.kind === "isolated_transaction" || context?.kind === "provider"
     ? context.providerId

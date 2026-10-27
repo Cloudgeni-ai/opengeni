@@ -13,6 +13,11 @@
 //   GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h
 //     -> { samples: MetricSample[] }
 //     The downsampled (~1/min) history for ONE machine over a time window.
+//
+// Per-machine changes (command policy, screen control, privacy panes, agent
+// update) follow the machine's scope (../sandbox/machine-authority.ts): the
+// owner changes their own Only me machine; workspace machines need
+// enrollments:manage and organization machines also account:admin.
 
 import {
   ChangeMachineAudienceRequest,
@@ -45,7 +50,6 @@ import {
   grantHasAgentAttemptAuthority,
   mayStartOnlyMe,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -74,6 +78,11 @@ import {
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
+import {
+  requireMachineAccessGrant,
+  requireMachineAudienceAuthority,
+  requireMachineScopeAuthority,
+} from "../sandbox/machine-authority";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -196,12 +205,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // concurrency fence so two operators cannot silently overwrite each other.
   app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -218,12 +222,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       message: "invalid machine operation policy",
     });
     const current = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      current.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, current.scope, "change");
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
       workspaceId: current.workspaceId,
@@ -253,14 +252,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // person's full access, is refused: the change decides who else can use the
   // machine.
   async function requireAudienceCaller(c: Context, workspaceId: string) {
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
+    // Narrowing to Only me or sharing with the workspace changes who else can
+    // use the machine, so it stays with workspace machine managers.
+    requireMachineAudienceAuthority(authorization);
     if (grantHasAgentAttemptAuthority(grant)) {
       throw new HTTPException(403, {
         message:
@@ -322,27 +319,17 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────
   // Turn screen control on for one connected machine, in place (see
   // ../sandbox/screen-control.ts): record the consent, then have the live agent
-  // renew its credentials. Needs enrollments:manage, like connecting the
-  // machine; agents holding it call this too (or the
+  // renew its credentials. Follows the same scope rule as connecting the
+  // machine; agents holding enrollments:manage call this too (or the
   // connected_machine_enable_screen_control tool). No request body.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      enrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, enrollment.scope, "change");
     try {
       return c.json(
         await enableMachineScreenControl(
@@ -367,12 +354,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -382,12 +364,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       { status: 400, message: "invalid privacy settings request" },
     );
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      enrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, enrollment.scope, "change");
     if (enrollment.os !== "macos") {
       throw new HTTPException(422, { message: "privacy settings panes exist only on macOS" });
     }
@@ -405,22 +382,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // successor Hello drive the durable state to completion.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/update", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     const visibleEnrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      visibleEnrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, visibleEnrollment.scope, "change");
     const originWorkspaceId = visibleEnrollment.workspaceId;
     const live = await getLiveEnrollmentConnection(
       db,

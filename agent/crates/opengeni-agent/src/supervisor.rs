@@ -1016,11 +1016,58 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// The handover a finished update run must carry into its successor.
+    /// Every link has stopped serving by then, so this image also hands the
+    /// successor the control delivery tokens no delivery used: it answers the
+    /// same subjects, and Opengeni keeps calling with the tokens it holds.
     #[cfg(unix)]
     pub fn take_pending_handover(&self) -> Option<PendingHandover> {
-        self.handover
-            .as_ref()
-            .and_then(|handover| handover.pending.lock().expect("pending handover").take())
+        let handover = self.handover.as_ref()?;
+        let pending = handover.pending.lock().expect("pending handover").take()?;
+        let leases = self.hand_over_reply_leases();
+        if !leases.is_empty() {
+            if let Err(error) = crate::handover::carry_reply_leases(&handover.manifest, leases) {
+                // Opengeni's next call with one of them gets an unknown
+                // outcome, as after a restart.
+                warn!(%error, "could not hand control delivery tokens to the updated agent");
+            }
+        }
+        Some(pending)
+    }
+
+    /// Removes every reply scope's unused tokens. This image refuses them from
+    /// now on, so each is admitted at most once across both images.
+    #[cfg(unix)]
+    fn hand_over_reply_leases(&self) -> Vec<crate::handover::CarriedReplyLeases> {
+        self.reply_journals
+            .lock()
+            .expect("reply scopes")
+            .iter()
+            .filter_map(|((api_url, connection_id, subject_prefix), journal)| {
+                let leases = journal.lock().expect("control receipts").hand_over_unused();
+                (!leases.is_empty()).then(|| crate::handover::CarriedReplyLeases {
+                    api_url: api_url.clone(),
+                    connection_id: connection_id.clone(),
+                    subject_prefix: subject_prefix.clone(),
+                    leases,
+                })
+            })
+            .collect()
+    }
+
+    /// Takes over the control delivery tokens a predecessor image handed
+    /// over, in the reply scope each link with that exact subject joins. Call
+    /// before running.
+    #[cfg(unix)]
+    pub fn restore_reply_leases(&self, carried: Vec<crate::handover::CarriedReplyLeases>) {
+        let mut journals = self.reply_journals.lock().expect("reply scopes");
+        for scope in carried {
+            journals
+                .entry((scope.api_url, scope.connection_id, scope.subject_prefix))
+                .or_default()
+                .lock()
+                .expect("control receipts")
+                .adopt(scope.leases);
+        }
     }
 
     /// Keeps the gone-op markers a predecessor image carried, so a start it
@@ -3404,6 +3451,9 @@ async fn hand_over_for_update<P: Platform>(
             .into_iter()
             .map(crate::handover::CarriedMarker::from)
             .collect(),
+        // Added once every link has stopped serving: see
+        // `Supervisor::take_pending_handover`.
+        reply_leases: Vec::new(),
     };
     if let Err(error) = crate::handover::write_manifest(&handover.manifest, &manifest) {
         warn!(%error, "could not record the update handover; commands keep running here");
@@ -7460,6 +7510,8 @@ mod tests {
             if let Some(manifest) = inherited {
                 assert_eq!(manifest.ops.len(), 1, "one running command handed over");
                 supervisor.restore_lost_markers(manifest.lost_markers);
+                assert_eq!(manifest.reply_leases.len(), 1, "unused tokens handed over");
+                supervisor.restore_reply_leases(manifest.reply_leases);
                 supervisor.adopt_handed_over(&platform, manifest.ops);
                 let owned = supervisor.update_drain.snapshot().unwrap();
                 assert_eq!(
@@ -7654,6 +7706,50 @@ mod tests {
                 break;
             }
         }
+        // Opengeni prefetches delivery tokens from the predecessor and uses
+        // one of them before the update.
+        let replay_ping = |request_id: &str| ControlRequest {
+            request_id: request_id.into(),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 0,
+            })),
+            ..Default::default()
+        };
+        let lease_request = ControlRequest {
+            request_id: "handover-lease".into(),
+            op: Some(v1::control_request::Op::Ping(v1::PingRequest {
+                nonce: 0,
+                control_replay_window_ms: 240_000,
+            })),
+            ..Default::default()
+        };
+        let leased = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(link.rpc_subject(), lease_request.encode_to_vec().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let Some(v1::control_response::Result::Ping(lease)) =
+            ControlResponse::decode(leased.payload.as_ref())
+                .unwrap()
+                .result
+        else {
+            panic!("lease response")
+        };
+        let delivery = |token: &str| format!("{}.replay.{token}", link.rpc_subject());
+        let used = delivery(&lease.control_replay_tokens[0]);
+        let before = replay_ping("used-before-update").encode_to_vec();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(used.clone(), before.clone().into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(reply.error.is_none(), "{reply:?}");
         std::fs::write(directory.path().join("hand-over-now"), b"").unwrap();
         let online = directory.path().join("successor-online");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -7688,6 +7784,40 @@ mod tests {
             })
             .await,
             "successor online"
+        );
+        // The successor admits a token the predecessor issued and no
+        // delivery used, so a call right after the update just works...
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(
+                delivery(&lease.control_replay_tokens[1]),
+                replay_ping("first-after-update").encode_to_vec().into(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(
+            reply.error.is_none(),
+            "a carried token is admitted: {reply:?}"
+        );
+        // ...while one the predecessor admitted stays refused: only that
+        // image knew whether its delivery ran.
+        let reply =
+            tokio::time::timeout(Duration::from_secs(10), client.request(used, before.into()))
+                .await
+                .unwrap()
+                .unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert_eq!(
+            reply
+                .error
+                .as_ref()
+                .and_then(|error| error.detail.get("failure_code"))
+                .map(String::as_str),
+            Some("control_delivery_expired"),
+            "{reply:?}"
         );
         // As after any reconnect, the server re-attaches the op; the
         // continued job replays what it retained (seq-idempotent).
