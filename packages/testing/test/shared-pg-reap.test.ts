@@ -403,6 +403,11 @@ describe("reaping a real cluster", () => {
       let now = Date.now();
       const minute = 60_000;
       const clock = { now: () => now, pruneTemplates: false };
+      // Errors too, so a drop that fails on a busy server says why.
+      const pass = async () => {
+        const result = await reap(clock);
+        return { dropped: [...result.dropped].sort(), errors: result.errors };
+      };
       const idle = await createDatabase(`${sub}idle_${hex12()}`);
       const busy = await createDatabase(`${sub}busy_${hex12()}`);
       // An owner on another machine may simply not have connected yet.
@@ -414,7 +419,7 @@ describe("reaping a real cluster", () => {
       const unmarked = await createDatabase(`${templatePrefix}${hex12()}`);
 
       // First sighting starts every clock: nothing is dropped yet.
-      expect((await reap(clock)).dropped).toEqual([]);
+      expect(await pass()).toEqual({ dropped: [], errors: [] });
 
       // A client connects to the busy one in between, so its clock restarts.
       const sessions = async () => {
@@ -431,14 +436,14 @@ describe("reaping a real cluster", () => {
       expect(await sessions()).not.toBe(before);
 
       now += 10 * minute;
-      expect((await reap(clock)).dropped).toEqual([]);
+      expect(await pass()).toEqual({ dropped: [], errors: [] });
       now += 10 * minute;
-      expect((await reap(clock)).dropped.sort()).toEqual([idle, unmarked].sort());
+      expect(await pass()).toEqual({ dropped: [idle, unmarked].sort(), errors: [] });
       expect(await exists(busy)).toBe(true);
       expect(await exists(foreign)).toBe(true);
 
       now += 7 * 60 * minute;
-      expect((await reap(clock)).dropped.sort()).toEqual([busy, foreign].sort());
+      expect(await pass()).toEqual({ dropped: [busy, foreign].sort(), errors: [] });
       const remembered = JSON.parse(await readFile(join(directory, "i.json"), "utf8")) as {
         databases: Record<string, unknown>;
       };
