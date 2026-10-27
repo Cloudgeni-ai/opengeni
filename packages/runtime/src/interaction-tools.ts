@@ -19,6 +19,7 @@ import {
   AuthRunMutationResponse,
   BrowserAction,
   BrowserLocator,
+  browserActionDeadlineMs,
   INTERACTION_ACTION_DEADLINE_MAX_MS,
   INTERACTION_MAX_ACTIONS_PER_BATCH,
   INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
@@ -2220,7 +2221,7 @@ export function createInteractionAttemptToolDefinitions(
         );
         // Omitted fences are resolved by the API from the live target in the same
         // request, so acting on the current document costs one round trip.
-        const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
+        const request = {
           operationId: context.operationId,
           targetId,
           ...(value.expectedTargetGeneration === undefined
@@ -2234,7 +2235,31 @@ export function createInteractionAttemptToolDefinitions(
             : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action,
-        });
+        };
+        let receipt: z.infer<typeof BrowserActionReceipt>;
+        try {
+          receipt = await input.transport.actInBrowser(
+            input.workspaceId,
+            browserSessionId,
+            request,
+          );
+        } catch (error) {
+          // The request reached the API, but its answer was lost on the way
+          // back. The browser records each action under its operation ID, so
+          // read what it did rather than report a network error for an action
+          // that may well have completed.
+          const recorded = isLostMutationResponse(error)
+            ? await recordedBrowserReceipt(
+                input.transport,
+                input.workspaceId,
+                browserSessionId,
+                context.operationId,
+                browserActionDeadlineMs(action),
+              )
+            : null;
+          if (!recorded) throw error;
+          receipt = recorded;
+        }
         const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
         if (!value.includeScreenshot) return projected;
         // A tab cannot be captured while a JavaScript dialog is open; the
@@ -4638,6 +4663,51 @@ async function launchOpenedComputerApp(
 
 function launchMayHaveRunNote(applicationId: string): string {
   return `The computer opened, but the launch of ${applicationId} has no known outcome: it may have started. Check computer_targets for its window before launching it again.`;
+}
+
+/** A mutation whose request was sent but whose answer never arrived (the
+ * connection broke, or the response could not be read). */
+function isLostMutationResponse(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 0 && error.outcomeUnknown === true;
+}
+
+/**
+ * The browser's own receipt for an action whose answer was lost: what it
+ * recorded once the action settled, read for as long as the action itself
+ * may run. Null when nothing was recorded under the ID, or no settled
+ * receipt could be read in that time; the lost answer then stands.
+ */
+async function recordedBrowserReceipt(
+  transport: InteractionTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  operationId: string,
+  deadlineMs: number,
+): Promise<z.infer<typeof BrowserActionReceipt> | null> {
+  const deadline = Date.now() + deadlineMs;
+  let pause = 250;
+  for (;;) {
+    try {
+      const receipt = await transport.getBrowserActionReceipt(
+        workspaceId,
+        browserSessionId,
+        operationId,
+      );
+      if (
+        receipt.state === "completed" ||
+        receipt.state === "failed" ||
+        receipt.state === "outcome_unknown"
+      )
+        return receipt;
+    } catch (error) {
+      // Nothing recorded: the action may not have reached the browser, or
+      // may still be about to. Either way its outcome stays unknown.
+      if (error instanceof OpenGeniApiError && error.status === 404) return null;
+    }
+    if (Date.now() + pause > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, pause));
+    pause = Math.min(pause * 2, 2_000);
+  }
 }
 
 /** A target's name or ID compared without case or spaces. */
