@@ -1,5 +1,5 @@
 // Dictation on macOS with the system's own `osascript`: a watcher for
-// shortcuts of modifier keys alone (Control and Fn, as Quedo has it), and
+// shortcuts of modifier keys alone (such as Control and Fn held together), and
 // Command-V into the app in front, which needs the Accessibility permission.
 
 import { type ChildProcess, spawn } from "node:child_process";

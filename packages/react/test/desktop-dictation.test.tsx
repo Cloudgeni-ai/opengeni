@@ -57,6 +57,8 @@ function fakeApp(
     accessibility?: boolean;
     shortcutErrors?: DesktopDictationStatus["shortcutErrors"];
     paste?: DesktopDictationStatus["paste"];
+    /** The app keeps dictation off when asked to turn it on, as a host's consent check may. */
+    refuseEnable?: boolean;
   } = {},
 ) {
   const reports: DesktopDictationReport[] = [];
@@ -80,6 +82,7 @@ function fakeApp(
     status: async () => status(),
     update: async (change) => {
       updates.push(change);
+      if (options.refuseEnable && change.enabled) return status();
       settings = { ...settings, ...change };
       return status();
     },
@@ -314,8 +317,28 @@ describe("DesktopDictationSettings", () => {
     expect(container.textContent).toContain("Another language");
   });
 
+  test("turned on but kept off by the app, it doesn't ask for Accessibility", async () => {
+    const app = fakeApp({ refuseEnable: true });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Dictate from anywhere") ?? false);
+    const toggle = mounted.container.querySelector<HTMLButtonElement>("button[role=switch]")!;
+    await act(async () => {
+      toggle.click();
+      await settle();
+    });
+    expect(app.updates).toEqual([{ enabled: true }]);
+    expect(app.permissionRequests).toEqual([]);
+    expect(mounted.container.textContent).toContain(
+      "Off. Turn on to dictate into any app with a shortcut.",
+    );
+  });
+
   test("adding a shortcut gives it its own keys and the next language", async () => {
-    const app = fakeApp({ settings: { enabled: true }, accessibility: true });
+    // The first shortcut has the app's own name until there are two.
+    const app = fakeApp({
+      settings: { enabled: true, profiles: [{ ...SETTINGS.profiles[0]!, name: "Dictate" }] },
+      accessibility: true,
+    });
     mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
     await waitFor(() => mounted!.container.textContent?.includes("Add shortcut") ?? false);
     const add = [...mounted.container.querySelectorAll("button")].find(

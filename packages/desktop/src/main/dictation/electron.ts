@@ -48,6 +48,11 @@ export interface CreateDesktopDictationOptions {
    * English by default.
    */
   words?: () => DictationWords;
+  /**
+   * The language the first shortcut hears until the person picks another,
+   * as an ISO code such as "nb". Null (the default) detects the language.
+   */
+  language?: string | null;
   /** Where the settings and recent dictations are kept: `app.getPath("userData")`. */
   dataDir: string;
   /** Bring the app's window to the front. */
@@ -67,7 +72,11 @@ export interface CreateDesktopDictationOptions {
  * call `start()` once the app is ready and `stop()` as it quits.
  */
 export function createDesktopDictation(options: CreateDesktopDictationOptions): Dictation {
-  const store = new DictationSettingsStore(options.dataDir, process.platform);
+  const store = new DictationSettingsStore(
+    options.dataDir,
+    process.platform,
+    options.language ?? null,
+  );
   const words = options.words ?? (() => ENGLISH_DICTATION_WORDS);
   let dictation: Dictation | null = null;
   const platform =

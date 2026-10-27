@@ -28,10 +28,14 @@ const LANGUAGE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/u;
 const PROFILE_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 
 /**
- * Off, with one shortcut that detects the language: Control and Fn held
- * together on a Mac (as Quedo has it), a key combination elsewhere.
+ * Off, with one shortcut: Control and Fn held together on a Mac, a key
+ * combination elsewhere. It hears `language` (an ISO code), or detects the
+ * language when that is null or not a language code.
  */
-export function defaultDictationSettings(platform: NodeJS.Platform): DesktopDictationSettings {
+export function defaultDictationSettings(
+  platform: NodeJS.Platform,
+  language: string | null = null,
+): DesktopDictationSettings {
   return {
     enabled: false,
     profiles: [
@@ -42,7 +46,7 @@ export function defaultDictationSettings(platform: NodeJS.Platform): DesktopDict
           platform === "darwin"
             ? { kind: "modifierChord", modifiers: ["control", "fn"] }
             : { kind: "accelerator", accelerator: "Control+Shift+Space" },
-        language: null,
+        language: parseLanguage(language) ?? null,
       },
     ],
     output: "paste",
@@ -170,12 +174,17 @@ export class DictationSettingsStore {
   constructor(
     dataDir: string,
     private readonly platform: NodeJS.Platform,
+    /** What the first shortcut hears until the person changes it; null detects. */
+    private readonly language: string | null = null,
   ) {
     this.path = join(dataDir, "dictation.json");
   }
 
   read(): DesktopDictationSettings {
-    return mergeDictationSettings(defaultDictationSettings(this.platform), this.file());
+    return mergeDictationSettings(
+      defaultDictationSettings(this.platform, this.language),
+      this.file(),
+    );
   }
 
   write(settings: DesktopDictationSettings): void {

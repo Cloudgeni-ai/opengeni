@@ -60,7 +60,8 @@ export type UseDesktopDictationResult = {
   saving: boolean;
   /** A plain sentence when the last change couldn't be saved. */
   error: string | null;
-  update: (change: Partial<DesktopDictationSettings>) => Promise<void>;
+  /** Saves a change; resolves to the app's status after it, or null when it wasn't saved. */
+  update: (change: Partial<DesktopDictationSettings>) => Promise<DesktopDictationStatus | null>;
   requestPermission: (id: DesktopDictationPermissionId) => void;
   clearHistory: () => Promise<void>;
 };
@@ -96,14 +97,17 @@ export function useDesktopDictation(
   }, [dictation, refresh]);
 
   const update = useCallback(
-    async (change: Partial<DesktopDictationSettings>) => {
-      if (!dictation) return;
+    async (change: Partial<DesktopDictationSettings>): Promise<DesktopDictationStatus | null> => {
+      if (!dictation) return null;
       setSaving(true);
       setError(null);
       try {
-        setStatus(await dictation.update(change));
+        const next = await dictation.update(change);
+        setStatus(next);
+        return next;
       } catch {
         setError(t("desktopDictation.settings.saveFailed"));
+        return null;
       } finally {
         setSaving(false);
       }
@@ -226,15 +230,26 @@ export function DesktopDictationSettings({
     const shortcut = freeShortcut(profiles, status);
     if (!shortcut) return;
     const id = newProfileId(profiles);
-    saveProfiles([...profiles, { id, name: profileName(language, t), shortcut, language }]);
+    // With more than one, each is named for its language wherever it shows.
+    saveProfiles([
+      ...profiles.map((profile) => ({ ...profile, name: profileName(profile.language, t) })),
+      { id, name: profileName(language, t), shortcut, language },
+    ]);
   };
 
   const onToggle = (enabled: boolean) => {
-    void update({ enabled });
-    // Typing into other apps needs Accessibility on a Mac: ask when turned on.
-    if (enabled && settings.output !== "copy" && accessibility && !accessibility.granted) {
-      requestPermission("accessibility");
-    }
+    void update({ enabled }).then((next) => {
+      // Typing into other apps needs Accessibility on a Mac: ask once it is on
+      // (an app may keep it off, such as until the person agrees to something).
+      const permission = next?.permissions.find((entry) => entry.id === "accessibility");
+      if (
+        next?.settings.enabled &&
+        next.settings.output !== "copy" &&
+        permission?.granted === false
+      ) {
+        requestPermission("accessibility");
+      }
+    });
   };
 
   return (

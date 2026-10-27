@@ -600,6 +600,24 @@ describe("dictation settings", () => {
     expect(defaultDictationSettings("win32").profiles[0]!.shortcut.kind).toBe("accelerator");
   });
 
+  test("an app may give the first shortcut its language; anything else detects", () => {
+    expect(defaultDictationSettings("darwin", "nb").profiles[0]!.language).toBe("nb");
+    expect(defaultDictationSettings("linux", "not a code").profiles[0]!.language).toBeNull();
+    const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
+    try {
+      const store = new DictationSettingsStore(dir, "darwin", "nb");
+      expect(store.read().profiles[0]!.language).toBe("nb");
+      // The person's choice wins once saved.
+      const chosen = store.read();
+      store.write({ ...chosen, profiles: [{ ...chosen.profiles[0]!, language: null }] });
+      expect(new DictationSettingsStore(dir, "darwin", "nb").read().profiles[0]!.language).toBe(
+        null,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("shortcuts: chords need two known keys", () => {
     expect(parseDictationShortcut({ kind: "modifierChord", modifiers: ["fn", "control"] })).toEqual(
       {

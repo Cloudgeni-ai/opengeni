@@ -761,6 +761,9 @@ const dictation = createDesktopDictation({
   wake: () => openMainWindowInBackground(), // optional
   // optional: the small window's words in the app's language (English by default)
   words: () => ({ ...ENGLISH_DICTATION_WORDS, transcribing: "Transkriberer…" }),
+  // optional: the language the first shortcut hears until the person picks another
+  // (it detects the language by default)
+  language: "nb",
 });
 handleDictationIpc({ ipcMain, dictation, allow: (event) => assertYourWebApp(event) });
 dictation.start();
