@@ -84,3 +84,13 @@ test("outside EU-only the saved choice shows and can be changed", async () => {
   expect(checked(container)).toBe("On");
   await act(async () => root.unmount());
 });
+
+test("no decision model at all: no row, and never Not supported in EU", async () => {
+  context.clientConfig.codeSearch = { available: false, workspaceDefault: "off" };
+  context.clientConfig.inferenceFeatures = [
+    { id: "code_search", available: false, unavailableReason: null },
+  ];
+  const { container, root } = await render();
+  expect(container.textContent).toBe("");
+  await act(async () => root.unmount());
+});

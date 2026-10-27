@@ -945,6 +945,18 @@ describe("the mic in an EU-only workspace", () => {
       undefined,
     );
   });
+
+  test("no speech-to-text route at all: no mic, and no EU label", () => {
+    expect(
+      composerTranscription(
+        context({
+          voiceInput: { available: false, providers: [] },
+          inferenceFeatures: [{ id: "voice_input", available: false, unavailableReason: null }],
+        }),
+        "ws-1",
+      ),
+    ).toBe(undefined);
+  });
 });
 
 test("appendFinalTranscript inserts once with spacing", () => {

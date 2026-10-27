@@ -79,3 +79,14 @@ test("outside EU-only the same video setting stays on and can be changed", async
   expect(toggle.disabled).toBe(false);
   await act(async () => root.unmount());
 });
+
+test("no video route reported: the plain setting, never Not supported in EU", async () => {
+  context.clientConfig.inferenceFeatures = [
+    { id: "video_generation", available: false, unavailableReason: null },
+  ];
+  const { container, root, toggle } = await render();
+  expect(container.textContent).not.toContain("Not supported in EU");
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect(toggle.disabled).toBe(false);
+  await act(async () => root.unmount());
+});

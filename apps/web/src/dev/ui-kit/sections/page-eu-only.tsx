@@ -432,7 +432,21 @@ const EU_ONLY_VOICE_MODEL: RealtimeModelOption = {
   recommended: true,
 };
 
-/** The live voice button and its model list, with no EU voice route here. */
+/** A voice model the server allows here (fixture: its route has an EU record). */
+const EU_ALLOWED_VOICE_MODEL: RealtimeModelOption = {
+  id: "opengeni-gateway/openai/gpt-realtime-mini",
+  label: "GPT Realtime Mini",
+  provider: "OpenGeni",
+  description: "Faster, lighter live voice",
+  available: true,
+  unavailableReason: null,
+  recommended: false,
+};
+
+/**
+ * The live voice button and its model list when the saved model has no EU
+ * route. With no voice model allowed at all, live voice isn't shown.
+ */
 function EuOnlyRealtime() {
   const noop = async () => {};
   return (
@@ -457,7 +471,7 @@ function EuOnlyRealtime() {
           admissionBlocker="Not supported in EU"
           modelAvailable={false}
           selectedModel={EU_ONLY_VOICE_MODEL}
-          models={[EU_ONLY_VOICE_MODEL]}
+          models={[EU_ONLY_VOICE_MODEL, EU_ALLOWED_VOICE_MODEL]}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={noop}
           onStop={noop}
@@ -472,7 +486,7 @@ function EuOnlyRealtime() {
         className="w-[320px] rounded-lg border border-border bg-popover p-1 shadow-md"
       >
         <RealtimeModelPickerMenu
-          models={[EU_ONLY_VOICE_MODEL]}
+          models={[EU_ONLY_VOICE_MODEL, EU_ALLOWED_VOICE_MODEL]}
           selectedModel={EU_ONLY_VOICE_MODEL}
           provider="OpenGeni"
           direction={1}

@@ -55,6 +55,31 @@ describe("the region-restricted reason", () => {
     expect(inferenceFeatureRestriction(t, {}, "video_generation")).toBeNull();
     expect(inferenceFeatureRestriction(t, null, "video_generation")).toBeNull();
   });
+
+  test("a feature the deployment has no route for is never called Not supported in EU", () => {
+    const noRoute = {
+      inferenceFeatures: (
+        [
+          "voice_input",
+          "realtime_voice",
+          "meeting_transcription",
+          "live_transcription",
+          "video_generation",
+          "code_search",
+        ] as const
+      ).map((id) => ({ id, available: false, unavailableReason: null })),
+    } as never;
+    for (const id of [
+      "voice_input",
+      "realtime_voice",
+      "meeting_transcription",
+      "live_transcription",
+      "video_generation",
+      "code_search",
+    ] as const) {
+      expect(inferenceFeatureRestriction(t, noRoute, id)).toBeNull();
+    }
+  });
 });
 
 describe("models in an EU-only workspace", () => {
