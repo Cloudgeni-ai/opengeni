@@ -2275,12 +2275,14 @@ export const englishMessages = {
     "About ${estimate} for this {duration} meeting.",
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
+  "meetings.detailPage.addCredits": "Add credits",
   "meetings.detailPage.auto": "Auto",
   "meetings.detailPage.backToMeetings": "Back to Meetings",
   "meetings.detailPage.canTLoadThePreview": "Can't show the live text right now",
   "meetings.detailPage.checkYourConnectionThenTry": "Check your connection, then try again.",
   "meetings.detailPage.confirm": "Confirm",
   "meetings.detailPage.connectProvidernameFirst": "Connect {providerName} first",
+  "meetings.detailPage.connectAModel": "Connect a model",
   "meetings.detailPage.couldnTChangeWhoCan": "Couldn't change who can see this",
   "meetings.detailPage.couldnTConfirmThisName": "Couldn't confirm this name",
   "meetings.detailPage.couldnTLoadTheTranscript": "Couldn't load the transcript",
@@ -2364,7 +2366,9 @@ export const englishMessages = {
   "meetings.detailPage.summary": "Summary",
   "meetings.detailPage.theAudioForThisMeeting":
     "The audio is gone, so this meeting can't be played or transcribed again.",
-  "meetings.detailPage.theAudioIsOnThe": "Waiting for the audio from the device that recorded it.",
+  "meetings.detailPage.theAudioCouldnTBeUploaded": "The audio couldn't be uploaded.",
+  "meetings.detailPage.theAudioIsOnThe":
+    "The rest of the audio is on the device that recorded it. If it's still recording, the transcript starts when it stops. If not, open Opengeni on that device to finish the upload.",
   "meetings.detailPage.theAudioWasDeletedOn":
     "The audio was deleted on {formatAbsoluteTime}, as this workspace's retention setting says. The transcript stays.",
   "meetings.detailPage.their": "their",
@@ -2372,6 +2376,7 @@ export const englishMessages = {
     "The new version replaces this one when it's ready.",
   "meetings.detailPage.theTranscriptFailed": "The transcript failed",
   "meetings.detailPage.theTranscriptShowsHereWhen": "The transcript appears here when it's ready.",
+  "meetings.detailPage.theUploadDidnTFinish": "The upload didn't finish",
   "meetings.detailPage.they": "they",
   "meetings.detailPage.theyAgreedRemember": "They agreed. Remember",
   "meetings.detailPage.thisMeetingDoesnTExist": "This meeting doesn't exist",
@@ -2380,11 +2385,14 @@ export const englishMessages = {
   "meetings.detailPage.title": "Title",
   "meetings.detailPage.transcribe": "Transcribe",
   "meetings.detailPage.transcribeAgain": "Transcribe again",
+  "meetings.detailPage.transcribeWithModel": "Transcribe with {modelName}",
   "meetings.detailPage.transcribing": "Transcribing",
   "meetings.detailPage.transcribingAgain": "Transcribing again…",
   "meetings.detailPage.transcribingAgain2": "Transcribing again",
   "meetings.detailPage.transcribingAgainFailed": "Transcribing again failed",
   "meetings.detailPage.transcribingAgainWithModelnameThis": "Transcribing again with {modelName}.",
+  "meetings.detailPage.transcribingLongAudio":
+    "Transcribing {duration} of audio. A long meeting takes a while, so you can leave this page and come back.",
   "meetings.detailPage.transcribingThisUsuallyTakesA":
     "Transcribing. This usually takes a minute or two.",
   "meetings.detailPage.transcript": "Transcript",
@@ -2392,6 +2400,10 @@ export const englishMessages = {
     "{transcriptErrorText} This version is unchanged.",
   "meetings.detailPage.tryAgain": "Try again",
   "meetings.detailPage.undo": "Undo",
+  "meetings.detailPage.uploadFailureKeptHere":
+    "{reason} The audio is kept on this device, so nothing is lost. Try again once it's fixed.",
+  "meetings.detailPage.uploadingFromThisDevice":
+    "Uploading the audio from this device. Keep Opengeni open until it's done; the transcript starts after that.",
   "meetings.detailPage.valuePerHour": "${value} per hour",
   "meetings.detailPage.versionVersionnumber": "Version {versionNumber}",
   "meetings.detailPage.voiceRecognitionIsOffIn":
@@ -2399,7 +2411,7 @@ export const englishMessages = {
   "meetings.detailPage.whatSSaidSoFar":
     "Rough live text. The transcript with speakers replaces it when the recording ends.",
   "meetings.detailPage.whatWasSaidAsIt":
-    "Rough live text. The transcript with speakers replaces it in a minute or two.",
+    "Rough live text. The transcript with speakers replaces it when it's ready.",
   "meetings.detailPage.whoCanSeeThisValue": "Who can see this: {value}",
   "meetings.detailPage.whoSpokeNamesWereSuggested_one":
     "Who spoke? One name was suggested from a voice.",
@@ -2655,6 +2667,18 @@ export const englishMessages = {
     "The audio couldn't be read. Part of the upload may be damaged.",
   "meetings.recordings.errorStorageUnavailable":
     "The audio couldn't be fetched from storage. Try again in a few minutes.",
+  "meetings.recordings.errorInsufficientCredits":
+    "This organization is out of credits for transcription. Add credits, or transcribe with a model that doesn't use them.",
+  "meetings.recordings.errorInsufficientCreditsFor":
+    "{modelName} uses credits, and this organization is out of them. Add credits, or transcribe with a model that doesn't use them.",
+  "meetings.recordings.errorAllowanceExhausted":
+    "This workspace has used its credit allowance for now. An admin can raise it, or transcribe with a model that doesn't use credits.",
+  "meetings.recordings.errorMonthlyCostLimit":
+    "This organization has reached its monthly spending limit. An admin can raise it, or transcribe with a model that doesn't use credits.",
+  "meetings.recordings.errorPolicyBlocked":
+    "This organization's policy doesn't allow this model. Try another model.",
+  "meetings.recordings.errorTimedOut":
+    "Transcribing took too long and was stopped. Try again, or try another model.",
   "meetings.recordings.errorUnknown":
     "Something went wrong while transcribing. Try again, or pick another model.",
   /** A speaker nobody has named yet. */
@@ -3172,7 +3196,6 @@ export const englishMessages = {
   "native.meetings.meetingView.thisMeetingCouldntLoad":
     "Couldn't open this meeting. It may have been deleted, or you don't have access.",
   "native.meetings.meetingView.transcribeAgainQuestion": "Transcribe again?",
-  "native.meetings.meetingView.transcribingThisTakes": "Transcribing. This takes a minute or two.",
   "native.meetings.meetingView.tryAgainInAMoment": "Try again in a moment.",
   "native.meetings.meetingView.useName": "Use “{name}”",
   "native.meetings.meetingView.waitingForTheRestOfTheAudio":

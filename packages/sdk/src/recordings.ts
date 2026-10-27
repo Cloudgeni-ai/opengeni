@@ -32,6 +32,7 @@ import type {
   ListRecordingNotesResponse,
   ListRecordingPeopleResponse,
   ListRecordingsResponse,
+  ListOwnRecordingsResponse,
   ListRecordingTranscriptVersionsResponse,
   Recording,
   RecordingLiveSession,
@@ -137,6 +138,32 @@ export class OpenGeniRecordingsClient {
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings`,
       request,
+    );
+  }
+
+  /**
+   * The signed-in person's own Only me meetings in their other workspaces,
+   * newest first, each with the workspace it is in and opens in. Only a
+   * person may ask (not a key, service or agent); nobody else's recordings
+   * and no shared ones are listed.
+   */
+  async listOwnRecordings(
+    options: {
+      /** Leave this workspace out, usually the one the list is shown in. */
+      excludeWorkspaceId?: string;
+      limit?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ListOwnRecordingsResponse> {
+    return await this.client.requestJson<ListOwnRecordingsResponse>(
+      "GET",
+      "/v1/recordings/own",
+      undefined,
+      {
+        ...(options.excludeWorkspaceId ? { excludeWorkspaceId: options.excludeWorkspaceId } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 
@@ -791,6 +818,19 @@ export class RecordingUploader {
     return this.pumps.get(recordingId)?.status ?? null;
   }
 
+  /**
+   * Try a recording again after a failure retrying couldn't fix, once its
+   * cause is fixed (credits added, a model chosen). Its audio stays stored
+   * here until the server has it, so nothing is lost by failing. False when
+   * this uploader holds no failed upload for it.
+   */
+  retry(recordingId: string): boolean {
+    const pump = this.pumps.get(recordingId);
+    if (!pump?.status.failed) return false;
+    this.kick(recordingId);
+    return true;
+  }
+
   /** The finalize result, once a finished recording is on the server. */
   readonly finalized = new Map<string, FinalizeRecordingResponse>();
 
@@ -840,6 +880,9 @@ export class RecordingUploader {
       };
       this.pumps.set(recordingId, pump);
     }
+    // A new pass is a new attempt: what failed before says nothing about it,
+    // so whoever waits for this pass waits for its own result.
+    if (pump.status.failed) this.update(pump, { failed: null });
     pump.again = true;
     pump.wake?.();
     this.startPump(recordingId, pump);
@@ -873,6 +916,9 @@ export class RecordingUploader {
         if (done) return;
       } catch (error) {
         if (error instanceof PermanentRecordingError) {
+          // Passes asked for before it failed would only fail the same way;
+          // the next kick, such as retry(), starts again.
+          pump.again = false;
           this.update(pump, {
             uploading: false,
             failed: { code: error.code, message: error.message },

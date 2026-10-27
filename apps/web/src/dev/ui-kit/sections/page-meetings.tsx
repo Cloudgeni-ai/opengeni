@@ -121,6 +121,8 @@ function fakeRecorder(
     systemAudioSupported: true,
     systemAudioKind: audio,
     recovered: [],
+    uploads: {},
+    retryUpload: () => false,
     start: async () => {},
     pause: () => {},
     resume: () => {},

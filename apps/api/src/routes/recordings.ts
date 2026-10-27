@@ -8,6 +8,7 @@ import {
   CreateRecordingUploadsRequest,
   RecordingCapturePurpose,
   FinalizeRecordingRequest,
+  ListOwnRecordingsResponse,
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceVoiceInputEnabled,
@@ -29,7 +30,9 @@ import {
 import {
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
+  inboxSubjectForContext,
   RecordingTranscriptionError,
+  requireAccessContext,
   requireAccessGrant,
   TranscriptionBillingRefusedError,
   type ApiRouteDeps,
@@ -53,6 +56,7 @@ import {
   listRecordingPeople,
   listRecordings,
   listRecordingTranscriptVersions,
+  listWorkspacesForSubject,
   markRecordingChunksUploaded,
   markRecordingDeleting,
   recordAuditEvent,
@@ -510,6 +514,65 @@ export function registerRecordingRoutes(
         limit: Number.isFinite(limit) ? limit : 50,
       }),
     );
+  });
+
+  /**
+   * The person's own Only me meetings in their other workspaces, so the
+   * Meetings page of any workspace can list them under "From other
+   * workspaces". Each is read in its own workspace, under the person's grant
+   * there, and stays there: only a signed-in person asks this (not a key,
+   * service or agent), and nobody else's or shared recordings are listed.
+   */
+  app.get("/v1/recordings/own", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const subjectId = inboxSubjectForContext(context);
+    if (!subjectId) {
+      throw new ApiHttpError(403, {
+        code: "permission_denied",
+        message: "Only a signed-in person can list their own recordings across workspaces.",
+        retryable: false,
+      });
+    }
+    const excluded = c.req.query("excludeWorkspaceId") ?? null;
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 20) || 20, 1), 50);
+    const workspaces = new Map<string, string>();
+    for (const workspace of await listWorkspacesForSubject(db, subjectId)) {
+      workspaces.set(workspace.id, workspace.name);
+    }
+    for (const grant of context.workspaceGrants) {
+      if (grant.workspaceId && !workspaces.has(grant.workspaceId)) {
+        const workspace = await getWorkspace(db, grant.workspaceId);
+        if (workspace) workspaces.set(workspace.id, workspace.name);
+      }
+    }
+    const found = await Promise.all(
+      [...workspaces].map(async ([workspaceId, workspaceName]) => {
+        if (workspaceId === excluded) return [];
+        // Access can change after a recording was made: read only where the
+        // person still reads sessions, as themselves.
+        const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read").catch(
+          () => null,
+        );
+        if (!grant || grant.subjectId !== subjectId) return [];
+        const { recordings } = await listRecordings(db, {
+          workspaceId,
+          subjectId,
+          ownPrivateOnly: true,
+          limit,
+        });
+        return recordings.map((recording) => ({ workspaceId, workspaceName, recording }));
+      }),
+    );
+    const recordings = found
+      .flat()
+      .sort(
+        (a, b) =>
+          b.recording.startedAt.localeCompare(a.recording.startedAt) ||
+          b.recording.id.localeCompare(a.recording.id),
+      )
+      .slice(0, limit);
+    c.header("cache-control", "private, no-store");
+    return c.json(ListOwnRecordingsResponse.parse({ recordings }));
   });
 
   app.post(base, async (c) => {

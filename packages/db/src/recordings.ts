@@ -431,6 +431,11 @@ export type ListRecordingsInput = RecordingActor & {
   externalRef?: string | undefined;
   /** Meetings unless asked otherwise: browser recordings stay out of meeting lists. */
   purpose?: RecordingPurpose | undefined;
+  /**
+   * Only the caller's own Only me recordings: what the person's list in
+   * another workspace shows of this one. Never anyone else's, nor shared ones.
+   */
+  ownPrivateOnly?: boolean | undefined;
   /** Only recordings started before this instant (the previous page's last `startedAt`). */
   before?: { startedAt: Date; id: string } | undefined;
   limit?: number | undefined;
@@ -449,6 +454,12 @@ export async function listRecordings(
       eq(schema.recordings.purpose, input.purpose ?? "meeting"),
     ];
     if (input.externalRef) conditions.push(eq(schema.recordings.externalRef, input.externalRef));
+    if (input.ownPrivateOnly) {
+      conditions.push(
+        eq(schema.recordings.ownerSubjectId, input.subjectId),
+        eq(schema.recordings.visibility, "private"),
+      );
+    }
     if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
     if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
     if (input.before) {

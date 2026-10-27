@@ -6,7 +6,7 @@ import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
 
@@ -60,6 +60,16 @@ export function MeetingDetailRoute({
   // "Ask about this meeting" starts a normal chat on the person's model, with
   // the question first and the meeting attached for meeting_read.
   const canAsk = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  // A transcript refused for credits, or for a model that isn't connected,
+  // links to the fix for those who can make it.
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    hasAccountPermission(accessContext, workspace?.accountId ?? "", "billing:manage");
+  const canConnectModels = hasWorkspacePermission(
+    accessContext,
+    workspaceId,
+    "connections:write",
+  );
   const ask = async (meetingId: string, question: string): Promise<boolean> => {
     const meeting = await recordings.getRecording(workspaceId, meetingId).catch(() => null);
     const created = await startSession(
@@ -93,6 +103,26 @@ export function MeetingDetailRoute({
             params: { workspaceId },
             search: { section: "general" },
           })
+        }
+        onOpenBilling={
+          canBuyCredits
+            ? () =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "billing" },
+                })
+            : undefined
+        }
+        onConnectModels={
+          canConnectModels
+            ? () =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "models", workspace: workspaceId },
+                })
+            : undefined
         }
         onOpenChat={(sessionId) =>
           void navigate({
