@@ -1,6 +1,6 @@
 import type { MachineView } from "@opengeni/sdk";
 import { ArrowUpRightIcon, CheckIcon, LaptopIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useOpenGeniText } from "../../messages/runtime";
 import { defaultThisComputerLabels, type ThisComputerLabels } from "./labels";
 import {
@@ -86,6 +86,10 @@ export function ThisComputerCard({
   const catalogText = useOpenGeniText();
   const labels = given ?? defaultThisComputerLabels(catalogText);
   const card = labels.card;
+  // A ready computer may not be the one the person means: on the web, the
+  // host's own connect path stays one click away after the card completes.
+  const [connectingAnother, setConnectingAnother] = useState(false);
+  const anotherStepsId = useId();
   const status = computer?.status ?? null;
   const use = computer ? computerUseState(computer) : ({ kind: "hidden" } as const);
   const own = (machines ?? []).filter(
@@ -211,6 +215,68 @@ export function ThisComputerCard({
   }
 
   const complete = readyName !== null;
+  const hostConnects = Boolean(onConnect || downloads?.length || openAppUrl || downloadUrl);
+  const offerAnother = complete && !computer && hostConnects;
+  const anotherLabel = catalogText("thisComputer.card.connectAnother");
+  const hasDownloads = Boolean(downloads?.length || openAppUrl);
+  // Install-and-open links for this device, for a first computer or (after a
+  // lead line saying so) for another one when that one is this device.
+  const downloadLinks = hasDownloads ? (
+    <>
+      {downloads?.map((download) => (
+        <a key={download.url} href={download.url}>
+          {download.label}
+        </a>
+      ))}
+      {openAppUrl ? <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a> : null}
+    </>
+  ) : null;
+  let another: ReactNode = null;
+  if (offerAnother && onConnect) {
+    another = (
+      <div className="og-tc-card-foot og-tc-card-another">
+        <HostConnectAction onConnect={onConnect} label={anotherLabel} secondary />
+      </div>
+    );
+  } else if (offerAnother) {
+    // A disclosure: the button stays put (and keeps focus) while the steps
+    // open below it. The steps happen on the other computer; this device's
+    // links only help when that computer is this one, and say so.
+    another = (
+      <>
+        <div className="og-tc-card-foot og-tc-card-another">
+          <button
+            type="button"
+            data-secondary=""
+            aria-expanded={connectingAnother}
+            aria-controls={anotherStepsId}
+            onClick={() => setConnectingAnother((open) => !open)}
+          >
+            {anotherLabel}
+          </button>
+        </div>
+        <div id={anotherStepsId} className="og-tc-card-another-steps" hidden={!connectingAnother}>
+          <div className="og-tc-card-foot">
+            <p>
+              {hasDownloads
+                ? catalogText("thisComputer.card.anotherSteps")
+                : catalogText("thisComputer.card.anotherGetApp", { productName })}
+            </p>
+          </div>
+          <div className="og-tc-card-foot og-tc-card-downloads">
+            <p className="og-tc-card-here">{catalogText("thisComputer.card.anotherIsThisOne")}</p>
+            {downloadLinks ??
+              (downloadUrl ? (
+                <a href={downloadUrl} target="_blank" rel="noreferrer">
+                  {card.getAppAction(productName)}
+                  <ArrowUpRightIcon aria-hidden />
+                </a>
+              ) : null)}
+          </div>
+        </div>
+      </>
+    );
+  }
   return (
     <section className="og-session-capability og-tc-card" aria-label={card.name}>
       <div className="og-session-capability-shell" data-state={complete ? "complete" : undefined}>
@@ -231,18 +297,10 @@ export function ThisComputerCard({
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>
-        {!computer && !complete && (downloads?.length || openAppUrl) ? (
-          <div className="og-tc-card-foot og-tc-card-downloads">
-            {downloads?.map((download) => (
-              <a key={download.url} href={download.url}>
-                {download.label}
-              </a>
-            ))}
-            {openAppUrl ? (
-              <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a>
-            ) : null}
-          </div>
+        {!computer && !complete && downloadLinks ? (
+          <div className="og-tc-card-foot og-tc-card-downloads">{downloadLinks}</div>
         ) : null}
+        {another}
         {!complete ? <p className="og-tc-card-note">{card.note}</p> : null}
       </div>
     </section>
@@ -252,9 +310,12 @@ export function ThisComputerCard({
 function HostConnectAction({
   onConnect,
   label,
+  secondary = false,
 }: {
   onConnect: () => Promise<void>;
   label: string;
+  /** A quieter button, beside a computer that is already ready. */
+  secondary?: boolean;
 }) {
   const t = useOpenGeniText();
   const busyRef = useRef(false);
@@ -265,6 +326,7 @@ function HostConnectAction({
       <button
         type="button"
         disabled={busy}
+        data-secondary={secondary ? "" : undefined}
         onClick={() => {
           if (busyRef.current) return;
           busyRef.current = true;

@@ -530,6 +530,73 @@ describe("recording routes", () => {
     });
   });
 
+  test("a dictation is heard in the language it names, else detected, never the meeting language", async () => {
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"voiceInput":{"enabled":true},"recordings":{"language":"sv"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    // Only the language: the workspace's voice input still picks the model.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          purpose: "dictation",
+          tracks: mic,
+          transcription: { language: "nb", model: "scribe_v2" },
+        })
+      ).status,
+    ).toBe(400);
+    const heard = async (transcriptionRequest?: Record<string, unknown>) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        purpose: "dictation",
+        tracks: mic,
+        ...(transcriptionRequest ? { transcription: transcriptionRequest } : {}),
+      });
+      expect(created.status).toBe(201);
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      expect(finalized.status).toBe(200);
+      const [{ options }] = await shared.admin`
+        select options from recording_transcript_versions where recording_id = ${recordingId}`;
+      return options;
+    };
+    expect(await heard({ language: "nb" })).toEqual({ language: "nb" });
+    // People dictate in more languages than they meet in: no language detects it.
+    expect(await heard()).toEqual({});
+    expect(await heard({ language: null })).toEqual({});
+  });
+
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
     const scope = await fixture();
     expect((await scope.owner.call("GET", "/recording-models")).body.language).toBeNull();
@@ -538,6 +605,12 @@ describe("recording routes", () => {
       where id = ${scope.workspaceId}`;
     // Recorders show it before the meeting starts.
     expect((await scope.owner.call("GET", "/recording-models")).body.language).toBe("no");
+    // So does whether they start with the live transcript on.
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(false);
+    await shared.admin`
+      update workspaces set settings = jsonb_set(settings, '{recordings,liveTranscript}', 'true')
+      where id = ${scope.workspaceId}`;
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(true);
     const create = async (transcription?: { language?: string | null }) => {
       const recordingId = crypto.randomUUID();
       const created = await scope.owner.call("POST", "/recordings", {

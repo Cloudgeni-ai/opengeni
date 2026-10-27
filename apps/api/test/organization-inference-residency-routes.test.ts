@@ -41,7 +41,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await db?.close();
   await shared?.release();
-});
+}, 60_000);
 
 function buildApp(productAccessMode: "managed" | "local" | "configured" = "managed"): Hono {
   const app = new Hono();

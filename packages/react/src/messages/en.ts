@@ -1540,6 +1540,88 @@ export const englishMessages = {
   "counts.timelineAnnotations_other": "{count} timeline annotations",
   "counts.tools_one": "{count} tool",
   "counts.tools_other": "{count} tools",
+  "desktopDictation.host.cantRecord": "This computer can't record audio.",
+  "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
+  "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
+  "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.stopped": "Dictation stopped. Try again.",
+  "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
+  "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
+  "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
+  "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
+  "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.settings.accessibilityDescription":
+    "Lets {product} type the text into other apps. Without it, the text is only copied.",
+  "desktopDictation.settings.accessibilityLabel": "Accessibility",
+  "desktopDictation.settings.acceleratorToggle":
+    "Press it to start, and again to finish. Works while {product} is open.",
+  "desktopDictation.settings.add": "Add shortcut",
+  "desktopDictation.settings.addDescription":
+    "Give another shortcut its own language, such as one for English and one for Norwegian.",
+  "desktopDictation.settings.addLabel": "Another language",
+  "desktopDictation.settings.allow": "Allow",
+  "desktopDictation.settings.allowed": "Allowed",
+  "desktopDictation.settings.anyLanguage": "Any language",
+  "desktopDictation.settings.cancelRecording": "Cancel",
+  "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
+  "desktopDictation.settings.chordToggle":
+    "Press the keys together and let go to start. Press them again to finish.",
+  "desktopDictation.settings.clearHistory": "Clear",
+  "desktopDictation.settings.copyText": "Copy text",
+  "desktopDictation.settings.description":
+    "Press a shortcut in any app and speak. The text is typed where your cursor is.",
+  "desktopDictation.settings.detectAutomatically": "Detect automatically",
+  "desktopDictation.settings.historyDescription": "Kept on this computer only.",
+  "desktopDictation.settings.historyTitle": "Recent dictations",
+  "desktopDictation.settings.keyCombination": "Key combination…",
+  "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
+  "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
+  "desktopDictation.settings.languageLabel": "Language",
+  "desktopDictation.settings.modeHold": "Hold while speaking",
+  "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
+  "desktopDictation.settings.modeLabel": "How the keys work",
+  "desktopDictation.settings.modeToggle": "Press to start and finish",
+  "desktopDictation.settings.modeToggleDescription": "Press once to start and again to finish.",
+  "desktopDictation.settings.outputCopy": "Copy it only",
+  "desktopDictation.settings.outputCopyDescription": "Paste it yourself where you want it.",
+  "desktopDictation.settings.outputDescription": "Where the text goes when you finish.",
+  "desktopDictation.settings.outputLabel": "Text",
+  "desktopDictation.settings.outputPaste": "Type it where the cursor is",
+  "desktopDictation.settings.outputPasteAndCopy": "Type it and keep it copied",
+  "desktopDictation.settings.outputPasteAndCopyDescription": "It stays on the clipboard too.",
+  "desktopDictation.settings.outputPasteDescription": "Your clipboard is put back afterwards.",
+  "desktopDictation.settings.pairHold": "Hold both keys while you speak, and let go to finish.",
+  "desktopDictation.settings.pairToggle":
+    "Press both keys together, left and right, to start. Press them again to finish.",
+  "desktopDictation.settings.pasteAccessibility":
+    "Allow Accessibility so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteUnsupported":
+    "This computer can't type into other apps, so the text is copied.",
+  "desktopDictation.settings.pasteWtype":
+    "Install wtype or ydotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteXdotool":
+    "Install xdotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.recordKeys": "Press the key combination now. Esc cancels.",
+  "desktopDictation.settings.remove": "Remove shortcut",
+  "desktopDictation.settings.saveFailed": "Couldn't save the change. Try again.",
+  "desktopDictation.settings.shortcutFailed":
+    "The shortcut couldn't be set up. Turn dictation off and on again.",
+  "desktopDictation.settings.shortcutLabel": "Shortcut",
+  "desktopDictation.settings.shortcutStopped":
+    "The shortcut stopped working. Turn dictation off and on again.",
+  "desktopDictation.settings.shortcutTaken":
+    "That key combination is taken or not allowed. Choose another.",
+  "desktopDictation.settings.shortcutUnsupported":
+    "This computer can't use those keys alone. Choose a key combination.",
+  "desktopDictation.settings.title": "Dictation",
+  "desktopDictation.settings.toggleLabel": "Dictate from anywhere",
+  "desktopDictation.settings.toggleOff": "Off. Turn on to dictate into any app with a shortcut.",
+  "desktopDictation.settings.toggleOn": "{shortcut} starts and finishes dictation in any app.",
+  "desktopDictation.settings.toggleOnHold": "Hold {shortcut} while you speak, in any app.",
+  "desktopDictation.settings.toggleOnMany": "Each shortcut dictates in its language, in any app.",
+  "desktopDictation.settings.usedByAnother": "Another shortcut uses these keys.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
@@ -1758,25 +1840,29 @@ export const englishMessages = {
     "Unknown transcription adapter failure.",
   "hooks.useTurnQueue.thatQueuedPromptChangedBefore":
     "That queued prompt changed before Steer could be sent.",
+  "humanInputForm.back": "Back",
   "humanInputForm.loadingTheExactSkillFiles": "Loading the exact Skill files…",
   "humanInputForm.loadTheExactSkillFiles": "Load the exact Skill files before saving.",
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
+  "humanInputForm.next": "Next",
   "humanInputForm.orSkipAndLetThe": "Or skip and let the agent decide.",
   "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
+  "humanInputForm.questionOfTotal": "Question {current} of {total}",
   "humanInputForm.retryPreview": "Retry preview",
   "humanInputForm.savingActivatesTheseExactFiles":
     "Saving activates these exact files. No additional review is required.",
   "humanInputForm.scopeLengthFiles": "· {scope} · {length} files",
   "humanInputForm.skill": "Skill",
+  "humanInputForm.somethingElse": "Something else…",
   "humanInputForm.theRequestedSkillRevisionCould":
     "The requested Skill revision could not be verified.",
   "humanInputForm.thisClientCannotPreviewSkill":
     "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
-  "humanInputForm.typeAValue": "Type a value…",
+  "humanInputForm.typeYourAnswer": "Type your answer…",
   "humanInputModel.apiKey": "API key",
   "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
   "humanInputModel.chooseAtLeastMin": "Choose at least {min}.",
@@ -4596,6 +4682,15 @@ export const englishMessages = {
   "thisComputer.card.note":
     "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app.",
   "thisComputer.card.openApp": "Open app and connect",
+  "thisComputer.card.connectAnother": "Connect another computer",
+  "thisComputer.card.anotherSteps":
+    "Do this on the computer you want to connect: open this chat there, install the app, then choose Open app and connect.",
+  "thisComputer.card.anotherGetApp":
+    "Do this on the computer you want to connect: open this chat there, install the {productName} app, then turn on “Use this computer”.",
+  "thisComputer.card.anotherIsThisOne": "If it's this computer:",
+  "thisComputer.card.connectOnThatComputer":
+    "A computer connects from the computer itself. Open this chat on the computer you want to use, then choose Connect.",
+  "thisComputer.card.shareConversation": "Share link to this chat",
   "thisComputer.card.installThenOpen":
     "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
   "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",
@@ -4898,6 +4993,27 @@ export const englishMessages = {
   "timeline.patchApplyCommand.runsGitApplyInYour":
     "Runs git apply in your project folder. Works on macOS, Linux and Git Bash.",
   "timeline.patchApplyCommand.tryAgain": "Try again",
+  "timeline.paymentPage.balanceNow": "Balance {balance}",
+  "timeline.paymentPage.billingPortal": "Billing",
+  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.continueToPayment": "Continue to payment",
+  "timeline.paymentPage.checkFailed":
+    "Couldn't check your payment from here. If you paid, your credits still arrive.",
+  "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
+  "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
+  "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",
+  "timeline.paymentPage.linkExpired": "This link has expired. Ask here for a new one.",
+  "timeline.paymentPage.openBilling": "Open billing",
+  "timeline.paymentPage.opensBillingPage": "Opens your billing page in a new tab.",
+  "timeline.paymentPage.opensSecurePage": "Opens a secure payment page in a new tab.",
+  "timeline.paymentPage.opensSecurePageConfirms":
+    "Opens a secure payment page in a new tab. Your credits show up here once you've paid.",
+  "timeline.paymentPage.pay": "Pay",
+  "timeline.paymentPage.payAmount": "Pay {amount}",
+  "timeline.paymentPage.payForCredits": "{amount} in credits",
+  "timeline.paymentPage.subscribe": "Subscribe",
+  "timeline.paymentPage.waitingForPayment":
+    "Waiting for your payment. Come back here when you're done.",
   "timeline.platformActivityPresentation.compactingConversationFirst":
     "Compacting conversation first",
   "timeline.platformActivityPresentation.connectingTools": "Connecting tools",

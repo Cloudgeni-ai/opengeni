@@ -171,11 +171,17 @@ enabling it changes no session's backend.
    to the release's OCI images, normally the Opengeni sandbox and desktop
    images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
    the deployment. When a release names an OCI image no stored image was
-   built from, the service has a live host build it (a few minutes, one
-   at a time per host; the host's log says `built and stored a sandbox
-   image`), records it, and new creates of that name start from it; until
-   then they start from the image the name had before. Existing sandboxes
-   keep theirs. A host builds into its state directory's `prepare/`
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from
@@ -390,6 +396,11 @@ reach compute through its E2B front door. In the chart:
    `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
    where `runner` is a stored image built from
    `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   Jobs rarely use all of their shape at once; a template that guarantees
+   less, for example `"runner:8x24576x65536,memory-request=8192"`, fits
+   more jobs on a host at once, each using more memory when the host has
+   it free, and warm templates saved from it guarantee the same. A host
+   that backs guest memory with huge pages reserves all of it anyway.
    It listens on its own port (3000) of the API Service, with the API's
    certificate under `apiTls`, and network policy admits only the pools
    and `e2b.ingressFrom`.
@@ -413,6 +424,13 @@ reach compute through its E2B front door. In the chart:
 Workflows say `runs-on: <pool name>`, and with a warm template check out
 with `clean: false` so the prepared dependencies stay. A pool's log shows
 each job it takes, each runner it starts and ends, and each warm refresh.
+
+A pool whose jobs deploy to a private destination, such as a cluster's
+API, reaches it as an offer of the hosts (see **Private destinations only
+some sandboxes need** under Network): give that pool a team of its own and
+grant the team the offer (`--team-reach TEAM=NAME`). Its sandboxes, created
+through the front door, reach every offer their team is given and go only
+to hosts that offer them; other pools' teams reach none.
 
 ## Hosts
 
@@ -1071,7 +1089,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   offers it). Grant each team the names its sandboxes may ask for on the
   control service, `--team-reach TEAM=NAME`, repeated (in the chart,
   `computeControl.extraArgs`); a create asking for one its team was not
-  given is refused with 400. A sandbox keeps its `reach` for life,
+  given is refused with 400. E2B's API has no way to name an offer, so a
+  create through the E2B front door (runner pools' among them) reaches
+  every offer its team is given: give such workloads a team of their own.
+  A sandbox keeps its `reach` for life,
   including on another host after a move, which must offer it too; one on
   a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni
@@ -1114,6 +1135,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   to start the nested profile without a pool. On cgroup v2 without the
   `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
   its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent

@@ -30,7 +30,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 60_000);
 
 test("an EU-only organization puts the EU requirement on every execution overlay", async () => {
   const userId = `eu-overlay-${crypto.randomUUID()}`;

@@ -22,7 +22,7 @@ import {
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
-  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
@@ -488,9 +488,7 @@ export async function startApi(options: StartApiOptions = {}) {
     ...databasePoolOptions(settings),
     // Runtime login only: the files rotate this URL's password in place.
     ...databasePasswordFileOptions(settings),
-    onCredentialEvent: logDatabaseCredentialEvent("api", (message, attributes) =>
-      observability.warn(message, attributes),
-    ),
+    onCredentialEvent: observeDatabaseCredentialEvents("api", observability),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;

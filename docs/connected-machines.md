@@ -961,10 +961,10 @@ of the command: the daemon chooses that workload's cgroup and OOM score. Operato
 must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
-installer never resets them with runtime `set-property`. A verified self-update
-migrates only the byte-identical old generated unit after proving its live MainPID,
-canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
-left untouched with an actionable diagnostic. The default operation leaf has no
+installer never resets them with runtime `set-property`. The agent never rewrites
+a unit on its own: at startup it only warns when the live unit is custom or systemd
+did not place it in the `supervisor` subgroup, and `service install --restart`
+adopts the generated unit. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1400,10 +1400,7 @@ private to the user, and ends the agent's process tree only if it does not stop
 within 45 seconds. The agent stays paused across sign-ins until `start`.
 `status` prints `opengeni-agent background task: running`, `paused`, `stopped`
 or `not installed`, read from the agent's own instance lock. The agent does not
-run while nobody is signed in to Windows. Earlier releases
-registered an `OpengeniAgent` Windows Service that could never start; `start`
-deletes it when allowed, and otherwise prints the one elevated command that
-removes it.
+run while nobody is signed in to Windows.
 
 The agent also never treats a filesystem root or the Windows system directory
 as its workspace, so an older service definition needs no manual step: when
@@ -1638,7 +1635,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
-  on a question is moved and keeps the question;
+  on a question is moved and keeps the question. No machine is promoted: every
+  reachable machine gets the same quiet button (only a machine that just
+  connected from the card's own dialog gets the primary one), because the card
+  can't know which computer the person means;
+- ends the card with an **Another computer** row (its own list, after the
+  machines and any screen control and Chrome rows) whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't connected yet is a
+  peer of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts
@@ -1670,12 +1674,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   that was offline, comes online the same dialog shows its name, **Connected**
   and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
   chat** (the same attach path as the list). Closing the dialog stops the watch;
-- once a machine with a screen is reachable (the chat's own machine first),
-  offers the
+- once this chat runs on a reachable machine with a screen, shows that
+  machine's screen control and offers the
   [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
-  stops after ten minutes or when the inventory is not readable.
+  stops after ten minutes or when the inventory is not readable. Before the
+  chat runs on a machine these rows stay hidden, so steps about a machine the
+  person may not mean don't compete with choosing or connecting the right one.
 
 Reading the list needs `enrollments:read`; connecting follows the scope rule
 above (every teammate connects an Only me machine; This workspace needs
@@ -1714,9 +1720,8 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `agent_update_required`: the agent predates the `credential_renew`
   capability. Update it, and the successor's Hello applies it.
 - `renewal_failed`: retry the request.
-- `reconnect_required`: the machine's connection predates in-place renewal
-  (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on. The chat card's **Connect again** opens the
+- `reconnect_required`: the machine's saved connection can't be renewed in
+  place. Run the connect command on it again with screen control on. The chat card's **Connect again** opens the
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
@@ -2047,7 +2052,7 @@ expecting transactional support. Changing transport limits is not required.
 
 ## Run as another local user
 
-Exec (including op-stream and background commands), git, PTY open and every file
+Exec (including op-stream and background commands), PTY open and every file
 request, transactional uploads included, carry an optional `run_as`: a local user
 name, else a decimal uid, which must exist in the machine's password database.
 The agent honors it only when it advertises `Capabilities.run_as`, which it does

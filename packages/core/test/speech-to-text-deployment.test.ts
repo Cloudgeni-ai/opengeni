@@ -13,6 +13,7 @@ import {
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
+import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
 
 const azure = {
   recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
@@ -363,7 +364,7 @@ describe("dictation over the shared providers", () => {
   };
 
   test("a key provider hears dictation with the workspace's key and is never charged", async () => {
-    const heard: Array<{ model: string; key: unknown; scope: unknown }> = [];
+    const heard: Array<{ model: string; key: unknown; scope: unknown; language?: string }> = [];
     const settings = testSettings({ voiceInputProviderOrder: "openai", billingMode: "stripe" });
     const deployment = createSpeechToTextDeployment(
       { settings },
@@ -371,7 +372,12 @@ describe("dictation over the shared providers", () => {
         isEuOnly: async () => false,
         providers: [
           fakeTextProvider("elevenlabs", "workspace_key", async (input, credentials) => {
-            heard.push({ model: input.model, key: credentials, scope: input.scope });
+            heard.push({
+              model: input.model,
+              key: credentials,
+              scope: input.scope,
+              ...(input.language ? { language: input.language } : {}),
+            });
             return {
               languages: ["en"],
               audioMilliseconds: null,
@@ -411,6 +417,9 @@ describe("dictation over the shared providers", () => {
         },
       },
     ]);
+    // The language a dictation names reaches the provider.
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", language: "nb" });
+    expect(heard.at(-1)?.language).toBe("nb");
   });
 
   test("an unauthorized provider falls back to the next one before any text", async () => {
@@ -480,6 +489,27 @@ describe("dictation over the shared providers", () => {
 });
 
 describe("transcript text", () => {
+  test("OpenAI models hear ISO 639-1 codes, with Bokmål and Nynorsk as Norwegian", () => {
+    expect(
+      ["nb", "nn", "nob", "nor", "no", "en", "eng", "en-US", "sv_SE", "zzzz", "", undefined].map(
+        (tag) => openAiLanguage(tag),
+      ),
+    ).toEqual([
+      "no",
+      "no",
+      "no",
+      "no",
+      "no",
+      "en",
+      "en",
+      "en",
+      "sv",
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   test("a result's text is the model's own, else its words joined", () => {
     expect(
       transcriptText({

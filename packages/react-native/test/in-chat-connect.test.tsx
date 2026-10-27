@@ -217,6 +217,41 @@ describe("native connection row", () => {
     });
     expect(opened).toEqual(["https://linear.app/auth"]);
   });
+
+  test("a computer request says it connects from that computer and shares this chat", async () => {
+    const computer = authItem({
+      reason: "missing_connection",
+      providerDomain: "opengeni.ai",
+      capability: {
+        id: "api:connected-machine",
+        name: "Connected Machine",
+        kind: "api",
+        source: "built_in",
+        action: "connect",
+        rationale: "Connect the laptop at home.",
+        requiredVariables: [],
+      },
+    } as Partial<AuthNeededItem>);
+    let shared = 0;
+    mounted = await renderComponent(
+      <NativeAuthNeededRow item={computer} onShareConversation={() => (shared += 1)} />,
+    );
+    expect(mounted.container.textContent).toContain(
+      "A computer connects from the computer itself.",
+    );
+    await act(async () => {
+      [...mounted!.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes("Share link to this chat"))!
+        .click();
+    });
+    expect(shared).toBe(1);
+    await mounted.unmount();
+
+    // A host without a conversation link keeps the plain explanation.
+    mounted = await renderComponent(<NativeAuthNeededRow item={computer} />);
+    expect(mounted.container.textContent).toContain("This app hasn't enabled computer setup here.");
+    expect(buttonLabels()).toEqual([]);
+  });
 });
 
 describe("native sign-in window host", () => {
