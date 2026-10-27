@@ -733,10 +733,13 @@ A dictation differs from a meeting in a few ways:
   one answers 403 with `details.code: "policy_blocked"` when voice input is
   off, and 503 when no voice input provider is available.
 - Its `transcription` can name only the `language` spoken (an ISO 639-1 or
-  639-3 code such as `nb` or `en`); anything else answers 400. Without a
-  language, the provider detects it. A dictation does not take the
-  workspace's meeting language, because people dictate in more languages
-  than they hold meetings in.
+  639-3 code such as `nb` or `en`) and `keyterms`, the person's vocabulary;
+  anything else answers 400. Without a language, the provider detects it. A
+  dictation does not take the workspace's meeting language, because people
+  dictate in more languages than they hold meetings in. Keyterms reach a
+  model that takes them (ElevenLabs Scribe and Azure Speech as keyterms,
+  OpenAI and Azure OpenAI as the prompt) and are left out for one that
+  doesn't.
 - It is billed like voice input: each piece is charged against the
   dictating person's usage, and a refused charge fails the transcript with
   that code (for example `insufficient_credits`).
@@ -752,7 +755,8 @@ offer the text of a dictation an earlier page, tab or device left behind.
 `useVoiceInput` (in `@opengeni/react/recordings`, used by the web composer)
 and `useNativeDictation` (in `@opengeni/react-native/recordings`) do all of
 this; their `language` option (and `ComposerTranscriptionControl`'s
-`language` prop) sets the language each new dictation is heard in. Taking
+`language` prop) sets the language each new dictation is heard in, and
+`useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
 insert the same speech twice. Cancel or Escape keeps anything longer than
@@ -782,7 +786,19 @@ saved for the composer to offer. The pieces:
   a shortcut can be modifier keys alone (Control and Fn by default) and
   typing needs Accessibility. On Windows it pastes with PowerShell; on Linux
   with xdotool (X11), wtype or ydotool (Wayland), and only copies without
-  them. Recent text is kept on the computer to copy again.
+  them.
+- The person can list a vocabulary (names and terms, one per line) that
+  every dictation listens for, and set two more shortcuts: one that
+  transcribes the last dictation again and types it, and one that cancels
+  the dictation in progress (Escape always does).
+- The last 50 dictations are kept on the computer, each with its text and
+  its speech (up to 32 MB each, readable only by the person). From the
+  settings page the person can copy a text, play its speech, or transcribe
+  it again; transcribing again uploads the kept speech as a new dictation
+  (`uploadRecordingAudio` in `@opengeni/sdk/recordings`) and replaces the
+  text. Clearing the history deletes the speech too.
+- While dictation is on, the app opens (without a window) when the person
+  logs in, so the shortcuts work from the start.
 - `DesktopDictationHost` (`@opengeni/react/desktop-dictation`), mounted once
   on the signed-in pages, records and transcribes when the app asks, with
   `useVoiceInput`. When no page is open, the app opens one in the background

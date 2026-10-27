@@ -509,6 +509,13 @@ export class DesktopShell {
     this.appShots.start();
     this.meetings.start();
     this.dictation.start();
+    // Dictation shortcuts work only while the app runs: it opens at login while they are on.
+    let dictating = this.dictation.enabled;
+    this.dictation.onChange(() => {
+      if (this.dictation.enabled === dictating) return;
+      dictating = this.dictation.enabled;
+      void this.refreshTray();
+    });
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -1457,8 +1464,11 @@ export class DesktopShell {
           needsPermissions: false,
           missingPermissions: [],
         };
-    if (this.config.thisComputer && app.isPackaged) {
-      const change = this.computer.openAtLoginChange(summary.connected);
+    if (app.isPackaged) {
+      const change = this.computer.openAtLoginChange(
+        this.config.thisComputer && summary.connected,
+        this.dictation.enabled,
+      );
       if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the

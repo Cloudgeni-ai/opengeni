@@ -1,8 +1,18 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import type {
+  DesktopDictationAudio,
   DesktopDictationHistoryEntry,
+  DesktopDictationKeys,
   DesktopDictationModifier,
   DesktopDictationOutput,
   DesktopDictationPermissionId,
@@ -24,8 +34,15 @@ const OUTPUTS: readonly DesktopDictationOutput[] = ["paste", "copy", "pasteAndCo
 export const DICTATION_PROFILES_MAX = 8;
 /** Finished dictations kept on this computer. */
 export const DICTATION_HISTORY_MAX = 50;
+/** Names and words a person's vocabulary holds, as transcription accepts them. */
+export const DICTATION_VOCABULARY_MAX = 100;
+export const DICTATION_VOCABULARY_TERM_MAX = 50;
+/** The most speech one kept dictation may hold (about 2 hours of the recorder's audio). */
+export const DICTATION_AUDIO_MAX_BYTES = 32 * 1024 * 1024;
 const LANGUAGE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/u;
 const PROFILE_ID = /^[A-Za-z0-9_-]{1,64}$/u;
+const ENTRY_ID = /^[A-Za-z0-9_-]{1,100}$/u;
+const AUDIO_TYPE = /^audio\/[\w.+-]+(;[\w=.,+\- ]*)?$/u;
 
 /**
  * Off, with one shortcut: Control and Fn held together on a Mac, a key
@@ -51,6 +68,9 @@ export function defaultDictationSettings(
     ],
     output: "paste",
     mode: "toggle",
+    vocabulary: [],
+    retryShortcut: null,
+    cancelShortcut: null,
   };
 }
 
@@ -69,6 +89,29 @@ export function parseDictationShortcut(value: unknown): DesktopDictationShortcut
     }
   }
   return parseAppShotShortcut(value);
+}
+
+/** A key combination for the retry or cancel shortcut, or null when it isn't one. */
+function parseKeys(value: unknown): DesktopDictationKeys | null {
+  const shortcut = parseAppShotShortcut(value);
+  return shortcut?.kind === "accelerator" ? shortcut : null;
+}
+
+/** The terms, trimmed and without repeats; undefined when it isn't a list. */
+function parseVocabulary(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const term = item.trim().replace(/\s+/gu, " ");
+    const key = term.toLocaleLowerCase();
+    if (!term || term.length > DICTATION_VOCABULARY_TERM_MAX || seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+    if (terms.length === DICTATION_VOCABULARY_MAX) break;
+  }
+  return terms;
 }
 
 function parseLanguage(value: unknown): string | null | undefined {
@@ -133,6 +176,27 @@ export function mergeDictationSettings(
       );
     if (valid) profiles = parsed as DesktopDictationProfile[];
   }
+  const keys = (key: "retryShortcut" | "cancelShortcut"): DesktopDictationKeys | null => {
+    const kept = current[key] ?? null;
+    if (!(key in candidate)) return kept;
+    const value = candidate[key];
+    return value === null ? null : (parseKeys(value) ?? kept);
+  };
+  let retryShortcut = keys("retryShortcut");
+  let cancelShortcut = keys("cancelShortcut");
+  // One key combination does one thing: the change that would share one is refused.
+  if (retryShortcut && cancelShortcut && sameShortcut(retryShortcut, cancelShortcut)) {
+    if ("cancelShortcut" in candidate) cancelShortcut = current.cancelShortcut ?? null;
+    else retryShortcut = current.retryShortcut ?? null;
+    if (retryShortcut && cancelShortcut && sameShortcut(retryShortcut, cancelShortcut)) {
+      cancelShortcut = null;
+    }
+  }
+  // A dictation shortcut wins over an action on the same keys.
+  const free = (shortcut: DesktopDictationKeys | null) =>
+    shortcut && profiles.some((profile) => sameShortcut(profile.shortcut, shortcut))
+      ? null
+      : shortcut;
   return {
     enabled: typeof candidate.enabled === "boolean" ? candidate.enabled : current.enabled,
     profiles,
@@ -140,6 +204,35 @@ export function mergeDictationSettings(
       ? (candidate.output as DesktopDictationOutput)
       : current.output,
     mode: candidate.mode === "toggle" || candidate.mode === "hold" ? candidate.mode : current.mode,
+    vocabulary: parseVocabulary(candidate.vocabulary) ?? current.vocabulary ?? [],
+    retryShortcut: free(retryShortcut),
+    cancelShortcut: free(cancelShortcut),
+  };
+}
+
+/** Speech a page sent with a finished dictation, or null when it isn't any. */
+export function parseDictationAudio(value: unknown): DesktopDictationAudio | null {
+  if (!value || typeof value !== "object") return null;
+  const audio = value as Record<string, unknown>;
+  const bytes = audio.bytes;
+  if (
+    typeof audio.mimeType !== "string" ||
+    audio.mimeType.length > 200 ||
+    !AUDIO_TYPE.test(audio.mimeType) ||
+    !(bytes instanceof Uint8Array) ||
+    bytes.byteLength === 0 ||
+    bytes.byteLength > DICTATION_AUDIO_MAX_BYTES
+  ) {
+    return null;
+  }
+  const duration = audio.durationMilliseconds;
+  return {
+    mimeType: audio.mimeType,
+    bytes,
+    durationMilliseconds:
+      typeof duration === "number" && Number.isFinite(duration) && duration > 0
+        ? Math.round(duration)
+        : 0,
   };
 }
 
@@ -148,6 +241,7 @@ function parseHistoryEntry(value: unknown): DesktopDictationHistoryEntry | null 
   const entry = value as Record<string, unknown>;
   if (
     typeof entry.id !== "string" ||
+    !ENTRY_ID.test(entry.id) ||
     typeof entry.text !== "string" ||
     typeof entry.at !== "string" ||
     typeof entry.profileName !== "string"
@@ -155,21 +249,31 @@ function parseHistoryEntry(value: unknown): DesktopDictationHistoryEntry | null 
     return null;
   }
   const language = parseLanguage(entry.language);
+  const audio = entry.audio as Record<string, unknown> | null | undefined;
   return {
     id: entry.id,
     text: entry.text,
     at: entry.at,
     profileName: entry.profileName,
     language: language ?? null,
+    audio:
+      audio &&
+      typeof audio.mimeType === "string" &&
+      AUDIO_TYPE.test(audio.mimeType) &&
+      typeof audio.durationMilliseconds === "number"
+        ? { mimeType: audio.mimeType, durationMilliseconds: audio.durationMilliseconds }
+        : null,
   };
 }
 
 /**
  * The settings, the permissions already asked for and recent dictations, in
- * the app's data folder (`dictation.json`, readable only by the person).
+ * the app's data folder (`dictation.json`, readable only by the person), and
+ * the recent dictations' speech beside it (`dictation-audio/`).
  */
 export class DictationSettingsStore {
   private readonly path: string;
+  private readonly audioDir: string;
 
   constructor(
     dataDir: string,
@@ -178,6 +282,7 @@ export class DictationSettingsStore {
     private readonly language: string | null = null,
   ) {
     this.path = join(dataDir, "dictation.json");
+    this.audioDir = join(dataDir, "dictation-audio");
   }
 
   read(): DesktopDictationSettings {
@@ -209,19 +314,79 @@ export class DictationSettingsStore {
       .slice(0, DICTATION_HISTORY_MAX);
   }
 
-  /** Newest first. */
-  remember(entry: DesktopDictationHistoryEntry): void {
+  /** Newest first; its speech is kept with it when given. */
+  remember(entry: DesktopDictationHistoryEntry, audio: DesktopDictationAudio | null = null): void {
+    let kept: DesktopDictationHistoryEntry = { ...entry, audio: null };
+    if (audio && ENTRY_ID.test(entry.id)) {
+      try {
+        mkdirSync(this.audioDir, { recursive: true, mode: 0o700 });
+        const temporary = join(this.audioDir, `${entry.id}.tmp`);
+        writeFileSync(temporary, audio.bytes, { mode: 0o600 });
+        renameSync(temporary, this.audioFile(entry.id));
+        kept = {
+          ...entry,
+          audio: { mimeType: audio.mimeType, durationMilliseconds: audio.durationMilliseconds },
+        };
+      } catch {
+        // The text is kept without its speech.
+      }
+    }
+    const history = [kept, ...this.history().filter((item) => item.id !== entry.id)].slice(
+      0,
+      DICTATION_HISTORY_MAX,
+    );
+    this.save({ ...this.file(), history });
+    this.pruneAudio(history);
+  }
+
+  /** A kept dictation's text, after it was transcribed again. */
+  replaceText(id: string, text: string): void {
+    const history = this.history();
+    if (!history.some((entry) => entry.id === id)) return;
     this.save({
       ...this.file(),
-      history: [entry, ...this.history().filter((kept) => kept.id !== entry.id)].slice(
-        0,
-        DICTATION_HISTORY_MAX,
-      ),
+      history: history.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
     });
+  }
+
+  /** A kept dictation's speech; null when there is none. */
+  audio(id: string): DesktopDictationAudio | null {
+    const entry = this.history().find((item) => item.id === id);
+    if (!entry?.audio) return null;
+    try {
+      const bytes = readFileSync(this.audioFile(id));
+      return {
+        mimeType: entry.audio.mimeType,
+        bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+        durationMilliseconds: entry.audio.durationMilliseconds,
+      };
+    } catch {
+      return null;
+    }
   }
 
   clearHistory(): void {
     this.save({ ...this.file(), history: [] });
+    this.pruneAudio([]);
+  }
+
+  private audioFile(id: string): string {
+    return join(this.audioDir, `${id}.audio`);
+  }
+
+  /** Speech whose dictation is no longer kept is deleted. */
+  private pruneAudio(history: DesktopDictationHistoryEntry[]): void {
+    if (!existsSync(this.audioDir)) return;
+    const kept = new Set(
+      history.filter((entry) => entry.audio).map((entry) => `${entry.id}.audio`),
+    );
+    try {
+      for (const name of readdirSync(this.audioDir)) {
+        if (!kept.has(name)) rmSync(join(this.audioDir, name), { force: true });
+      }
+    } catch {
+      // Tried again with the next dictation.
+    }
   }
 
   private file(): Record<string, unknown> {
