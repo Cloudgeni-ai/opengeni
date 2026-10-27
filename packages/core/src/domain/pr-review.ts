@@ -9,6 +9,7 @@ import {
   type SessionSkill,
 } from "@opengeni/contracts";
 import { z } from "zod";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const PR_REVIEW_AUTOMATION_ADAPTER_ID = "source-control.pull-request.v1" as const;
 
@@ -657,10 +658,6 @@ function positiveInteger(value: unknown): number | null {
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   }
   return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function record(value: unknown): Record<string, unknown> | null {

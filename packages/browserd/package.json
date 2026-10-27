@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "private": true,
   "description": "Placement-resident browser controller for Opengeni: launches and drives managed Chrome over CDP.",
   "license": "Apache-2.0",
@@ -12,7 +12,7 @@
     "build:binary": "bun build --compile --env OPENGENI_RUNTIME_BUILD_* ./src/main.ts --outfile ./dist/opengeni-browserd",
     "typecheck": "tsrs --noEmit",
     "test": "bun test",
-    "test:e2e": "OPENGENI_BROWSERD_E2E=1 bun test --timeout 120000 test/cdp-driver.e2e.test.ts test/tab-not-responding.e2e.test.ts test/cdp-upload.e2e.test.ts test/cdp-reference.e2e.test.ts test/fenced-input-batch.e2e.test.ts test/cdp-press-key.e2e.test.ts test/cdp-covered-click.e2e.test.ts test/cdp-dispatch-error-outcome.e2e.test.ts test/cdp-sticky-cover.e2e.test.ts test/cdp-hover-reveal.e2e.test.ts test/cdp-wait-any-match.e2e.test.ts test/cdp-long-text.e2e.test.ts test/cdp-network-idle-live.e2e.test.ts test/cdp-navigation-commit.e2e.test.ts test/cdp-scroll-container.e2e.test.ts test/cdp-nested-scroll.e2e.test.ts test/cdp-background-tab-capture.e2e.test.ts test/cdp-exit-animation.e2e.test.ts test/cdp-context-menu.e2e.test.ts test/browser-conformance.e2e.test.ts test/chromium-context-pool.e2e.test.ts test/ephemeral-supervisor.e2e.test.ts test/supervisor.e2e.test.ts test/server.e2e.test.ts test/state-restore.e2e.test.ts test/headless-session-auth.e2e.test.ts test/external-provider.e2e.test.ts test/network-isolation.e2e.test.ts test/attached-tab-cleanup.e2e.test.ts test/cdp-large-page.e2e.test.ts test/cdp-out-of-view-click.e2e.test.ts test/cdp-click-hit-target.e2e.test.ts test/cdp-shadow-hit.e2e.test.ts test/cdp-resolved-target.e2e.test.ts test/action-failure-observation.e2e.test.ts"
+    "test:e2e": "OPENGENI_BROWSERD_E2E=1 bun test --timeout 120000 test/cdp-driver.e2e.test.ts test/tab-not-responding.e2e.test.ts test/cdp-upload.e2e.test.ts test/cdp-reference.e2e.test.ts test/fenced-input-batch.e2e.test.ts test/cdp-press-key.e2e.test.ts test/cdp-covered-click.e2e.test.ts test/cdp-dispatch-error-outcome.e2e.test.ts test/cdp-sticky-cover.e2e.test.ts test/cdp-hover-reveal.e2e.test.ts test/cdp-wait-any-match.e2e.test.ts test/cdp-long-text.e2e.test.ts test/cdp-network-idle-live.e2e.test.ts test/cdp-navigation-commit.e2e.test.ts test/cdp-scroll-container.e2e.test.ts test/cdp-nested-scroll.e2e.test.ts test/cdp-background-tab-capture.e2e.test.ts test/cdp-exit-animation.e2e.test.ts test/cdp-context-menu.e2e.test.ts test/browser-conformance.e2e.test.ts test/chromium-context-pool.e2e.test.ts test/ephemeral-supervisor.e2e.test.ts test/supervisor.e2e.test.ts test/server.e2e.test.ts test/state-restore.e2e.test.ts test/headless-session-auth.e2e.test.ts test/external-provider.e2e.test.ts test/network-isolation.e2e.test.ts test/attached-tab-cleanup.e2e.test.ts test/cdp-large-page.e2e.test.ts test/cdp-out-of-view-click.e2e.test.ts test/cdp-clipped-panel-click.e2e.test.ts test/cdp-click-hit-target.e2e.test.ts test/cdp-shadow-hit.e2e.test.ts test/cdp-resolved-target.e2e.test.ts test/action-failure-observation.e2e.test.ts"
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",

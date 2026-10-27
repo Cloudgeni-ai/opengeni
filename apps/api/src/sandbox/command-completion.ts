@@ -35,6 +35,7 @@ import {
   withoutWaking,
 } from "@opengeni/runtime/sandbox";
 import type { ConnectedCommandCompletionLocator } from "./completion-locator";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The transport of an immediate stop. One absolute budget covers capability
@@ -131,7 +132,7 @@ async function deliverStop(
     });
     return { delivered: true };
   } catch (error) {
-    return { delivered: false, error: error instanceof Error ? error.message : String(error) };
+    return { delivered: false, error: errorMessage(error) };
   }
 }
 

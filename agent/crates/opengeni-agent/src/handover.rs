@@ -384,6 +384,9 @@ mod tests {
             br#"{"nonce":"n1","from_version":"0.0.0","connection_instance_id":"instance","ops":[]}"#,
         )
         .unwrap();
-        assert!(read_manifest(&path).unwrap().reply_leases.is_empty());
+        assert_eq!(
+            read_manifest(&path).unwrap().reply_leases,
+            Vec::<CarriedReplyLeases>::new()
+        );
     }
 }

@@ -60,6 +60,7 @@ import type {
   WorkspaceCaptureRepo,
   WorkspaceCaptureStats,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // ─── Guards & constants for pathological cases; configurable ─────
 // Production Modal captures of the acceptance workspace normally take ~30s:
@@ -172,7 +173,7 @@ export class BoxExitingError extends Error {
  *  bogus revision. */
 function classifyCaptureEntryError(error: unknown): BoxExitingError | null {
   if (isBoxExitingError(error)) {
-    return new BoxExitingError(error instanceof Error ? error.message : String(error));
+    return new BoxExitingError(errorMessage(error));
   }
   return null;
 }
@@ -516,7 +517,7 @@ export async function captureWorkspaceRevision(
       {
         "opengeni.session_id": input.sessionId,
         "opengeni.turn_id": input.turnId ?? "",
-        "error.message": error instanceof Error ? error.message : String(error),
+        "error.message": errorMessage(error),
         "workspace_capture.duration_ms": Date.now() - startedAt,
         "workspace_capture.stage": stage.value,
       },
@@ -942,7 +943,7 @@ async function runCapture(
     // GC is storage hygiene — a failure never affects the just-committed capture.
     observability.warn("workspace capture GC failed — capture unaffected", {
       "opengeni.session_id": input.sessionId,
-      "error.message": gcError instanceof Error ? gcError.message : String(gcError),
+      "error.message": errorMessage(gcError),
     });
   }
 
@@ -1155,7 +1156,7 @@ async function safeDelete(
     await storage.deleteObject(key).catch((error) => {
       observability.warn("workspace capture blob delete failed (orphan left; capture unaffected)", {
         "storage.key": key,
-        "error.message": error instanceof Error ? error.message : String(error),
+        "error.message": errorMessage(error),
       });
     });
   }
@@ -1192,7 +1193,7 @@ async function buildTreeIndex(
     throwIfCaptureAborted(signal);
   } catch (error) {
     if (isBoxExitingError(error)) {
-      throw new BoxExitingError(error instanceof Error ? error.message : String(error));
+      throw new BoxExitingError(errorMessage(error));
     }
     throw error;
   }

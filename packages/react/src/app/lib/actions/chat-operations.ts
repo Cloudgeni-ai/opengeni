@@ -15,6 +15,7 @@ import { usePage } from "../navigation";
 import { applySessionArchiveProjection } from "../session-pagination";
 import { notifySessionListChanged } from "../session-list-invalidation";
 import { toast } from "../toast";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type ChatOperations = {
   archiveLabel?: (chat: SessionListRow) => string;
@@ -64,7 +65,7 @@ export function useChatOperations(): ChatOperations {
         toast.success("Link copied");
       } catch (error) {
         toast.error("Couldn't copy the link.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       }
     },
@@ -120,7 +121,7 @@ export function useChatOperations(): ChatOperations {
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       } finally {
         archiving.current.delete(chat.id);
@@ -151,7 +152,7 @@ export function useChatOperations(): ChatOperations {
         toast.success(unread ? "Marked as unread" : "Marked as read");
       } catch (error) {
         toast.error("Couldn't update the chat.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       }
     },

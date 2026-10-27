@@ -613,6 +613,7 @@ import type {
   SerializedHumanInputInterruption,
   SerializedInteractionInterventionInterruption,
 } from "./run-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -4463,10 +4464,13 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
-        );
+        // A server without a connector row is always approved under its synthetic
+        // session-MCP identity, exactly as the attempt gateway and saved tool
+        // permission rules derive it. A local registration's own connection
+        // identity is for its adapter, never a substitute for that identity.
+        return server.connectionRef
+          ? resolvedMcpConnectionId(server, resolvedMcpConnectionIds)
+          : sessionMcpApprovalConnectionId(server.id, server.url);
       };
       return {
         prefix: prefixedMcpToolName(server.id, ""),
@@ -4993,7 +4997,11 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
-  /** Exact connection identity frozen while constructing the local adapter. */
+  /**
+   * Exact connection identity frozen while constructing the local adapter. It is
+   * the approval identity only for a connector-backed (`connectionRef`) server;
+   * a server without one is approved under its synthetic session-MCP identity.
+   */
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
@@ -7696,7 +7704,7 @@ function boundedMcpToolResult(result: AttemptToolResultValue): AttemptToolResult
 
 function exactErrorMessage(error: unknown): string {
   try {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   } catch {
     return "MCP tool call failed";
   }
@@ -11416,7 +11424,7 @@ function sandboxFileDownloadFailure(
     fileId: download.fileId,
     filename: download.filename,
     path: targetPath,
-    reason: error instanceof Error ? error.message : String(error),
+    reason: errorMessage(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
   };
@@ -14222,7 +14230,7 @@ export async function runRigSetupHook(
       result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
       payload: {
@@ -14476,7 +14484,7 @@ export async function runRepositoryCloneHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;
@@ -14580,7 +14588,7 @@ export async function runAzureCliLoginHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;

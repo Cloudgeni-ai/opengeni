@@ -4,13 +4,15 @@
 //! with no lease held no reading comes. The tests give the agent its disk
 //! readings one at a time, so each is decided exactly when they say.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compute_core::{DiskPolicy, DiskSpace, HostPolicy};
+use compute_engine::Writes;
 use compute_host::fleet::{LeaseGate, boot_now};
-use compute_host::protocol::{DiskStatus, Id, ImageId, SandboxConfig};
+use compute_host::protocol::{DiskStatus, Id, ImageId, LevelName, SandboxConfig};
 use compute_host::{Directory, DiskGauge, Handle, HostAgent, HostError};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -190,4 +192,252 @@ async fn a_registering_host_refuses_work_waiting_for_a_disk_reading() {
     host.read(PLENTY).await;
     host.create(id(3), None).await.unwrap().unwrap();
     host.create(id(4), Some(host.image)).await.unwrap().unwrap();
+}
+
+/// What the guest of the tests below writes to its disk.
+const WRITTEN: u64 = 64 << 20;
+
+/// A lab whose agent takes the disk readings `gauge` gives it, with one
+/// awake sandbox whose disk holds [`WRITTEN`] bytes: its disk's path, and
+/// what more wakes may book once a reading shows them written.
+async fn awake_with_written_disk(gauge: &DiskGauge) -> (Lab, PathBuf, u64) {
+    let reading = gauge.clone();
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        move |config| {
+            // A base image as long as what the guest writes, so its
+            // sandbox's disk is, and books, that length.
+            std::fs::File::create(&config.base_image)
+                .unwrap()
+                .set_len(WRITTEN)
+                .unwrap();
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+            // Far enough apart that only the sample taking a reading
+            // finds what each test does as it is read.
+            config.sample_every = Duration::from_millis(500);
+            // Its guest is asked to write its disks out before it pauses.
+            config.restore_notice_port = Some(53);
+        },
+    )
+    .await;
+    let sandbox = id(1);
+    read_free(gauge, &lab, None).await;
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set awake"]).await;
+    let disk = lab.sandbox_dir(sandbox).join("root/disk.ext4");
+    write_again(&disk);
+    let written = read_free(gauge, &lab, None).await;
+    (lab, disk, written)
+}
+
+/// [`WRITTEN`] bytes no file system compresses or skips as zeros.
+fn ones() -> Vec<u8> {
+    vec![1_u8; usize::try_from(WRITTEN).unwrap()]
+}
+
+/// Frees all [`WRITTEN`] bytes of `disk`, as a guest's trim does.
+fn trim(disk: &Path) {
+    let file = std::fs::OpenOptions::new().write(true).open(disk).unwrap();
+    rustix::fs::fallocate(
+        &file,
+        rustix::fs::FallocateFlags::PUNCH_HOLE | rustix::fs::FallocateFlags::KEEP_SIZE,
+        0,
+        WRITTEN,
+    )
+    .unwrap();
+}
+
+/// Writes all [`WRITTEN`] bytes of `disk` again in one call, as a guest's
+/// VMM does.
+fn write_again(disk: &Path) {
+    use std::os::unix::fs::FileExt;
+
+    let file = std::fs::OpenOptions::new().write(true).open(disk).unwrap();
+    file.write_all_at(&ones(), 0).unwrap();
+    file.sync_all().unwrap();
+}
+
+/// Asserts that a reading after `written`, which left `raced` for more
+/// wakes, booked the disk's [`WRITTEN`] bytes for its guest again.
+fn assert_booked_again(written: u64, raced: u64) {
+    assert!(
+        written - raced >= WRITTEN - (1 << 20),
+        "space the guest may take was left for others: {written} then {raced}"
+    );
+}
+
+/// Space a guest frees while the agent reads the disk, as its trim before
+/// a pause may, stays booked for that guest: its disk is read after the
+/// reading, which shows the space free, so the space is not left for
+/// other sandboxes while the guest may take it back at once. A later
+/// reading, showing it taken again, ends that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_frees_while_the_disk_is_read_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+
+    // The guest frees all it wrote as the disk is read, and writes it
+    // all again at once.
+    let freed = disk.clone();
+    let raced = read_free(&gauge, &lab, Some(Box::new(move || trim(&freed)))).await;
+    write_again(&disk);
+    assert_booked_again(written, raced);
+
+    // Readings of the disk alone keep it booked, until a disk reading
+    // shows it taken again.
+    sleep(Duration::from_millis(1100)).await;
+    let status = lab.status().await.disk.unwrap();
+    assert_eq!(status.free, raced, "it stays booked until a reading");
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// A guest that frees space just before the disk reading and writes it
+/// again just after, before the agent reads its disk, leaves the disk
+/// holding as much as before while the reading shows the space free. What
+/// its VMM wrote meanwhile is counted, so the space stays booked for it
+/// all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_frees_and_takes_again_as_the_disk_is_read_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+
+    let world = Arc::clone(&lab.world);
+    let rewritten = disk.clone();
+    let race = move || {
+        trim(&rewritten);
+        write_again(&rewritten);
+        let mut counted = world.written.lock().unwrap();
+        *counted = Writes {
+            bytes: counted.bytes + WRITTEN,
+            calls: counted.calls + 1,
+            dirtied: counted.dirtied,
+        };
+    };
+    let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
+    assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// A guest that frees space just before the disk reading and takes it
+/// again with no write call, as discards over part of shared blocks do
+/// (the file system copies each such block to a new one), leaves the disk
+/// holding as much as before while the reading shows the space free. The
+/// pages its VMM dirtied meanwhile are counted, so the space stays booked
+/// for it all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_takes_again_with_no_write_call_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+
+    let world = Arc::clone(&lab.world);
+    let rewritten = disk.clone();
+    let race = move || {
+        trim(&rewritten);
+        write_again(&rewritten);
+        world.written.lock().unwrap().dirtied += WRITTEN;
+    };
+    let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
+    assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// Space a guest frees as it trims its disk before a pause stays booked
+/// for it: the pause holds the VM, so no reading of its disk comes until
+/// the pause ends, and the guest may take the space again before it
+/// pauses, or once it wakes. A reading of its disk after it woke ends
+/// that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_trims_as_it_pauses_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+    let sandbox = id(1);
+
+    lab.world.syncs_held.store(true, Ordering::SeqCst);
+    let asked = lab.world.syncs.load(Ordering::SeqCst);
+    let trims = async {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lab.world.syncs.load(Ordering::SeqCst) == asked {
+            assert!(
+                Instant::now() < deadline,
+                "the pause never asked for a sync"
+            );
+            sleep(Duration::from_millis(5)).await;
+        }
+        // The guest trims as the disk reading is taken, and writes it all
+        // again before it answers.
+        let freed = disk.clone();
+        let raced = read_free(&gauge, &lab, Some(Box::new(move || trim(&freed)))).await;
+        write_again(&disk);
+        lab.world.syncs_held.store(false, Ordering::SeqCst);
+        raced
+    };
+    let (_, raced) = tokio::join!(lab.sleep_to(sandbox, LevelName::Paused), trims);
+    assert_booked_again(written, raced);
+
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.wake(sandbox).await;
+    lab.wait_level(sandbox, LevelName::Running).await;
+    sleep(Duration::from_millis(1100)).await;
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// A disk that cannot be read as the disk reading is taken, or whose VM's
+/// writes do not return in time, books all it may take for that reading:
+/// what its guest freed may be taken again, and nothing tells how much
+/// it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disk_not_read_whole_books_all_it_may_take() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+
+    // Freed as the disk reading is taken, and gone when the disk is read.
+    let (freed, away) = (disk.clone(), disk.with_extension("away"));
+    let hide = move || {
+        trim(&freed);
+        std::fs::rename(&freed, away).unwrap();
+    };
+    let raced = read_free(&gauge, &lab, Some(Box::new(hide))).await;
+    std::fs::rename(disk.with_extension("away"), &disk).unwrap();
+    write_again(&disk);
+    assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+
+    // Read whole, but by a VM whose writes do not return in time: what it
+    // wrote after the disk reading cannot be counted.
+    lab.world.unsettled.store(true, Ordering::SeqCst);
+    let raced = read_free(&gauge, &lab, None).await;
+    lab.world.unsettled.store(false, Ordering::SeqCst);
+    assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// Has the agent of `lab` read plenty free on its disk, just after
+/// `change` is made if one is given, and tells what more wakes may book.
+async fn read_free(gauge: &DiskGauge, lab: &Lab, change: Option<Box<dyn FnOnce() + Send>>) -> u64 {
+    let plenty = DiskSpace {
+        bytes: PLENTY,
+        inodes: PLENTY,
+    };
+    match change {
+        Some(change) => gauge.give_after(change, plenty),
+        None => gauge.give(plenty),
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gauge.taken() {
+        assert!(Instant::now() < deadline, "no sample took the reading");
+        sleep(Duration::from_millis(5)).await;
+    }
+    lab.status().await.disk.expect("a disk policy").free
 }

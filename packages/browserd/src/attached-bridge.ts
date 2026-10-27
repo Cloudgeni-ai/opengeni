@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { isRecord } from "@opengeni/contracts/values";
 
 const BRIDGE_PROTOCOL_VERSION = 1 as const;
 const MAX_REQUEST_MESSAGE_BYTES = 1024 * 1024;
@@ -467,8 +468,4 @@ function boundedTimeout(value: number): number {
     throw new RangeError("attached browser bridge timeout is invalid");
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

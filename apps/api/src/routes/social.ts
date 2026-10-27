@@ -28,6 +28,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, observability } = deps;
@@ -233,7 +234,7 @@ function socialHttpException(error: unknown): HTTPException {
   if (error instanceof OrganizationIntegrationDeniedError) {
     return new HTTPException(403, { message: error.message });
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   if (message.includes("not found")) {
     return new HTTPException(404, { message });
   }

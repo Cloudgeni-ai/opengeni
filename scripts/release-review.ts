@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export interface ExactHeadReleaseReview {
   version: 3;
@@ -79,7 +80,7 @@ if (import.meta.main) {
   try {
     main(process.argv.slice(2));
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(errorMessage(error));
     process.exitCode = 1;
   }
 }

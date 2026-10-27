@@ -252,6 +252,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the shared unbilled allowance counter (0976).
       "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
+      // Nor the managed passkey mutation (0998).
+      "target-schema runtime capability mutate_managed_passkey(text, text, jsonb) is missing or ambiguous",
       // Nor the machine-owner lookup for personal-machine chats (0978).
       "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the connected-command re-arm (0984).
@@ -343,7 +345,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime role lacks EXECUTE on private routine set_promotion_detector_mode(text, text)",
       "runtime role lacks EXECUTE on private routine set_promotion_enforcement(boolean, text, text, boolean)",
       "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
-      // 0999 withholds the EU-only change function's grant the same way.
+      // 1002 withholds the EU-only change function's grant the same way.
       "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
     ]);

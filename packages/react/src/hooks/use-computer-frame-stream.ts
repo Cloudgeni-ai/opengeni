@@ -20,6 +20,7 @@ import {
   useEmbeddedComputerInteraction,
 } from "../session-context";
 import { useOpenGeniText } from "../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type ComputerFrameConnectionState =
   | "idle"
@@ -454,6 +455,6 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
 }
 
 function isPlacementGenerationLossError(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = errorMessage(cause);
   return /placement instance changed|controller authority changed/i.test(message);
 }

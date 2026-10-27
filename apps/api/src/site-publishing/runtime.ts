@@ -46,6 +46,7 @@ import {
   type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
+import type { SiteAgentUnfundedReason } from "./agent-model";
 import { bindSiteSessionRequestAuthority } from "./session-request-authority";
 import { effectiveSiteLimits, siteViewerLimits, sourceSiteLimitProfile } from "./limits";
 import {
@@ -62,6 +63,7 @@ import {
   SITE_VISITOR_ID,
   type SiteRuntimeViewer,
 } from "./viewer";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Site-runtime: the narrow API a Site gateway calls for one published Site
@@ -484,6 +486,47 @@ export function requireSiteAgent(
     );
 }
 
+/** What someone outside the workspace is told when the workspace can't pay for their turn. */
+export const SITE_AGENT_UNFUNDED_MESSAGE = "This Site's assistant isn't available right now";
+
+/** The refusal for someone outside the workspace whose turn the workspace can't pay for. */
+export function siteAgentUnfunded(reason: SiteAgentUnfundedReason = "no_credits") {
+  return siteNotAvailableForViewer("agent", SITE_AGENT_UNFUNDED_MESSAGE, {
+    reason,
+  });
+}
+
+/**
+ * Core refuses a turn with 402 when the workspace can't pay for it: no
+ * credits for the model (`payment_required` with `details.code`
+ * `insufficient_credits`), or its allowance used up (`allowance_exhausted`).
+ * Someone outside the workspace can neither add credits nor change the
+ * allowance, so a forwarded refusal of either kind becomes the assistant's
+ * plain "not available" refusal instead of the owner's prompt. Every other
+ * response, including any other 402, is returned unchanged (null).
+ */
+export async function siteOutsiderUnfundedRefusal(
+  viewer: Pick<SiteRuntimeViewer, "kind">,
+  response: Response,
+): Promise<ReturnType<typeof siteAgentUnfunded> | null> {
+  if (viewer.kind === "member" || response.status !== 402) return null;
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: { code?: unknown; details?: { code?: unknown } } } | null;
+  const code = body?.error?.code;
+  const detail = body?.error?.details?.code;
+  const reason: SiteAgentUnfundedReason | null =
+    code === "allowance_exhausted"
+      ? "allowance_exhausted"
+      : code === "payment_required" && detail === "insufficient_credits"
+        ? "no_credits"
+        : null;
+  if (reason === null) return null;
+  await response.body?.cancel().catch(() => undefined);
+  return siteAgentUnfunded(reason);
+}
+
 function budgetExhausted(budget: string, message: string) {
   return sitePublishingError(429, "limit_exceeded", "site_budget_exhausted", message, { budget });
 }
@@ -635,7 +678,7 @@ export async function settleSiteRuntimeSpend(
   } catch (error) {
     console.warn("[site-runtime] could not settle conversation spend", {
       siteId: host.site.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return null;
   }
@@ -820,7 +863,7 @@ export async function meterSiteRuntime(
     console.warn("[site-runtime] could not meter usage", {
       siteId: host.site.id,
       type: event.type,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }

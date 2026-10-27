@@ -1,6 +1,7 @@
 // Preview-only wiring. SessionHeader and its styles are real; the sessions are sample data.
 // Serve with test/session-sidebar-preview.vite.config.ts.
 import { createRoot } from "react-dom/client";
+import { MenuIcon } from "lucide-react";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -18,6 +19,8 @@ import "../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);
 const previewTheme = params.get("theme");
+// `keyAuth=1` adds the access-key control, the most crowded phone row.
+const keyAuthRequired = params.get("keyAuth") === "1";
 if (previewTheme === "dark" || previewTheme === "light") {
   document.documentElement.classList.toggle("dark", previewTheme === "dark");
   document.documentElement.dataset.ogTheme = previewTheme;
@@ -283,7 +286,17 @@ const root = createRootRoute({
               ancestors={ancestors}
               connectionState="live"
               status="idle"
-              keyAuthRequired={false}
+              keyAuthRequired={keyAuthRequired}
+              leading={
+                // Phones open the sessions list from the header, as the app does.
+                <button
+                  type="button"
+                  aria-label="Open navigation"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded-md sm:hidden"
+                >
+                  <MenuIcon aria-hidden className="size-4" />
+                </button>
+              }
               onForgetAccessKey={() => undefined}
               inspectorOpen={false}
               onToggleInspector={() => undefined}

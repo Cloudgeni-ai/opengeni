@@ -10,6 +10,7 @@ import type { ScheduledTask } from "@opengeni/contracts";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { reviewScheduledTaskBlockerInventory } from "./scheduled-task-blockers";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type Dependencies = {
   db: Database;
@@ -51,7 +52,7 @@ export async function reconcileExhaustedScheduledTasks(deps: Dependencies): Prom
       await deferScheduledTaskScheduleReconciliation(deps.db, pending.workspace_id, pending.id);
       deps.observability?.error("Exhausted schedule reconciliation will retry", {
         taskId: pending.task_id,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -68,7 +69,7 @@ export function startScheduledTaskLifecyclePump(
     running = reconcileExhaustedScheduledTasks(deps)
       .catch((error: unknown) => {
         deps.observability?.error("Exhausted schedule inventory failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {

@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext, type Workspace } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrantAuthorization,
+  workspaceSettingsAuthorized,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
   createApiKey,
@@ -23,6 +27,7 @@ import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learnin
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerBrowserSessionRoutes } from "../src/routes/browser-sessions";
 import { registerSitePublishingRoutes } from "../src/routes/site-publishing";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -141,6 +146,14 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerVideoGenerationRoutes(registered, deps);
   registerBrowserSessionRoutes(registered, deps);
   registerSitePublishingRoutes(registered, deps);
+  // The settings decision itself, as an accepted message records it.
+  registered.get("/probe/workspace-settings/:workspaceId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    return c.json({
+      authorized: await workspaceSettingsAuthorized(deps, authorization, workspaceId),
+    });
+  });
   return registered;
 }
 
@@ -411,6 +424,15 @@ describe("managed personal workspace access", () => {
   test("Personal settings deny delegated owner lookalikes and read-only shared-workspace cookies", async () => {
     if (!shared || !client || !app) return;
     const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
+    const decision = async (workspaceId: string, headers: Record<string, string>) =>
+      (
+        (await (
+          await app!.request(`http://x/probe/workspace-settings/${workspaceId}`, { headers })
+        ).json()) as { authorized: boolean }
+      ).authorized;
+    // The shared decision agrees with the routes: the signed-in owner may
+    // configure their Personal workspace; everyone below is refused.
+    expect(await decision(personalWorkspaceId, { cookie: "session=present" })).toBe(true);
     for (const principalKind of ["human_session", "service"] as const) {
       const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
         accountId,
@@ -420,6 +442,7 @@ describe("managed personal workspace access", () => {
         permissions: managedPersonalWorkspacePermissions,
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
+      expect(await decision(personalWorkspaceId, { authorization: `Bearer ${token}` })).toBe(false);
       for (const [method, path, body] of [
         ["PATCH", "/settings", { memoryEnabled: true }],
         ["POST", "/learning/revisions", { workspaceMode: "automatic", sourceOverrides: [] }],
@@ -448,6 +471,7 @@ describe("managed personal workspace access", () => {
       select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
     try {
       await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
+      expect(await decision(sharedWorkspaceId, { cookie: "session=present" })).toBe(false);
       const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}/settings`, {
         method: "PATCH",
         headers: { cookie: "session=present", "content-type": "application/json" },
@@ -1021,10 +1045,3 @@ describe("managed personal workspace access", () => {
     expect(secondOverlap.status).toBe(429);
   });
 });
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}

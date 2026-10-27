@@ -11,6 +11,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import postgres from "postgres";
+import { errorMessage } from "@opengeni/contracts/values";
 
 function usage(exitCode = 1): never {
   const message =
@@ -93,10 +94,9 @@ export async function runModelCatalogUpsert(
   try {
     raw = JSON.parse(await readFile(file, "utf8"));
   } catch (error) {
-    throw new Error(
-      `Unable to read a valid JSON catalog document: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`Unable to read a valid JSON catalog document: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   const document = preflightModelCatalogDocument(raw, env);
   const searchPath = modelCatalogDatabaseSearchPath(env);
@@ -176,7 +176,7 @@ if (import.meta.main) {
   try {
     await runModelCatalogUpsert();
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${errorMessage(error)}\n`);
     process.exitCode = 1;
   }
 }

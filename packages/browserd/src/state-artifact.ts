@@ -22,6 +22,7 @@ import {
   encodeHeadlessSessionCookies,
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
+import { isRecord } from "@opengeni/contracts/values";
 
 export { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
 
@@ -925,10 +926,6 @@ function canonicalTimestamp(value: string): boolean {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function asError(value: unknown): Error {

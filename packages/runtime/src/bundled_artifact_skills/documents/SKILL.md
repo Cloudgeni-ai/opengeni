@@ -47,17 +47,28 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested Word or PDF files
 
 When the user sends a Word or PDF file to be changed and returned, or asks for a
-new Word or PDF file, the file itself is the deliverable. Document artifacts are
-not exported to DOCX or PDF (unless an export tool already in your context lists
-that format), so do not load artifact tools just to check:
+new Word or PDF file, the file itself is the deliverable. Making the file is one
+reply of work: do not set a goal for it, explore the sandbox, or search for
+tools other than `sandbox_file_publish`.
+Document artifacts are not exported to DOCX or PDF (unless an export tool
+already in your context lists that format), so do not load artifact tools just
+to check:
 
-1. Make or edit it in the sandbox with ordinary tools (`python-docx` for Word;
-   `pandoc` or LibreOffice (`soffice --headless --convert-to pdf`) for PDF).
-   Managed sandboxes already include python-docx, so do not check for it first;
-   run `pip install <package>` only if an import fails.
+1. Make or edit it in the sandbox: `python-docx` for Word. For a new PDF, write
+   one HTML file (`@page { size: A4; margin: 18mm } body { margin: 0 }`) and
+   print it: `chromium --headless --no-sandbox --log-level=3
+   --user-data-dir=/tmp/pdf-profile --no-pdf-header-footer
+   --print-to-pdf=out.pdf in.html`.
+   Managed sandboxes already include python-docx and Chromium, and no
+   LibreOffice, pandoc or PDF library, so do not check for tools or install any
+   for a new file; run `pip install <package>` only if an import fails or a
+   sent PDF needs a library.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
-3. Read the result back to check the content.
+3. Read the result back to check the content. For a PDF made from HTML, check
+   the layout once instead: `chromium --headless --no-sandbox --log-level=3
+   --user-data-dir=/tmp/pdf-profile --hide-scrollbars --window-size=658,986
+   --screenshot=page.png in.html` (the first page), then view the image.
 4. Publish the file with `sandbox_file_publish` and reply with a short summary
    and its link. If that tool is not loaded yet, load it with `tool_search` in
    the same batch as your first command. Do not also build a native artifact of

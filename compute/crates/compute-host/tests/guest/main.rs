@@ -589,6 +589,49 @@ async fn templates_give_each_sandbox_its_own_environment_and_token() {
     host.finish().await;
 }
 
+/// Bytes the host's file `disk` takes on its file system.
+fn allocated(disk: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(disk).unwrap().blocks() * 512
+}
+
+/// What a sandbox's files free comes back to the host when it sleeps,
+/// with nobody asking for it: the guest trims its disk before the pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sleeping_sandbox_gives_back_what_its_files_freed() {
+    const PROBE: u64 = 64 << 20;
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let image = image(&lab, &guest, ALPINE);
+    let host = Host::start(&lab, "trim", &image, &[]).await;
+    let sandbox = id(0);
+    host.create(sandbox, 1, 512).await;
+    init(&host.client, sandbox, &[], "token-trim").await;
+    let root = Envd::new(&host.client, sandbox)
+        .with_token("token-trim")
+        .with_user("root");
+    let disk = host.vm_dir().join("root/disk.ext4");
+    root.run("dd if=/dev/urandom of=/root/probe bs=1M count=64 2>/dev/null && sync")
+        .await
+        .unwrap();
+    let written = allocated(&disk);
+    root.run("rm /root/probe").await.unwrap();
+    host.sleep_to(sandbox, LevelName::Paused).await;
+    let asleep = allocated(&disk);
+    eprintln!(
+        "trim: the disk took {} MiB with a 64 MiB file, {} MiB asleep once it was deleted",
+        written >> 20,
+        asleep >> 20
+    );
+    assert!(
+        written.saturating_sub(asleep) >= PROBE * 3 / 4,
+        "the pause gave back only {} of 64 MiB",
+        written.saturating_sub(asleep) >> 20
+    );
+    host.finish().await;
+}
+
 /// A copy of the alpine image whose config is `config`, as
 /// `<name>.ext4`, and the config's file beside it.
 fn command_image(lab: &Path, guest: &Path, name: &str, config: &serde_json::Value) -> PathBuf {

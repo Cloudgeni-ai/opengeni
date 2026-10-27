@@ -23,6 +23,7 @@ import {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
+  COMPUTER_UNCONFIRMED_INPUT_TRACE,
   type ComputerInteractionDriver,
   type InteractionDispatchTrace,
 } from "@opengeni/interaction";
@@ -272,21 +273,24 @@ export class ComputerDriver implements ComputerInteractionDriver {
       ? (item: ComputerBackendRoleStandIn) =>
           trace.record(redactInteractionSecretValues(item, secretValues))
       : undefined;
+    const unconfirmed = trace ? () => trace.record(COMPUTER_UNCONFIRMED_INPUT_TRACE) : undefined;
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
       this.assertActionBatch(command, client);
       const native = nativeCommand(materialized);
-      const observation = await client.dispatch(native, standIn).catch(async (error: unknown) => {
-        // A pasted value stays on the seat clipboard, where clipboard reads
-        // would expose it; text with resolved secrets is never pasted.
-        const text =
-          this.capabilities.clipboard && command.secretValues === undefined
-            ? untypeableText(materialized, error)
-            : null;
-        if (text === null) throw error;
-        return await pasteText(client, native, text);
-      });
+      const observation = await client
+        .dispatch(native, standIn, unconfirmed)
+        .catch(async (error: unknown) => {
+          // A pasted value stays on the seat clipboard, where clipboard reads
+          // would expose it; text with resolved secrets is never pasted.
+          const text =
+            this.capabilities.clipboard && command.secretValues === undefined
+              ? untypeableText(materialized, error)
+              : null;
+          if (text === null) throw error;
+          return await pasteText(client, native, text);
+        });
       // An action that opened a window returns that window, and leaves the
       // computer in it.
       this.current = observation?.target.id ?? command.targetId;
