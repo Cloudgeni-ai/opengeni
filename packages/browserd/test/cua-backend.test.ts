@@ -2036,6 +2036,15 @@ describe("CUA desktop boundary", () => {
         message:
           "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:3), so none were sent: act on that window, or close it first",
       });
+      // The app named no focused window (or did not answer in time): no
+      // other window is said to have focus.
+      fixture.mutation = refused("key_focus_unknown");
+      await expect(keys("text", await backend.observe("cua:window:42:1"))).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
+      });
       // An element CUA places in another window of the app that is a target
       // here: point at that target.
       fixture.mutation = result(

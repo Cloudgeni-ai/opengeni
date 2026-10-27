@@ -1204,7 +1204,21 @@ export class CuaComputerBackend implements ComputerBackend {
     observed: ComputerBackendObservation | undefined,
   ): ComputerBackendError | null {
     const target = this.targetsById.get(targetId);
-    if (!target || this.identity.platform !== "macos" || cuaCode !== "window_not_key") return null;
+    if (
+      !target ||
+      this.identity.platform !== "macos" ||
+      (cuaCode !== "window_not_key" && cuaCode !== "key_focus_unknown")
+    )
+      return null;
+    // The app named no focused window, or did not answer in time: nothing
+    // is known about where keys would go.
+    if (cuaCode === "key_focus_unknown")
+      return new ComputerBackendError(
+        code,
+        "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
+        false,
+        false,
+      );
     if (observed?.roots.some((node) => node.role === "AXSheet"))
       return new ComputerBackendError(
         code,
