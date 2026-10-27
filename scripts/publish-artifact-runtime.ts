@@ -35,7 +35,11 @@ export type RuntimePublisherApi = {
   assetBytes(id: number): Promise<Buffer>;
 };
 
-/** Provider-owned event fields are only selectors; re-read the canonical run before any mutation. */
+/**
+ * Provider-owned event fields are only selectors; re-read the canonical run before any mutation.
+ * The workflow is identified by its path: CI sets a run-name, so the run's `name` is its
+ * display title (the landed commit's subject), not "CI".
+ */
 export function validateRuntimeProducer(
   run: any,
   expected: { sourceSha: string; runId: number; runAttempt: number },
@@ -49,7 +53,6 @@ export function validateRuntimeProducer(
     run.head_sha !== expected.sourceSha ||
     run.head_branch !== "main" ||
     run.path !== ".github/workflows/ci.yml" ||
-    run.name !== "CI" ||
     run.event !== "push" ||
     run.status !== "completed" ||
     run.conclusion !== "success" ||

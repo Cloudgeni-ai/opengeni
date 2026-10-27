@@ -100,13 +100,22 @@ export function useMeetingView({
     ...scope,
     refreshKey: recording?.transcript?.id,
   });
-  const models = useRecordingModels({ ...scope, enabled: ready });
+  // A failed transcript names its model too, to say which provider it needs.
+  const models = useRecordingModels({ ...scope, enabled: ready || phase?.kind === "failed" });
   const version = recording?.transcript ?? null;
   const modelName = version
     ? (models.models.find(
         (candidate) =>
           candidate.providerId === version.providerId && candidate.model === version.model,
       )?.name ?? null)
+    : null;
+  const failedVersion = phase?.kind === "failed" ? (phase.version ?? null) : null;
+  const failedModel = failedVersion
+    ? (models.models.find(
+        (candidate) =>
+          candidate.providerId === failedVersion.providerId &&
+          candidate.model === failedVersion.model,
+      ) ?? null)
     : null;
   const recorder = useMeetingRecorder();
   const capturingHere = isCapturing(recorder) && recorder?.recordingId === recording?.id;
@@ -257,7 +266,18 @@ export function useMeetingView({
             ) : phase?.kind === "failed" ? (
               <PhaseNote
                 tone="danger"
-                text={transcriptErrorText(phase.version?.errorCode ?? null, msg)}
+                text={transcriptErrorText(
+                  phase.version?.errorCode ?? null,
+                  msg,
+                  failedModel
+                    ? {
+                        modelName: failedModel.name,
+                        providerName: failedModel.providerName,
+                        funding: failedModel.funding,
+                        pinned: models.pinned,
+                      }
+                    : null,
+                )}
               />
             ) : phase?.kind === "no_transcript" ? (
               <PhaseNote text={msg("meetings.detailPage.noTranscriptYet")} />

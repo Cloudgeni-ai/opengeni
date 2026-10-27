@@ -21,7 +21,14 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
+import {
+  plan,
+  latestRun,
+  infrastructureRetryReason,
+  settledCiFinished,
+  unseenRunHoldsSlot,
+  type Action,
+} from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 import { proveHeadRefresh } from "./head-refresh";
@@ -160,6 +167,8 @@ export class LiveReader implements Reader {
     // Bound historical provider lookups independently of cache cardinality.
     // Persist a round-robin cursor so restarts do not repeatedly sample only
     // the oldest refs. Unobserved no-run refs remain conservative reservations.
+    // Settled refs the ledger already records as finished need no lookup, so
+    // the bounded sample covers only refs whose outcome is still unknown.
     const historical = candidates
       .filter(
         (candidate) =>
@@ -168,12 +177,15 @@ export class LiveReader implements Reader {
           ledger.invalidated.includes(candidate.manifest.batchId),
       )
       .sort((a, b) => a.branch.localeCompare(b.branch));
+    const unresolved = historical.filter(
+      (candidate) => !settledCiFinished(ledger, candidate.manifest.batchId),
+    );
     const cursorKey = `history-cursor:${this.config.repository}:${this.config.branchPrefix}`;
     const savedCursor = await this.manifestCache.get<number>(cursorKey);
     const cursor = Number.isSafeInteger(savedCursor) && savedCursor! >= 0 ? savedCursor! : 0;
     const selected = new Set<string>();
-    for (let i = 0; i < Math.min(8, historical.length); i++)
-      selected.add(historical[(cursor + i) % historical.length]!.manifest.batchId);
+    for (let i = 0; i < Math.min(8, unresolved.length); i++)
+      selected.add(unresolved[(cursor + i) % unresolved.length]!.manifest.batchId);
     const archivedIds = new Set(historical.map((candidate) => candidate.manifest.batchId));
     for (const candidate of candidates) {
       const archived = archivedIds.has(candidate.manifest.batchId);
@@ -194,11 +206,11 @@ export class LiveReader implements Reader {
         if (refresh) candidate.headRefresh = refresh;
       }
     }
-    if (historical.length)
-      await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
-    if (historical.length > selected.size)
+    if (unresolved.length)
+      await this.manifestCache.set(cursorKey, (cursor + selected.size) % unresolved.length);
+    if (unresolved.length > selected.size)
       observationWarnings.push(
-        `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
+        `Historical CI scan sampled ${selected.size}/${unresolved.length} unresolved refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
     const failedRoot = candidates.some((candidate) => {
       const run = latestRun(candidate, this.config);
@@ -244,10 +256,7 @@ export class LiveReader implements Reader {
                     headSha: candidate.manifest.tipSha,
                     runId: run.id,
                   }));
-                if (
-                  !latestRun(candidate, this.config) &&
-                  ledger.missingRuns[candidate.manifest.batchId]?.status !== "released"
-                )
+                if (unseenRunHoldsSlot(candidate, ledger, this.config))
                   return [
                     ...reservations,
                     { branch: candidate.branch, headSha: candidate.manifest.tipSha },

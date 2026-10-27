@@ -581,6 +581,18 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: true,
         configuration: ["search_path=pg_catalog"],
       },
+      {
+        // 0988 reads only session tables present in every current posture;
+        // its runtime grant stays deferred for previous-release compatibility.
+        name: "summarize_queued_turns_by_hold()",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -1856,6 +1868,9 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0998 managed-auth passkeys: one auth table without RLS whose
+          // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
+          (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2006,6 +2021,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -3358,6 +3374,70 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("a deferred full-DML table accepts no runtime DML or all four, never a partial grant", () => {
+    expect(runtimePosture.RUNTIME_DEFERRED_FULL_DML_TABLES).toEqual(["auth_passkeys"]);
+    expect(NON_RLS_RUNTIME_TABLES).toContain("auth_passkeys");
+    expect(RUNTIME_FULL_DML_TABLES).not.toContain("auth_passkeys");
+    expect(RUNTIME_TABLE_PRIVILEGES.auth_passkeys).toBeUndefined();
+    const { tablePrivileges: _explicit, ...defaultContract } = options;
+    const deferredTable = (grants: Partial<RuntimeTablePosture>) => {
+      const posture = safePosture();
+      posture.tables.push({
+        ...posture.tables[0]!,
+        name: "auth_passkeys",
+        rlsEnabled: false,
+        rlsForced: false,
+        rlsActive: false,
+        policyCount: 0,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        ...grants,
+      });
+      return evaluateRuntimeDatabasePosture(posture, defaultContract).filter((violation) =>
+        violation.includes("auth_passkeys"),
+      );
+    };
+    expect(deferredTable({})).toEqual([]);
+    expect(deferredTable({ select: true, insert: true, update: true, delete: true })).toEqual([]);
+    expect(deferredTable({ select: true })).toEqual([
+      "table auth_passkeys grants partial runtime DML: SELECT",
+    ]);
+    expect(deferredTable({ columnPrivileges: ["UPDATE"] })).toEqual([
+      "table auth_passkeys grants partial runtime DML: UPDATE",
+    ]);
+    expect(
+      deferredTable({ select: true, insert: true, update: true, delete: true, truncate: true }),
+    ).toEqual(["table auth_passkeys grants excess runtime privileges: TRUNCATE"]);
+  });
+
+  test("a deferred target-schema capability is accepted with or without runtime EXECUTE, never PUBLIC", () => {
+    expect(runtimePosture.DEFERRED_RUNTIME_TARGET_ROUTINES).toEqual([
+      "mutate_managed_passkey(text, text, jsonb)",
+    ]);
+    const name = "mutate_managed_passkey(text, text, jsonb)";
+    const violationsFor = (change: { execute?: boolean; publicExecute?: boolean }) => {
+      const posture = safePosture();
+      Object.assign(posture.targetRoutines.find((routine) => routine.name === name)!, change);
+      return evaluateRuntimeDatabasePosture(posture, options).filter((violation) =>
+        violation.includes(name),
+      );
+    };
+    expect(violationsFor({ execute: true })).toEqual([]);
+    expect(violationsFor({ execute: false })).toEqual([]);
+    expect(violationsFor({ execute: false, publicExecute: true })).toContain(
+      `PUBLIC has forbidden target-schema capability ${name}`,
+    );
+    // A capability that is not deferred still requires runtime EXECUTE.
+    const sibling = "mutate_managed_sign_in_method(text, text, jsonb)";
+    const posture = safePosture();
+    posture.targetRoutines.find((routine) => routine.name === sibling)!.execute = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      `runtime role lacks target-schema capability ${sibling}`,
+    );
+  });
+
   test("accepts and enforces read-only, read-insert, and protected no-DML classes", () => {
     const posture = safePosture();
     posture.tables[0] = { ...posture.tables[0]!, update: false, delete: false };
@@ -3860,6 +3940,10 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
+    posture.privateRoutines = posture.privateRoutines.filter(
+      (entry) =>
+        !(runtimePosture.RUNTIME_DEFINER_ROUTINES as readonly string[]).includes(entry.name),
+    );
     posture.privateRoutines.push(
       ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
@@ -3901,10 +3985,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -3955,6 +4041,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
