@@ -16,6 +16,7 @@ import {
 import {
   answersFromDrafts,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   humanInputHeading,
   initialDrafts,
@@ -149,7 +150,7 @@ export function HumanInputCard({
 }: HumanInputCardProps) {
   const t = useOpenGeniText();
   const merged = useMemo(
-    () => ({ ...defaultHumanInputFormMessages(t), ...messages }),
+    () => mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messages),
     [t, messages],
   );
   const mergedSecret = useMemo(
@@ -480,7 +481,13 @@ function HumanInputForm({
               />
             ) : null}
             <Button
-              label={busy ? messages.submitting : messages.submit}
+              label={
+                busy
+                  ? messages.submitting
+                  : single
+                    ? (messages.submitOne ?? messages.submit)
+                    : messages.submit
+              }
               variant="primary"
               size="form"
               busy={busy}

@@ -1894,6 +1894,7 @@ export const englishMessages = {
   "humanInputModel.savesToThisTask": "Saves to this task",
   "humanInputModel.savesToYourPrivateVault": "Saves to your private vault",
   "humanInputModel.saveTo": "Save to",
+  "humanInputModel.sendAnswer": "Send answer",
   "humanInputModel.sendAnswers": "Send answers",
   "humanInputModel.show": "Show",
   "humanInputModel.skip": "Skip",
