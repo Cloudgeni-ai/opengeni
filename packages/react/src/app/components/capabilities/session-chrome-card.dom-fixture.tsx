@@ -50,6 +50,10 @@ const fleet = {
   machines: [sessionBox] as Machine[],
   canRead: true,
   canManage: true,
+  canConnect: true,
+  canManageMachine(target: { scope: string }): boolean {
+    return target.scope === "user" ? this.canConnect : this.canManage;
+  },
   canAttach: true,
   attaching: false,
   loading: false,
@@ -152,6 +156,7 @@ beforeEach(() => {
   fleet.machines = [sessionBox];
   fleet.canRead = true;
   fleet.canManage = true;
+  fleet.canConnect = true;
   fleet.error = null;
   context.accessContext.workspaceGrants = [{ workspaceId: "workspace", permissions: everyone }];
 });
@@ -350,6 +355,7 @@ describe("Chrome setup card", () => {
 
   test("says who can connect when this person cannot", async () => {
     fleet.canManage = false;
+    fleet.canConnect = false;
     const member = await render();
     expect(member.text()).toContain("Ask a workspace admin to connect a computer.");
     expect(member.button("Connect a computer")).toBeNull();

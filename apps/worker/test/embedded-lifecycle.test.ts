@@ -768,6 +768,18 @@ describe("embedded worker lifecycle contract", () => {
             security_definer: true,
             configuration: ["search_path=pg_catalog"],
           },
+          // Migration 0988: the queued-turn hold summary. Its runtime grant
+          // stays deferred for previous-release compatibility.
+          {
+            name: "summarize_queued_turns_by_hold()",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          },
           ...[
             "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
             "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
