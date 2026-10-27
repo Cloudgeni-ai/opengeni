@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_fleet::{
-    Demand, HostId, LeaseTerms, Next, Op, Outcome, OwnerEpoch, Ownership, Prefer, SandboxId,
-    answered,
+    Demand, HostId, LeaseTerms, Next, Offers, Op, Outcome, OwnerEpoch, Ownership, Prefer,
+    SandboxId, answered,
 };
 use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request, SandboxConfig, SleepConfig};
 use compute_storage::store::ChunkStore;
@@ -288,14 +288,11 @@ impl<S: Store> Service<S> {
         &self.settings
     }
 
-    /// What a sandbox of `config` asks of the host it is placed on.
-    ///
-    /// # Errors
-    ///
-    /// It asks to reach what no host this replica read offers, or the
-    /// replica has read no host yet to tell.
-    fn demand(&self, config: &SandboxConfig, prefer: Prefer) -> Result<Demand, Failure> {
-        Ok(Demand {
+    /// What a sandbox of `config` asks of the host it is placed on, but
+    /// for what it reaches, which is numbered as it is placed
+    /// ([`Service::place`]).
+    fn demand(&self, config: &SandboxConfig, prefer: Prefer) -> Demand {
+        Demand {
             memory_mib: u64::from(config.memory_request()),
             memory_max_mib: u64::from(config.memory_mib),
             cpu_millis: u64::from(config.cpu_request()),
@@ -303,9 +300,9 @@ impl<S: Store> Service<S> {
                 .settings
                 .disk_mib
                 .max(config.disk_mib.map_or(0, u64::from)),
-            reach: self.view.offers(&config.reach).map_err(unplaced)?,
+            reach: Offers::NONE,
             prefer,
-        })
+        }
     }
 
     /// The config `target` is sent for `row`'s sandbox, which it holds
@@ -334,9 +331,15 @@ impl<S: Store> Service<S> {
         config
     }
 
-    /// Places `demand` on a host not in `exclude`.
-    fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
-        let placement = self.view.place(demand, exclude).map_err(unplaced)?;
+    /// Places `demand`, reaching the offers named `reach`, on a host not
+    /// in `exclude`.
+    fn place(
+        &self,
+        demand: &Demand,
+        reach: &[String],
+        exclude: &HashSet<HostId>,
+    ) -> Result<Target, Failure> {
+        let placement = self.view.place(demand, reach, exclude).map_err(unplaced)?;
         self.view.target(placement.host).ok_or(Failure::NoCapacity)
     }
 
@@ -450,7 +453,7 @@ impl<S: Store> Service<S> {
         // Every host placement can find is tried once: one that refuses
         // holds nothing of it, and refuses before making anything.
         loop {
-            let target = match self.place(&demand, &exclude) {
+            let target = match self.place(&demand, &row.spec.config.reach, &exclude) {
                 Ok(target) => target,
                 Err(failure) => {
                     self.forget_if_refused(&row, refused.as_ref()).await?;
@@ -560,7 +563,7 @@ impl<S: Store> Service<S> {
             u32::from(spec.config.vcpus),
             spec.config.memory_mib,
         );
-        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape))?;
+        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape));
         let row = SandboxRow {
             id,
             team: team.to_owned(),

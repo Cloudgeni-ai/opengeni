@@ -18,10 +18,13 @@
 //! rather than pass over every host as silent and answer that none has
 //! room.
 //!
-//! The view numbers the names of what hosts offer sandboxes to reach, in
-//! the order it first reads them, up to the 64 placement can tell apart;
-//! a host's offers past those are left out of its placement, so it is not
-//! chosen for them, and logged.
+//! The view numbers the names of what the hosts it holds offer sandboxes
+//! to reach, up to the 64 placement can tell apart at once. A name no host
+//! it holds offers any longer gives its number back, for another name; a
+//! host's offers past those numbered are left out of its placement, so it
+//! is not chosen for them, and logged, until a number is free when it is
+//! next read. A sandbox's reach is numbered as it is placed, under the
+//! same lock, so a number given back never stands for the name it had.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -103,12 +106,80 @@ struct Inner {
     heard: HashMap<HostId, (u64, Instant)>,
     zones: HashMap<String, ZoneId>,
     classes: HashMap<String, ClassId>,
-    /// Each offer name read from a host, by its number in
-    /// [`compute_fleet::Offers`].
-    offers: HashMap<String, u8>,
+    /// Each offer name a host held makes: its number in
+    /// [`compute_fleet::Offers`], and how many hosts make it.
+    offers: HashMap<String, Offered>,
+    /// The offer names each host is counted as making: those numbered
+    /// when it was last read.
+    offered_by: HashMap<HostId, Vec<String>>,
     rng: Rng,
     /// When this replica last read host rows from the store.
     read_at: Option<Instant>,
+}
+
+/// An offer name some host makes.
+#[derive(Clone, Copy, Debug)]
+struct Offered {
+    number: u8,
+    hosts: usize,
+}
+
+impl Inner {
+    /// The offers named `names`, as numbered now.
+    fn reach(&self, names: &[String]) -> Result<Offers, Unplaced> {
+        names.iter().try_fold(Offers::NONE, |offers, name| {
+            self.offers
+                .get(name)
+                .map(|offered| offers.with(offered.number))
+                .ok_or_else(|| Unplaced::Unoffered(name.clone()))
+        })
+    }
+
+    /// Counts host `host` as making the offers `names`, in place of those
+    /// it was counted as making, numbering a name no host made while a
+    /// number is free. Its offers, for placement.
+    fn offer(&mut self, host: HostId, host_name: &str, names: &[String]) -> Offers {
+        self.give_back(host);
+        let mut counted = Vec::with_capacity(names.len());
+        let offers = names.iter().fold(Offers::NONE, |offers, name| {
+            if let Some(offered) = self.offers.get_mut(name) {
+                offered.hosts += 1;
+                counted.push(name.clone());
+                return offers.with(offered.number);
+            }
+            if self.offers.len() >= MAX_OFFERS {
+                tracing::warn!(
+                    host = host_name,
+                    offer = %name,
+                    "the hosts offer more than {MAX_OFFERS} names; placement leaves this one out"
+                );
+                return offers;
+            }
+            let used = self
+                .offers
+                .values()
+                .fold(0u64, |used, offered| used | 1 << offered.number);
+            let number = u8::try_from(used.trailing_ones()).unwrap_or(u8::MAX);
+            self.offers
+                .insert(name.clone(), Offered { number, hosts: 1 });
+            counted.push(name.clone());
+            offers.with(number)
+        });
+        self.offered_by.insert(host, counted);
+        offers
+    }
+
+    /// No longer counts host `host` as making any offer.
+    fn give_back(&mut self, host: HostId) {
+        for name in self.offered_by.remove(&host).unwrap_or_default() {
+            if let Some(offered) = self.offers.get_mut(&name) {
+                offered.hosts -= 1;
+                if offered.hosts == 0 {
+                    self.offers.remove(&name);
+                }
+            }
+        }
+    }
 }
 
 /// Why [`View::place`] placed nothing.
@@ -120,8 +191,8 @@ pub enum Unplaced {
     /// `silent_after`, for this long (`None`: none yet), so it cannot tell
     /// which hosts renew.
     Blind(Option<Duration>),
-    /// No host this replica has read offers this, which the sandbox asks
-    /// to reach.
+    /// No host this replica holds offers this, which the sandbox asks to
+    /// reach.
     Unoffered(String),
 }
 
@@ -142,27 +213,6 @@ fn intern<T: Copy>(table: &mut HashMap<String, T>, key: &str, make: impl Fn(u16)
     let value = make(u16::try_from(table.len()).unwrap_or(u16::MAX));
     table.insert(key.to_owned(), value);
     value
-}
-
-/// The offers `names` that `table` numbers, numbering those it does not
-/// while it has room.
-fn offers_of(table: &mut HashMap<String, u8>, host: &str, names: &[String]) -> Offers {
-    names.iter().fold(Offers::NONE, |offers, name| {
-        if let Some(number) = table.get(name) {
-            return offers.with(*number);
-        }
-        if table.len() >= MAX_OFFERS {
-            tracing::warn!(
-                host,
-                offer = %name,
-                "the hosts offer more than {MAX_OFFERS} names; placement leaves this one out"
-            );
-            return offers;
-        }
-        let number = u8::try_from(table.len()).unwrap_or(u8::MAX);
-        table.insert(name.clone(), number);
-        offers.with(number)
-    })
 }
 
 /// What placement reads of a host's report.
@@ -198,6 +248,7 @@ impl View {
                 zones: HashMap::new(),
                 classes: HashMap::new(),
                 offers: HashMap::new(),
+                offered_by: HashMap::new(),
                 rng: Rng::new(seed),
                 read_at: None,
             }),
@@ -235,7 +286,7 @@ impl View {
             let zone = intern(&mut inner.zones, &row.info.zone, ZoneId);
             let class_name = class_key(&row.info);
             let class = intern(&mut inner.classes, &class_name, ClassId);
-            let offers = offers_of(&mut inner.offers, &row.info.name, &row.info.offers);
+            let offers = inner.offer(row.id, &row.info.name, &row.info.offers);
             let info = HostInfo {
                 zone,
                 class,
@@ -281,6 +332,7 @@ impl View {
             inner.hosts.remove(&host);
             inner.heard.remove(&host);
             inner.fleet.remove(host);
+            inner.give_back(host);
         }
     }
 
@@ -337,46 +389,33 @@ impl View {
         self.read().classes.get(class).copied()
     }
 
-    /// The offers named `names`, which a sandbox asks to reach, for
-    /// placement. None for none, whatever this replica has read.
+    /// Places `demand`, reaching the offers named `reach` (its own
+    /// `reach` is not read), on a live host not in `exclude`, and heard
+    /// renewing within the view's `silent_after`, and books it there until
+    /// the host next reports. Places nothing while this replica has read
+    /// no host rows within `silent_after` ([`Unplaced::Blind`]). The names
+    /// are numbered under the lock placement holds, as hosts' offers are.
     ///
     /// # Errors
     ///
-    /// A name no host this replica has read offers
-    /// ([`Unplaced::Unoffered`]), or, before it has read any host, that it
-    /// cannot tell ([`Unplaced::Blind`]).
-    pub fn offers(&self, names: &[String]) -> Result<Offers, Unplaced> {
-        if names.is_empty() {
-            return Ok(Offers::NONE);
-        }
-        let inner = self.read();
-        if inner.read_at.is_none() {
-            return Err(Unplaced::Blind(None));
-        }
-        names.iter().try_fold(Offers::NONE, |offers, name| {
-            inner
-                .offers
-                .get(name)
-                .map(|number| offers.with(*number))
-                .ok_or_else(|| Unplaced::Unoffered(name.clone()))
-        })
-    }
-
-    /// Places `demand` on a live host not in `exclude`, and heard renewing
-    /// within the view's `silent_after`, and books it there until the host
-    /// next reports. Places nothing while this replica has read no host
-    /// rows within `silent_after` ([`Unplaced::Blind`]).
-    ///
-    /// # Errors
-    ///
-    /// Why it placed nothing.
-    pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Placement, Unplaced> {
+    /// Why it placed nothing, which for a name no host it holds offers is
+    /// [`Unplaced::Unoffered`].
+    pub fn place(
+        &self,
+        demand: &Demand,
+        reach: &[String],
+        exclude: &HashSet<HostId>,
+    ) -> Result<Placement, Unplaced> {
         let mut inner = self.write();
         let inner = &mut *inner;
         match inner.read_at.map(|at| at.elapsed()) {
             Some(since) if since <= self.silent_after => {}
             since => return Err(Unplaced::Blind(since)),
         }
+        let demand = &Demand {
+            reach: inner.reach(reach)?,
+            ..*demand
+        };
         let silent: Vec<HostId> = inner
             .heard
             .iter()
@@ -544,13 +583,13 @@ mod tests {
     fn a_replica_that_has_read_no_hosts_yet_is_blind_not_full() {
         let view = View::new(1, SILENT_AFTER);
         assert_eq!(
-            view.place(&demand(), &HashSet::new()),
+            view.place(&demand(), &[], &HashSet::new()),
             Err(Unplaced::Blind(None))
         );
         // A read that finds no hosts at all is a fleet with no room.
         view.apply_all(&[]);
         assert_eq!(
-            view.place(&demand(), &HashSet::new()),
+            view.place(&demand(), &[], &HashSet::new()),
             Err(Unplaced::NoRoom)
         );
     }
@@ -559,19 +598,19 @@ mod tests {
     fn a_replica_whose_reads_stopped_is_blind_until_it_reads_again() {
         let view = View::new(1, SILENT_AFTER);
         view.apply_all(&[host(1)]);
-        let placed = view.place(&demand(), &HashSet::new()).unwrap();
+        let placed = view.place(&demand(), &[], &HashSet::new()).unwrap();
         assert_eq!(placed.host, HostId(1));
         std::thread::sleep(SILENT_AFTER + Duration::from_millis(50));
         // Every host now looks silent, but only because this replica read
         // nothing: it says so rather than that no host has room.
-        match view.place(&demand(), &HashSet::new()) {
+        match view.place(&demand(), &[], &HashSet::new()) {
             Err(Unplaced::Blind(Some(since))) => assert!(since > SILENT_AFTER, "{since:?}"),
             other => panic!("expected a blind view, got {other:?}"),
         }
         // A read that shows the host renewing places on it again.
         view.apply(&[host(2)]);
         assert_eq!(
-            view.place(&demand(), &HashSet::new())
+            view.place(&demand(), &[], &HashSet::new())
                 .map(|placed| placed.host),
             Ok(HostId(1))
         );
@@ -586,9 +625,22 @@ mod tests {
         // host is silent, and nothing else has room.
         view.apply(&[]);
         assert_eq!(
-            view.place(&demand(), &HashSet::new()),
+            view.place(&demand(), &[], &HashSet::new()),
             Err(Unplaced::NoRoom)
         );
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// Host `id`, named `host-<id>`, offering `offers`.
+    fn offering(id: u64, offers: &[&str]) -> HostRow {
+        let mut row = host(1);
+        row.id = HostId(id);
+        row.info.name = format!("host-{id}");
+        row.info.offers = names(offers);
+        row
     }
 
     /// Offer names are numbered as hosts are read, the same name the same
@@ -597,51 +649,94 @@ mod tests {
     #[test]
     fn a_sandbox_reaching_an_offer_goes_to_a_host_that_offers_it() {
         let view = View::new(1, SILENT_AFTER);
-        let names = |names: &[&str]| -> Vec<String> {
-            names.iter().map(|name| (*name).to_owned()).collect()
-        };
+        let previews = names(&["previews"]);
         assert_eq!(
-            view.offers(&names(&["previews"])),
+            view.place(&demand(), &previews, &HashSet::new()),
             Err(Unplaced::Blind(None))
         );
-        assert_eq!(view.offers(&[]), Ok(Offers::NONE));
-        let mut plain = host(1);
-        plain.id = HostId(1);
-        let mut offering = host(1);
-        offering.id = HostId(2);
-        offering.info.name = "host-2".to_owned();
-        offering.info.offers = names(&["builds", "previews"]);
-        view.apply_all(&[plain, offering]);
-        let previews = view.offers(&names(&["previews"])).unwrap();
-        assert_ne!(previews, Offers::NONE);
+        view.apply_all(&[offering(1, &[]), offering(2, &["builds", "previews"])]);
         assert_eq!(
-            view.offers(&names(&["other"])),
+            view.place(&demand(), &names(&["other"]), &HashSet::new()),
             Err(Unplaced::Unoffered("other".to_owned()))
         );
-        let wanted = Demand {
-            reach: previews,
-            ..demand()
-        };
         for _ in 0..50 {
-            let placed = view.place(&wanted, &HashSet::new()).unwrap();
+            let placed = view.place(&demand(), &previews, &HashSet::new()).unwrap();
             assert_eq!(placed.host, HostId(2));
         }
         assert_eq!(
-            view.place(&wanted, &HashSet::from([HostId(2)])),
+            view.place(&demand(), &previews, &HashSet::from([HostId(2)])),
             Err(Unplaced::NoRoom)
         );
     }
 
     /// Past the 64 offer names placement tells apart, a host's further
-    /// offers are left out, so it is never chosen for them.
+    /// offers are left out, so it is never chosen for them, until a name
+    /// no host offers any longer gives its number back.
     #[test]
-    fn offers_past_what_placement_tells_apart_are_left_out() {
-        let mut table = HashMap::new();
+    fn offers_past_what_placement_tells_apart_wait_for_a_free_number() {
+        let view = View::new(1, SILENT_AFTER);
         let many: Vec<String> = (0..MAX_OFFERS).map(|n| format!("o{n}")).collect();
-        let all = offers_of(&mut table, "host-1", &many);
-        assert_eq!(all, Offers(u64::MAX));
-        let more = offers_of(&mut table, "host-2", &["o3".to_owned(), "late".to_owned()]);
-        assert_eq!(more, Offers::NONE.with(3));
-        assert!(!table.contains_key("late"));
+        let mut first = offering(1, &[]);
+        first.info.offers.clone_from(&many);
+        view.apply_all(&[first.clone(), offering(2, &["o3", "late"])]);
+        let late = names(&["late"]);
+        assert_eq!(
+            view.place(&demand(), &late, &HashSet::new()),
+            Err(Unplaced::Unoffered("late".to_owned()))
+        );
+        assert_eq!(
+            view.place(&demand(), &names(&["o3"]), &HashSet::from([HostId(1)]))
+                .map(|placed| placed.host),
+            Ok(HostId(2))
+        );
+
+        // The first host stops offering o5: once the second is read
+        // again, late has its number, and o5 is no longer offered.
+        first.info.offers.retain(|name| name != "o5");
+        view.apply(&[first]);
+        view.apply(&[offering(2, &["o3", "late"])]);
+        assert_eq!(
+            view.place(&demand(), &late, &HashSet::new())
+                .map(|placed| placed.host),
+            Ok(HostId(2))
+        );
+        assert_eq!(
+            view.place(&demand(), &names(&["o5"]), &HashSet::new()),
+            Err(Unplaced::Unoffered("o5".to_owned()))
+        );
+    }
+
+    /// Names only hosts gone from the store offered give their numbers
+    /// back: offers retired over time never use up the 64.
+    #[test]
+    fn retired_offers_give_their_numbers_back() {
+        let view = View::new(1, SILENT_AFTER);
+        let mut retired = offering(1, &[]);
+        retired.info.offers = (0..MAX_OFFERS).map(|n| format!("retired-{n}")).collect();
+        view.apply_all(&[retired]);
+        view.apply_all(&[]);
+        view.apply_all(&[offering(2, &["previews"])]);
+        assert_eq!(
+            view.place(&demand(), &names(&["previews"]), &HashSet::new())
+                .map(|placed| placed.host),
+            Ok(HostId(2))
+        );
+        assert_eq!(
+            view.place(&demand(), &names(&["retired-0"]), &HashSet::new()),
+            Err(Unplaced::Unoffered("retired-0".to_owned()))
+        );
+    }
+
+    /// A host that no longer offers a name, read again, is not counted
+    /// for it: a sandbox asking for it is told no host offers it.
+    #[test]
+    fn an_offer_a_host_withdraws_is_no_longer_offered() {
+        let view = View::new(1, SILENT_AFTER);
+        view.apply_all(&[offering(1, &["previews"])]);
+        view.apply(&[offering(1, &[])]);
+        assert_eq!(
+            view.place(&demand(), &names(&["previews"]), &HashSet::new()),
+            Err(Unplaced::Unoffered("previews".to_owned()))
+        );
     }
 }
