@@ -19,9 +19,12 @@ export const MEETING_CARD_TIMEOUT_MS = 45_000;
 
 const ACTIONS = { act: "chosen", dismiss: "dismissed", expire: "expired" } as const;
 
-/** The button a page address reports, and for which question, if any. */
-export function cardAction(url: string): { outcome: MeetingPromptOutcome; token: number } | null {
-  const [name = "", token = ""] = (url.split("#")[1] ?? "").split("/");
+/** What the card's page answered (`action/token`): the outcome, and for which question. */
+export function cardAnswer(
+  answer: unknown,
+): { outcome: MeetingPromptOutcome; token: number } | null {
+  if (typeof answer !== "string") return null;
+  const [name = "", token = ""] = answer.split("/");
   const outcome = ACTIONS[name as keyof typeof ACTIONS];
   const value = Number(token);
   return outcome && Number.isInteger(value) && value > 0 ? { outcome, token: value } : null;
@@ -129,10 +132,6 @@ export class MeetingPromptCard implements MeetingPromptView {
     });
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     window.webContents.on("will-navigate", (event) => event.preventDefault());
-    window.webContents.on("did-navigate-in-page", (_event, url) => {
-      const action = cardAction(url);
-      if (action) this.finish(action.token, action.outcome);
-    });
     window.on("closed", () => {
       if (this.window !== window) return;
       this.window = null;
@@ -173,5 +172,9 @@ export class MeetingPromptCard implements MeetingPromptView {
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     window.setBounds(cardBounds(display.workArea, height));
     window.showInactive();
+    // Settles when a button is pressed or the time runs out, or with null when
+    // a newer question replaces this one.
+    const answer = cardAnswer(await window.webContents.executeJavaScript("answer()"));
+    if (answer) this.finish(answer.token, answer.outcome);
   }
 }

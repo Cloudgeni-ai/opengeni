@@ -32,7 +32,7 @@ import { handleMeetingDetectionIpc } from "../src/main/meeting-detection/ipc";
 import { ENGLISH_MEETING_WORDS } from "../src/main/meeting-detection/words";
 
 // These import Electron, which the stub stands in for.
-const { cardAction, cardBounds } = await import("../src/main/meeting-detection/card");
+const { cardAnswer, cardBounds } = await import("../src/main/meeting-detection/card");
 const { meetingDetectionFileLog } = await import("../src/main/meeting-detection/electron");
 const { meetingDetectionBridge } = await import("../src/preload/meeting-detection");
 
@@ -430,16 +430,14 @@ describe("MeetingDetection", () => {
 });
 
 describe("the card", () => {
-  test("buttons report their outcome and the question they answer", () => {
-    expect(cardAction("data:text/html,x#act/3/1700000000000")).toEqual({
-      outcome: "chosen",
-      token: 3,
-    });
-    expect(cardAction("data:text/html,x#dismiss/4/1")).toEqual({ outcome: "dismissed", token: 4 });
-    expect(cardAction("data:text/html,x#expire/5/1")).toEqual({ outcome: "expired", token: 5 });
-    expect(cardAction("data:text/html,x#act/zero/1")).toBe(null);
-    expect(cardAction("data:text/html,x#other/1/1")).toBe(null);
-    expect(cardAction("data:text/html,x")).toBe(null);
+  test("the page's answer names the outcome and the question it answers", () => {
+    expect(cardAnswer("act/3")).toEqual({ outcome: "chosen", token: 3 });
+    expect(cardAnswer("dismiss/4")).toEqual({ outcome: "dismissed", token: 4 });
+    expect(cardAnswer("expire/5")).toEqual({ outcome: "expired", token: 5 });
+    expect(cardAnswer("act/zero")).toBe(null);
+    expect(cardAnswer("other/1")).toBe(null);
+    expect(cardAnswer(null)).toBe(null);
+    expect(cardAnswer(7)).toBe(null);
   });
 
   test("sits in the top right corner of the screen's work area", () => {

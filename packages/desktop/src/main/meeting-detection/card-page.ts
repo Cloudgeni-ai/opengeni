@@ -2,8 +2,10 @@
 // whether to record a call (or to stop when it ended), the way a meeting
 // notes app does, without the system's notifications, which Focus and Do Not
 // Disturb hide. Self-contained (a data: URL, no files), so an app that embeds
-// the kit ships nothing extra. Buttons report through the page's address
-// (`#action/token/time`), which the main process watches.
+// the kit ships nothing extra. The main process waits on the page's
+// `answer()`, which settles with `action/token` once a button is pressed or
+// the time runs out. (Chromium won't let a data: page change its own address,
+// so the answer can't travel that way.)
 
 /** Room around the card, inside the window, for its shadow. */
 export const MEETING_CARD_MARGIN = 14;
@@ -16,7 +18,7 @@ export const MEETING_CARD_HTML = String.raw`<!doctype html>
 <style>
 :root {
   color-scheme: light dark;
-  --surface: rgba(255, 255, 255, 0.97);
+  --surface: #ffffff;
   --edge: rgba(0, 0, 0, 0.08);
   --text: #18181b;
   --muted: #52525b;
@@ -29,7 +31,7 @@ export const MEETING_CARD_HTML = String.raw`<!doctype html>
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface: rgba(39, 39, 42, 0.97);
+    --surface: #27272a;
     --edge: rgba(255, 255, 255, 0.1);
     --text: #f4f4f5;
     --muted: #a1a1aa;
@@ -94,8 +96,19 @@ let left = 0;
 let since = 0;
 let timer = null;
 let hovering = false;
+let settle = null;
+let answered = Promise.resolve(null);
 function report(action) {
-  location.hash = action + "/" + token + "/" + Date.now();
+  clearTimeout(timer);
+  timer = null;
+  left = 0;
+  const done = settle;
+  settle = null;
+  if (done) done(action + "/" + token);
+}
+// The answer to the question showing now; a newer question settles it with null.
+function answer() {
+  return answered;
 }
 function schedule() {
   clearTimeout(timer);
@@ -118,6 +131,8 @@ document.body.addEventListener("mouseleave", () => {
 });
 // Shows a question; returns the window height it needs.
 function render(state) {
+  if (settle) settle(null);
+  answered = new Promise((resolve) => { settle = resolve; });
   token = state.token;
   document.getElementById("question").textContent = state.question;
   document.getElementById("reason").textContent = state.reason;
