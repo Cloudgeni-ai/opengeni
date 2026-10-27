@@ -288,7 +288,7 @@ function previewStartingCredits() {
     model: {
       id: scopedCreditPreview() ? "gpt-6-luna" : "preview-credits",
       label: scopedCreditPreview() ? "GPT-6 Luna" : "Preview Credits Model",
-      reasoningEffort: "xhigh" as const,
+      reasoningEffort: "medium" as const,
     },
   };
 }
