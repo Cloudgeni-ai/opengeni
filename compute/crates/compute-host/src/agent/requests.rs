@@ -465,7 +465,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         match self.sleep_policy(config) {
             Err(error) => Some(Err(HostError::Invalid(error))),
-            Ok(_) => self.needs_absent_store(&config.sleep).map(Err),
+            Ok(_) => self
+                .needs_absent_store(&config.sleep)
+                .or_else(|| self.unoffered(config))
+                .map(Err),
         }
     }
 
@@ -482,6 +485,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         })
     }
 
+    /// The refusal of a sandbox of `config` that asks to reach what this
+    /// host does not offer.
+    fn unoffered(&self, config: &SandboxConfig) -> Option<HostError> {
+        let offered = |name: &String| self.net.as_ref().is_some_and(|net| net.offers(name));
+        config.reach.iter().find(|name| !offered(name)).map(|name| {
+            HostError::Invalid(format!(
+                "this host does not offer {name:?}, which the sandbox asks to reach"
+            ))
+        })
+    }
+
     /// Refuses a new sandbox `id` of `config` that cannot be created here,
     /// or not woken at once as `size`; adopted with `remote`, its first
     /// wake fetches it. Otherwise says whether it fits now or only the
@@ -495,6 +509,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<Room, HostError> {
         self.sleep_policy(config).map_err(HostError::Invalid)?;
         if let Some(refused) = self.needs_absent_store(&config.sleep) {
+            return Err(refused);
+        }
+        if let Some(refused) = self.unoffered(config) {
             return Err(refused);
         }
         self.room_for(id, size, remote, DiskSpace::default())

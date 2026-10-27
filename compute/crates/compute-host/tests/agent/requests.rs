@@ -224,6 +224,7 @@ async fn bad_requests_are_refused() {
     );
     let config = SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: 1,
         memory_mib: 256,
@@ -253,6 +254,7 @@ async fn bad_requests_are_refused() {
             id: missing,
             config: SandboxConfig {
                 disk_mib: None,
+                reach: Vec::new(),
                 image: None,
                 vcpus: 1,
                 memory_mib: 256,
@@ -280,6 +282,7 @@ async fn bad_requests_are_refused() {
             id: missing,
             config: SandboxConfig {
                 disk_mib: None,
+                reach: Vec::new(),
                 image: None,
                 vcpus: 1,
                 memory_mib: 512,
@@ -292,6 +295,28 @@ async fn bad_requests_are_refused() {
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+}
+
+/// A host that offers nothing cannot make a sandbox that asks to reach an
+/// offer, so placement's view cannot put one there by mistake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_reaching_what_the_host_does_not_offer_is_refused() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let reply = lab
+        .client
+        .call(&Request::Create {
+            id: id(8),
+            config: SandboxConfig::new(1, 256, NEVER).with_reach(["previews"]),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply, Reply::Error { code: ErrorCode::Invalid, message, .. }
+            if message.contains("does not offer \"previews\"")),
+        "{reply:?}"
+    );
+    assert_eq!(lab.status().await.sandboxes, []);
+    lab.assert_clean();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

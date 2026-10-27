@@ -27,6 +27,7 @@ impl Rng {
 fn config() -> SandboxConfig {
     SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: 1,
         memory_mib: 256,

@@ -219,6 +219,11 @@ pub struct CreateBody {
     /// [`SandboxConfig::disk_mib`]); its image's length when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mib: Option<u32>,
+    /// What hosts offer that it may reach besides the internet, by name
+    /// (see [`SandboxConfig::reach`]), each of them one its team is given
+    /// (`--team-reach`); none when omitted. Taken in any order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<String>,
     /// How it sleeps; the fleet's default when omitted (see
     /// [`crate::service::DEFAULT_SLEEP`]). Taken as given otherwise: one
     /// without `checkpoint_every_ms` takes no checkpoints.
@@ -381,6 +386,7 @@ async fn create<S: Store>(
     let init = body.init.clone();
     let config = SandboxConfig {
         disk_mib: body.disk_mib,
+        reach: Vec::new(),
         vcpus: body.vcpus,
         memory_mib: body.memory_mib,
         memory_request_mib: body.memory_request_mib,
@@ -389,7 +395,8 @@ async fn create<S: Store>(
         // Set by the service from the image the create names.
         image: None,
         link: None,
-    };
+    }
+    .with_reach(body.reach.iter().cloned());
     let agent = init
         .as_ref()
         .and_then(|init| init.agent.as_ref())

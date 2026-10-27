@@ -220,6 +220,23 @@ pub const MAX_VCPUS: u8 = 32;
 /// The longest disk a sandbox may ask for, in MiB: 1 TiB.
 pub const MAX_DISK_MIB: u32 = 1 << 20;
 
+/// The most private destinations a sandbox may ask to reach
+/// ([`SandboxConfig::reach`]).
+pub const MAX_REACH: usize = 8;
+
+/// Whether `name` can name what a host offers sandboxes to reach
+/// ([`SandboxConfig::reach`]): 1 to 63 lowercase letters, digits and
+/// inner hyphens, such as `previews`.
+#[must_use]
+pub fn is_offer_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
 /// The least processor time a sandbox may be guaranteed, in thousandths
 /// of a processor: what one `cpu.weight` step stands for.
 pub const MIN_CPU_REQUEST_MILLIS: u32 = 10;
@@ -326,6 +343,15 @@ pub struct SandboxConfig {
     /// a disk at rest holds only what its files use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mib: Option<u32>,
+    /// The private destinations it may reach besides the internet, by the
+    /// names of what hosts offer (`compute-host --offer`), sorted and each
+    /// once: it is placed only on a host that offers every one, which opens
+    /// their destinations, and answers their names, to it alone. Omitted,
+    /// none: it reaches only what its host opens to every sandbox
+    /// (`--reach`). A host of an earlier release, which offers nothing,
+    /// would ignore it, so such a sandbox reaches less, never more.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<String>,
     /// How the host reaches its guest's Opengeni agent, when it runs one
     /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
     /// the control service sets it for the host and owner epoch it gives the
@@ -347,6 +373,7 @@ impl SandboxConfig {
             sleep,
             image: None,
             disk_mib: None,
+            reach: Vec::new(),
             link: None,
         }
     }
@@ -362,6 +389,15 @@ impl SandboxConfig {
     #[must_use]
     pub fn with_disk_mib(mut self, disk_mib: u32) -> Self {
         self.disk_mib = Some(disk_mib);
+        self
+    }
+
+    /// The same, reaching what hosts offer as `reach` names, put in order.
+    #[must_use]
+    pub fn with_reach<I: IntoIterator<Item = S>, S: Into<String>>(mut self, reach: I) -> Self {
+        self.reach = reach.into_iter().map(Into::into).collect();
+        self.reach.sort_unstable();
+        self.reach.dedup();
         self
     }
 
@@ -386,6 +422,7 @@ impl SandboxConfig {
             sleep,
             image,
             disk_mib,
+            reach,
             link: _,
         } = self;
         *vcpus == other.vcpus
@@ -395,6 +432,7 @@ impl SandboxConfig {
             && *sleep == other.sleep
             && *image == other.image
             && *disk_mib == other.disk_mib
+            && *reach == other.reach
     }
 
     /// Guest memory in MiB it is guaranteed.
@@ -452,6 +490,18 @@ impl SandboxConfig {
             && !(1..=MAX_DISK_MIB).contains(&mib)
         {
             return Err(format!("disk_mib must be between 1 and {MAX_DISK_MIB}"));
+        }
+        if self.reach.len() > MAX_REACH {
+            return Err(format!("reach may name at most {MAX_REACH} offers"));
+        }
+        if let Some(bad) = self.reach.iter().find(|name| !is_offer_name(name)) {
+            return Err(format!(
+                "reach {bad:?} is not an offer's name: 1 to 63 lowercase letters, digits and \
+                 inner hyphens"
+            ));
+        }
+        if !self.reach.is_sorted_by(|a, b| a < b) {
+            return Err("reach must be sorted, each name once".into());
         }
         self.sleep_policy()
     }
@@ -1120,6 +1170,7 @@ mod tests {
     fn configs_are_validated() {
         let mut config = SandboxConfig {
             disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 2,
             memory_mib: 1024,
@@ -1173,6 +1224,44 @@ mod tests {
         assert_eq!(json["disk_mib"], 16);
         let read: SandboxConfig = serde_json::from_value(json).unwrap();
         assert_eq!(read, sized);
+    }
+
+    /// What a sandbox reaches is a short, sorted list of offer names, part
+    /// of what makes a create the same sandbox; a config without one reads
+    /// and writes as before.
+    #[test]
+    fn reach_names_offers_in_order_and_is_part_of_the_sandbox() {
+        let config = SandboxConfig::new(2, 1024, SleepConfig::default());
+        let reaching = config
+            .clone()
+            .with_reach(["previews", "builds-2", "previews"]);
+        assert_eq!(reaching.reach, ["builds-2", "previews"]);
+        assert!(reaching.validate().is_ok());
+        assert!(!reaching.same_sandbox(&config));
+        assert!(!reaching.same_sandbox(&config.clone().with_reach(["previews"])));
+        assert!(reaching.same_sandbox(&reaching.clone()));
+
+        let wrong = |reach: &[&str]| {
+            let mut config = config.clone();
+            config.reach = reach.iter().map(|name| (*name).to_owned()).collect();
+            config.validate().unwrap_err()
+        };
+        for bad in ["", "Previews", "-a", "a-", "a.b", "a_b", &"a".repeat(64)] {
+            assert!(wrong(&[bad]).contains("not an offer's name"), "{bad:?}");
+        }
+        assert!(wrong(&["b", "a"]).contains("sorted"));
+        assert!(wrong(&["a", "a"]).contains("sorted"));
+        let many: Vec<String> = (0..=MAX_REACH).map(|n| format!("o{n}")).collect();
+        assert!(wrong(&many.iter().map(String::as_str).collect::<Vec<_>>()).contains("at most"));
+        assert!(is_offer_name(&"a".repeat(63)));
+        assert!(is_offer_name("k3s-api"));
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("reach").is_none(), "{json}");
+        let json = serde_json::to_value(&reaching).unwrap();
+        assert_eq!(json["reach"], serde_json::json!(["builds-2", "previews"]));
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read, reaching);
     }
 
     #[test]
