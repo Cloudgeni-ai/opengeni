@@ -100,6 +100,7 @@ import {
   shellDialectFor,
   spliceCarry,
 } from "../secret-delivery";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -1660,7 +1661,7 @@ export class SelfhostedSession {
         error instanceof SelfhostedControlError
           ? error
           : new SelfhostedControlError({
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
               code: ErrorCode.ERROR_CODE_PROTOCOL,
               reason: null,
               retryable: false,

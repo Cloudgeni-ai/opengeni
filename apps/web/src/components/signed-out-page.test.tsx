@@ -32,6 +32,33 @@ test("signed-out page presents the landing copy around the existing social/email
   expect(html).not.toContain("max-w-sm");
 });
 
+test("the Excel pitch speaks to Excel users and keeps the same form and links", () => {
+  const html = renderToStaticMarkup(
+    <SignedOutPage pitch="excel" supportEmail="support@opengeni.ai">
+      <ManagedAuthPanel
+        presentation="embedded"
+        socialProviders={["google", "github"]}
+        onSocialSubmit={async () => undefined}
+        onSubmit={async () => undefined}
+      />
+    </SignedOutPage>,
+  );
+  expect(html).toContain("Your Opengeni agents,");
+  expect(html).toContain("right inside Excel.");
+  expect(html).toContain(
+    "Sign in to connect the add-in. Then ask in plain words and watch the agent work in your open workbook.",
+  );
+  expect(html).toContain("Builds tables, formulas and summaries in your sheets");
+  expect(html).toContain("Cleans up messy data and formats sheets");
+  expect(html).toContain("Explains what is in a workbook");
+  expect(html).not.toContain("Agents in your product.");
+  expect(html).not.toContain("Infrastructure out of the box.");
+  expect(html.match(/<li\b/g)).toHaveLength(3);
+  expect(html.match(/<h1\b/g)).toHaveLength(1);
+  expect(html).toContain("Continue with Google");
+  expect(html).toContain("Contact support");
+});
+
 test("legal links render only when the deployment configures them", () => {
   const unconfigured = renderToStaticMarkup(
     <SignedOutPage>

@@ -287,14 +287,20 @@ export function SessionHeader({
           takes every pixel the actions leave and truncates first. When the
           row is crowded, the parent link and the title split it evenly (each
           up to its natural width), so neither squeezes the other to nothing;
-          a narrow title area (`titlegroup`) shows only the arrow back. */}
-      <div className="@container/titlegroup flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
+          a narrow header shows only the arrow back. There everything here is
+          icon-sized, so the group asks for its real width (the way back, 2rem
+          of title and the icons): on the smallest screens the actions move to
+          a second row rather than crush the title, and only at extreme zoom
+          do the icons wrap below it. */}
+      <div className="flex min-w-20 flex-[1_1_5rem] items-center gap-1.5 @max-[34rem]/titlebar:min-w-min @max-[14rem]/titlebar:flex-wrap">
         <div
           className={cn(
             "grid min-w-0 items-center gap-x-1.5",
+            // The title's own minimum (2rem in a narrow header) sizes its
+            // track, so the group's real width includes it.
             session.parentSessionId
-              ? "grid-cols-[minmax(1.5rem,max-content)_minmax(0,max-content)] pointer-coarse:grid-cols-[minmax(2.75rem,max-content)_minmax(0,max-content)]"
-              : "grid-cols-[minmax(0,max-content)]",
+              ? "grid-cols-[minmax(1.5rem,max-content)_minmax(auto,max-content)] pointer-coarse:grid-cols-[minmax(2.75rem,max-content)_minmax(auto,max-content)]"
+              : "grid-cols-[minmax(auto,max-content)]",
           )}
         >
           <SessionAncestryBreadcrumb
@@ -608,7 +614,7 @@ function AutomationWaitChip({ session, onOpen }: { session: Session; onOpen: () 
           aria-label={t("automations.wait.openPanel", {
             wait: wait?.label ?? t("automations.wait.none"),
           })}
-          className="inline-flex min-w-0 max-w-60 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+          className="inline-flex min-w-0 max-w-60 items-center justify-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <AutomationWaitIcon kind={kind} />
           <span className="hidden min-w-0 truncate sm:block @max-[34rem]/titlebar:hidden!">
@@ -807,14 +813,15 @@ function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
         dir="auto"
-        className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden"
+        className="-mx-1.5 w-full min-w-0 truncate rounded-md bg-surface-2/70 px-1.5 text-[15px] font-semibold leading-6 tracking-[-0.01em] outline-hidden ring-1 ring-border-strong focus:outline-hidden focus-visible:outline-hidden @max-[34rem]/titlebar:min-w-8"
         style={{ outline: "none" }}
       />
     );
   }
 
   return (
-    <div className="group/title flex min-w-0 items-center gap-0.5">
+    // A narrow header never squeezes the title below 2rem.
+    <div className="group/title flex min-w-0 items-center gap-0.5 @max-[34rem]/titlebar:min-w-8">
       <button
         type="button"
         onClick={rename.startEditing}

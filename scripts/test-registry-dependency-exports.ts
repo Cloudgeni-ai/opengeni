@@ -23,6 +23,7 @@ import {
   type PackageJson,
   type WorkspacePackage,
 } from "./publishable-workspaces";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SmokeManifest = PackageJson & {
   name: string;
@@ -330,15 +331,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         } catch (error) {
           packagePassed = false;
           failures.push(
-            `${selection} ${mode}: ${error instanceof Error ? error.message : String(error)}\nConsumer retained at ${temporaryRoot}`,
+            `${selection} ${mode}: ${errorMessage(error)}\nConsumer retained at ${temporaryRoot}`,
           );
         }
       }
       passed = packagePassed;
     } catch (error) {
-      failures.push(
-        `${selection}: ${error instanceof Error ? error.message : String(error)}\nConsumer retained at ${temporaryRoot}`,
-      );
+      failures.push(`${selection}: ${errorMessage(error)}\nConsumer retained at ${temporaryRoot}`);
     } finally {
       if (passed) await rm(temporaryRoot, { recursive: true, force: true });
     }

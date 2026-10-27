@@ -1,5 +1,5 @@
 import { MAX_SESSION_ADMIN_ACCESS_HOURS, Permission } from "@opengeni/contracts";
-import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
@@ -507,6 +507,57 @@ export async function recordTurnAppActionGrant(
       permissions: [...new Set(input.grant.permissions)],
     })
     .onConflictDoNothing({ target: schema.sessionTurnAppActionGrants.turnId });
+}
+
+/**
+ * What one person's sign-in could do in this workspace when they last sent a
+ * message to this chat (the frozen grants above, whatever the organization
+ * allows through app actions): the same effective access their chat shows,
+ * narrowed by an embed's token and including their own workspace. This
+ * turn's own grant when they sent its message; otherwise, for a turn the
+ * platform started for them (a wake-up, a child's result, a goal
+ * continuation), their latest message's grant in the same chat. `null` when
+ * they never sent one here.
+ */
+export async function readTurnSenderAccess(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    subjectId: string;
+  },
+): Promise<{ permissions: Permission[] } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const grants = schema.sessionTurnAppActionGrants;
+      const [frozen] = await scopedDb
+        .select({ permissions: grants.permissions })
+        .from(grants)
+        .innerJoin(schema.sessionTurns, eq(schema.sessionTurns.id, grants.turnId))
+        .where(
+          and(
+            eq(grants.workspaceId, input.workspaceId),
+            eq(grants.subjectId, input.subjectId),
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+          ),
+        )
+        // This turn's own grant first, then the latest message's.
+        .orderBy(sql`${grants.turnId} = ${input.turnId} desc`, desc(grants.createdAt))
+        .limit(1);
+      if (!frozen) return null;
+      return {
+        permissions: frozen.permissions.flatMap((value) => {
+          const parsed = Permission.safeParse(value);
+          return parsed.success ? [parsed.data] : [];
+        }),
+      };
+    },
+  );
 }
 
 /**

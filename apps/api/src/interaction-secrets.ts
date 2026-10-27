@@ -32,6 +32,7 @@ import {
   secretValueAtDispatch,
 } from "@opengeni/contracts";
 import { ApiHttpError } from "./http/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type AttemptSecretPrincipal = Extract<SecretPrincipal, { kind: "attempt" }>;
 
@@ -399,7 +400,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       } catch (error) {
         input.log?.("browser.passkey.event_failed", {
           type: event.type,
-          message: error instanceof Error ? error.message : String(error),
+          message: errorMessage(error),
         });
       }
     }
@@ -412,7 +413,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     return { saved, asserted };
   } catch (error) {
     input.log?.("browser.passkey.sync_failed", {
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
     });
     return null;
   }

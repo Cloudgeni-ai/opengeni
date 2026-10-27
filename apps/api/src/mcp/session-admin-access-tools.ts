@@ -120,6 +120,31 @@ function confirmedCall(saved: string, args: CallArgs): boolean {
   return parsed.success && isDeepStrictEqual(parsed.data, args);
 }
 
+/**
+ * The path parameters a call may leave out: an action in one workspace runs
+ * in this chat's workspace unless the call names another, so a question about
+ * "my workspace" needs no lookup first. Shown in search and describe results
+ * only; the tool descriptions stay as they are.
+ *
+ * One rule for every caller, full access included: the default is stated in
+ * the results the model reads before calling, so leaving the id out picks this
+ * chat's workspace on purpose, and it never reaches anything the caller
+ * couldn't already reach by naming that workspace.
+ */
+function pathParameterDefaults(workspaceId: string): { workspaceId: string } {
+  return { workspaceId };
+}
+
+function withPathParameterDefaults(
+  entry: ActionCatalogEntry | undefined,
+  pathParameters: CallArgs["pathParameters"],
+  workspaceId: string,
+): CallArgs["pathParameters"] {
+  return entry?.path.includes(":workspaceId") && !pathParameters.workspaceId
+    ? { ...pathParameters, workspaceId }
+    : pathParameters;
+}
+
 /** As whom an app action in this turn runs (see `resolveSessionAppActionAuthority`). */
 export type SessionAppActionAuthority = Awaited<
   ReturnType<typeof resolveSessionAppActionAuthority>
@@ -256,7 +281,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find app actions",
       description:
-        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, set whether an integration's tools run without asking (Allow, Ask or Block), and manage sessions, connections, schedules, files, knowledge and keys. When a setting blocks what the person asked for, find its action and make the change here. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -273,8 +298,9 @@ export function registerSessionAdminAccessTools(input: {
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       // Offer only what can succeed: someone who uses Opengeni through another
       // product reaches this chat's workspace, within this turn's access.
-      return text(
-        searchActions({
+      return text({
+        pathParameterDefaults: pathParameterDefaults(grant.workspaceId),
+        ...searchActions({
           query,
           limit,
           offset,
@@ -282,7 +308,7 @@ export function registerSessionAdminAccessTools(input: {
             ? { reachable: (entry: ActionCatalogEntry) => externalPersonCanRun(entry, authority) }
             : {}),
         }),
-      );
+      });
     },
   );
 
@@ -302,7 +328,13 @@ export function registerSessionAdminAccessTools(input: {
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       const entry = findAppAction(id);
       if (!entry || entry.browserOnly || entry.retired) return describeActionResult(id);
-      return text({ ...describeAction(entry), changes: appActionChangesState(entry) });
+      return text({
+        ...describeAction(entry),
+        ...(entry.path.includes(":workspaceId")
+          ? { pathParameterDefaults: pathParameterDefaults(grant.workspaceId) }
+          : {}),
+        changes: appActionChangesState(entry),
+      });
     },
   );
 
@@ -346,7 +378,8 @@ export function registerSessionAdminAccessTools(input: {
       }
       return await callOrganizationAction(reach.actAs(authority), {
         id: args.id,
-        pathParameters: args.pathParameters,
+        // After the confirmation check, which compares the call as the model made it.
+        pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
         query: args.query,
         ...(args.body !== undefined ? { body: args.body } : {}),
       });

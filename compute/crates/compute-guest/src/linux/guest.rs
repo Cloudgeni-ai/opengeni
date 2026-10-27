@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,6 +29,25 @@ const LINE_LIMIT: Duration = Duration::from_secs(10);
 
 /// Longest connecting to a guest TCP port may take.
 const CONNECT_LIMIT: Duration = Duration::from_secs(2);
+
+/// The shortest run of free space a trim gives back. Shorter runs hold
+/// little, but can be many: deleting every other file of 100,000 left
+/// runs whose trim took 4 s of a pause, where trimming only runs of 1 MiB
+/// or more took 40 ms and still gave back the large deletions.
+const TRIM_MIN: u64 = 1 << 20;
+
+/// Gives the host back the root file system's free space, so that a disk
+/// saved after this holds only what its files use. A device that takes no
+/// discards (a host before they were turned on) says so the first time
+/// only.
+fn trim_root() {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if let Err(error) = sys::trim("/", TRIM_MIN)
+        && !REPORTED.swap(true, Ordering::Relaxed)
+    {
+        log(&format!("trim: {error}"));
+    }
+}
 
 /// The environment the image's command gets on top of the image's own.
 pub type CommandEnv = BTreeMap<String, String>;
@@ -319,8 +339,10 @@ impl Guest {
     }
 
     /// Handles one connection to the notice port. Notices are handled one
-    /// at a time, on the listener's thread, and so are the host's
-    /// `activity` question and `sync` request.
+    /// at a time, on the listener's thread, and so is the host's
+    /// `activity` question. Its `sync` request gets a thread of its own:
+    /// a flush and trim can take a while, and must not hold up the notices
+    /// after them, such as a restore's clock.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
@@ -332,9 +354,14 @@ impl Guest {
         }
         if line == "sync" {
             // The host is about to save the disks: what they would hold
-            // only in this memory reaches them first.
-            sys::sync();
-            let _ = stream.write_all(notice::SYNCED);
+            // only in this memory reaches them first, then what the files
+            // freed goes back to the host. The sync commits the deletions
+            // first, so their space is free for the trim.
+            super::spawn("sync", move || {
+                sys::sync();
+                trim_root();
+                let _ = stream.write_all(notice::SYNCED);
+            });
             return;
         }
         let Some(notice) = Notice::parse(&line) else {

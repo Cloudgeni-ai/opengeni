@@ -137,6 +137,7 @@ import {
   type SubscriptionCoreLeaseRef,
   type SubscriptionCoreTurnIdentity,
 } from "../../src/subscription-core/turns";
+import { errorMessage } from "@opengeni/contracts/values";
 /**
  * The provider-neutral vocabulary of upstream replies the suite scripts. A
  * subject's upstream renders each one in its own wire format (status codes,
@@ -3560,7 +3561,7 @@ export function describeSubscriptionCoreConformance<Credential>(
           settled.outcome = "it returned";
         },
         (error: unknown) => {
-          settled.outcome = `it failed: ${error instanceof Error ? error.message : String(error)}`;
+          settled.outcome = `it failed: ${errorMessage(error)}`;
         },
       );
       const [self] = await holder<{ pid: number }[]>`select pg_backend_pid() as pid`;

@@ -91,13 +91,15 @@ pub fn kept(device: &Path, timeout: Duration) -> io::Result<Option<Watchdog>> {
 /// Asks systemd, through its notification socket `socket` (a path, or an
 /// abstract name after `@`, as `NOTIFY_SOCKET` gives it), to keep `fd` in
 /// the service's file descriptor store under `name`, without polling it.
+/// It does not wait for systemd to take the message.
 ///
 /// # Errors
 ///
-/// When the message cannot be sent. systemd answers nothing: one that
-/// cannot keep it (the service keeps no store) logs that and closes it;
-/// a [`Barrier`] sent after it shows when systemd has done one or the
-/// other.
+/// When the message cannot be sent, as when systemd has not taken those
+/// sent before it ([`io::ErrorKind::WouldBlock`]). systemd answers
+/// nothing: one that cannot keep it (the service keeps no store) logs
+/// that and closes it; a [`Barrier`] sent after it shows when systemd has
+/// done one or the other.
 pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
     notify(socket, &format!("FDSTORE=1\nFDNAME={name}\nFDPOLL=0\n"), fd)
 }
@@ -112,11 +114,13 @@ pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
 pub struct Barrier(PipeReader);
 
 impl Barrier {
-    /// Sends a barrier through systemd's notification socket `socket`.
+    /// Sends a barrier through systemd's notification socket `socket`,
+    /// without waiting for systemd to take it.
     ///
     /// # Errors
     ///
-    /// When the message cannot be sent.
+    /// When the message cannot be sent, as when systemd has not taken those
+    /// sent before it ([`io::ErrorKind::WouldBlock`]).
     pub fn send(socket: &str) -> io::Result<Self> {
         let (reader, writer) = std::io::pipe()?;
         notify(socket, "BARRIER=1\n", writer.as_fd())?;
@@ -143,7 +147,10 @@ impl Barrier {
 
 /// Sends systemd the notification `message` with the descriptor `fd`,
 /// through its notification socket `socket` (a path, or an abstract name
-/// after `@`, as `NOTIFY_SOCKET` gives it).
+/// after `@`, as `NOTIFY_SOCKET` gives it). It fails rather than waits
+/// when systemd's queue is full: systemd waits on the same busy machine
+/// as everything else, and the guard asks it from the step that feeds the
+/// watchdog, which must not wait; it asks again later.
 fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
     let address = match socket.strip_prefix('@') {
         Some(abstract_name) => SocketAddrUnix::new_abstract_name(abstract_name.as_bytes())?,
@@ -172,7 +179,7 @@ fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
         &address,
         &[IoSlice::new(message.as_bytes())],
         &mut control,
-        SendFlags::empty(),
+        SendFlags::DONTWAIT,
     )?;
     if sent != message.len() {
         return Err(io::Error::other("the notification was cut short"));
@@ -287,6 +294,33 @@ fn listed(json: &[u8], name: &str, identity: Identity) -> io::Result<bool> {
             && entry.inode == Some(identity.inode)
             && entry.rdevno == Some(identity.rdev)
     }))
+}
+
+/// Fills the queue of the datagram socket bound at `socket`, as systemd's
+/// is while it is slow to take its messages: one more message cannot be
+/// sent without waiting. Returns the senders, which keep what they sent.
+#[cfg(test)]
+pub(super) fn fill_queue(socket: &Path) -> Vec<std::os::unix::net::UnixDatagram> {
+    let mut fillers = Vec::new();
+    // A sender's own buffer may fill before the queue does: fresh senders
+    // go on until one cannot send even once.
+    for _ in 0..10_000 {
+        let filler = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        filler.set_nonblocking(true).unwrap();
+        let mut sent = 0;
+        loop {
+            match filler.send_to(b"x", socket) {
+                Ok(_) => sent += 1,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("filling {}: {error}", socket.display()),
+            }
+        }
+        fillers.push(filler);
+        if sent == 0 {
+            return fillers;
+        }
+    }
+    panic!("the queue of {} never filled", socket.display());
 }
 
 #[cfg(test)]
@@ -481,5 +515,30 @@ mod tests {
         assert!(!barrier.passed().unwrap(), "received, not yet dealt with");
         drop(fds);
         assert!(barrier.passed().unwrap());
+    }
+
+    /// systemd slow to take its messages: asking it fails at once, rather
+    /// than holding up the guard's step, which feeds the watchdog.
+    #[test]
+    fn asking_systemd_does_not_wait_for_it_to_take_the_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("notify");
+        let _systemd = UnixDatagram::bind(&socket).unwrap();
+        let _queued = fill_queue(&socket);
+        let socket = socket.to_str().unwrap().to_owned();
+        let kept = File::create(dir.path().join("device")).unwrap();
+        let (done, answers) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let keeping = keep(&socket, WATCHDOG, kept.as_fd()).map_err(|error| error.kind());
+            let barrier = Barrier::send(&socket)
+                .map(drop)
+                .map_err(|error| error.kind());
+            let _ = done.send((keeping, barrier));
+        });
+        let (keeping, barrier) = answers
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waited for systemd to take the message");
+        assert_eq!(keeping, Err(io::ErrorKind::WouldBlock));
+        assert_eq!(barrier, Err(io::ErrorKind::WouldBlock));
     }
 }

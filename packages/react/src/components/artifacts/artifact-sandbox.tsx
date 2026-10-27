@@ -144,6 +144,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       )}
     >
       <div
+        data-artifact-toolbar
         data-window-drag={focused || undefined}
         hidden={props.showToolbar === false && !focused}
         className={cn(

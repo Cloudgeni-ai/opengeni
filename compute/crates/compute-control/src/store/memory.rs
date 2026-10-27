@@ -11,8 +11,8 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
-    admits, rule,
+    Admission, Admits, Counted, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
+    Store, Write, admits, rule,
 };
 
 #[derive(Debug)]
@@ -231,13 +231,17 @@ impl MemoryStore {
         rows
     }
 
-    fn renewals_now(&self) -> Vec<(HostId, u64)> {
+    fn renewals_now(&self) -> Vec<Counted> {
         let inner = self.lock();
         inner
             .hosts
             .values()
             .filter(|host| host.row.state != HostState::Lost)
-            .map(|host| (host.row.id, host.row.renewals))
+            .map(|host| Counted {
+                host: host.row.id,
+                renewals: host.row.renewals,
+                boot: host.row.info.boot.clone(),
+            })
             .collect()
     }
 
@@ -520,7 +524,7 @@ impl Store for MemoryStore {
         ready(Ok(self.hosts_changed_now(after)))
     }
 
-    fn renewals(&self) -> impl Future<Output = Result<Vec<(HostId, u64)>>> + Send {
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send {
         ready(Ok(self.renewals_now()))
     }
 

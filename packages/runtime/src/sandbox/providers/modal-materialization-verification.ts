@@ -11,6 +11,7 @@ import {
   ProviderCommandStartOutcomeUnknownError,
   type ProviderCommandOutput,
 } from "../provider-command-session";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const MARKER = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
 const OUTPUT_LIMIT = 16 * 1024;
@@ -174,7 +175,7 @@ export async function verifyModalMaterializedPath(
     if (!(error instanceof SandboxMaterializationVerificationError)) {
       retainMaterializationVerificationDiagnostic(error, {
         ...diagnostic("command_error"),
-        causeMessage: error instanceof Error ? error.message : String(error),
+        causeMessage: errorMessage(error),
       });
     }
     throw error;

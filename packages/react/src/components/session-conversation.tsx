@@ -42,7 +42,8 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
-import { AuthNeededRow, MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import { AuthNeededRow } from "./auth-needed-row";
+import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import {
   inChatConnectDecision,
   isAgentCapabilityRequest,

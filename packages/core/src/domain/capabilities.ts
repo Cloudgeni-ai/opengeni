@@ -83,6 +83,7 @@ import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -1055,7 +1056,7 @@ async function probeStreamableHttpMcpServer(
 }
 
 function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const normalized = message.replace(/\s+/g, " ").trim();
   const endpoint = safeEndpointLabel(endpointUrl);
   if (
@@ -1584,7 +1585,7 @@ async function fetchMcpRegistryPage(
       });
     }
     throw new HTTPException(502, {
-      message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
+      message: `MCP registry request failed: ${errorMessage(error)}`,
     });
   } finally {
     clearTimeout(timeout);

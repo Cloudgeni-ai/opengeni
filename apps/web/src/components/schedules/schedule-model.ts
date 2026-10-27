@@ -63,6 +63,7 @@ import type {
   ScheduledTaskScheduleSpec,
   Session,
 } from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { hasEventTriggers, isFinishedOnce, viewerTimeZone };
 
@@ -605,7 +606,7 @@ export function updateRequestFromDraft(
  * or the request reference (that belongs in Technical details).
  */
 export function scheduleErrorText(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
+  const raw = errorMessage(error);
   const clean = raw
     .replace(/\s*Reference:\s*[\w-]+\.?\s*$/i, "")
     .replace(/^(?:Opengeni|OpenGeni) API \d+:\s*/i, "")

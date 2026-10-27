@@ -390,17 +390,87 @@ fn an_awake_vm_books_what_its_disk_may_still_grow_by() {
     rig.disk(5 * GIB, 10_000);
     assert_eq!(rig.booked(), 2 * GIB);
 
-    // Paused, it writes to its disk no more; what it wrote just before
-    // stays booked until a reading shows it.
+    // Its pause has its guest trim its disk first, and no reading of the
+    // disk comes while it runs: the guest may take what the trim frees
+    // again, so its disk books its whole bound while the pause runs.
+    // Paused, it writes to its disk no more; what it booked meanwhile
+    // stays booked until a reading shows what it wrote.
     rig.release(1);
     let actions = rig.at(10);
     let [(1, Step::Pause, op)] = started(&actions)[..] else {
         panic!("no pause: {actions:?}");
     };
+    assert_eq!(rig.booked(), 5 * GIB, "its save and its whole disk");
     rig.finish(1, op);
-    assert_eq!(rig.booked(), 2 * GIB);
+    assert_eq!(rig.booked(), 5 * GIB);
     rig.disk(5 * GIB, 10_000);
     assert_eq!(rig.booked(), GIB, "only its save");
+}
+
+/// A wake soon after a pause, before a reading measured the disk its
+/// guest trimmed as it paused, books the disk's whole bound: the guest may
+/// take what the trim freed at once. A reading of the disk ends that. A
+/// pause declined before it began, as while a command runs, trimmed
+/// nothing: what it booked ends with it.
+#[test]
+fn a_disk_its_pause_trimmed_books_its_whole_bound_until_it_is_read() {
+    let mut rig = Rig::new();
+    let size = Size {
+        disk: 4 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, saved(), size);
+    rig.disk(16 * GIB, 10_000);
+    wake(&mut rig, 1);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.disk(16 * GIB, 10_000);
+    assert_eq!(rig.booked(), 2 * GIB);
+
+    rig.release(1);
+    let actions = rig.at(10);
+    let [(1, Step::Pause, op)] = started(&actions)[..] else {
+        panic!("no pause: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 5 * GIB, "its save and its whole disk");
+    // Held again, its pause is declined before it began.
+    rig.hold(1);
+    let actions = rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Cancelled,
+        wrote: false,
+    });
+    assert_eq!(started(&actions), [], "{actions:?}");
+    assert_eq!(rig.level(1), Level::Running);
+    assert_eq!(rig.booked(), 2 * GIB, "a declined pause books nothing more");
+
+    rig.release(1);
+    let actions = rig.at(20);
+    let [(1, Step::Pause, op)] = started(&actions)[..] else {
+        panic!("no pause: {actions:?}");
+    };
+    rig.finish(1, op);
+    rig.disk(16 * GIB, 10_000);
+    assert_eq!(rig.booked(), GIB, "only its save");
+
+    let actions = rig.hold(1);
+    let [(1, Step::Resume, op)] = started(&actions)[..] else {
+        panic!("no resume: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 5 * GIB, "its save and its whole disk");
+    rig.finish(1, op);
+    assert_eq!(rig.booked(), 5 * GIB);
+
+    // Read, its disk may grow by 3 GiB: the trim freed 2 GiB.
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: 3 * GIB,
+    });
+    rig.disk(16 * GIB, 10_000);
+    assert_eq!(rig.booked(), 4 * GIB);
 }
 
 #[test]

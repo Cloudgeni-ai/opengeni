@@ -13,6 +13,7 @@
 //! indicator, so the person always sees when an agent is looking at the screen.
 
 use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -21,11 +22,11 @@ use futures::StreamExt as _;
 use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder as _};
 use opengeni_agent_pipewire_ffi::{FrameWait, PipeWireError, ScreenCastStream};
 use opengeni_agent_platform::{
-    linux_layout_text_keysyms, linux_named_key_chord_keysyms, CapturedFrame, LinuxRgbaFrame,
-    PlatformError, PlatformResult,
+    linux_layout_text_keysyms, linux_named_key_chord_keys, CapturedFrame, CompositorKey,
+    CompositorLayout, KeymapNames, LinuxRgbaFrame, PlatformError, PlatformResult,
 };
 use opengeni_agent_proto::v1;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{Connection, Proxy};
@@ -58,6 +59,13 @@ const MAX_SCROLL_STEPS: i32 = 32;
 const BTN_LEFT: i32 = 0x110;
 const BTN_RIGHT: i32 = 0x111;
 const BTN_MIDDLE: i32 = 0x112;
+
+/// `ConnectToEIS` device type: keyboard only.
+const EIS_KEYBOARD: u32 = 1;
+/// How long a new session waits for Mutter to report its active keyboard
+/// layout group over EIS. Mutter before GNOME 49 never does; the group is then
+/// unknown.
+const LAYOUT_GROUP_WAIT: Duration = Duration::from_secs(1);
 
 /// What the current graphical session offers for whole-screen control.
 pub(crate) enum WaylandScreen {
@@ -184,6 +192,7 @@ struct Session {
     closed: Arc<AtomicBool>,
     /// Captures after input want a frame at least this new.
     input_floor: AtomicU64,
+    layout: LayoutWatch,
 }
 
 impl Session {
@@ -193,6 +202,7 @@ impl Session {
 
     async fn stop(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
+            self.layout.close();
             let _ = self.remote_desktop.call_method("Stop", &()).await;
         }
     }
@@ -213,8 +223,16 @@ impl Session {
         self.call("NotifyPointerButton", &(button, pressed)).await
     }
 
-    async fn keysym(&self, keysym: u32, pressed: bool) -> PlatformResult<()> {
-        self.call("NotifyKeyboardKeysym", &(keysym, pressed)).await
+    async fn key(&self, key: CompositorKey, pressed: bool) -> PlatformResult<()> {
+        match key {
+            CompositorKey::Keysym(keysym) => {
+                self.call("NotifyKeyboardKeysym", &(keysym, pressed)).await
+            }
+            CompositorKey::Keycode(keycode) => {
+                self.call("NotifyKeyboardKeycode", &(keycode, pressed))
+                    .await
+            }
+        }
     }
 
     async fn move_to(&self, x: i32, y: i32) -> PlatformResult<()> {
@@ -223,6 +241,240 @@ impl Session {
             &(self.stream_path.as_str(), f64::from(x), f64::from(y)),
         )
         .await
+    }
+}
+
+/// Mutter's active keyboard layout group as it reports it to an EIS client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutGroup {
+    /// Not reported yet.
+    Pending,
+    /// Not reported by this Mutter, or no longer followed.
+    Unknown,
+    Active(u32),
+}
+
+/// What Mutter has told an EIS client about its keyboard layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutReport {
+    group: LayoutGroup,
+    /// The locked modifiers, reported with the group.
+    locked: Option<u32>,
+    /// The names of the keyboard's keymap, sent with the keyboard.
+    keymap: Option<KeymapNames>,
+}
+
+/// A layout change an EIS client sees.
+#[derive(Debug)]
+enum LayoutChange {
+    /// A keyboard arrived with this keymap.
+    Keyboard(Option<KeymapNames>),
+    /// Mutter reported the active group and the locked modifiers.
+    Group { group: u32, locked: u32 },
+    /// The keyboard was removed, as Mutter does when its keymap changes.
+    KeyboardRemoved,
+    /// No group was reported in time, or the report stream ended.
+    NoGroup,
+}
+
+impl LayoutReport {
+    const PENDING: Self = Self {
+        group: LayoutGroup::Pending,
+        locked: None,
+        keymap: None,
+    };
+    const UNKNOWN: Self = Self {
+        group: LayoutGroup::Unknown,
+        locked: None,
+        keymap: None,
+    };
+
+    fn apply(&mut self, change: LayoutChange) {
+        match change {
+            LayoutChange::Keyboard(keymap) => self.keymap = keymap,
+            LayoutChange::Group { group, locked } => {
+                self.group = LayoutGroup::Active(group);
+                self.locked = Some(locked);
+            }
+            // Until the new keyboard reports, its group and keymap are
+            // unknown. Mutter keeps the locked modifiers across the keymap
+            // change and does not report them again, so they stay.
+            LayoutChange::KeyboardRemoved if self.group != LayoutGroup::Pending => {
+                *self = Self {
+                    locked: self.locked,
+                    ..Self::UNKNOWN
+                };
+            }
+            LayoutChange::KeyboardRemoved => self.keymap = None,
+            LayoutChange::NoGroup if self.group == LayoutGroup::Pending => {
+                self.group = LayoutGroup::Unknown;
+            }
+            LayoutChange::NoGroup => {}
+        }
+    }
+
+    fn layout(&self) -> CompositorLayout {
+        CompositorLayout {
+            active_group: match self.group {
+                LayoutGroup::Active(group) => Some(group),
+                LayoutGroup::Pending | LayoutGroup::Unknown => None,
+            },
+            locked_modifiers: self.locked,
+            keymap: self.keymap.clone(),
+        }
+    }
+}
+
+/// Follows Mutter's keyboard layout for one remote-desktop session. Mutter
+/// types a keysym only from its active layout group, so text and key chords
+/// are resolved against that group of the keymap it names.
+struct LayoutWatch {
+    report: watch::Receiver<LayoutReport>,
+    /// The EIS socket, shut down to end the follower with the session.
+    socket: Option<UnixStream>,
+}
+
+impl LayoutWatch {
+    fn unknown() -> Self {
+        Self {
+            report: watch::channel(LayoutReport::UNKNOWN).1,
+            socket: None,
+        }
+    }
+
+    /// Connects a keyboard-only EIS client to the session and follows the
+    /// layout Mutter reports to it. Older Mutter, without EIS or without group
+    /// reports, leaves the group unknown.
+    async fn start(remote_desktop: &Proxy<'static>) -> Self {
+        let options = HashMap::from([("device-types", Value::U32(EIS_KEYBOARD))]);
+        let Ok(fd) = remote_desktop
+            .call::<_, _, zvariant::OwnedFd>("ConnectToEIS", &(options,))
+            .await
+        else {
+            return Self::unknown();
+        };
+        let socket = UnixStream::from(std::os::fd::OwnedFd::from(fd));
+        let Ok(shutdown) = socket.try_clone() else {
+            return Self::unknown();
+        };
+        let (sender, report) = watch::channel(LayoutReport::PENDING);
+        // reis' tokio stream is not Send, so it runs on its own thread.
+        let follower = std::thread::Builder::new()
+            .name("gnome-keyboard-layout".into())
+            .spawn(move || {
+                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    runtime.block_on(follow_layout(socket, &sender));
+                }
+                sender.send_replace(LayoutReport::UNKNOWN);
+            });
+        if follower.is_err() {
+            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+            return Self::unknown();
+        }
+        Self {
+            report,
+            socket: Some(shutdown),
+        }
+    }
+
+    /// The layout, waiting briefly for a new session's first group report.
+    async fn current(&self) -> CompositorLayout {
+        let mut report = self.report.clone();
+        let _ = tokio::time::timeout(
+            LAYOUT_GROUP_WAIT,
+            report.wait_for(|report| report.group != LayoutGroup::Pending),
+        )
+        .await;
+        let layout = report.borrow().layout();
+        layout
+    }
+
+    fn close(&self) {
+        if let Some(socket) = &self.socket {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+impl Drop for LayoutWatch {
+    /// Ends the follower thread with the watch, however the session ends.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The keymap text a keyboard carries is at most this large.
+const MAX_KEYMAP_BYTES: u32 = 4 << 20;
+
+/// The names in an EIS keyboard's XKB keymap.
+fn eis_keymap_names(keymap: Option<&reis::event::Keymap>) -> Option<KeymapNames> {
+    use std::os::unix::fs::FileExt as _;
+
+    let keymap = keymap?;
+    if keymap.type_ != reis::ei::keyboard::KeymapType::Xkb || keymap.size > MAX_KEYMAP_BYTES {
+        return None;
+    }
+    let file = std::fs::File::from(keymap.fd.try_clone().ok()?);
+    let mut text = vec![0; usize::try_from(keymap.size).ok()?];
+    file.read_exact_at(&mut text, 0).ok()?;
+    let names =
+        KeymapNames::from_keymap_text(String::from_utf8_lossy(&text).trim_end_matches('\0'));
+    (!names.is_empty()).then_some(names)
+}
+
+async fn follow_layout(socket: UnixStream, sender: &watch::Sender<LayoutReport>) {
+    use reis::event::{DeviceCapability, EiEvent};
+
+    let Ok(context) = reis::ei::Context::new(socket) else {
+        return;
+    };
+    let handshake = context.handshake_tokio(
+        "opengeni-keyboard-layout",
+        reis::ei::handshake::ContextType::Sender,
+    );
+    let Ok(Ok((_connection, mut events))) =
+        tokio::time::timeout(LAYOUT_GROUP_WAIT, handshake).await
+    else {
+        return;
+    };
+    let first_report = tokio::time::Instant::now() + LAYOUT_GROUP_WAIT;
+    loop {
+        let event = if sender.borrow().group == LayoutGroup::Pending {
+            let Ok(event) = tokio::time::timeout_at(first_report, events.next()).await else {
+                sender.send_modify(|report| report.apply(LayoutChange::NoGroup));
+                continue;
+            };
+            event
+        } else {
+            events.next().await
+        };
+        let change = match event {
+            Some(Ok(EiEvent::SeatAdded(added))) => {
+                added
+                    .seat
+                    .bind_capabilities(DeviceCapability::Keyboard.into());
+                if context.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
+            Some(Ok(EiEvent::DeviceAdded(added)))
+                if added.device.has_capability(DeviceCapability::Keyboard) =>
+            {
+                LayoutChange::Keyboard(eis_keymap_names(added.device.keymap()))
+            }
+            Some(Ok(EiEvent::KeyboardModifiers(modifiers))) => LayoutChange::Group {
+                group: modifiers.group,
+                locked: modifiers.locked,
+            },
+            Some(Ok(EiEvent::DeviceRemoved(_))) => LayoutChange::KeyboardRemoved,
+            Some(Ok(_)) => continue,
+            Some(Err(_)) | None => return,
+        };
+        sender.send_modify(|report| report.apply(change));
     }
 }
 
@@ -351,12 +603,14 @@ impl GnomeScreen {
             let _ = closed_signal.next().await;
             watcher.store(true, Ordering::Release);
         });
+        let layout = LayoutWatch::start(&remote_desktop).await;
         Ok(Session {
             remote_desktop,
             stream_path: stream_path.as_str().to_string(),
             video,
             closed,
             input_floor: AtomicU64::new(0),
+            layout,
         })
     }
 
@@ -452,18 +706,22 @@ impl GnomeScreen {
 
     /// Delivers one pointer, scroll or keyboard input in frame pixel coordinates.
     pub(crate) async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
+        let session = self.session().await?;
         // Resolve keys before anything is sent, so unsupported text or keys
-        // fail cleanly: the compositor silently drops a keysym its layout
-        // lacks while reporting success.
-        let keysyms = match input.event.as_ref() {
+        // fail cleanly: the compositor silently drops a keysym its active
+        // layout group lacks while reporting success. A chord key only another
+        // group has is sent as its physical key instead.
+        let keys = match input.event.as_ref() {
             Some(v1::desktop_input::Event::Key(key)) => {
                 let display = self.layout_display.clone();
+                let layout = session.layout.current().await;
                 let (value, is_text) = (key.key.clone(), key.is_text);
                 tokio::task::spawn_blocking(move || {
                     if is_text {
-                        linux_layout_text_keysyms(display.as_deref(), &value)
+                        linux_layout_text_keysyms(display.as_deref(), &layout, &value)
+                            .map(|keysyms| keysyms.into_iter().map(CompositorKey::Keysym).collect())
                     } else {
-                        linux_named_key_chord_keysyms(display.as_deref(), &value)
+                        linux_named_key_chord_keys(display.as_deref(), &layout, &value)
                     }
                 })
                 .await
@@ -472,8 +730,7 @@ impl GnomeScreen {
             Some(_) => Vec::new(),
             None => return Err(PlatformError::os("DesktopInput carried no event")),
         };
-        let session = self.session().await?;
-        let delivered = deliver(&session, input, &keysyms).await;
+        let delivered = deliver(&session, input, &keys).await;
         session
             .input_floor
             .store(session.video.latest_sequence() + 1, Ordering::Release);
@@ -484,7 +741,7 @@ impl GnomeScreen {
 async fn deliver(
     session: &Session,
     input: &v1::DesktopInput,
-    keysyms: &[u32],
+    keys: &[CompositorKey],
 ) -> PlatformResult<()> {
     match input.event.as_ref() {
         Some(v1::desktop_input::Event::Pointer(pointer)) => {
@@ -524,24 +781,24 @@ async fn deliver(
         Some(v1::desktop_input::Event::Key(key)) => {
             let action = key.action();
             if key.is_text {
-                for &keysym in keysyms {
+                for &key in keys {
                     if action != v1::KeyAction::Up {
-                        session.keysym(keysym, true).await?;
+                        session.key(key, true).await?;
                     }
                     if action != v1::KeyAction::Down {
-                        session.keysym(keysym, false).await?;
+                        session.key(key, false).await?;
                     }
                 }
                 return Ok(());
             }
             if action != v1::KeyAction::Up {
-                for &keysym in keysyms {
-                    session.keysym(keysym, true).await?;
+                for &key in keys {
+                    session.key(key, true).await?;
                 }
             }
             if action != v1::KeyAction::Down {
-                for &keysym in keysyms.iter().rev() {
-                    session.keysym(keysym, false).await?;
+                for &key in keys.iter().rev() {
+                    session.key(key, false).await?;
                 }
             }
             Ok(())
@@ -559,5 +816,157 @@ fn pipewire_error(error: PipeWireError) -> PlatformError {
             PlatformError::Timeout(format!("GNOME sent no screen frame within {wait:?}"))
         }
         PipeWireError::Failed(message) => os("GNOME screen cast", message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_report_follows_the_keyboard_and_its_group() {
+        let ru_us = KeymapNames::from_keymap_text(
+            "xkb_symbols \"pc+ru+us:2\" {\n\tname[1]=\"Russian\";\n\tname[2]=\"English (US)\";\n};",
+        );
+        let mut report = LayoutReport::PENDING;
+        report.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
+        assert_eq!(
+            report.layout(),
+            CompositorLayout {
+                active_group: None,
+                locked_modifiers: None,
+                keymap: Some(ru_us.clone()),
+            }
+        );
+        assert_eq!(report.group, LayoutGroup::Pending);
+        // Caps Lock locks the Lock modifier, which changes what a key types.
+        report.apply(LayoutChange::Group {
+            group: 1,
+            locked: 2,
+        });
+        assert_eq!(report.layout().active_group, Some(1));
+        assert_eq!(report.layout().locked_modifiers, Some(2));
+        report.apply(LayoutChange::NoGroup);
+        assert_eq!(report.layout().active_group, Some(1));
+        // A keymap change replaces the keyboard: its group and keymap are
+        // unknown until the new one reports, while Mutter keeps the locks.
+        report.apply(LayoutChange::KeyboardRemoved);
+        assert_eq!(
+            report.layout(),
+            CompositorLayout {
+                active_group: None,
+                locked_modifiers: Some(2),
+                keymap: None,
+            }
+        );
+        report.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
+        report.apply(LayoutChange::Group {
+            group: 0,
+            locked: 0,
+        });
+        assert_eq!(
+            report.layout(),
+            CompositorLayout {
+                active_group: Some(0),
+                locked_modifiers: Some(0),
+                keymap: Some(ru_us.clone()),
+            }
+        );
+        // Mutter before GNOME 49 sends the keymap but never the group.
+        let mut older = LayoutReport::PENDING;
+        older.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
+        older.apply(LayoutChange::NoGroup);
+        assert_eq!(older.group, LayoutGroup::Unknown);
+        assert_eq!(older.layout().locked_modifiers, None);
+        assert_eq!(older.layout().keymap, Some(ru_us));
+    }
+
+    /// Reads the next request a fake EIS server receives.
+    fn next_request(context: &reis::eis::Context) -> reis::eis::Request {
+        loop {
+            match context.pending_request() {
+                Some(reis::PendingRequestResult::Request(request)) => return request,
+                Some(_) => panic!("malformed EIS request"),
+                None => {}
+            }
+            match context.read() {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("EIS read: {error}"),
+            }
+        }
+    }
+
+    /// A fake Mutter EIS server: a keyboard that reports group 1 with Lock
+    /// locked, then (once `gate` opens) is removed as on a keymap change.
+    fn fake_mutter_eis(socket: UnixStream, gate: &std::sync::mpsc::Receiver<()>) {
+        use reis::request::{DeviceCapability, EisRequest, EisRequestConverter};
+        let context = reis::eis::Context::new(socket).unwrap();
+        let mut handshaker = reis::handshake::EisHandshaker::new(&context, 1);
+        let handshake = loop {
+            if let Some(done) = handshaker.handle_request(next_request(&context)).unwrap() {
+                break done;
+            }
+        };
+        let mut converter = EisRequestConverter::new(&context, handshake, 1);
+        let connection = converter.handle().clone();
+        let seat = connection.add_seat(Some("seat"), DeviceCapability::Keyboard.into());
+        connection.flush().unwrap();
+        while !matches!(converter.next_request(), Some(EisRequest::Bind(_))) {
+            converter.handle_request(next_request(&context)).unwrap();
+        }
+        let device = seat.add_device(
+            Some("keyboard"),
+            reis::eis::device::DeviceType::Virtual,
+            DeviceCapability::Keyboard.into(),
+            |_| {},
+        );
+        device.resumed();
+        let keyboard = device.interface::<reis::eis::Keyboard>().unwrap();
+        connection.with_next_serial(|serial| keyboard.modifiers(serial, 0, 2, 0, 1));
+        connection.flush().unwrap();
+        gate.recv().unwrap();
+        device.remove();
+        connection.flush().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_layout_follower_keeps_mutters_locked_modifiers() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (open, gate) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || fake_mutter_eis(server, &gate));
+        let (sender, mut report) = watch::channel(LayoutReport::PENDING);
+        let observe = async {
+            let reported = report
+                .wait_for(|report| report.group == LayoutGroup::Active(1))
+                .await
+                .unwrap()
+                .layout();
+            open.send(()).unwrap();
+            let removed = report
+                .wait_for(|report| report.group == LayoutGroup::Unknown)
+                .await
+                .unwrap()
+                .layout();
+            (reported, removed)
+        };
+        let ((reported, removed), ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(observe, follow_layout(client, &sender))
+        })
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            (reported.active_group, reported.locked_modifiers),
+            (Some(1), Some(2))
+        );
+        // Mutter re-adds the keyboard after a keymap change without
+        // reporting its modifiers again; the locks it keeps still apply.
+        assert_eq!(
+            (removed.active_group, removed.locked_modifiers),
+            (None, Some(2))
+        );
     }
 }

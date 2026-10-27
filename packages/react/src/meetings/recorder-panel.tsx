@@ -450,6 +450,7 @@ function RecorderLiveTranscript({
       className="mt-4 border-t border-border pt-4"
       lines={lines}
       partials={live.map((track) => ({ trackNumber: track.trackNumber, text: track.partial }))}
+      tracks={recorder.tracks}
       speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, viewerName)}
       status={status}
       empty={
@@ -648,6 +649,8 @@ function RecorderPanelContent({
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
+      // Names their microphone in the transcript when Opengeni has no name for them.
+      ...(viewerName?.trim() ? { ownerName: viewerName } : {}),
       // Sent even when it's the workspace's, so this meeting keeps it.
       transcription:
         languageChoice === null && defaultLanguage === undefined

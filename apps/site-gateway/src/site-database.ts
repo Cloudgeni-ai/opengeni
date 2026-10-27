@@ -42,6 +42,7 @@ import {
   type SiteSqlRow,
   type SiteSqlValue,
 } from "@opengeni/contracts";
+import { errorMessage, isRecord, sha256Hex } from "@opengeni/contracts/values";
 
 // The slice of the Durable Object SQLite API used here (workers-types is not loaded).
 export type SqlStorageValue = ArrayBuffer | string | number | null;
@@ -105,11 +106,6 @@ function utf8Length(text: string): number {
   return utf8.encode(text).byteLength;
 }
 
-async function sha256Hex(text: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(text)));
-  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 class SiteDbError extends Error {
   constructor(
     readonly code: SiteDbErrorCode,
@@ -133,10 +129,6 @@ const STATUS: Record<SiteDbErrorCode, number> = {
 
 function errorResponse(code: SiteDbErrorCode, message: string): Response {
   return Response.json({ error: { code, message } }, { status: STATUS[code] });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function positiveInt(value: unknown, ceiling: number, name: string): number {
@@ -194,7 +186,7 @@ function rowObject(columns: string[], values: SqlStorageValue[]): SiteSqlRow {
 }
 
 function sqlErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   // workerd prefixes SQLite errors; keep the useful part and bound it.
   return message.replace(/^Error:\s*/u, "").slice(0, 500);
 }

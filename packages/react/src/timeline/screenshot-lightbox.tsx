@@ -93,6 +93,41 @@ const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(nul
 const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
 
 /**
+ * Parts of an open lightbox a click acts on instead of closing it: its buttons
+ * and links, the zoom controls, and the zoom surface, which closes on its own
+ * when a click misses the image.
+ */
+const LIGHTBOX_INTERACTIVE_SELECTOR = "a, button, [data-zoom-controls], [data-zoom-pan-surface]";
+
+/** True for a press on the lightbox's empty space or caption: anything but its controls and image. */
+function isLightboxBackdrop(target: EventTarget | null, content: Element): boolean {
+  return (
+    target instanceof Element &&
+    content.contains(target) &&
+    !target.closest(LIGHTBOX_INTERACTIVE_SELECTOR)
+  );
+}
+
+/**
+ * The open lightbox covers the whole window, so in a desktop shell (Electron)
+ * no part of it may move the window. Painting over a drag area does not cancel
+ * it; only an explicit no-drag does. Without it, draggable title bars underneath,
+ * such as the session header, keep capturing presses through the lightbox, which
+ * swallowed the lower half of the close button and the backdrop beside it.
+ * Browsers ignore this property.
+ */
+const NO_WINDOW_DRAG = "[-webkit-app-region:no-drag] [app-region:no-drag]";
+
+/** The lightbox's round buttons: visible hover and press feedback over the dark backdrop. */
+const ROUND_BUTTON = cn(
+  "inline-flex items-center justify-center rounded-full",
+  "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+  "transition-colors hover:border-white/30 hover:bg-white/15 hover:text-white",
+  "active:border-white/40 active:bg-white/25 active:text-white",
+  "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50",
+);
+
+/**
  * Adds the element's image to the lightbox gallery so an open lightbox can page
  * to it with the arrow controls, in document order. The entry is resolved only
  * when it is shown, so deferred images that never scrolled into view still page.
@@ -186,6 +221,9 @@ function LightboxRoot({ children }: { children: ReactNode }) {
   } | null>(null);
   // Fences stale gallery discovery and navigation after a newer open or step.
   const generation = useRef(0);
+  // Whether the press that ends in a click began on the backdrop, so a drag that
+  // starts on the image or a control and is released beside it never closes.
+  const pressedBackdrop = useRef(false);
   // Each image opens fitted; paging to the next one starts fitted again.
   const zoom = useZoomPan(state?.src ?? "");
   useZoomPanShortcuts(zoom, state !== null);
@@ -338,7 +376,10 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.15 }}
-                  className="og-root fixed inset-0 z-50 bg-black/90 backdrop-blur-md"
+                  className={cn(
+                    "og-root fixed inset-0 z-50 bg-black/90 backdrop-blur-md",
+                    NO_WINDOW_DRAG,
+                  )}
                   style={portalStyle}
                 />
               </Dialog.Overlay>
@@ -356,15 +397,30 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   // Content is a full-inset centering wrapper layered above the
                   // Overlay, so Radix's own click-outside (which fires on the
                   // Overlay) can never see a backdrop click — every click lands on
-                  // Content. We make Content's own backdrop dismiss: a click whose
-                  // target is the wrapper itself (not the figure) closes it, so the
-                  // figcaption's "click outside to close" affordance is real.
+                  // Content. So Content dismisses itself: a press that begins and
+                  // ends on its empty space or caption (the padding, the figure's
+                  // gutters, the gaps around the zoom controls) closes it. The image
+                  // area closes on its own when a click misses the image.
+                  onPointerDown={(event) => {
+                    pressedBackdrop.current = isLightboxBackdrop(event.target, event.currentTarget);
+                  }}
                   onClick={(event) => {
-                    if (event.target === event.currentTarget) {
+                    const pressed = pressedBackdrop.current;
+                    pressedBackdrop.current = false;
+                    // Selecting caption text is a drag across the backdrop; keep it open.
+                    const selection = event.currentTarget.ownerDocument.getSelection();
+                    if (
+                      pressed &&
+                      (!selection || selection.isCollapsed) &&
+                      isLightboxBackdrop(event.target, event.currentTarget)
+                    ) {
                       close();
                     }
                   }}
-                  className="og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12"
+                  className={cn(
+                    "og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12",
+                    NO_WINDOW_DRAG,
+                  )}
                   style={portalStyle}
                 >
                   <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
@@ -477,10 +533,8 @@ function LightboxStepButton({
       onClick={onClick}
       aria-label={label}
       className={cn(
-        "absolute top-1/2 z-10 inline-flex size-11 -translate-y-1/2 items-center justify-center rounded-full",
-        "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-        "transition-colors hover:border-white/30 hover:text-white",
-        "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50",
+        ROUND_BUTTON,
+        "absolute top-1/2 z-10 size-11 -translate-y-1/2",
         direction === "previous" ? "left-3 sm:left-6" : "right-3 sm:right-6",
       )}
     >
@@ -501,16 +555,15 @@ export function ScreenshotLightboxControls({
 }) {
   const t = useOpenGeniText();
   return (
-    <div className="absolute right-3 top-3 z-10 flex items-center gap-2 sm:right-6 sm:top-6">
+    <div
+      data-lightbox-controls
+      className="absolute right-3 top-3 z-10 flex items-center gap-2 sm:right-6 sm:top-6"
+    >
       {downloadFilename ? (
         <a
           href={src}
           download={downloadFilename}
-          className={cn(
-            "inline-flex size-9 items-center justify-center rounded-full",
-            "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-            "transition-colors hover:border-white/30 hover:text-white",
-          )}
+          className={cn(ROUND_BUTTON, "size-9")}
           aria-label={
             controlLabels?.download ??
             t("timeline.screenshotLightbox.downloadDownloadfilename", { downloadFilename })
@@ -520,11 +573,7 @@ export function ScreenshotLightboxControls({
         </a>
       ) : null}
       <Dialog.Close
-        className={cn(
-          "inline-flex size-9 items-center justify-center rounded-full",
-          "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-          "transition-colors hover:border-white/30 hover:text-white",
-        )}
+        className={cn(ROUND_BUTTON, "size-9")}
         aria-label={controlLabels?.close ?? t("timeline.screenshotLightbox.close")}
       >
         <XIcon className="size-4" />

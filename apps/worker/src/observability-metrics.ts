@@ -51,6 +51,7 @@ import {
   type SelfhostedOpObserver,
   type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
@@ -1154,7 +1155,7 @@ export function startSessionRecoveryMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("session recovery monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {
@@ -1244,7 +1245,7 @@ export function startContextCompactionPendingMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("context compaction monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {

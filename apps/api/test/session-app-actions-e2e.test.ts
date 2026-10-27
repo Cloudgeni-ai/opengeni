@@ -228,6 +228,7 @@ describe("app actions in an ordinary chat end to end", () => {
         canonicalLocalHumanSession: false,
       },
       delegatedSignInChangesEnabled: false,
+      workspaceSettings: false,
     });
     expect(signedIn?.changes).toBe("confirm");
     const { call, describeAction, allow } = await chatTurn(signedIn);
@@ -349,6 +350,7 @@ describe("app actions in an ordinary chat end to end", () => {
         grant: embedToken,
         authorization: embedAuthorization,
         delegatedSignInChangesEnabled: false,
+        workspaceSettings: false,
       }),
     );
     const ownerInvite = {
@@ -372,6 +374,7 @@ describe("app actions in an ordinary chat end to end", () => {
         grant: embedToken,
         authorization: embedAuthorization,
         delegatedSignInChangesEnabled: true,
+        workspaceSettings: false,
       }),
     );
     await optedIn.allow("call-opted-in-invite", ownerInvite);

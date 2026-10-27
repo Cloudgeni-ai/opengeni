@@ -195,6 +195,68 @@ async fn assert_traffic_follows_io(engine: &Firecracker, vm: &FirecrackerVm, uds
     eprintln!("traffic: 8 MiB write {written} bytes, paused 300 ms {paused} bytes");
 }
 
+/// The host books a running disk by what its VMM writes: every byte a
+/// guest writes to its disk counts among the VMM's writes once they have
+/// returned, which the VMM answers for promptly. Leaves the VM running.
+async fn assert_disk_writes_are_counted(engine: &Firecracker, vm: &FirecrackerVm, uds: &Path) {
+    let before = engine.writes(vm).unwrap();
+    exec(
+        uds,
+        "dd if=/dev/urandom of=/var/tmp/write-probe bs=1M count=16 conv=fsync 2>/dev/null; sync",
+    )
+    .await
+    .unwrap();
+    let asked = Instant::now();
+    engine.settle_writes(vm).await.unwrap();
+    let settled = asked.elapsed();
+    let wrote = engine.writes(vm).unwrap().since(before);
+    exec(uds, "rm -f /var/tmp/write-probe; sync").await.unwrap();
+    assert!(
+        wrote.bytes >= 16 << 20 && wrote.calls > 0,
+        "writing 16 MiB to disk counted only {wrote:?}"
+    );
+    assert!(
+        settled < Duration::from_millis(100),
+        "an idle VM's writes took {settled:?} to settle"
+    );
+    eprintln!("writes: 16 MiB write counted {wrote:?}, settled in {settled:?}");
+}
+
+/// Bytes the host's file `disk` takes on its file system.
+fn allocated(disk: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(disk).unwrap().blocks() * 512
+}
+
+/// What the guest frees on its disk, the host gets back once the guest
+/// trims it: the drive takes discards, and keeps taking them in a VM
+/// restored from a snapshot.
+async fn assert_trimmed_space_returns(uds: &Path, disk: &Path) {
+    const PROBE: u64 = 64 << 20;
+    exec(uds, "head -c 64M /dev/urandom > /root/trim-probe && sync")
+        .await
+        .unwrap();
+    let written = allocated(disk);
+    let (output, _) = exec(
+        uds,
+        "rm /root/trim-probe && sync && fstrim -m 1M / && echo trimmed",
+    )
+    .await
+    .unwrap();
+    assert!(output.contains("trimmed"), "fstrim failed: {output}");
+    let trimmed = allocated(disk);
+    eprintln!(
+        "trim: the disk took {} MiB with a 64 MiB file, {} MiB once it was deleted and trimmed",
+        written >> 20,
+        trimmed >> 20
+    );
+    assert!(
+        written.saturating_sub(trimmed) >= PROBE * 3 / 4,
+        "trimming gave back only {} of 64 MiB",
+        written.saturating_sub(trimmed) >> 20
+    );
+}
+
 /// A VM's spec in the jail layout the jailer expects, with its own copy of
 /// the base disk and a hard link to the lab kernel.
 fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
@@ -302,6 +364,8 @@ async fn boot_pause_compress_snapshot_restore() {
     let awake = engine.resident_bytes(&vm).unwrap();
     assert_processor_time_follows_work(&engine, &vm, &uds).await;
     assert_traffic_follows_io(&engine, &vm, &uds).await;
+    assert_disk_writes_are_counted(&engine, &vm, &uds).await;
+    assert_trimmed_space_returns(&uds, &spec.drives[0].path).await;
 
     // A timer that comes due while the VM is paused fires as soon as it
     // resumes, and the guest's clocks count the paused time. Guest uptimes
@@ -416,6 +480,7 @@ async fn boot_pause_compress_snapshot_restore() {
         (0.0..0.5).contains(&late_by),
         "a timer due after the restore fired {late_by} s late"
     );
+    assert_trimmed_space_returns(&uds, &spec.drives[0].path).await;
 
     let cgroup = vm.cgroup().path().to_owned();
     engine.stop(vm).await.unwrap();
