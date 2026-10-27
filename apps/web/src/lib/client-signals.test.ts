@@ -112,6 +112,37 @@ describe("signal reporter", () => {
   test("the contract page list is exactly the journey page labels", () => {
     expect([...journeyPageLabels()].sort()).toEqual([...CLIENT_PAGES].sort());
   });
+
+  test("reports a desktop page without the bridge once, with a sanitised app version", () => {
+    const sent: unknown[] = [];
+    const reporter = createClientSignalReporter({
+      send: (body) => sent.push(JSON.parse(body)),
+      revision: "abc123",
+      routePattern: () => "/workspaces/$workspaceId/sessions/$sessionId",
+    });
+    expect(reporter.desktopBridgeMissing("macos", "0.1.32")).toBe(true);
+    // Once per page load, whatever comes next.
+    expect(reporter.desktopBridgeMissing("macos", "0.1.32")).toBe(false);
+    expect(reporter.desktopBridgeMissing("windows", "0.1.33")).toBe(false);
+    expect(sent).toEqual([
+      {
+        signal: "desktop_bridge_missing",
+        platform: "macos",
+        appVersion: "0.1.32",
+        route: "/workspaces/$workspaceId/sessions/$sessionId",
+        revision: "abc123",
+      },
+    ]);
+    for (const appVersion of [null, "", "0.1", "0.1.32 (Mac)", "x".repeat(200)]) {
+      const other: Array<{ appVersion: string }> = [];
+      createClientSignalReporter({
+        send: (body) => other.push(JSON.parse(body)),
+        revision: "abc123",
+        routePattern: () => "/",
+      }).desktopBridgeMissing("linux", appVersion);
+      expect(other.map((report) => report.appVersion)).toEqual(["unknown"]);
+    }
+  });
 });
 
 describe("beacon delivery while offline", () => {

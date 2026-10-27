@@ -21,6 +21,7 @@ import {
   createClientSignalReporter,
   setClientSignalReporter,
 } from "@opengeni/react/app/lib/client-signals";
+import { reportMissingDesktopBridge } from "@opengeni/react/app/lib/desktop";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
 import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
@@ -59,6 +60,8 @@ if (reportClientSignals) {
       routePattern: appRoutePattern,
     }),
   );
+  // The desktop app's own window without the shell's bridge; see lib/desktop.tsx.
+  reportMissingDesktopBridge();
 }
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
 // Content-free count of analytics banner answers; see lib/analytics-consent.ts.

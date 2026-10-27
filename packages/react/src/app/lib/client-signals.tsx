@@ -11,8 +11,12 @@
 //   produced by stream-health.ts
 // - web vitals (`opengeni_client_web_vital{metric,page}`), produced by the
 //   lazily loaded web-vitals-reporting.ts
+// - a desktop app page without the shell's bridge
+//   (`opengeni_client_desktop_bridge_missing_total{platform}`), from desktop.tsx
 import {
+  CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_WEB_VITAL_MAX_VALUE,
+  type ClientDesktopPlatform,
   type ClientPage,
   type ClientRequestAction,
   type ClientRequestFailureReason,
@@ -115,6 +119,7 @@ export type ClientSignalReporter = {
   requestFailure(action: ClientRequestAction, reason: ClientRequestFailureReason): boolean;
   stream(stream: ClientStream, event: ClientStreamEvent): boolean;
   webVital(metric: ClientWebVitalMetric, page: ClientPage, value: number): boolean;
+  desktopBridgeMissing(platform: ClientDesktopPlatform, appVersion: string | null): boolean;
 };
 
 export type ClientSignalReporterOptions = {
@@ -145,6 +150,7 @@ export function createClientSignalReporter(
   const revision = clientRevision(options.revision);
   const lastReportedAt = new Map<string, number>();
   const reportedVitals = new Set<ClientWebVitalMetric>();
+  let reportedDesktopBridgeMissing = false;
   let sentAt: number[] = [];
   const send = (report: ClientSignalReport) => {
     try {
@@ -196,6 +202,21 @@ export function createClientSignalReporter(
       });
       return true;
     },
+    desktopBridgeMissing(platform, appVersion) {
+      if (reportedDesktopBridgeMissing) return false;
+      reportedDesktopBridgeMissing = true;
+      send({
+        signal: "desktop_bridge_missing",
+        platform,
+        appVersion:
+          appVersion && CLIENT_DESKTOP_APP_VERSION_PATTERN.test(appVersion)
+            ? appVersion
+            : "unknown",
+        route: route(),
+        revision,
+      });
+      return true;
+    },
   };
 }
 
@@ -237,4 +258,12 @@ export function reportClientWebVital(
   value: number,
 ): void {
   defaultReporter?.webVital(metric, page, value);
+}
+
+/** Count a desktop app page whose shell bridge is missing; once per page load. */
+export function reportDesktopBridgeMissing(
+  platform: ClientDesktopPlatform,
+  appVersion: string | null,
+): void {
+  defaultReporter?.desktopBridgeMissing(platform, appVersion);
 }
