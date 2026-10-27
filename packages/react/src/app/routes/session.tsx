@@ -8,6 +8,7 @@ import {
 import { isModelUnavailableSubmissionError } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
+import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
@@ -17,8 +18,11 @@ import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
 import { useReadSessionInbox } from "../lib/inbox";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
-import { getComposerSendBlocker } from "../lib/composer-send-blocking";
-import { useSessionComposerDelivery } from "../lib/session-composer-readiness";
+import {
+  useSessionComposerDelivery,
+  useSessionSendGate,
+  type SessionSendState,
+} from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
@@ -1405,7 +1409,7 @@ export function SessionRoute({
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
-        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
           <NativeConnectSetup
             transport={reconnectTransport}
             workspaceId={workspaceId}
@@ -1423,7 +1427,7 @@ export function SessionRoute({
               });
             }}
           />
-        </Suspense>
+        </LazyPart>
       )}
       <SessionDock
         workspaceId={workspaceId}
@@ -1661,7 +1665,7 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         : {}),
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
             key={props.sessionId}
             workspaceId={props.workspaceId}
@@ -1688,7 +1692,7 @@ function SessionDockPanel(props: SessionDockProps) {
                 : undefined
             }
           />
-        </Suspense>
+        </LazyPart>
       ),
     },
   ];
@@ -1698,7 +1702,7 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Agent",
       icon: <BotIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
@@ -1708,7 +1712,7 @@ function SessionDockPanel(props: SessionDockProps) {
             usageLimitFocusRequest={usageLimitFocus}
             goalPausedAtUsageLimit={goalPausedAtLimit}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -1718,14 +1722,14 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Debug",
       icon: <BugIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
             session={props.session}
             events={props.events}
             connectionState={props.connectionState}
             onReloadSession={props.onReloadSession}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -2633,10 +2637,9 @@ function SessionChatPane(props: {
       durableToolSelection,
     ],
   );
-  // Whether the composer's model choice can run, as last committed. It is
-  // worked out below from the composer's own policy; Send's guard reads it
-  // while the composer renders (see useSessionComposerDelivery).
-  const [committedComposerPolicyValid, setCommittedComposerPolicyValid] = useState(false);
+  // Send's guard; whether the model choice can run is worked out below from
+  // the composer's own policy (see useSessionSendGate).
+  const sendGate = useSessionSendGate();
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const loadSkillReview = useCallback(
@@ -2677,23 +2680,22 @@ function SessionChatPane(props: {
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
   });
-  const composerSendBlocker = () =>
-    getComposerSendBlocker({
-      uploadPending: attachments.hasUnresolved,
-      repositoryError: repositories.error,
-      policyValid: committedComposerPolicyValid,
-      personalDecision:
-        personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
-      machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
-      personalLoading:
-        durableToolsSaving ||
-        durableToolsSaveInFlight.current ||
-        !durableToolsHydrated ||
-        personalAttachment.loading ||
-        personalAttachment.refreshing ||
-        connectionAccounts.loading ||
-        connectionAccounts.error !== null,
-    });
+  const sendState: SessionSendState = {
+    uploadPending: attachments.hasUnresolved,
+    repositoryError: repositories.error,
+    personalDecision:
+      personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+    machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
+    loading:
+      durableToolsSaving ||
+      durableToolsSaveInFlight.current ||
+      !durableToolsHydrated ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing ||
+      connectionAccounts.loading,
+    loadFailed: connectionAccounts.error !== null,
+  };
+  const composerSendBlocker = () => sendGate.blocker(sendState);
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
@@ -2996,20 +2998,11 @@ function SessionChatPane(props: {
     setComposerReasoningEffort,
     unavailableReplacement,
   ]);
-  const composerDelivery = useSessionComposerDelivery(composerView, {
+  const composerDelivery = useSessionComposerDelivery(composerView, sendGate, {
     policyValid: composerPolicyValid,
-    committedPolicyValid: committedComposerPolicyValid,
-    commitPolicyValid: setCommittedComposerPolicyValid,
-    // What Send also waits on while the page opens. When one of them fails
-    // instead, it shows its own message.
-    loading:
-      (modelCatalog.loading && !composerPolicyValid) ||
-      replacesUnavailableModel ||
-      !durableToolsHydrated ||
-      durableToolsSaving ||
-      personalAttachment.loading ||
-      personalAttachment.refreshing ||
-      connectionAccounts.loading,
+    catalogLoading: modelCatalog.loading,
+    replacingModel: replacesUnavailableModel,
+    send: sendState,
   });
   const unavailableModelNotice =
     (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
@@ -3558,7 +3551,7 @@ function SessionChatPane(props: {
           onFiles={attachments.addFiles}
         >
           {findMounted ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <ConversationFind
                 workspaceId={props.session.workspaceId}
                 sessionId={props.session.id}
@@ -3570,7 +3563,7 @@ function SessionChatPane(props: {
                 onTarget={setActiveSearchTarget}
                 onJump={props.onJumpToSequence}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
           {cancelled ? (
             <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
@@ -3630,7 +3623,7 @@ function SessionChatPane(props: {
                                   onReject={(approval) => decideApproval(approval.id, "reject")}
                                 />
                               )}
-                            <Suspense fallback={null}>
+                            <LazyPart fallback={null}>
                               <SessionSkillReviews
                                 key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
                                 context={context}
@@ -3638,11 +3631,11 @@ function SessionChatPane(props: {
                                 sessionId={props.session.id}
                                 events={props.events}
                               />
-                            </Suspense>
+                            </LazyPart>
                             {props.humanInput.requests.length > 0 &&
                             props.session.status === "requires_action" ? (
                               <div className="pb-1" data-human-input-timeline-surface="">
-                                <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                                <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
                                   <HumanInputSurface
                                     loadSkillReview={loadSkillReview}
                                     allowedSaveTo={secretSaveTargets(
@@ -3660,7 +3653,7 @@ function SessionChatPane(props: {
                                       }
                                     }}
                                   />
-                                </Suspense>
+                                </LazyPart>
                               </div>
                             ) : null}
                           </>
@@ -3761,7 +3754,7 @@ function SessionChatPane(props: {
           }
 
           {forkEventId ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <MessageForkDialog
                 key={forkEventId}
                 session={props.session}
@@ -3769,7 +3762,7 @@ function SessionChatPane(props: {
                 sourceEventId={forkEventId}
                 onForkClose={() => setForkEventId(null)}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
@@ -3837,7 +3830,7 @@ function SessionChatPane(props: {
                 }}
               />
               {waitingSubSessions.length > 0 ? (
-                <Suspense fallback={null}>
+                <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
                   <OpenGeniLinkProvider resolveLink={resolveLink}>
                     <DescendantRequests
@@ -3854,7 +3847,7 @@ function SessionChatPane(props: {
                       )}
                     />
                   </OpenGeniLinkProvider>
-                </Suspense>
+                </LazyPart>
               ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
@@ -3868,23 +3861,23 @@ function SessionChatPane(props: {
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
                 commandsPanel={
-                  <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                  <LazyPart fallback={<LoadingPanel label="Loading commands…" />}>
                     <SessionCommands
                       key={props.session.id}
                       sessionId={props.session.id}
                       readOnly={terminal}
                     />
-                  </Suspense>
+                  </LazyPart>
                 }
                 agentsSignal={agentsSignal}
                 agentsPanel={
                   props.agentNodes.length > 0 ? (
-                    <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                    <LazyPart fallback={<LoadingPanel label="Loading agents…" />}>
                       <SubagentTree
                         workspaceId={props.session.workspaceId}
                         nodes={props.agentNodes}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
               />
@@ -4076,7 +4069,7 @@ function SessionChatPane(props: {
                 }
                 actions={
                   !terminal ? (
-                    <Suspense fallback={null}>
+                    <LazyPart onLoadFailure="hide" fallback={null}>
                       <LazyCodexRealtimeControl
                         client={realtimeClient}
                         workspaceId={props.session.workspaceId}
@@ -4092,7 +4085,7 @@ function SessionChatPane(props: {
                         onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
                         onVoiceActiveChange={onVoiceActiveChange}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
                 placeholder={

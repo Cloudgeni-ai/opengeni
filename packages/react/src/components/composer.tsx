@@ -137,6 +137,13 @@ export { defaultChatComposerMessages } from "../composer-messages";
 export type { ChatComposerMessages } from "../composer-messages";
 
 export type ComposerSubmitMode = "queue" | "steer";
+/**
+ * How long a Send pressed while the composer is still preparing waits for it.
+ * Long enough for a slow first load and one retry of a timed-out draft read;
+ * after that the hold ends and the person is told to try again.
+ */
+const HELD_SEND_LIMIT_MS = 30_000;
+
 export type ComposerSubmitBlocker =
   | "disabled"
   | "attachment"
@@ -624,10 +631,27 @@ export function useChatComposerController({
       setSubmittingMode(mode);
       try {
         if (!delivery.canSend) {
+          let gaveUp = false;
           const ready = await new Promise<boolean>((resolve) => {
-            heldSendRef.current = resolve;
+            // Never wait forever: a load that hangs ends the hold with a message.
+            const limit = window.setTimeout(() => {
+              if (heldSendRef.current !== settle) return;
+              heldSendRef.current = null;
+              gaveUp = true;
+              resolve(false);
+            }, HELD_SEND_LIMIT_MS);
+            const settle = (value: boolean) => {
+              window.clearTimeout(limit);
+              resolve(value);
+            };
+            heldSendRef.current = settle;
           });
-          if (!ready) return false;
+          if (!ready) {
+            if (gaveUp && mountedRef.current) {
+              setNotice({ tone: "error", message: t("composerMessages.heldSendGaveUp") });
+            }
+            return false;
+          }
         }
         const current = latestSendRef.current;
         if (current.resumesOnSend) return await current.delivery.steer();
@@ -654,6 +678,7 @@ export function useChatComposerController({
       disabled,
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
+      t,
       waitsForPreparation,
     ],
   );

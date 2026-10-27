@@ -64,7 +64,6 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Component,
   Fragment,
-  Suspense,
   createContext,
   lazy,
   memo,
@@ -210,6 +209,7 @@ import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LazyPart } from "./lazy-part";
 import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
@@ -2619,13 +2619,13 @@ export function MessageTimeline({
                         style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                       >
                         {onAnnotate ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationSelection
                               rootRef={scrollRef}
                               sources={annotationSources}
                               onAnnotate={onAnnotate}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
                         {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
@@ -2923,13 +2923,13 @@ export function MessageTimeline({
                           </TimelineBeforeLayout>
                         </div>
                         {draftAnnotations && draftAnnotations.length > 0 ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationMarkers
                               rootRef={scrollRef}
                               annotations={draftAnnotations}
                               onSelect={onDraftAnnotationSelect}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
 
                         <div
@@ -4425,7 +4425,9 @@ function UserMessageRow({
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
-              {renderMessageActions?.(item)}
+              {renderMessageActions ? (
+                <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+              ) : null}
               <MessageFooterTime occurredAt={item.occurredAt} />
             </>
           }
@@ -4762,7 +4764,9 @@ function AgentMessageRow({
       trailing={
         item.streaming ? null : (
           <>
-            {renderMessageActions?.(item)}
+            {renderMessageActions ? (
+              <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+            ) : null}
             <MessageFooterTime occurredAt={item.occurredAt} />
           </>
         )

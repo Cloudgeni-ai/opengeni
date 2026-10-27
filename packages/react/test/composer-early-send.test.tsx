@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { act, useState } from "react";
 
 import { ChatComposer } from "../src/components/chat-composer";
@@ -124,6 +124,34 @@ describe("Send pressed before the composer can send", () => {
     await settle(() => controls.setGate({ preparing: false, canSend: true }));
     expect(sends).toEqual(["Sum column B"]);
     expect(textarea(mounted.container).value).toBe("");
+  });
+
+  test("a load that never finishes ends the wait with a message instead of spinning forever", async () => {
+    const sends: string[] = [];
+    jest.useFakeTimers();
+    try {
+      mounted = await renderComponent(
+        <Harness sends={sends} initial={{ preparing: true, canSend: false }} />,
+      );
+      await pressEnter(textarea(mounted.container));
+      const send = sendButton(mounted.container);
+      expect(send.querySelector(".animate-og-spin")).not.toBeNull();
+      await act(async () => jest.advanceTimersByTime(30_000));
+    } finally {
+      jest.useRealTimers();
+    }
+    await settle(() => {});
+    expect(sends).toEqual([]);
+    expect(sendButton(mounted.container).querySelector(".animate-og-spin")).toBeNull();
+    expect(textarea(mounted.container).value).toBe("Sum column B");
+    expect(mounted.container.textContent).toContain(
+      "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
+    );
+    // Once it does load, Send works as usual.
+    await settle(() => controls.setGate({ preparing: false, canSend: true }));
+    await pressEnter(textarea(mounted.container));
+    await settle(() => {});
+    expect(sends).toEqual(["Sum column B"]);
   });
 
   test("a held Send uses the draft as it is when it goes out", async () => {

@@ -1,10 +1,14 @@
 // An open chat's composer while its saved draft is still loading: the real
 // useComposer and ChatComposer, wired the way the session page wires them.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import type { ComposerDraft, SessionEvent } from "@opengeni/sdk";
-import { act, useState } from "react";
+import { act } from "react";
 
-import { useSessionComposerDelivery } from "../src/app/lib/session-composer-readiness";
+import {
+  useSessionComposerDelivery,
+  useSessionSendGate,
+  type SessionSendState,
+} from "../src/app/lib/session-composer-readiness";
 import { ChatComposer } from "../src/components/chat-composer";
 import { useComposer } from "../src/hooks/use-composer";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -35,9 +39,9 @@ const savedDraft: ComposerDraft = {
 };
 
 /**
- * As on the session page: Send's guard is read while the composer renders,
- * and whether the model choice can run is worked out from the composer's own
- * policy after it renders.
+ * The session page's composer wiring, from the module the page uses: Send's
+ * guard reads the committed model check while the composer renders, and the
+ * delivery handed to the composer reports preparing until Send can go.
  */
 function SessionComposer({
   client,
@@ -48,20 +52,27 @@ function SessionComposer({
   modelRunnable: (model: string) => boolean;
   loading?: boolean;
 }) {
-  const [committedPolicyValid, commitPolicyValid] = useState(false);
+  const gate = useSessionSendGate();
+  const send: SessionSendState = {
+    uploadPending: false,
+    repositoryError: null,
+    personalDecision: false,
+    machineAccessDenied: false,
+    loading,
+    loadFailed: false,
+  };
   const composer = useComposer(SESSION_ID, {
     client,
     workspaceId: WORKSPACE_ID,
-    // Like the page, Send is also blocked while what it waits on loads.
-    sendBlocked: () => !committedPolicyValid || loading,
+    sendBlocked: () => gate.blocker(send) !== null,
   });
   const policyValid = composer.policy !== null && modelRunnable(composer.policy.model);
   typeInto.current = composer.setValue;
-  const delivery = useSessionComposerDelivery(composer, {
+  const delivery = useSessionComposerDelivery(composer, gate, {
     policyValid,
-    committedPolicyValid,
-    commitPolicyValid,
-    loading,
+    catalogLoading: false,
+    replacingModel: false,
+    send,
   });
   return <ChatComposer composer={delivery} />;
 }
@@ -174,5 +185,74 @@ describe("Enter while an open chat's saved draft is still loading", () => {
     expect(sent).toEqual([]);
     expect(sendSpinner(mounted.container)).toBeNull();
     expect(box.value).toBe("Fix the totals");
+  });
+
+  test("keeps waiting through a retry when the first draft read times out, then sends once", async () => {
+    const sent: string[] = [];
+    let reads = 0;
+    const firstRead = draftGate();
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) {
+          await firstRead.opened;
+          throw new DOMException("Request timed out", "TimeoutError");
+        }
+        return savedDraft;
+      },
+      sendMessage: async (_workspaceId, _sessionId, message) => {
+        const input = typeof message === "string" ? { text: message } : message;
+        sent.push(input.text ?? "");
+        return {
+          id: crypto.randomUUID(),
+          sessionId: SESSION_ID,
+          sequence: 2,
+          type: "user.message",
+          payload: { text: input.text },
+          createdAt: new Date().toISOString(),
+        } as unknown as SessionEvent;
+      },
+    });
+    mounted = await renderComponent(
+      <SessionComposer client={client} modelRunnable={(model) => model === "model-x"} />,
+    );
+    const box = await type(mounted.container, "Fix the totals");
+    await pressEnter(box);
+    firstRead.open();
+    await flush(50);
+    // The read timed out and is retried shortly: the send still waits.
+    expect(sent).toEqual([]);
+    expect(sendSpinner(mounted.container)).not.toBeNull();
+
+    // The retry comes about a second later and settles the draft.
+    await flush(1_500);
+    expect(reads).toBe(2);
+    expect(sent).toEqual(["Fix the totals"]);
+  });
+
+  test("never waits forever: a draft that doesn't arrive ends the wait with a message", async () => {
+    const sent: string[] = [];
+    const { client } = clientWithSlowDraft(sent);
+    jest.useFakeTimers();
+    try {
+      mounted = await renderComponent(
+        <SessionComposer client={client} modelRunnable={(model) => model === "model-x"} />,
+      );
+      const box = await type(mounted.container, "Fix the totals");
+      await pressEnter(box);
+      expect(sendSpinner(mounted.container)).not.toBeNull();
+      await act(async () => jest.advanceTimersByTime(29_000));
+      expect(sendSpinner(mounted.container)).not.toBeNull();
+      await act(async () => jest.advanceTimersByTime(1_500));
+    } finally {
+      jest.useRealTimers();
+    }
+    await flush();
+    expect(sent).toEqual([]);
+    expect(sendSpinner(mounted.container)).toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
+    );
+    expect(mounted.container.querySelector("textarea")?.value).toBe("Fix the totals");
   });
 });

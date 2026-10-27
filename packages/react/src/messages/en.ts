@@ -1116,6 +1116,8 @@ export const englishMessages = {
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
+  "composerMessages.heldSendGaveUp":
+    "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
   "composerMessages.addMessageToQueue": "Add message to queue",
   "composerMessages.addToQueueEnterSteer": "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   "composerMessages.alsoPausedBy": "Also paused by",
