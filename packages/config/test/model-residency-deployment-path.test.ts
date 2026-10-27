@@ -48,6 +48,25 @@ describe("deployment-path endpoints and residency", () => {
     );
     expect(modelEndpointDeployment("https://res.openai.azure.com/openai/v1/responses")).toBeNull();
     expect(modelEndpointDeployment("not a url")).toBeNull();
+    // Read the way the provider reads the path: any case, percent-decoded,
+    // empty segments dropped.
+    for (const path of [
+      "/openai/Deployments/gpt-global/responses",
+      "/openai/%64eployments/gpt-global/responses",
+      "/openai/deployments//gpt-global/responses",
+      "/openai/deployments%2Fgpt-global/responses",
+    ]) {
+      expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("gpt-global");
+    }
+    // A deployment path whose deployment can't be read is unknown, not absent.
+    for (const path of [
+      "/openai/deployments",
+      "/openai/deployments/",
+      "/openai/deployments/%E0%A4%A",
+      "/openai/deployments/gpt-eu/deployments/gpt-global",
+    ]) {
+      expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("");
+    }
     // An EU claim on a deployment path is right only for the deployment it calls.
     const route = { baseUrl: "https://res.openai.azure.com/openai/deployments/gpt-eu" };
     expect(
@@ -56,6 +75,14 @@ describe("deployment-path endpoints and residency", () => {
     expect(
       modelResidencyRouteProblems(euDataZone, { ...route, upstreamModelId: "gpt-other" }),
     ).toHaveLength(1);
+    for (const baseUrl of [
+      "https://res.openai.azure.com/openai/Deployments/gpt-other",
+      "https://res.openai.azure.com/openai/deployments/",
+    ]) {
+      expect(
+        modelResidencyRouteProblems(euDataZone, { baseUrl, upstreamModelId: "gpt-eu" }),
+      ).toHaveLength(1);
+    }
   });
 
   test("built-in Azure deployment-path mode is EU only for the model that is its deployment", () => {

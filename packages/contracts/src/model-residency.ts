@@ -207,8 +207,12 @@ function hostOf(baseUrl: string): string | null {
 
 /**
  * The deployment an endpoint URL calls, from its `/deployments/{name}` path
- * segment (Azure OpenAI's deployment-path form), or null. Such an endpoint
- * runs that deployment whatever model the request body names.
+ * segment (Azure OpenAI's deployment-path form), or null when the path has no
+ * such segment. Such an endpoint runs that deployment whatever model the
+ * request body names. Segments are percent-decoded, empty segments are
+ * dropped and `deployments` matches in any case, the way the provider reads
+ * the path. An empty string means the path calls a deployment that can't be
+ * read (no name, an undecodable one, or different names): refuse it under EU.
  */
 export function modelEndpointDeployment(url: string | URL): string | null {
   let pathname: string;
@@ -217,15 +221,26 @@ export function modelEndpointDeployment(url: string | URL): string | null {
   } catch {
     return null;
   }
-  const segments = pathname.split("/");
-  const index = segments.lastIndexOf("deployments");
-  const name = index >= 0 ? segments[index + 1] : undefined;
-  if (!name) return null;
-  try {
-    return decodeURIComponent(name);
-  } catch {
-    return name;
+  const segments: (string | null)[] = [];
+  for (const raw of pathname.split("/")) {
+    let decoded: string | null;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = null;
+    }
+    // A decoded `%2F` separates segments too.
+    if (decoded === null) segments.push(null);
+    else segments.push(...decoded.split("/").filter((segment) => segment !== ""));
   }
+  const names = new Set<string>();
+  segments.forEach((segment, index) => {
+    if (segment?.toLowerCase() !== "deployments") return;
+    names.add(segments[index + 1] ?? "");
+  });
+  if (names.size === 0) return null;
+  if (names.size > 1 || names.has("")) return "";
+  return [...names][0]!;
 }
 
 /**
@@ -271,7 +286,13 @@ export function modelResidencyRouteProblems(
     });
   }
   const deployment = route.baseUrl ? modelEndpointDeployment(route.baseUrl) : null;
-  if (deployment !== null && deployment !== (route.upstreamModelId ?? "")) {
+  if (deployment === "") {
+    problems.push({
+      path: ["baseUrl"],
+      message:
+        "the endpoint calls a deployment whose name can't be read, so it cannot be declared eu",
+    });
+  } else if (deployment !== null && deployment !== (route.upstreamModelId ?? "")) {
     problems.push({
       path: ["baseUrl"],
       message: `the endpoint calls deployment ${deployment}, not ${route.upstreamModelId ?? "this model"}, so only ${deployment} can be declared eu on it`,

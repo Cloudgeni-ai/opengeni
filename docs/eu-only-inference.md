@@ -46,7 +46,11 @@ Rules:
   that one model can be EU on it; this includes the built-in Azure provider
   configured with `OPENGENI_AZURE_OPENAI_ENDPOINT` and
   `OPENGENI_AZURE_OPENAI_DEPLOYMENT` and no base URL. Every resolver, including built-in models, treats
-  such a claim as unknown. `OPENGENI_MODEL_PROVIDERS_JSON`,
+  such a claim as unknown. The path is read the way the provider reads it
+  (`modelEndpointDeployment`): segments percent-decoded, empty segments
+  dropped, `deployments` in any case. A deployment path whose name can't be
+  read (missing, undecodable, or two different names) is never EU.
+  `OPENGENI_MODEL_PROVIDERS_JSON`,
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
   stored database document is never refused for it, so a later release that
   adds a host or prefix cannot take the catalog down. Names only ever reject a
@@ -130,8 +134,9 @@ EU route, and nothing falls back to a route that is not EU.
     request whose provider and request-body model are not an EU route
     (`euModelRoutes`), wherever it is used. When the URL calls a deployment by
     path (`/openai/deployments/{name}/`), that deployment must be an EU route
-    too, because the provider runs it rather than the body's model. Clients
-    for EU and other settings are never shared through the client cache.
+    too, because the provider runs it rather than the body's model; one
+    whose name can't be read is refused. Clients for EU and other settings
+    are never shared through the client cache.
   - The body's model is read from the object an SDK request body encodes, so
     a request is never buffered for the check; only other stream bodies are
     read from a copy.

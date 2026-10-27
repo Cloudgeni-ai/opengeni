@@ -230,8 +230,9 @@ function contextRequirement(): InferenceResidencyRequirement | null | "refuse" {
  * A request is allowed under EU only when its provider and request-body model
  * are an EU route, and, when its URL calls a deployment by path (Azure's
  * `/openai/deployments/{name}/`), that deployment is one too: the provider
- * runs the deployment in the URL, not the model in the body. Returns the init
- * to send (a tee'd stream body is replaced).
+ * runs the deployment in the URL, not the model in the body. A deployment
+ * path whose name can't be read is refused. Returns the init to send (a tee'd
+ * stream body is replaced).
  */
 export async function assertInferenceResidencyForRequest(
   providerId: string,
@@ -248,9 +249,10 @@ export async function assertInferenceResidencyForRequest(
     if (!requirement) continue;
     if (
       !allowsRoute(requirement, providerId, read.model) ||
+      deployment === "" ||
       (deployment !== null && !allowsRoute(requirement, providerId, deployment))
     ) {
-      throw new InferenceRegionRestrictedError(read.model ?? deployment ?? providerId);
+      throw new InferenceRegionRestrictedError(read.model ?? (deployment || providerId));
     }
   }
   return read.init;

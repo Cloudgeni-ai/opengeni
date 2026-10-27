@@ -343,6 +343,26 @@ describe("EU-only inference enforcement", () => {
     );
     await guarded(deployment("gpt-eu"), post("gpt-eu"));
     expect(sent).toHaveLength(1);
+    // Case, percent-encoding and empty segments don't hide the deployment,
+    // and a deployment path without a readable name is refused.
+    for (const path of [
+      "/openai/Deployments/gpt-global-standard/responses",
+      "/openai/%64eployments/gpt-global-standard/responses",
+      "/openai/deployments//gpt-global-standard/responses",
+      "/openai/deployments%2Fgpt-global-standard/responses",
+      "/openai/deployments",
+      "/openai/deployments/",
+      "/openai/deployments/gpt-eu/deployments/gpt-global-standard/responses",
+    ]) {
+      await expect(
+        guarded(`https://res.openai.azure.com${path}?api-version=1`, post("gpt-eu")),
+      ).rejects.toThrow(InferenceRegionRestrictedError);
+    }
+    await guarded(
+      "https://res.openai.azure.com/openai/DEPLOYMENTS//gpt-eu/responses",
+      post("gpt-eu"),
+    );
+    expect(sent).toHaveLength(2);
   });
 
   test("built-in Azure deployment-path mode refuses a model that is not its deployment", () => {
