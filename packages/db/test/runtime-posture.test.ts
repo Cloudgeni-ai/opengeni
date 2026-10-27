@@ -1605,7 +1605,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 1003 adds the workspace-isolated chat share links with full runtime DML.
+          // 1004 adds the workspace-isolated chat share links with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -2014,7 +2014,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          1 + // 1003 chat share links.
+          1 + // 1004 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -2028,7 +2028,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          1 + // 1003 chat share links.
+          1 + // 1004 chat share links.
           1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.

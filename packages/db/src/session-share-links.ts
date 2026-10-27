@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Read-only chat share links (migration 1003). Every owner read and write runs
+ * Read-only chat share links (migration 1004). Every owner read and write runs
  * in the chat's workspace RLS context; the public read uses the share-link
  * lane, which names one share id in `opengeni.session_share_id` and sees only
  * that live row. Callers decide who may share; these functions keep one live

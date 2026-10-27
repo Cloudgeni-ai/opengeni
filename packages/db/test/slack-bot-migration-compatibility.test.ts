@@ -239,7 +239,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     // withheld usage-history routines, the later 0890 reconciliation tables,
     // the 0909 message search text table, Site opens, the six Teams tables, and
     // the 0948 attempt machine-authorization helper, 0981–0982 promotion
-    // tables and 1003 chat share links. The previous runtime remains ready.
+    // tables and 1004 chat share links. The previous runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
         await inspectRuntimeDatabasePosture(client.db, options),

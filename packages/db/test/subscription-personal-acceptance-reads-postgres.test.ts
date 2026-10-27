@@ -734,7 +734,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "scheduled_task_blocker_reviews",
       // 0909 message search text.
       "session_message_search_texts",
-      // 1003 chat share links.
+      // 1004 chat share links.
       "session_share_links",
       "session_title_operations",
       "site_abuse_reports",
