@@ -94,6 +94,13 @@ html[data-desktop="macos"]::before {
   background-color: color-mix(in srgb, var(--og-color-bg) 62%, transparent);
 }
 
+/* In a short window a tall dialog or a menu can reach over the bar; it stays
+   clickable there instead of moving the window. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) :is(dialog, [role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 /* The page is laid out below the bar, and shells sized to the window fill the
    space below it instead. */
 html:is([data-desktop="macos"], [data-desktop="windows"]) body {

@@ -146,14 +146,22 @@ describe("the desktop window bar", () => {
         await page.waitForTimeout(300);
         const box = (await menu.boundingBox())!;
         expect(box.y).toBeGreaterThanOrEqual(pageTop(platform));
+        // Where a menu reaches over the bar in a short window, it stays clickable.
+        if (platform !== "browser") {
+          expect(
+            await menu.evaluate((element) =>
+              getComputedStyle(
+                element.closest("[data-radix-popper-content-wrapper]")!,
+              ).getPropertyValue("-webkit-app-region"),
+            ),
+          ).toBe("no-drag");
+        }
         // The menu's start and its gap to the button's near edge (the account
         // menu lists fewer items in the desktop app, so compare edges, not tops).
         const below = box.y >= button.y + button.height / 2;
         found.push(
           Math.round(box.x - button.x),
-          Math.round(
-            below ? box.y - (button.y + button.height) : button.y - (box.y + box.height),
-          ),
+          Math.round(below ? box.y - (button.y + button.height) : button.y - (box.y + box.height)),
         );
         await page.keyboard.press("Escape");
         await menu.waitFor({ state: "hidden" });
