@@ -1617,7 +1617,8 @@ function SessionsIndexRouteContent({
   const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
   // With no usable credit, the notice above the composer carries the one
   // Add credits action, so the heading's top-up button steps aside. Hosts that
-  // turn off addCredits (side panes) get neither.
+  // turn off addCredits (side panes) get the notice's billing link instead of
+  // the dialog.
   const canTopUpCredits =
     addCredits &&
     context.clientConfig.billingMode === "stripe" &&

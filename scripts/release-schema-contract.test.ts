@@ -2340,8 +2340,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "1003_signup_use_case_current.sql",
-      "1002_signup_use_case_everyday.sql",
+      "1004_signup_use_case_current.sql",
+      "1003_signup_use_case_everyday.sql",
       "1002_browser_wait_hold.sql",
       "1001_browser_session_display.sql",
       "0998_managed_auth_passkeys.sql",
