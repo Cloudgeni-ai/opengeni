@@ -83,7 +83,6 @@ function fixture(cause: unknown) {
   });
   const persistence: ProviderCommandPersistence = {
     load: async () => stored,
-    acknowledge: async (value) => value,
     reserveInput: async () => {
       throw new Error("inspection must not reserve stdin");
     },
@@ -310,7 +309,6 @@ test("readiness cancellation and closure settle only the exact never-started sup
     let rejections = 0;
     const persistence: ProviderCommandPersistence = {
       load: async () => reserved,
-      acknowledge: async (command) => command,
       reserveInput: async () => 0,
       rejectSupervisedLaunch: async (command) => {
         expect(command).toEqual(reserved!);

@@ -9,4 +9,4 @@ On macOS, a window named by its id (`cua:window:<pid>:<window>`) is a computer-u
 
 A failed read of a window still on screen (a tree read or capture CUA answers with text only) is refused as unavailable with what to do next, instead of an internal error; a window that closed meanwhile is reported gone. On macOS, computer listings and observations say when a person used the keyboard, mouse or trackpad within the last minute (`personInputSecondsAgo`), from timers that input agents send to apps in the background does not reset.
 
-Pins CUA 296f8e87: an accessibility press the app answers with "cannot complete" counts as done when its window closes within a second.
+Pins CUA 24a0726f: an accessibility press the app answers with "cannot complete" counts as done when its window closes within a second.

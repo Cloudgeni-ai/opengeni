@@ -1,4 +1,5 @@
 import {
+  canonicalLanguageTag,
   RecordingTranscriptionError,
   type RecordingLiveSessionGrant,
   type RecordingLiveSessionRequest,
@@ -26,11 +27,13 @@ export function openAiRealtimeTranscribes(model: string): boolean {
 }
 
 /**
- * The Realtime API takes an ISO 639-1 code. Norwegian Bokmål and Nynorsk are
- * transcribed as Norwegian.
+ * OpenAI's transcription models (batch and Realtime) take an ISO 639-1 code.
+ * ISO 639-3 codes ("nor", "eng") are shortened first, and Norwegian Bokmål and
+ * Nynorsk are transcribed as Norwegian.
  */
-export function openAiRealtimeLanguage(tag: string | undefined): string | undefined {
-  const primary = tag?.split(/[-_]/u)[0]?.toLowerCase();
+export function openAiLanguage(tag: string | undefined): string | undefined {
+  const raw = tag?.split(/[-_]/u)[0]?.toLowerCase();
+  const primary = raw ? canonicalLanguageTag(raw).toLowerCase() : undefined;
   if (!primary || !/^[a-z]{2}$/u.test(primary)) return undefined;
   return primary === "nb" || primary === "nn" ? "no" : primary;
 }
@@ -72,7 +75,7 @@ export async function createOpenAiRealtimeLiveSession(input: {
   now?: () => Date;
 }): Promise<RecordingLiveSessionGrant> {
   const base = input.baseUrl.replace(/\/+$/u, "");
-  const language = openAiRealtimeLanguage(input.request.language);
+  const language = openAiLanguage(input.request.language);
   const timeout = AbortSignal.timeout(MINT_TIMEOUT_MILLISECONDS);
   let response: Response;
   try {
