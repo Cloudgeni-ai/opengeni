@@ -95,9 +95,9 @@ the console uses:
   keeps going while the person moves around. A recording stays with the
   workspace it started in until it stops, even when `workspaceId` changes or
   is null for a while; then the recorder moves to the workspace shown. In
-  the desktop app it also carries out the call notifications ("Record this
-  meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say where those
-  open. `onOpenMeeting` gets the meeting's workspace, which may not be the
+  the desktop app it also carries out the choices on the app's call card
+  ("Record this meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say
+  where those open. `onOpenMeeting` gets the meeting's workspace, which may not be the
   one shown, and `MeetingsListPage` uses it to open a recording made in
   another workspace after Stop. A host that mounts it above sign-in passes
   `scope`, such as the signed-in person's id: a new value ends a recording
@@ -181,6 +181,52 @@ any Electron app that shows Opengeni's meetings, with `@opengeni/desktop`:
 
 Inside an Electron app that doesn't, the recorder offers no tab audio, because
 Electron shows no share picker of its own.
+
+The same app can offer to record calls, as the Opengeni desktop app does.
+When Zoom, Teams, Slack, Webex, FaceTime, Discord or a browser starts using
+the microphone, a small card in the top right corner of the screen asks
+"Record this meeting?"; when the call being recorded ends, it asks whether to
+stop. The card is the app's own window, above full-screen apps and without
+taking the keyboard, so Focus and Do Not Disturb don't hide it the way they
+hide notifications. A question to record goes away after 45 seconds, unless
+the pointer is on it. It uses the same helper, which tells which apps use the
+microphone without asking for any permission:
+
+```ts
+import {
+  createMeetingDetection,
+  handleMeetingDetectionIpc,
+} from "@opengeni/desktop/meeting-detection";
+
+const meetings = createMeetingDetection({
+  helperPath, // the same helper as above
+  appId: "com.example.app", // so your app's own microphone isn't a call
+  dataDir: app.getPath("userData"), // where the person's on/off switch is kept
+  logDir: app.getPath("logs"), // meeting-detection.log: what it asked and when
+  iconPath: join(process.resourcesPath, "icon.png"), // shown on the card
+  words: () => cardWordsIn(currentLanguage()), // English by default
+  reveal: () => showYourWindow(), // the person chose Record or Stop
+});
+handleMeetingDetectionIpc({ ipcMain, detection: meetings, allow: (event) => assertYourWebApp(event) });
+app.whenReady().then(() => meetings.start());
+app.on("will-quit", () => meetings.stop());
+```
+
+In the preload, call `exposeMeetingDetection()` from
+`@opengeni/desktop/preload/meeting-detection` next to `exposeSystemAudio()`.
+It defines `window.opengeniMeetingDetection`: `MeetingRecorderProvider`
+starts recording when the person chooses Record and stops when they choose
+Stop recording, and your settings can show the switch with
+`getDesktopMeetingDetection()` from `@opengeni/sdk/desktop-bridge` (its
+`status()` and `update({ enabled })`).
+
+The app asks only once a page that can record has said so: the provider
+takes the card's choices while someone is signed in and it has a
+`workspaceId` (or a recording is going). So an app nobody can record in yet,
+such as one signed out or for an account without meetings, never shows the
+card. The app remembers the answer, so after a restart it asks before any
+window has loaded; a page that closes doesn't change it, because Record opens
+the window again.
 
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:

@@ -30,7 +30,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { getDesktopBridge, hasDesktopCapability } from "@opengeni/sdk/desktop-bridge";
+import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult;
@@ -199,14 +199,6 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(store, {
-    signedOut: scope === null,
-    onOpenMeetings,
-  });
-  // A start someone asked for belongs to who was signed in then.
-  useEffect(() => {
-    store.takeStart();
-  }, [store, scope]);
   // Leaving a workspace must not end a recording made in it: the host, and
   // with it the capture, stays in the recording's workspace until it stops,
   // then follows the host's current workspace. Another person (scope) gets a
@@ -216,6 +208,17 @@ export function MeetingRecorderProvider({
     () => capturing(store.get()?.state),
     () => false,
   );
+  useDesktopMeetingRequests(store, {
+    // The desktop app asks about calls only while a page can record them:
+    // someone signed in, with a workspace to record to, or a recording going.
+    canRecord: scope !== null && (workspaceId !== null || busy),
+    signedOut: scope === null,
+    onOpenMeetings,
+  });
+  // A start someone asked for belongs to who was signed in then.
+  useEffect(() => {
+    store.takeStart();
+  }, [store, scope]);
   const [host, setHost] = useState({ scope, workspaceId });
   if (host.scope !== scope || (!busy && host.workspaceId !== workspaceId)) {
     setHost({ scope, workspaceId });
@@ -241,24 +244,31 @@ export function MeetingRecorderProvider({
 const NO_FINISHED: readonly string[] = [];
 
 /**
- * The desktop app's call notifications: "Record" opens Meetings and starts
- * recording the call; "Stop" (the call ended) stops and opens the meeting.
+ * The desktop app's meeting card: "Record" opens Meetings and starts
+ * recording the call; "Stop recording" (the call ended) stops and opens the
+ * meeting.
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
-  navigation: { signedOut: boolean; onOpenMeetings?: (() => void) | undefined },
+  navigation: {
+    canRecord: boolean;
+    signedOut: boolean;
+    onOpenMeetings?: (() => void) | undefined;
+  },
 ): void {
   const latest = useRef(navigation);
   useEffect(() => {
     latest.current = navigation;
   });
+  const canRecord = navigation.canRecord;
   useEffect(() => {
+    // Taking choices tells the app this page can record; stopping while the
+    // page stays (signed out, no workspace) tells it nobody can.
+    if (!canRecord) return;
     // The bridge itself, not the app layer's helper, which would bring every
-    // contract into this module, mounted above a host's routes.
-    const bridge = getDesktopBridge();
-    const detection = hasDesktopCapability(bridge, "meetingDetection")
-      ? bridge?.meetingDetection
-      : undefined;
+    // contract into this module, mounted above a host's routes. Any Electron
+    // app that embeds these pages can offer it, not only the Opengeni app.
+    const detection = getDesktopMeetingDetection();
     if (!detection) return;
     return detection.onRequest((request) => {
       const recorder = store.get();
@@ -280,7 +290,7 @@ function useDesktopMeetingRequests(
         }
       });
     });
-  }, [store]);
+  }, [store, canRecord]);
 }
 
 /** The start a desktop notification asked for, until the recorder panel takes it. */
