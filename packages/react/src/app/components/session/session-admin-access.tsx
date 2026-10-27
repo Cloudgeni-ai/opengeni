@@ -150,7 +150,6 @@ function ActiveIndicator({
   // Opening the dialog waits for the menu to close, so the menu's focus
   // restoration can't pull focus out of the dialog.
   const afterClose = useRef<(() => void) | null>(null);
-  const canChange = control.state.canGrant && onChangeTimeLimit;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -176,31 +175,58 @@ function ActiveIndicator({
           action();
         }}
       >
-        <div className="px-2 py-1.5 text-xs text-fg-muted">
-          <p className="font-medium text-fg">Full access is on</p>
-          <p className="mt-1">{grantedByText(control.state)}</p>
-          <p className="mt-1" data-session-admin-access-ends="">
-            {endsText(control.state.expiresAt)}.
-          </p>
-        </div>
-        {canChange || control.state.canRevoke ? <DropdownMenuSeparator /> : null}
-        {canChange ? (
-          <DropdownMenuItem
-            disabled={control.busy}
-            onSelect={() => {
-              afterClose.current = onChangeTimeLimit;
-            }}
-          >
-            Change time limit…
-          </DropdownMenuItem>
-        ) : null}
-        {control.state.canRevoke ? (
-          <DropdownMenuItem disabled={control.busy} onSelect={() => control.revoke()}>
-            Turn off full access
-          </DropdownMenuItem>
-        ) : null}
+        <SessionAdminAccessMenuItems
+          control={control}
+          onChangeTimeLimit={onChangeTimeLimit}
+          runAfterClose={(action) => {
+            afterClose.current = action;
+          }}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * What full access is and how to change it, as menu items: the shield's own
+ * menu, or the header's "…" menu when the shield has no room beside the title.
+ * `runAfterClose` runs an action once the menu has closed.
+ */
+export function SessionAdminAccessMenuItems({
+  control,
+  onChangeTimeLimit,
+  runAfterClose,
+}: {
+  control: SessionAdminAccessControl;
+  onChangeTimeLimit?: (() => void) | undefined;
+  runAfterClose: (action: () => void) => void;
+}) {
+  if (!control.state.active) return null;
+  const changeTimeLimit = control.state.canGrant ? onChangeTimeLimit : undefined;
+  return (
+    <>
+      <div className="px-2 py-1.5 text-xs text-fg-muted">
+        <p className="flex items-center gap-1.5 font-medium text-fg">
+          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-warning" />
+          Full access is on
+        </p>
+        <p className="mt-1">{grantedByText(control.state)}</p>
+        <p className="mt-1" data-session-admin-access-ends="">
+          {endsText(control.state.expiresAt)}.
+        </p>
+      </div>
+      {changeTimeLimit || control.state.canRevoke ? <DropdownMenuSeparator /> : null}
+      {changeTimeLimit ? (
+        <DropdownMenuItem disabled={control.busy} onSelect={() => runAfterClose(changeTimeLimit)}>
+          Change time limit…
+        </DropdownMenuItem>
+      ) : null}
+      {control.state.canRevoke ? (
+        <DropdownMenuItem disabled={control.busy} onSelect={() => control.revoke()}>
+          Turn off full access
+        </DropdownMenuItem>
+      ) : null}
+    </>
   );
 }
 

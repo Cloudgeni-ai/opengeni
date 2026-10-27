@@ -3388,16 +3388,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * Present the completed User-Agent on an auto-attached page or frame
    * session, and on each cross-origin frame it hosts, nested ones included,
    * before that frame runs its first script. Same-origin frames and dedicated
-   * workers inherit it from their document. Never fails the attachment: a
-   * target that closed meanwhile simply needs nothing.
+   * workers inherit it from their document. A cross-origin frame shares its
+   * page's virtual authenticator, so with passkeys it also gets the page's
+   * passkey autofill withdrawal. Never fails the attachment: a target that
+   * closed meanwhile simply needs nothing.
    */
   private async presentUserAgent(
     connection: BrowserCdpConnection,
     sessionId: string,
     parent: string | null,
+    frame = false,
   ): Promise<void> {
     const presented = this.presentedUserAgentOverride();
-    if (!presented || this.presentationSessions.has(sessionId)) return;
+    if ((!presented && !this.passkeys) || this.presentationSessions.has(sessionId)) return;
     this.presentationSessions.set(sessionId, {
       parent,
       stop: [
@@ -3417,9 +3420,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ],
     });
     await Promise.all([
-      connection
-        .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
-        .catch(() => undefined),
+      presented
+        ? connection
+            .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
+            .catch(() => undefined)
+        : undefined,
+      frame ? this.passkeys?.withdrawAutofill(connection, sessionId) : undefined,
       connection
         .send(
           "Target.setAutoAttach",
@@ -3444,8 +3450,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const sessionId = params.sessionId;
     if (typeof sessionId !== "string") return;
+    const frame = (params.targetInfo as { type?: unknown } | undefined)?.type === "iframe";
     try {
-      await this.presentUserAgent(connection, sessionId, parentSessionId);
+      await this.presentUserAgent(connection, sessionId, parentSessionId, frame);
     } finally {
       if (params.waitingForDebugger === true)
         await connection

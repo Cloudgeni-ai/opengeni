@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ClassifiedDatabaseRefusal,
   databaseReconnectBackoffSeconds,
   DatabaseUnavailableError,
   isDatabaseConnectionLoss,
@@ -39,6 +40,25 @@ describe("session event persistence failure truth", () => {
     ).rejects.toMatchObject({
       details: { attempts: 1, sqlState: null, retryOutcome: "not_retryable" },
     });
+    expect(attempts).toBe(1);
+  });
+  test("a classified database refusal keeps its meaning and is never retried", async () => {
+    class Refusal extends ClassifiedDatabaseRefusal {}
+    const refusal = new Refusal("not authorized", {
+      cause: databaseError({ code: "42501" }),
+    });
+    let attempts = 0;
+    let rejected: unknown;
+    try {
+      await runIdempotentPersistenceTransaction({ stage: "prompt" }, async () => {
+        attempts++;
+        throw refusal;
+      });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBe(refusal);
+    expect(rejected).not.toBeInstanceOf(SessionEventPersistenceError);
     expect(attempts).toBe(1);
   });
   test("recognizes raw postgres transport failures without message heuristics", () => {

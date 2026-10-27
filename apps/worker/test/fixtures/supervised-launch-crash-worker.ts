@@ -48,7 +48,6 @@ const routed = new RoutingSandboxSession({
   },
   providerCommandPersistence: () => ({
     load: async () => retained,
-    acknowledge: async (command) => command,
     reserveInput: async () => { throw new Error("No stdin during launch"); },
   }),
 });
