@@ -292,9 +292,12 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   that is shown.
 - A focus action on a macOS window brings it to the front and leaves it there
   (CUA's `bring_to_front`), for what works only in the active app, and is
-  reported done only once the window is the front app's focused window. On
-  Windows and Linux a focus action is refused: input there acts on a window
-  without it.
+  reported done only once the window is the front app's focused window. It is
+  refused before anything is sent while someone other than Opengeni used the
+  keyboard, mouse or trackpad within the last minute (the reading listings
+  report as `personInputSecondsAgo`), since the front app is the one they are
+  working in. On Windows and Linux a focus action is refused: input there acts
+  on a window without it.
 - On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
   click, double-click, key press or element invoke the driver reports as
   unverifiable, with no element changed after it, is reported as possibly not

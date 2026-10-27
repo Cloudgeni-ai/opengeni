@@ -2103,6 +2103,16 @@ export class CuaComputerBackend implements ComputerBackend {
       // macOS brings the window to the front and leaves it there: a focus
       // action asks for exactly that (see dispatchFocus).
       const focused = await this.target(action.targetId);
+      // Not while someone else is using the computer: the front app is the
+      // one they are working in.
+      const personInputSecondsAgo = this.recentPersonInput();
+      if (personInputSecondsAgo !== undefined)
+        throw new ComputerBackendError(
+          "invalid_action",
+          `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${personInputSecondsAgo} s ago, so this window was not brought to the front: ask them first, or keep working in the background`,
+          false,
+          false,
+        );
       return [{ name: "bring_to_front", args: { pid: focused.pid, window_id: focused.windowId } }];
     }
     if (action.type !== "semantic" && action.type !== "keyboard")

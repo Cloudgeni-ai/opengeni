@@ -516,6 +516,38 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("macOS focus is refused before anything is sent while someone else uses the computer", async () => {
+    let seconds: number | null = 3.4;
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      personInput: () => seconds,
+    });
+    try {
+      const focus = async () =>
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "focus", targetId: "cua:window:42:1" },
+        });
+      await expect(focus()).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Someone other than Opengeni used this computer's keyboard, mouse or trackpad 3 s ago, so this window was not brought to the front: ask them first, or keep working in the background",
+      });
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toEqual([]);
+      // Input a minute or more ago, or none the reading can tell, leaves
+      // focus as it was.
+      fixture.mutation = result({ status: "activated", activated: true, pid: 42, window_id: 1 });
+      for (const reading of [60, null]) {
+        seconds = reading;
+        expect((await focus())?.target.id).toBe("cua:window:42:1");
+      }
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("input an agent sent in the foreground is not reported as a person's, in any session", async () => {
     // The HID timers the reading comes from see input sent in the foreground
     // as they see a person's; input sent to an app in the background they
