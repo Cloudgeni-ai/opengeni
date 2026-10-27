@@ -257,8 +257,9 @@ struct Serve {
     #[arg(long, requires = "e2b_tls_cert")]
     e2b_tls_key: Option<PathBuf>,
     /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
-    /// `base=base:2x1024`; repeat for more. Without any, `base` is the
-    /// default image at 2x1024.
+    /// `base=base:2x1024`, or `id=image:VCPUSxMEMORY_MIBxDISK_MIB` for
+    /// sandboxes with a disk of at least `DISK_MIB` (`ci=runner:4x8192x65536`);
+    /// repeat for more. Without any, `base` is the default image at 2x1024.
     #[arg(long = "e2b-template", value_parser = parse_template)]
     e2b_templates: Vec<(String, e2b::Template)>,
 }
@@ -293,16 +294,35 @@ fn parse_team_link(text: &str) -> Result<(String, String), String> {
 }
 
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
-    let shape = "a template is `id=image:VCPUSxMEMORY_MIB`";
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`";
     let (id, rest) = text.split_once('=').ok_or(shape)?;
     let (image, size) = rest.rsplit_once(':').ok_or(shape)?;
-    let (vcpus, memory) = size.split_once('x').ok_or(shape)?;
+    let mut parts = size.split('x');
+    let (Some(vcpus), Some(memory), disk, None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(shape.into());
+    };
+    let disk = disk
+        .map(|disk| {
+            disk.parse::<u32>()
+                .ok()
+                .filter(|disk| (1..=compute_protocol::host::MAX_DISK_MIB).contains(disk))
+                .ok_or_else(|| {
+                    format!(
+                        "{text:?}: DISK_MIB must be between 1 and {}",
+                        compute_protocol::host::MAX_DISK_MIB
+                    )
+                })
+        })
+        .transpose()?;
     Ok((
         id.to_owned(),
         e2b::Template {
             image: image.to_owned(),
             vcpus: vcpus.parse().map_err(|_| shape)?,
             memory_mib: memory.parse().map_err(|_| shape)?,
+            disk,
             disk_mib: 0,
         },
     ))
@@ -405,7 +425,10 @@ impl Serve {
                 .iter()
                 .map(|(id, template)| {
                     let mut template = template.clone();
-                    template.disk_mib = self.disk_mib;
+                    // Each sandbox is booked for the longer of the two.
+                    template.disk_mib = template
+                        .disk
+                        .map_or(self.disk_mib, |disk| self.disk_mib.max(u64::from(disk)));
                     (id.clone(), template)
                 })
                 .collect();
@@ -775,5 +798,26 @@ mod tests {
             config.get_password(),
             Some(&b"two words \\ and ' quote"[..])
         );
+    }
+
+    #[test]
+    fn a_template_may_name_the_disk_its_sandboxes_get() {
+        let (id, template) = parse_template("base=base:2x1024").unwrap();
+        assert_eq!((id.as_str(), template.disk), ("base", None));
+        let (id, template) = parse_template("ci=runner:4x8192x65536").unwrap();
+        assert_eq!(id, "ci");
+        assert_eq!(
+            (template.image.as_str(), template.vcpus, template.memory_mib),
+            ("runner", 4, 8192)
+        );
+        assert_eq!(template.disk, Some(65536));
+        for wrong in [
+            "ci=runner:4x8192x0",
+            "ci=runner:4x8192x99999999",
+            "ci=runner:4x8192x1x2",
+            "ci=runner:4",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
     }
 }

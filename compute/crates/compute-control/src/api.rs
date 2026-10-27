@@ -215,6 +215,10 @@ pub struct CreateBody {
     pub memory_request_mib: Option<u32>,
     #[serde(default)]
     pub cpu_request_millis: Option<u32>,
+    /// How long its disk is in MiB, where longer than its image's (see
+    /// [`SandboxConfig::disk_mib`]); its image's length when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mib: Option<u32>,
     /// How it sleeps; the fleet's default when omitted (see
     /// [`crate::service::DEFAULT_SLEEP`]). Taken as given otherwise: one
     /// without `checkpoint_every_ms` takes no checkpoints.
@@ -376,6 +380,7 @@ async fn create<S: Store>(
     let digest = body.request_id.as_ref().map(|_| request_digest(&body));
     let init = body.init.clone();
     let config = SandboxConfig {
+        disk_mib: body.disk_mib,
         vcpus: body.vcpus,
         memory_mib: body.memory_mib,
         memory_request_mib: body.memory_request_mib,

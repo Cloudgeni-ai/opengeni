@@ -54,7 +54,7 @@ use crate::layout::{Images, Paths, vm_spec};
 use crate::net::{Link, Networks};
 use crate::pool::{self, Lender, Shape, Sources, Start, Template};
 use crate::protocol::{Id, SandboxConfig, TemplateStatus};
-use crate::state::{Identity, Record, Records};
+use crate::state::{Claim, Identity, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{OwnerEpoch, Store};
 
@@ -723,9 +723,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// given the request's guarantees before the claim is recorded (see
     /// [`Engine::set_guarantees`]), processor share at once and memory
     /// protection from its first resume, which also tells its guest which
-    /// sandbox it is. Everything else a request sets is the sandbox's
-    /// record, not its VM's. A VM that cannot be given them goes, and the
-    /// create starts without a ready sandbox.
+    /// sandbox it is. A request for a longer disk lengthens its copy and
+    /// tells its guest (see [`super::disk::ClaimedDisk::lengthen`]).
+    /// Everything else a request sets is the sandbox's record, not its
+    /// VM's. A VM that cannot be given them goes, and the create starts
+    /// without a ready sandbox.
     pub(super) fn claim(
         &mut self,
         id: Id,
@@ -776,40 +778,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             },
             first_wake,
         ]);
-        let template = Arc::clone(&idle.template);
         let filled = &idle.record.config;
         let guarantees = (config.memory_request(), config.cpu_weight());
-        let change = guarantees != (filled.memory_request(), filled.cpu_weight());
+        let fitting = Fitting {
+            template: Arc::clone(&idle.template),
+            sources,
+            change: guarantees != (filled.memory_request(), filled.cpu_weight()),
+            guarantees,
+            disk: self.claimed_disk(&idle.record),
+        };
         tokio::spawn(async move {
-            // A template that no longer fits today's kernel, image or VMM
-            // makes its ready sandboxes stale too.
-            let fits = tokio::task::spawn_blocking(move || template.fits(&sources))
-                .await
-                .map_err(std::io::Error::other)
-                .and_then(|fits| fits);
-            let fits = fits.map(|fits| {
-                if !fits {
-                    return Fit::Stale;
+            let result = match fitting.fit(&*engine, &idle.live.vm, &config).await {
+                Ok(Fit::Fits(disk_bytes)) => {
+                    let claim = Claim {
+                        id,
+                        config: config.clone(),
+                        owner,
+                        first_wake_by_ms: by_ms,
+                        disk_bytes,
+                    };
+                    let claimed = records.claim(host, fence, claim).await;
+                    ClaimResult::Claimed(claimed.map(Box::new).map_err(HostError::from))
                 }
-                // Filled under its booking as a limit; the claimed sandbox
-                // may use what its shape allows.
-                if let Err(error) = engine.set_memory_limit(&idle.live.vm, None) {
-                    return Fit::Unfit(error.to_string());
-                }
-                let (memory, weight) = guarantees;
-                match change.then(|| engine.set_guarantees(&idle.live.vm, memory, weight)) {
-                    Some(Err(error)) => Fit::Unfit(error.to_string()),
-                    _ => Fit::Fits,
-                }
-            });
-            let result = match fits {
-                Ok(Fit::Fits) => ClaimResult::Claimed(
-                    records
-                        .claim(host, fence, id, config.clone(), owner, by_ms)
-                        .await
-                        .map(Box::new)
-                        .map_err(HostError::from),
-                ),
                 Ok(Fit::Stale) => ClaimResult::Stale,
                 Ok(Fit::Unfit(error)) => ClaimResult::Unfit(error),
                 Err(error) => ClaimResult::Claimed(Err(HostError::Io(error.to_string()))),
@@ -971,7 +961,59 @@ enum ClaimResult {
 
 /// Whether a ready sandbox can be claimed.
 enum Fit {
-    Fits,
+    /// Yes, with its disk's length, where the claim lengthened it.
+    Fits(Option<u64>),
     Stale,
     Unfit(String),
+}
+
+/// What a claim checks and changes of a ready sandbox's VM before the
+/// claim is recorded.
+struct Fitting {
+    template: Arc<Template>,
+    sources: Arc<Sources>,
+    /// The memory request and processor weight the create asks for.
+    guarantees: (u32, u16),
+    /// Whether they differ from what the VM was filled with.
+    change: bool,
+    disk: super::disk::ClaimedDisk,
+}
+
+impl Fitting {
+    /// Whether the ready sandbox whose VM is `vm` can be claimed for a
+    /// create of `config`, once its VM was given what the create asks for.
+    async fn fit<E: Engine>(
+        self,
+        engine: &E,
+        vm: &E::Vm,
+        config: &SandboxConfig,
+    ) -> std::io::Result<Fit> {
+        let Self {
+            template, sources, ..
+        } = self;
+        // A template that no longer fits today's kernel, image or VMM
+        // makes its ready sandboxes stale too.
+        let fits = tokio::task::spawn_blocking(move || template.fits(&sources))
+            .await
+            .map_err(std::io::Error::other)??;
+        if !fits {
+            return Ok(Fit::Stale);
+        }
+        // Filled under its booking as a limit; the claimed sandbox may use
+        // what its shape allows.
+        if let Err(error) = engine.set_memory_limit(vm, None) {
+            return Ok(Fit::Unfit(error.to_string()));
+        }
+        let (memory, weight) = self.guarantees;
+        if let Some(Err(error)) = self
+            .change
+            .then(|| engine.set_guarantees(vm, memory, weight))
+        {
+            return Ok(Fit::Unfit(error.to_string()));
+        }
+        Ok(match self.disk.lengthen(engine, vm, config).await {
+            Ok(length) => Fit::Fits(Some(length)),
+            Err(error) => Fit::Unfit(error),
+        })
+    }
 }

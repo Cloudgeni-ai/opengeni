@@ -119,7 +119,8 @@ fn unplaced(unplaced: Unplaced) -> Failure {
 pub struct Settings {
     /// The lease terms hosts are told.
     pub terms: LeaseTerms,
-    /// Disk in MiB each sandbox is booked for where it is placed.
+    /// Disk in MiB each sandbox is booked for where it is placed, or the
+    /// disk it asks for if that is longer.
     pub disk_mib: u64,
     /// How long a wake or connect may take in all.
     pub wake_within: Duration,
@@ -265,7 +266,10 @@ impl<S: Store> Service<S> {
             memory_mib: u64::from(config.memory_request()),
             memory_max_mib: u64::from(config.memory_mib),
             cpu_millis: u64::from(config.cpu_request()),
-            disk_mib: self.settings.disk_mib,
+            disk_mib: self
+                .settings
+                .disk_mib
+                .max(config.disk_mib.map_or(0, u64::from)),
             prefer,
         }
     }

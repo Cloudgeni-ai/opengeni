@@ -217,6 +217,9 @@ pub const MIN_MEMORY_MIB: u32 = 128;
 /// The most virtual processors a sandbox may have.
 pub const MAX_VCPUS: u8 = 32;
 
+/// The longest disk a sandbox may ask for, in MiB: 1 TiB.
+pub const MAX_DISK_MIB: u32 = 1 << 20;
+
 /// The least processor time a sandbox may be guaranteed, in thousandths
 /// of a processor: what one `cpu.weight` step stands for.
 pub const MIN_CPU_REQUEST_MILLIS: u32 = 10;
@@ -316,6 +319,13 @@ pub struct SandboxConfig {
     /// host that does not have it yet fetches it from its store first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageId>,
+    /// How long its disk is, in MiB: its image's file system grown to this
+    /// length, or its image's own length when that is longer, since a file
+    /// system does not shrink. Omitted, its image's length. The host books
+    /// the whole length on a host while the sandbox runs, as for any disk;
+    /// a disk at rest holds only what its files use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mib: Option<u32>,
     /// How the host reaches its guest's Opengeni agent, when it runs one
     /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
     /// the control service sets it for the host and owner epoch it gives the
@@ -336,6 +346,7 @@ impl SandboxConfig {
             cpu_request_millis: None,
             sleep,
             image: None,
+            disk_mib: None,
             link: None,
         }
     }
@@ -345,6 +356,21 @@ impl SandboxConfig {
     pub fn with_image(mut self, image: ImageId) -> Self {
         self.image = Some(image);
         self
+    }
+
+    /// The same, with a disk of at least `disk_mib`.
+    #[must_use]
+    pub fn with_disk_mib(mut self, disk_mib: u32) -> Self {
+        self.disk_mib = Some(disk_mib);
+        self
+    }
+
+    /// The length its disk is made with when its image's disk is
+    /// `image_bytes` long.
+    #[must_use]
+    pub fn disk_bytes(&self, image_bytes: u64) -> u64 {
+        self.disk_mib
+            .map_or(image_bytes, |mib| image_bytes.max(u64::from(mib) << 20))
     }
 
     /// Whether `other` asks for the same sandbox: equal in everything but
@@ -359,6 +385,7 @@ impl SandboxConfig {
             cpu_request_millis,
             sleep,
             image,
+            disk_mib,
             link: _,
         } = self;
         *vcpus == other.vcpus
@@ -367,6 +394,7 @@ impl SandboxConfig {
             && *cpu_request_millis == other.cpu_request_millis
             && *sleep == other.sleep
             && *image == other.image
+            && *disk_mib == other.disk_mib
     }
 
     /// Guest memory in MiB it is guaranteed.
@@ -419,6 +447,11 @@ impl SandboxConfig {
             return Err(format!(
                 "cpu_request_millis must be between {MIN_CPU_REQUEST_MILLIS} and vcpus * 1000"
             ));
+        }
+        if let Some(mib) = self.disk_mib
+            && !(1..=MAX_DISK_MIB).contains(&mib)
+        {
+            return Err(format!("disk_mib must be between 1 and {MAX_DISK_MIB}"));
         }
         self.sleep_policy()
     }
@@ -1086,6 +1119,7 @@ mod tests {
     #[test]
     fn configs_are_validated() {
         let mut config = SandboxConfig {
+            disk_mib: None,
             image: None,
             vcpus: 2,
             memory_mib: 1024,
@@ -1101,6 +1135,44 @@ mod tests {
         assert!(config.validate().is_ok(), "never sleeping is valid");
         config.vcpus = 0;
         assert!(config.validate().is_err());
+    }
+
+    /// A disk size is optional, at least 1 MiB and at most
+    /// [`MAX_DISK_MIB`]; it only ever lengthens the image's disk, it is
+    /// part of what makes a create the same sandbox, and a config without
+    /// one reads and writes as before.
+    #[test]
+    fn a_disk_size_lengthens_the_image_and_is_part_of_the_sandbox() {
+        let config = SandboxConfig::new(2, 1024, SleepConfig::default());
+        assert_eq!(config.disk_bytes(5 << 20), 5 << 20);
+        let sized = config.clone().with_disk_mib(16);
+        assert!(sized.validate().is_ok());
+        assert_eq!(sized.disk_bytes(5 << 20), 16 << 20);
+        assert_eq!(sized.disk_bytes(32 << 20), 32 << 20, "never shorter");
+        assert!(
+            config
+                .clone()
+                .with_disk_mib(MAX_DISK_MIB)
+                .validate()
+                .is_ok()
+        );
+        for wrong in [0, MAX_DISK_MIB + 1] {
+            let error = config.clone().with_disk_mib(wrong).validate().unwrap_err();
+            assert!(error.contains("disk_mib"), "{error}");
+        }
+
+        assert!(sized.same_sandbox(&sized.clone()));
+        assert!(!sized.same_sandbox(&config));
+        assert!(!sized.same_sandbox(&config.clone().with_disk_mib(17)));
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("disk_mib").is_none(), "{json}");
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read.disk_mib, None);
+        let json = serde_json::to_value(&sized).unwrap();
+        assert_eq!(json["disk_mib"], 16);
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read, sized);
     }
 
     #[test]

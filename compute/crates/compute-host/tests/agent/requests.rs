@@ -223,6 +223,7 @@ async fn bad_requests_are_refused() {
         "{reply:?}"
     );
     let config = SandboxConfig {
+        disk_mib: None,
         image: None,
         vcpus: 1,
         memory_mib: 256,
@@ -251,6 +252,7 @@ async fn bad_requests_are_refused() {
         .call(&Request::Create {
             id: missing,
             config: SandboxConfig {
+                disk_mib: None,
                 image: None,
                 vcpus: 1,
                 memory_mib: 256,
@@ -277,6 +279,7 @@ async fn bad_requests_are_refused() {
         .call(&Request::Create {
             id: missing,
             config: SandboxConfig {
+                disk_mib: None,
                 image: None,
                 vcpus: 1,
                 memory_mib: 512,
