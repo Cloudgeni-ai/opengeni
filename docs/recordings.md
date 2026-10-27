@@ -220,6 +220,14 @@ Stop recording, and your settings can show the switch with
 `getDesktopMeetingDetection()` from `@opengeni/sdk/desktop-bridge` (its
 `status()` and `update({ enabled })`).
 
+The app asks only once a page that can record has said so: the provider
+takes the card's choices while someone is signed in and it has a
+`workspaceId` (or a recording is going). So an app nobody can record in yet,
+such as one signed out or for an account without meetings, never shows the
+card. The app remembers the answer, so after a restart it asks before any
+window has loaded; a page that closes doesn't change it, because Record opens
+the window again.
+
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:
 

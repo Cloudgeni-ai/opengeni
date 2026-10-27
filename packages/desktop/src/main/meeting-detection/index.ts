@@ -488,7 +488,11 @@ export function promptRequest(prompt: MeetingPrompt): DesktopMeetingRequest {
     : { kind: "stop", app: prompt.app.name };
 }
 
-/** The switch, in the app's data folder (`meetings.json`). On unless turned off. */
+/**
+ * The switch, in the app's data folder (`meetings.json`). On unless turned
+ * off. Beside it, whether a page here last said it can record, so after a
+ * restart the app asks again before any window has loaded.
+ */
 export class MeetingDetectionStore {
   private readonly path: string;
 
@@ -501,7 +505,18 @@ export class MeetingDetectionStore {
   }
 
   setEnabled(enabled: boolean): void {
-    const value = { ...this.file(), detectCalls: enabled };
+    this.write({ ...this.file(), detectCalls: enabled });
+  }
+
+  canRecord(): boolean {
+    return this.file().canRecord === true;
+  }
+
+  setCanRecord(canRecord: boolean): void {
+    this.write({ ...this.file(), canRecord });
+  }
+
+  private write(value: Record<string, unknown>): void {
     mkdirSync(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -536,7 +551,16 @@ export interface MeetingDetectionOptions {
   /** Whether the helper works on this OS version. */
   available: boolean;
   own: OwnApp;
-  store: { enabled(): boolean; setEnabled(enabled: boolean): void };
+  /**
+   * The person's switch, and whether a page here last said it can record
+   * (see {@link MeetingDetection.listen}). `MeetingDetectionStore` keeps both.
+   */
+  store: {
+    enabled(): boolean;
+    setEnabled(enabled: boolean): void;
+    canRecord(): boolean;
+    setCanRecord(canRecord: boolean): void;
+  };
   /** Puts the questions in front of the person: the card in the corner of the screen. */
   view: MeetingPromptView;
   /** The person chose a question: bring the app's window up, opening it if it is closed. */
@@ -556,11 +580,19 @@ const RESTART_MIN_MS = 1_000;
 const RESTART_MAX_MS = 60_000;
 /** A choice no page takes within this long is dropped: the call may be long over. */
 export const REQUEST_WAIT_MS = 60_000;
+/**
+ * The last page to stop taking choices while it stays open means nobody can
+ * record here (signed out, or no meetings); after this long, so a page
+ * that stops and starts again at once doesn't stop the helper.
+ */
+export const CANNOT_RECORD_AFTER_MS = 2_000;
 
 /**
  * Runs the helper's microphone watch while detection is on, feeds the
  * prompter, restarts the helper (with back-off) if it exits, and hands the
- * person's choices to the pages that record.
+ * person's choices to the pages that record. It asks only once a page that
+ * can record has taken choices, so an app nobody can record in (signed out,
+ * or without meetings) never asks.
  */
 export class MeetingDetection {
   private readonly prompter: MeetingPrompter;
@@ -575,6 +607,7 @@ export class MeetingDetection {
   private readonly recordingPages = new Set<MeetingPage>();
   private readonly listeners = new Set<() => void>();
   private pending: { request: DesktopMeetingRequest; timer: NodeJS.Timeout } | null = null;
+  private cannotRecord: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: MeetingDetectionOptions) {
     this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt));
@@ -608,11 +641,21 @@ export class MeetingDetection {
     };
   }
 
-  /** A page starts or stops taking the person's choices. */
+  /**
+   * A page starts or stops taking the person's choices. A page takes them
+   * while it can record, so this also tells the app whether anyone can
+   * record here: yes from the first page that takes them, and no once the
+   * last one stops while staying open. A page that closes says nothing: the
+   * app opens one again when the person chooses Record.
+   */
   listen(page: MeetingPage, listening: boolean): void {
-    const index = this.pages.indexOf(page);
-    if (index >= 0) this.pages.splice(index, 1);
-    if (listening) this.pages.push(page);
+    this.drop(page);
+    if (listening) {
+      this.pages.push(page);
+      this.setCanRecord(true);
+    } else if (this.livePages().length === 0) {
+      this.setCanRecordLater(false);
+    }
     const pending = this.pending;
     if (!listening || !pending) return;
     if (this.send(pending.request)) this.clearPending();
@@ -627,7 +670,7 @@ export class MeetingDetection {
 
   /** A page closed or went to another address: it neither records nor listens. */
   pageGone(page: MeetingPage): void {
-    this.listen(page, false);
+    this.drop(page);
     this.setRecording(page, false);
   }
 
@@ -713,6 +756,33 @@ export class MeetingDetection {
     return [...this.pages];
   }
 
+  private drop(page: MeetingPage): void {
+    const index = this.pages.indexOf(page);
+    if (index >= 0) this.pages.splice(index, 1);
+  }
+
+  private setCanRecord(canRecord: boolean): void {
+    if (this.cannotRecord) clearTimeout(this.cannotRecord);
+    this.cannotRecord = null;
+    if (canRecord === this.options.store.canRecord()) return;
+    this.options.store.setCanRecord(canRecord);
+    this.options.log(
+      canRecord
+        ? "Meeting detection: a page can record here."
+        : "Meeting detection: no page can record here.",
+    );
+    this.apply();
+  }
+
+  private setCanRecordLater(canRecord: boolean): void {
+    if (this.cannotRecord) clearTimeout(this.cannotRecord);
+    this.cannotRecord = setTimeout(() => {
+      this.cannotRecord = null;
+      if (this.livePages().length === 0) this.setCanRecord(canRecord);
+    }, CANNOT_RECORD_AFTER_MS);
+    this.cannotRecord.unref?.();
+  }
+
   private clearPending(): void {
     if (this.pending) clearTimeout(this.pending.timer);
     this.pending = null;
@@ -731,7 +801,7 @@ export class MeetingDetection {
   }
 
   private apply(): void {
-    const wanted = this.usable() && this.options.store.enabled();
+    const wanted = this.usable() && this.options.store.enabled() && this.options.store.canRecord();
     this.prompter.setEnabled(wanted, this.now());
     if (wanted && !this.running) {
       this.running = true;

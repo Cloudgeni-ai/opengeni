@@ -10,6 +10,7 @@ mock.module("electron", () => electronStub);
 
 import { DESKTOP_IPC, type DesktopMeetingRequest } from "../src/contract";
 import {
+  CANNOT_RECORD_AFTER_MS,
   ENDED_AFTER_MS,
   identifyCallApp,
   isOwnApp,
@@ -250,6 +251,19 @@ describe("MeetingDetectionStore", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("whether a page can record is remembered beside the switch, no until one says so", () => {
+    const dir = mkdtempSync(join(tmpdir(), "meetings-"));
+    try {
+      expect(new MeetingDetectionStore(dir).canRecord()).toBe(false);
+      new MeetingDetectionStore(dir).setEnabled(false);
+      new MeetingDetectionStore(dir).setCanRecord(true);
+      expect(new MeetingDetectionStore(dir).canRecord()).toBe(true);
+      expect(new MeetingDetectionStore(dir).enabled()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 class FakePage implements MeetingPage {
@@ -267,10 +281,16 @@ class FakePage implements MeetingPage {
 
 /** Detection with a fake helper the test feeds, a fake card and a clock it sets. */
 function detection(
-  options: { chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined } = {},
+  options: {
+    chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
+    /** Whether a page said it can record, before this run. Yes by default. */
+    canRecord?: boolean;
+  } = {},
 ) {
   let now = 0;
   let enabled = true;
+  let canRecord = options.canRecord ?? true;
+  let helpers = 0;
   const helper = Object.assign(new EventEmitter(), {
     stdout: Object.assign(new EventEmitter(), { setEncoding() {} }),
     stdin: { end() {} },
@@ -294,6 +314,10 @@ function detection(
       setEnabled: (value) => {
         enabled = value;
       },
+      canRecord: () => canRecord,
+      setCanRecord: (value) => {
+        canRecord = value;
+      },
     },
     view: {
       show: (prompt, done) => {
@@ -307,7 +331,10 @@ function detection(
     },
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     log: (message) => log.push(message),
-    spawnProcess: (() => helper) as never,
+    spawnProcess: (() => {
+      helpers += 1;
+      return helper;
+    }) as never,
     now: () => now,
   });
   subject.start();
@@ -321,6 +348,8 @@ function detection(
     log,
     microphone,
     revealed: () => revealed,
+    helpers: () => helpers,
+    canRecord: () => canRecord,
     /** A call in Zoom long enough to be asked about. */
     call: (app: MicrophoneUser = zoom, at = 0) => {
       microphone([app], at);
@@ -413,6 +442,50 @@ describe("MeetingDetection", () => {
     microphone([zoom], 10_000);
     cards[0]!.done("chosen");
     expect(page.sent).toEqual([]);
+    subject.stop();
+  });
+
+  test("asks only once a page that can record has taken choices", () => {
+    const { subject, cards, call, helpers, canRecord, log } = detection({ canRecord: false });
+    call(zoom, 0);
+    expect(cards).toEqual([]);
+    expect(helpers()).toBe(0);
+    // A signed-in page with meetings loads and takes choices.
+    subject.listen(new FakePage(1), true);
+    expect(canRecord()).toBe(true);
+    expect(log).toContain("Meeting detection: a page can record here.");
+    expect(helpers()).toBe(1);
+    call(zoom, 10_000);
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["record"]);
+    subject.stop();
+  });
+
+  test("a closed window keeps asking; the last page to stop taking choices while open stops it", async () => {
+    const { subject, cards, call, canRecord, log } = detection();
+    const closed = new FakePage(1);
+    subject.listen(closed, true);
+    subject.pageGone(closed);
+    // Record opens the window again, so the app still asks.
+    call(zoom, 0);
+    expect(cards).toHaveLength(1);
+    expect(canRecord()).toBe(true);
+    // A page that stops and starts again at once (a re-render) changes nothing.
+    const page = new FakePage(2);
+    subject.listen(page, true);
+    subject.listen(page, false);
+    subject.listen(page, true);
+    await Bun.sleep(CANNOT_RECORD_AFTER_MS + 100);
+    expect(canRecord()).toBe(true);
+    // Signed out, or a company without meetings: the page stays but stops taking choices.
+    subject.listen(page, false);
+    expect(canRecord()).toBe(true);
+    await Bun.sleep(CANNOT_RECORD_AFTER_MS + 100);
+    expect(canRecord()).toBe(false);
+    expect(log).toContain("Meeting detection: no page can record here.");
+    // The question that was up goes, and no new call is asked about.
+    expect(cards[0]!.closed).toBe(true);
+    call(chrome, 20_000);
+    expect(cards).toHaveLength(1);
     subject.stop();
   });
 
