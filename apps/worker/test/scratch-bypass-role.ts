@@ -86,17 +86,22 @@ export async function dropScratchBypassRole(
     }
     for (const { datname, reachable } of databases) {
       if (!datname || !reachable) continue;
-      if (Date.now() > deadline) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs < 1000) {
         notes.push(`${role}: out of time before ${datname}`);
         break;
       }
       const url = new URL(adminUrl);
       url.pathname = `/${datname}`;
+      // Keep one database's work inside what is left of the deadline.
       const target = postgres(url.toString(), {
         max: 1,
-        connect_timeout: 10,
+        connect_timeout: Math.max(1, Math.min(10, Math.floor(remainingMs / 1000))),
         onnotice: () => undefined,
-        connection: { lock_timeout: 2000, statement_timeout: 30_000 },
+        connection: {
+          lock_timeout: 2000,
+          statement_timeout: Math.max(1000, Math.min(30_000, remainingMs)),
+        },
       });
       try {
         // It owns nothing here (checked above), so this only revokes.
