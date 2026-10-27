@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ConnectAttempt, ConnectProvider, ConnectTransport } from "@opengeni/connect";
-import { act } from "react";
+import { act, StrictMode } from "react";
 
 GlobalRegistrator.register();
 const { createRoot } = await import("react-dom/client");
@@ -16,6 +16,7 @@ let providers: ConnectProvider[] = [];
 let installed: Array<Record<string, unknown>> = [];
 let afterSignIn: Partial<ConnectAttempt> = {};
 let current: ConnectAttempt | null = null;
+let stillSigningIn = false;
 const begins: Array<Record<string, unknown>> = [];
 const advances: Array<Record<string, unknown>> = [];
 const policies: Array<Record<string, unknown>> = [];
@@ -56,9 +57,11 @@ const transport: ConnectTransport = {
       },
     });
   },
-  // The provider callback has landed by the first poll.
+  // The provider callback has landed by the first poll, unless the person is still signing in.
   get: async () =>
-    current!.nextAction.type === "authorize" ? attempt(afterSignIn) : structuredClone(current!),
+    current!.nextAction.type === "authorize" && !stillSigningIn
+      ? attempt(afterSignIn)
+      : structuredClone(current!),
   advance: async (_workspaceId, _attemptId, input) => {
     advances.push(input as Record<string, unknown>);
     const action = (input as { action: { type: string } }).action;
@@ -160,27 +163,29 @@ beforeEach(() => {
   continued.length = 0;
   continuation = { outcome: "queued", updateId: "update-1" };
   popups.length = 0;
+  stillSigningIn = false;
   sessionStorage.clear();
 });
 
-async function mount() {
+async function mount({ strict = false } = {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   const configured = mock(async () => {});
+  const card = (
+    <SessionIntegrationCapabilityCard
+      client={client as never}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId={`api:integration:${DEFINITION}`}
+      name="Outlook Mail"
+      rationale="Reading your newest emails needs your Hotmail inbox."
+      returnUrl="https://app.example.test/chat"
+      onConfigured={configured}
+    />
+  );
   await act(async () => {
-    root.render(
-      <SessionIntegrationCapabilityCard
-        client={client as never}
-        workspaceId="workspace"
-        sessionId="session"
-        capabilityId={`api:integration:${DEFINITION}`}
-        name="Outlook Mail"
-        rationale="Reading your newest emails needs your Hotmail inbox."
-        returnUrl="https://app.example.test/chat"
-        onConfigured={configured}
-      />,
-    );
+    root.render(strict ? <StrictMode>{card}</StrictMode> : card);
   });
   return { host, root, configured };
 }
@@ -250,6 +255,49 @@ test("one click signs in, installs the reviewed tools, adds them to this chat an
   expect(continued).toEqual([
     ["workspace", "session", { capabilityId: `api:integration:${DEFINITION}` }],
   ]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("under StrictMode the replayed mount still signs in", async () => {
+  const { host, root } = await mount({ strict: true });
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => connected(host), "complete");
+  expect(host.textContent).not.toContain("disposed");
+  expect(begins).toHaveLength(1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("while the sign-in window is open the card offers one way out, then sign-in again", async () => {
+  stillSigningIn = true;
+  const { host, root } = await mount();
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => host.textContent?.includes("in the window that opened") ?? false, "waiting");
+  // One status line and one Cancel: no second sign-in, status check or setup cancel.
+  for (const label of ["Sign in", "Check status", "Cancel setup", "Stop waiting"])
+    expect(button(host, label)).toBeUndefined();
+  expect(button(host, "Cancel")).toBeDefined();
+  await act(async () => {
+    button(host, "Cancel")!.click();
+  });
+  await until(() => !!button(host, "Try signing in again"), "sign in again");
+  expect(host.textContent).toContain("Sign-in window closed");
+  expect(button(host, "Cancel setup")).toBeDefined();
+  // In a chat card nothing asks the person to check status after a sign-in window.
+  expect(button(host, "Check status")).toBeUndefined();
   await act(async () => root.unmount());
   host.remove();
 });

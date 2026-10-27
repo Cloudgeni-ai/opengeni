@@ -118,6 +118,16 @@ export function useIntegrationCapabilityConnect({
   const [controller] = useState(
     () => new ConnectController(client.connectTransport(), workspaceId),
   );
+  // StrictMode and Fast Refresh run an effect's cleanup and then the effect
+  // again on the same state, and a disposed controller can't be used again.
+  // Dispose a tick after unmount, so a replayed mount keeps its controller.
+  const pendingDispose = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    clearTimeout(pendingDispose.current);
+    return () => {
+      pendingDispose.current = setTimeout(() => controller.dispose(), 0);
+    };
+  }, [controller]);
   const view = useConnect(controller);
   const attempt = view.attempt;
   const [availability, setAvailability] = useState<IntegrationCapabilityAvailability>({
@@ -201,8 +211,6 @@ export function useIntegrationCapabilityConnect({
     // The flow is mounted once per client/workspace/session/capability.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloads]);
-
-  useEffect(() => () => controller.dispose(), [controller]);
 
   // A cancelled, failed or expired attempt has nothing left to pick up after a
   // reload or app restart; forget it so the next setup starts fresh.

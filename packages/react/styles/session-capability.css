@@ -23,11 +23,14 @@
 .og-session-capability-actions button { display:inline-flex; align-items:center; justify-content:center; gap:6px; width:100%; min-height:40px; padding:8px 16px; border-radius:var(--og-radius-md,10px); border:1px solid transparent; color:var(--og-color-bg); background:var(--og-color-fg); font:inherit; font-size:13px; font-weight:500; white-space:nowrap; cursor:pointer; transition:background-color .15s,opacity .15s; }
 .og-session-capability-actions button:hover:not(:disabled) { background:color-mix(in srgb,var(--og-color-fg) 85%,transparent); }
 .og-session-capability-actions button:disabled { opacity:.55; cursor:not-allowed; }
+/* Inline in the card, setup lines up with the header and the agent's reason. */
+.og-session-capability-shell .og-session-capability-setup { padding:16px; }
 @container og-capability (min-width:28rem) {
   .og-session-capability-header { padding:18px 20px 0; }
   .og-session-capability-copy { padding-left:20px; padding-right:20px; }
   .og-session-capability-actions { flex-direction:row; align-items:center; justify-content:space-between; padding:16px 20px 18px; }
   .og-session-capability-actions > span { justify-content:flex-start; }
+  .og-session-capability-shell .og-session-capability-setup { padding:16px 20px 18px; }
   .og-session-capability-actions button { width:auto; min-height:36px; margin-left:auto; }
 }
 .og-session-capability-note { margin:8px 4px 0; font-size:11px; line-height:1.5; color:var(--og-color-fg-muted); }
@@ -59,5 +62,10 @@
 .og-session-capability-setup .og-session-capability-primary { justify-self:end; min-height:40px; padding:10px 16px; border:1px solid transparent; background:var(--og-color-fg); color:var(--og-color-bg); font-weight:500; }
 .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) { background:color-mix(in srgb,var(--og-color-fg) 85%,transparent); }
 .og-session-capability-progress { color:var(--og-color-fg-muted); padding-block:8px; }
-.og-session-capability-setup .og-session-capability-stop { justify-self:end; }
+.og-session-capability-waiting { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px 10px; color:var(--og-color-fg-muted); }
+.og-session-capability-waiting > p { flex:1 1 12rem; margin:0; line-height:1.5; }
+.og-session-capability-spinner { flex:none; box-sizing:border-box; width:14px; height:14px; margin-top:3px; border-radius:999px; border:2px solid color-mix(in srgb,currentColor 25%,transparent); border-top-color:currentColor; animation:og-session-capability-spin .8s linear infinite; }
+.og-session-capability-waiting .og-session-capability-stop { margin-inline-start:auto; align-self:center; }
+@keyframes og-session-capability-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .og-session-capability-spinner { animation:none; } }
 @media (pointer:coarse) { .og-session-capability-actions button,.og-session-capability-setup button { min-height:44px; } }

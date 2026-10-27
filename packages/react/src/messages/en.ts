@@ -4435,7 +4435,7 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.preparing": "Preparing sign-in…",
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
-  "sessionIntegrationCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
   "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
@@ -4481,7 +4481,7 @@ export const englishMessages = {
     "Sign-in did not finish. You can try connecting again.",
   "sessionMcpCapabilityCard.signInWasCancelledYou":
     "Sign-in was cancelled. You can try connecting again.",
-  "sessionMcpCapabilityCard.stopWaiting": "Stop waiting",
+  "sessionMcpCapabilityCard.stopWaiting": "Cancel",
   "sessionMcpCapabilityCard.theAuthorizedAccountDoesNot":
     "The authorized account does not match this integration. Review its connection settings.",
   "sessionMcpCapabilityCard.theConnectionOwnershipChangedReview":

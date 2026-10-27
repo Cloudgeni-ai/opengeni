@@ -82,10 +82,13 @@ function ScopedCard({
       <>
         {error ? <p role="alert">{error}</p> : null}
         {flow.notice ? <p role="status">{flow.notice}</p> : null}
-        {attempt ? (
+        {/* While the sign-in window is open, the card says so and offers one way
+            out; the sign-in controls return if the person cancels or it closes. */}
+        {waiting ? null : attempt ? (
           <ConnectSetup
             className="og-connect"
             controller={flow.controller}
+            inChat
             authorizeLabel={
               flow.signInClosed
                 ? t("connectSetup.trySigningInAgain")
@@ -97,12 +100,15 @@ function ScopedCard({
           <p role="status">{t("sessionIntegrationCapabilityCard.preparing")}</p>
         ) : null}
         {waiting ? (
-          <p role="status" className="og-session-capability-progress">
-            {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}{" "}
+          <div className="og-session-capability-waiting">
+            <span aria-hidden className="og-session-capability-spinner" />
+            <p role="status">
+              {t("sessionIntegrationCapabilityCard.finishSigningIn", { name: presentation.name })}
+            </p>
             <button type="button" className="og-session-capability-stop" onClick={flow.stopWaiting}>
               {t("sessionIntegrationCapabilityCard.stopWaiting")}
             </button>
-          </p>
+          </div>
         ) : null}
         {!busy && !waiting && (flow.restartable || error) ? (
           <button type="button" className="og-session-capability-primary" onClick={flow.start}>
