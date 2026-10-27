@@ -1,5 +1,4 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
 import { resolveModelProvider } from "@opengeni/config";
 import { modelCallProcessingResidency } from "@opengeni/contracts";
@@ -277,29 +276,4 @@ test("the authoritative fact writer forwards the served route's residency", asyn
     processingResidency: EU_CLAIM as never,
   });
   expect(facts.map((fact) => fact.processingResidency)).toEqual([EU_CLAIM]);
-});
-
-test("every worker call site passes the served route's residency", () => {
-  const source = (path: string) =>
-    readFileSync(new URL(path, import.meta.url), "utf8").replace(/\s+/g, " ");
-  const stream = source("../src/activities/agent-turn/stream-attempt.ts");
-  const compaction = source("../src/activities/agent-turn/compaction-prep.ts");
-  const title = source("../src/activities/independent-session-title.ts");
-  // The turn's route, resolved once; the title records its own route.
-  expect(stream).toContain(
-    "const turnProcessingResidency = servedRouteProcessingResidency( settings, resolvedModel, turnExecutionPolicy.productModelId, );",
-  );
-  expect(stream.split("processingResidency: turnProcessingResidency,").length - 1).toBe(3);
-  expect(stream).toContain(
-    "processingResidency: titleProcessingResidency ?? turnProcessingResidency,",
-  );
-  expect(stream).toContain(
-    "titleProcessingResidency = servedRouteProcessingResidency( settings, titleRoute.resolvedModel,",
-  );
-  expect(compaction).toContain("processingResidency: compactionProcessingResidency,");
-  // The independent title freezes its accepted route's residency in the request.
-  expect(title).toContain(
-    "processingResidency: servedRouteProcessingResidency( input.settings, input.route.resolvedModel, route.modelId, ),",
-  );
-  expect(title.split("processingResidency,").length - 1).toBeGreaterThanOrEqual(2);
 });

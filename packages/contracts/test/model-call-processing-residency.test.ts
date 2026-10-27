@@ -73,6 +73,43 @@ describe("model call processing residency", () => {
     });
   });
 
+  test("a stored eu claim that breaks the eu rules reads back as unknown, never eu", () => {
+    const read = (value: unknown) => parseModelCallProcessingResidency(value)?.geography;
+    // Deployment types that can leave the EU.
+    for (const deploymentType of [
+      "azure_global",
+      "bedrock_global_profile",
+      "gateway",
+      "subscription",
+      "unknown",
+    ]) {
+      expect(read({ geography: "eu", deploymentType, regions: [] })).toBe("unknown");
+    }
+    // Azure and Bedrock claims need regions, all inside that family's EU list.
+    expect(read({ geography: "eu", deploymentType: "azure_regional", regions: [] })).toBe(
+      "unknown",
+    );
+    expect(
+      read({
+        geography: "eu",
+        deploymentType: "azure_data_zone",
+        regions: ["swedencentral", "eastus"],
+      }),
+    ).toBe("unknown");
+    expect(
+      read({ geography: "eu", deploymentType: "azure_regional", regions: ["eu-west-1"] }),
+    ).toBe("unknown");
+    expect(
+      read({ geography: "eu", deploymentType: "bedrock_regional", regions: "eu-west-1" }),
+    ).toBe("unknown");
+    // Valid eu claims stay eu; non-eu claims are kept as stored.
+    expect(
+      read({ geography: "eu", deploymentType: "bedrock_geo_profile", regions: ["eu-west-1"] }),
+    ).toBe("eu");
+    expect(read({ geography: "eu", deploymentType: "self_hosted", regions: [] })).toBe("eu");
+    expect(read({ geography: "us", deploymentType: "provider_default", regions: [] })).toBe("us");
+  });
+
   test("Insights calls expose the geography, null only for calls recorded before it", () => {
     const call = {
       id: "00000000-0000-4000-8000-000000000001",

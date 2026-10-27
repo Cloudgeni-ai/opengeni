@@ -16,6 +16,10 @@ COMMENT ON COLUMN model_call_facts.processing_residency IS
 -- insights_usage_filter ignores. The previous release never asks, so its
 -- strict response parser keeps receiving the shape it knows. Assert the exact
 -- anchor so source drift cannot silently skip the change.
+-- A stored eu claim reads as eu only under the rules of
+-- ModelCallProcessingResidencyV1 (EU_CAPABLE_DEPLOYMENT_TYPES, and for Azure
+-- and Bedrock at least one region, every one in EU_AZURE_REGIONS or
+-- EU_AWS_REGIONS); anything else reads as unknown, never eu.
 DO $calls_geography$
 DECLARE
   routine regprocedure := 'opengeni_private.insights_scoped_calls_rows(uuid,uuid,timestamptz,timestamptz,jsonb,timestamptz,uuid,integer,uuid[],boolean)'::regprocedure;
@@ -24,7 +28,21 @@ DECLARE
   replacement text := $new$'cacheWrite',f.list_cache_write_cost_micros,'output',f.list_output_cost_micros) END)
             ||CASE WHEN p_query?'processingGeography' THEN jsonb_build_object('processingGeography',
               CASE WHEN f.processing_residency IS NULL THEN NULL
-                WHEN f.processing_residency->>'geography' IN('eu','us','global','other','unknown')
+                WHEN f.processing_residency->>'geography'='eu' THEN CASE
+                  WHEN f.processing_residency->>'deploymentType' IN('provider_default','self_hosted') THEN 'eu'
+                  WHEN f.processing_residency->>'deploymentType' NOT IN('azure_regional','azure_data_zone','bedrock_regional','bedrock_geo_profile') THEN 'unknown'
+                  WHEN pg_catalog.jsonb_typeof(f.processing_residency->'regions') IS DISTINCT FROM 'array' THEN 'unknown'
+                  WHEN pg_catalog.jsonb_array_length(f.processing_residency->'regions')=0 THEN 'unknown'
+                  WHEN f.processing_residency->>'deploymentType' IN('azure_regional','azure_data_zone')
+                    AND NOT EXISTS(SELECT 1 FROM pg_catalog.jsonb_array_elements(f.processing_residency->'regions') r(v)
+                      WHERE r.v NOT IN('"austriaeast"','"belgiumcentral"','"denmarkeast"','"francecentral"','"francesouth"','"germanynorth"','"germanywestcentral"','"italynorth"','"northeurope"','"norwayeast"','"norwaywest"','"polandcentral"','"spaincentral"','"swedencentral"','"swedensouth"','"switzerlandnorth"','"switzerlandwest"','"westeurope"'))
+                    THEN 'eu'
+                  WHEN f.processing_residency->>'deploymentType' IN('bedrock_regional','bedrock_geo_profile')
+                    AND NOT EXISTS(SELECT 1 FROM pg_catalog.jsonb_array_elements(f.processing_residency->'regions') r(v)
+                      WHERE r.v NOT IN('"eu-central-1"','"eu-central-2"','"eu-north-1"','"eu-south-1"','"eu-south-2"','"eu-west-1"','"eu-west-3"'))
+                    THEN 'eu'
+                  ELSE 'unknown' END
+                WHEN f.processing_residency->>'geography' IN('us','global','other','unknown')
                 THEN f.processing_residency->>'geography' ELSE 'unknown' END) ELSE '{}'::jsonb END$new$;
 BEGIN
   IF (pg_catalog.length(definition) - pg_catalog.length(pg_catalog.replace(definition, anchor, '')))

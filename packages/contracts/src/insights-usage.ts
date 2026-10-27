@@ -732,6 +732,7 @@ export const InsightsCall = /* @__PURE__ */ defineSchema(() =>
       /**
        * Where the route that served the call processed it. Null for calls
        * recorded before calls carried a processing residency; unknown is never EU.
+       * Undefined in responses from servers older than this release.
        */
       processingGeography: ModelProcessingGeography.nullable(),
     })

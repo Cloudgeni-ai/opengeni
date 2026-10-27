@@ -124,6 +124,7 @@ import {
   settleOpenSuffixResumeIfNeeded,
 } from "../open-suffix-resume";
 import {
+  modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
   withPublicApprovalFields,
@@ -552,7 +553,9 @@ export async function runTurnStreamAttempt(
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
         leaseLostMessage: "Provider credential lease expired during session title generation",
-        processingResidency: titleProcessingResidency ?? turnProcessingResidency,
+        // The title's own route; a title whose route was never resolved is
+        // unknown, never the turn's residency.
+        processingResidency: titleProcessingResidency ?? modelCallProcessingResidency(null),
       });
     }
     if (!generated.title) {

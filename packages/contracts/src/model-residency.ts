@@ -359,7 +359,9 @@ export function projectClientModelResidency(residency: ModelResidencyV1): Client
  * Where the route that served one model call processes data, as recorded on
  * the call's `model_call_facts` row and its durable `agent.model.usage` event:
  * the residency claim only. Evidence is never recorded, because its reference
- * text may name internal resources.
+ * text may name internal resources. An eu claim must still satisfy the same
+ * deployment-type and region rules as the route record it came from; a stored
+ * value that does not is read back as unknown, never as eu.
  */
 export const ModelCallProcessingResidencyV1 = /* @__PURE__ */ defineSchema(() =>
   z
@@ -368,9 +370,37 @@ export const ModelCallProcessingResidencyV1 = /* @__PURE__ */ defineSchema(() =>
       deploymentType: ModelDeploymentType,
       regions: z.array(z.string().regex(REGION_PATTERN)).max(32),
     })
-    .strict(),
+    .strict()
+    .superRefine((claim, context) => {
+      if (!recordedEuClaimHolds(claim)) {
+        context.addIssue({
+          code: "custom",
+          path: ["geography"],
+          message: "an eu claim needs an EU-capable deployment type and EU regions",
+        });
+      }
+    }),
 );
 export type ModelCallProcessingResidencyV1 = z.infer<typeof ModelCallProcessingResidencyV1>;
+
+/**
+ * Whether a recorded claim may say eu: the deployment type is EU-capable and,
+ * for cloud families with known EU regions, it names at least one region and
+ * every region is one of them. Non-eu claims always hold.
+ */
+function recordedEuClaimHolds(claim: {
+  geography: ModelProcessingGeography;
+  deploymentType: ModelDeploymentType;
+  regions: readonly string[];
+}): boolean {
+  if (claim.geography !== "eu") return true;
+  if (!EU_CAPABLE_DEPLOYMENT_TYPES.includes(claim.deploymentType)) return false;
+  const allowedRegions = euRegionsFor(claim.deploymentType);
+  if (!allowedRegions) return true;
+  return (
+    claim.regions.length > 0 && claim.regions.every((region) => allowedRegions.includes(region))
+  );
+}
 
 /**
  * The recorded processing residency for a call served by a route with this
@@ -386,8 +416,9 @@ export function modelCallProcessingResidency(
 /**
  * Read a recorded processing residency (a fact column or event payload field).
  * Absent or null means the call was recorded before calls carried one. A value
- * that is present but malformed is unknown. Any other field, such as evidence,
- * is dropped.
+ * that is present but malformed, or an eu claim that breaks the eu rules
+ * (see `ModelCallProcessingResidencyV1`), is unknown. Any other field, such as
+ * evidence, is dropped.
  */
 export function parseModelCallProcessingResidency(
   value: unknown,

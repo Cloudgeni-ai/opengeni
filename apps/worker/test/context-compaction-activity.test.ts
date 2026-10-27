@@ -1159,6 +1159,17 @@ describe("standalone context compaction execution", () => {
           effectiveContextWindowTokens: 250_000,
           autoCompactLimitTokens: 225_000,
           hostedWebSearch: false,
+          // The summarizer's route; its claim is recorded on the usage event.
+          residency: {
+            geography: "eu",
+            deploymentType: "self_hosted",
+            regions: [],
+            evidence: {
+              source: "operator_declaration",
+              reference: "compactor on internal-host-1",
+              verifiedAt: null,
+            },
+          },
         },
       }),
       buildAgent: forbid,
@@ -1229,9 +1240,11 @@ describe("standalone context compaction execution", () => {
           sourceKey: "chatcmpl-compaction",
           inputTokens: 1_234,
           outputTokens: 56,
+          processingResidency: { geography: "eu", deploymentType: "self_hosted", regions: [] },
         }),
       }),
     ]);
+    expect(JSON.stringify(events)).not.toContain("internal-host-1");
   });
 
   test("uses the injected summarizer when model resolution is unavailable", async () => {

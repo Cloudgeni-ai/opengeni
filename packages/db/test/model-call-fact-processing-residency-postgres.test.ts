@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { InsightsCallsQuery, InsightsCallsResponse } from "@opengeni/contracts/insights-usage";
-import type { ModelCallProcessingResidencyV1 } from "@opengeni/contracts";
+import {
+  parseModelCallProcessingResidency,
+  type ModelCallProcessingResidencyV1,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   backfillModelCallFactsFromSessionEvents,
@@ -213,11 +216,46 @@ test("Insights calls expose each call's processing geography", async () => {
   await fact(base, "eu", { processingResidency: EU as never, occurredAt: at });
   await fact(base, "unknown", { occurredAt: at });
   await fact(base, "us", { processingResidency: US as never, occurredAt: at });
-  // A fact written before 1001, and one whose stored geography is not a known value.
-  for (const [sourceKey, residency] of [
-    ["legacy", null],
-    ["corrupt", { geography: "mars", deploymentType: "unknown", regions: [] }],
-  ] as const) {
+  // A fact written before 1001, stored values the writer never produces, and
+  // valid eu claims. The SQL reader and the TypeScript parser must agree on
+  // every one: an eu claim that breaks the eu rules reads as unknown.
+  const stored = [
+    ["legacy", null, null],
+    ["corrupt", { geography: "mars", deploymentType: "unknown", regions: [] }, "unknown"],
+    ["eu-global", { geography: "eu", deploymentType: "azure_global", regions: [] }, "unknown"],
+    ["eu-gateway", { geography: "eu", deploymentType: "gateway", regions: [] }, "unknown"],
+    [
+      "eu-outside",
+      { geography: "eu", deploymentType: "azure_data_zone", regions: ["swedencentral", "eastus"] },
+      "unknown",
+    ],
+    [
+      "eu-no-regions",
+      { geography: "eu", deploymentType: "azure_regional", regions: [] },
+      "unknown",
+    ],
+    [
+      "eu-scalar-regions",
+      { geography: "eu", deploymentType: "bedrock_regional", regions: "eu-west-1" },
+      "unknown",
+    ],
+    [
+      "eu-aws-on-azure",
+      { geography: "eu", deploymentType: "azure_regional", regions: ["eu-west-1"] },
+      "unknown",
+    ],
+    ["eu-self-hosted", { geography: "eu", deploymentType: "self_hosted", regions: [] }, "eu"],
+    [
+      "eu-bedrock",
+      {
+        geography: "eu",
+        deploymentType: "bedrock_geo_profile",
+        regions: ["eu-central-1", "eu-west-1"],
+      },
+      "eu",
+    ],
+  ] as const;
+  for (const [sourceKey, residency] of stored) {
     await shared.admin`
       insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
         provider, provider_api, model, billing_path, priced_cost_micros, processing_residency, occurred_at)
@@ -239,7 +277,18 @@ test("Insights calls expose each call's processing geography", async () => {
   const byId = new Map(ids.map((row) => [row.id, row.sourceKey]));
   expect(
     Object.fromEntries(page.calls.map((call) => [byId.get(call.id), call.processingGeography])),
-  ).toEqual({ eu: "eu", unknown: "unknown", us: "us", legacy: null, corrupt: "unknown" });
+  ).toEqual({
+    eu: "eu",
+    unknown: "unknown",
+    us: "us",
+    ...Object.fromEntries(stored.map(([sourceKey, , geography]) => [sourceKey, geography])),
+  });
+  for (const [sourceKey, residency, geography] of stored) {
+    expect([sourceKey, parseModelCallProcessingResidency(residency)?.geography ?? null]).toEqual([
+      sourceKey,
+      geography,
+    ]);
+  }
 
   // The previous release never asks for the geography and keeps its exact
   // response shape, which its strict parser requires.
