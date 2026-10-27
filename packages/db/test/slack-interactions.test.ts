@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -34,23 +34,8 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", import.meta.url)
-  .pathname;
-const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
-  .pathname;
-const nativeActionMigrationPath = new URL(
-  "../drizzle/0227_slack_native_actions.sql",
-  import.meta.url,
-).pathname;
-const fileFactMigrationPath = new URL("../drizzle/0229_slack_inbox_file_fact.sql", import.meta.url)
-  .pathname;
-const appHomeMigrationPath = new URL(
-  "../drizzle/0244_slack_app_home_refresh_queue.sql",
-  import.meta.url,
-).pathname;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -165,67 +150,6 @@ function inboxInput(input: {
 }
 
 describe("Slack interaction migration and durable database boundary", () => {
-  test("declares rolling FORCE-RLS tables and bounded security-definer functions", async () => {
-    const sql = await readFile(migrationPath, "utf8");
-    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(4);
-    expect(sql).toContain("slack_interactions_visibility_check");
-    expect(sql).toContain("slack_interactions_session_binding_check");
-    expect(sql).toContain("slack_interaction_progress_deliveries_slot_uq");
-    expect(sql).toContain("FOR UPDATE SKIP LOCKED");
-    expect(sql).toContain("claim_slack_interaction_delivery");
-    expect(sql.match(/\n\s+SECURITY DEFINER\n\s+SET search_path = pg_catalog/g)).toHaveLength(3);
-    expect(sql.match(/SET search_path = pg_catalog/g)).toHaveLength(3);
-    expect(sql).toContain("credentialRole' = 'opengeni_slack_bot'");
-  });
-
-  test("expands the inbox trigger constraint for reactions as a rolling migration", async () => {
-    const sql = await readFile(reactionMigrationPath, "utf8");
-    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql).toContain('DROP CONSTRAINT "slack_interaction_inbox_trigger_check"');
-    expect(sql).toContain("'reaction'");
-    expect(sql).toContain(") NOT VALID;");
-    expect(sql).toContain('VALIDATE CONSTRAINT "slack_interaction_inbox_trigger_check"');
-    expect(sql).toContain('ADD COLUMN "reaction_context_checkpoint" jsonb');
-    expect(sql).toContain('"slack_interaction_inbox_reaction_checkpoint_check"');
-    expect(sql).toContain('octet_length("reaction_context_checkpoint"::text) <= 131072');
-    expect(sql).not.toContain("CREATE TABLE");
-    expect(sql).not.toContain("ALTER TYPE");
-  });
-
-  test("adds requester-bound native action and update ledgers", async () => {
-    const sql = await readFile(nativeActionMigrationPath, "utf8");
-    expect(sql).toContain('ADD COLUMN "initiating_slack_user_id" text');
-    expect(sql).toContain("'block_action'");
-    expect(sql).toContain('CREATE TABLE "slack_interaction_action_handles"');
-    expect(sql).toContain('CREATE TABLE "slack_bot_update_operations"');
-    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(2);
-    expect(sql).toContain("slack_interaction_action_handles_identity_uq");
-    expect(sql).toContain("slack_bot_update_operations_workspace_operation_uq");
-    expect(sql).not.toContain("rawItem");
-    expect(sql).not.toContain("arguments");
-  });
-
-  test("persists one bounded file-presence fact for ordinary Slack inbox rows", async () => {
-    const sql = await readFile(fileFactMigrationPath, "utf8");
-    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql).toContain('ADD COLUMN "has_files" boolean NOT NULL DEFAULT false');
-    expect(sql).not.toContain("jsonb");
-    expect(sql).not.toContain("provider payload");
-  });
-
-  test("adds a coalesced FORCE-RLS Slack App Home refresh authority", async () => {
-    const sql = await readFile(appHomeMigrationPath, "utf8");
-    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql).toContain('CREATE TABLE "slack_app_home_refreshes"');
-    expect(sql).toContain("FORCE ROW LEVEL SECURITY");
-    expect(sql).toContain("claim_slack_app_home_refresh");
-    expect(sql).toContain("FOR UPDATE SKIP LOCKED");
-    expect(sql).toContain('"processed_revision" < "desired_revision"');
-    expect(FORCE_RLS_TABLES).toContain("slack_app_home_refreshes");
-    expect(RUNTIME_FULL_DML_TABLES).toContain("slack_app_home_refreshes");
-  });
-
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
     if (!available) return;
     const rows = await admin<

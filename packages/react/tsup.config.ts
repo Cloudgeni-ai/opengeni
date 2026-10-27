@@ -75,6 +75,7 @@ export default defineConfig({
     "src/terminal.ts",
     "src/editor.ts",
     "src/desktop.ts",
+    "src/desktop-dictation.ts",
     "src/workbench.ts",
     // `./ui/*` is a subpath pattern export: every primitive is its own entry.
     "src/ui/*.tsx",

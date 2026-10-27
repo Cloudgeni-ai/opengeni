@@ -34,7 +34,7 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("organization-inference-residency");
   if (!acquired) throw new Error("EU-only inference tests require PostgreSQL");
   shared = acquired;
-  // Run as the runtime will once the change function 1010 withholds is granted;
+  // Run as the runtime will once the change function 1020 withholds is granted;
   // one test checks the behaviour while it is still withheld.
   await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
@@ -45,7 +45,7 @@ afterAll(async () => {
   await runtime?.end({ timeout: 5 }).catch(() => undefined);
   await client?.close();
   await shared?.release();
-});
+}, 60_000);
 
 async function organization() {
   const userId = `eu-only-${crypto.randomUUID()}`;

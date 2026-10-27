@@ -808,7 +808,7 @@ reachable by link.
 
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only
-`organization_inference_residency_events`, migration 1010,
+`organization_inference_residency_events`, migration 1020,
 `/v1/organizations/:organizationId/inference-residency`). Any member can read
 it. Owners and admins, an organization key with administration rights, or an
 agent with the person's `account:admin` can turn it on; only an owner or admin
@@ -822,7 +822,7 @@ event together; the events table also rejects an off change recorded for any
 other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
-version, so repeating "on" never makes someone else's change stale. 1010
+version, so repeating "on" never makes someone else's change stale. 1020
 withholds the runtime's EXECUTE on that
 function for one release (see
 [migrations-expand-contract.md](migrations-expand-contract.md)); until a later
@@ -1669,7 +1669,7 @@ connection and MCP authority revalidate live membership on every use. Do not
 add a membership lock, or a write whose trigger takes one, to the claim.
 `packages/db/test/claim-organization-membership-fence.test.ts` pins this.
 
-`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+`packages/db/test/organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
 not move (so an application-level `40P01` replay cannot mask a regression), and
@@ -2431,7 +2431,7 @@ this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
 `FOR SELECT` leaves a row-locking lookup blind. See
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
 production-posture regression harness
-`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`.
+`packages/db/test/owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>

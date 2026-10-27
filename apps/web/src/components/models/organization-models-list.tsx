@@ -949,7 +949,7 @@ export function OrganizationModelsList({
  * What every workspace starts with: the default model, Allowed models and
  * compaction limits. A workspace follows each until its admins change it.
  */
-export function OrganizationDefaultsSection({
+function OrganizationDefaultsSection({
   organizationName,
   anchorWorkspaceId,
   defaults,

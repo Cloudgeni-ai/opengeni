@@ -21,6 +21,7 @@ import {
   type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
+import { dictationBridge } from "./dictation";
 import { systemAudioBridge } from "./system-audio";
 
 function argument(name: string): string | null {
@@ -105,6 +106,7 @@ if (origin && window.location.origin === origin) {
       ...(systemAudio ? (["meetingDetection"] as const) : []),
       "computerCapabilities",
       "captureWindow",
+      "dictation",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     ...(appVersion ? { appVersion } : {}),
@@ -223,6 +225,7 @@ if (origin && window.location.origin === origin) {
         ) as Promise<DesktopComputerCapabilities>,
       onChange: (listener) => subscribe(DESKTOP_IPC.capabilitiesChanged, () => listener()),
     },
+    dictation: dictationBridge(ipcRenderer),
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }

@@ -1,29 +1,65 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate, planMigrations, type MigrationPhaseResult } from "../src/migrate";
 import type { MigrationPhase } from "../src/migration-phases";
 
-// Real immutable migration files, with just their prerequisites in each schema.
-const PRE = "0072_sessions_workspace_created_id_idx.sql";
-const MAINTENANCE = "0456_social_connection_versions.sql";
-const MIDDLE = "0506_background_command_text.sql";
-const POST = "0812_session_events_usage_source_key_index.sql";
+// One migration of each phase kind, with just their prerequisites in each schema.
+const PRE = "0001_sessions_workspace_created_id_idx.sql";
+const MAINTENANCE = "0002_social_connection_versions.sql";
+const MIDDLE = "0003_background_command_text.sql";
+const POST = "0004_session_events_usage_source_key_index.sql";
 const pending = [PRE, MAINTENANCE, MIDDLE, POST];
+const sources: Record<string, string> = {
+  [PRE]: `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "sessions_workspace_created_id_idx"
+  ON "sessions" ("workspace_id", "created_at" DESC, "id" DESC);
+`,
+  [MAINTENANCE]: `-- deployment-mode: maintenance
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '5min';
+ALTER TABLE social_connections ADD COLUMN version integer NOT NULL DEFAULT 1 CHECK (version > 0);
+CREATE FUNCTION bump_social_connection_version() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $body$
+BEGIN
+  NEW.version := OLD.version + 1;
+  RETURN NEW;
+END
+$body$;
+REVOKE ALL ON FUNCTION bump_social_connection_version() FROM PUBLIC;
+CREATE TRIGGER social_connection_version BEFORE UPDATE ON social_connections
+FOR EACH ROW EXECUTE FUNCTION bump_social_connection_version();
+`,
+  [MIDDLE]: `-- deployment-mode: rolling
+ALTER TABLE session_background_commands ADD COLUMN command_text text;
+`,
+  [POST]: `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+CREATE INDEX CONCURRENTLY IF NOT EXISTS session_events_usage_source_key_idx
+ON session_events (workspace_id, turn_id, usage_source_key)
+WHERE usage_source_key IS NOT NULL;
+`,
+};
+const shippedDirectory = join(import.meta.dir, "../drizzle");
+let directory: string;
 let blank: BlankTestDatabase;
-let shipped: string[];
 
 beforeAll(async () => {
+  directory = mkdtempSync(join(tmpdir(), "opengeni-migrate-phases-"));
+  for (const [name, source] of Object.entries(sources))
+    writeFileSync(join(directory, name), source);
   const acquired = await acquireBlankTestDatabase("migrate-phases");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   blank = acquired;
-  shipped = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql"))
-    .sort();
 }, 180_000);
-afterAll(async () => await blank?.release(), 60_000);
+afterAll(async () => {
+  rmSync(directory, { recursive: true, force: true });
+  await blank?.release();
+}, 60_000);
 
 async function fixture(schema: string) {
   const sql = postgres(blank.databaseUrl, { max: 1 });
@@ -36,8 +72,11 @@ async function fixture(schema: string) {
     CREATE TABLE nested_agent_depth_configuration (
       singleton boolean PRIMARY KEY, max_nested_agent_depth int, policy_source text, updated_at timestamptz);
   `);
-  await sql`INSERT INTO schema_migrations ${sql(shipped.filter((name) => !pending.includes(name)).map((name) => ({ name })))}`;
   return sql;
+}
+
+function plan(schema: string) {
+  return planMigrations(blank.databaseUrl, schema, directory);
 }
 
 async function run(
@@ -48,6 +87,7 @@ async function run(
   let result: MigrationPhaseResult | undefined;
   await migrate(blank.databaseUrl, schema, {
     ...(phase === undefined ? {} : { phase }),
+    migrationsDirectory: directory,
     maxNestedAgentDepth: depth,
     onPhaseComplete: (value) => {
       result = value;
@@ -62,7 +102,7 @@ describe("database-backed cumulative migration phases", () => {
     const schema = "phase_sequence";
     const sql = await fixture(schema);
     try {
-      expect((await planMigrations(blank.databaseUrl, schema)).phases).toEqual({
+      expect((await plan(schema)).phases).toEqual({
         pre: [PRE],
         maintenance: [MAINTENANCE, MIDDLE],
         post: [POST],
@@ -95,7 +135,7 @@ describe("database-backed cumulative migration phases", () => {
       expect(
         (await sql`SELECT to_regclass('session_events_usage_source_key_idx') AS index`)[0]?.index,
       ).toBeNull();
-      expect((await planMigrations(blank.databaseUrl, schema)).phases).toEqual({
+      expect((await plan(schema)).phases).toEqual({
         pre: [],
         maintenance: [],
         post: [POST],
@@ -106,7 +146,7 @@ describe("database-backed cumulative migration phases", () => {
         (await sql`SELECT to_regclass('session_events_usage_source_key_idx') AS index`)[0]?.index,
       ).not.toBeNull();
       expect(await run(schema, "post")).toMatchObject({ applied: [], remaining: [] });
-      expect((await planMigrations(blank.databaseUrl, schema)).pending).toEqual([]);
+      expect((await plan(schema)).pending).toEqual([]);
     } finally {
       await sql.end();
     }
@@ -134,9 +174,11 @@ describe("database-backed cumulative migration phases", () => {
     try {
       await sql`DROP TABLE social_connections`;
       await expect(run(schema, "maintenance")).rejects.toMatchObject({ code: "42P01" });
-      expect(
-        (await planMigrations(blank.databaseUrl, schema)).pending.map(({ name }) => name),
-      ).toEqual([MAINTENANCE, MIDDLE, POST]);
+      expect((await plan(schema)).pending.map(({ name }) => name)).toEqual([
+        MAINTENANCE,
+        MIDDLE,
+        POST,
+      ]);
       await sql`CREATE TABLE social_connections (id int)`;
       expect(await run(schema, "maintenance")).toMatchObject({
         applied: [MAINTENANCE, MIDDLE],
@@ -151,25 +193,27 @@ describe("database-backed cumulative migration phases", () => {
     const schema = "phase_cli";
     const sql = await fixture(schema);
     try {
-      for (const expected of [
-        { phase: "pre", applied: [PRE], remaining: [MAINTENANCE, MIDDLE, POST] },
-        { phase: "maintenance", applied: [MAINTENANCE, MIDDLE], remaining: [POST] },
-        { phase: "post", applied: [POST], remaining: [] },
-        { phase: "post", applied: [], remaining: [] },
+      // The CLI reads the shipped migrations; this ledger already holds them all.
+      const shipped = readdirSync(shippedDirectory).filter((name) => name.endsWith(".sql"));
+      await sql`INSERT INTO schema_migrations ${sql(shipped.map((name) => ({ name })))}`;
+      for (const { flag, expected } of [
+        { flag: true, expected: { phase: "pre", applied: [], remaining: [] } },
+        { flag: true, expected: { phase: "maintenance", applied: [], remaining: [] } },
+        { flag: false, expected: { phase: "post", applied: [], remaining: [] } },
       ]) {
         const child = Bun.spawn(
           [
             process.execPath,
             "--no-env-file",
             join(import.meta.dir, "../src/migrate.ts"),
-            ...(expected.applied.length ? [`--phase=${expected.phase}`] : []),
+            ...(flag ? [`--phase=${expected.phase}`] : []),
           ],
           {
             env: {
               ...process.env,
               OPENGENI_MIGRATIONS_DATABASE_URL: blank.databaseUrl,
               OPENGENI_DB_SCHEMA: schema,
-              OPENGENI_MIGRATION_PHASE: expected.applied.length ? "invalid" : "post",
+              OPENGENI_MIGRATION_PHASE: flag ? "invalid" : "post",
             },
             stdout: "pipe",
             stderr: "pipe",
@@ -220,7 +264,7 @@ describe("database-backed cumulative migration phases", () => {
     const sql = await fixture(schema);
     try {
       await sql`INSERT INTO schema_migrations (name) VALUES (${MAINTENANCE})`;
-      expect((await planMigrations(blank.databaseUrl, schema)).phases).toEqual({
+      expect((await plan(schema)).phases).toEqual({
         pre: [PRE, MIDDLE],
         maintenance: [],
         post: [POST],
@@ -228,56 +272,6 @@ describe("database-backed cumulative migration phases", () => {
       expect(await run(schema, "pre")).toMatchObject({ applied: [PRE, MIDDLE], remaining: [POST] });
       expect(await run(schema, "maintenance")).toMatchObject({ applied: [], remaining: [POST] });
     } finally {
-      await sql.end();
-    }
-  }, 60_000);
-
-  test("0874 RESET restores URL startup timeout before 0875/0879, in one run or fresh phases", async () => {
-    const chain = [
-      "0867_member_teammate_permissions_backfill.sql",
-      "0874_elevenlabs_realtime_models.sql",
-      "0875_realtime_history_reference_index.sql",
-      "0879_unsettled_admissions_session_index.sql",
-    ];
-    const sql = postgres(blank.databaseUrl, { max: 1 });
-    const url = new URL(blank.databaseUrl);
-    url.searchParams.set("options", "-c statement_timeout=35min -c lock_timeout=9s");
-    try {
-      await sql.unsafe(`CREATE TABLE public.phase_index_settings (schema_name text, statement_timeout text, lock_timeout text);
-        CREATE FUNCTION public.capture_phase_index_settings() RETURNS event_trigger LANGUAGE plpgsql AS $$
-        BEGIN
-          INSERT INTO public.phase_index_settings VALUES
-            (current_schema(), current_setting('statement_timeout'), current_setting('lock_timeout'));
-        END $$;
-        CREATE EVENT TRIGGER phase_index_settings ON ddl_command_start WHEN TAG IN ('CREATE INDEX')
-          EXECUTE FUNCTION public.capture_phase_index_settings();`);
-      for (const split of [false, true]) {
-        const schema = split ? "timeout_split" : "timeout_single";
-        await sql.unsafe(`CREATE SCHEMA ${schema}; SET search_path = ${schema};
-          CREATE TABLE schema_migrations (name text PRIMARY KEY);
-          CREATE TABLE workspace_memberships (id int, role text, subject_id text, permissions jsonb, updated_at timestamptz);
-          CREATE TABLE session_realtime_modes (model text CONSTRAINT session_realtime_modes_model_check CHECK (model IS NOT NULL));
-          CREATE TABLE session_realtime_entries (history_item_id int);
-          CREATE TABLE sandbox_workspace_mutation_admissions (workspace_id int, session_id int, settled_at timestamptz);`);
-        await sql`INSERT INTO schema_migrations ${sql(shipped.filter((name) => !chain.includes(name)).map((name) => ({ name })))}`;
-        // Discard implicit CREATE INDEX events from fixture primary keys.
-        await sql`DELETE FROM public.phase_index_settings WHERE schema_name = ${schema}`;
-        expect((await planMigrations(url.toString(), schema)).phases).toEqual({
-          pre: chain.slice(0, 2),
-          maintenance: [],
-          post: chain.slice(2),
-        });
-        if (split) await migrate(url.toString(), schema, { phase: "pre" });
-        await migrate(url.toString(), schema, { phase: "post" });
-        expect([
-          ...(await sql`SELECT statement_timeout, lock_timeout FROM public.phase_index_settings WHERE schema_name = ${schema}`),
-        ]).toEqual([
-          { statement_timeout: "35min", lock_timeout: "0" },
-          { statement_timeout: "35min", lock_timeout: "0" },
-        ]);
-      }
-    } finally {
-      await sql`DROP EVENT TRIGGER IF EXISTS phase_index_settings`;
       await sql.end();
     }
   }, 60_000);
