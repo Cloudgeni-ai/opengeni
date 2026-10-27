@@ -304,6 +304,13 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
           "track numbers must be unique",
         ),
       transcription: RecordingTranscriptionRequest.optional(),
+      /**
+       * The person recording's name, as your app knows it. With computer or
+       * tab audio beside the microphone, the microphone is theirs and is
+       * named with this in the transcript, unless Opengeni already has a name
+       * for them (their profile or membership label).
+       */
+      ownerName: z.string().trim().min(1).max(200).optional(),
     })
     .strict(),
 );
