@@ -11,6 +11,7 @@ import {
   createDb,
   createOrganizationInvitation,
   createSession,
+  DEFERRED_RUNTIME_TARGET_ROUTINES,
   ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
   getOrganizationPrivateSessionSettings,
@@ -605,7 +606,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
         name,
         owner: "postgres",
-        execute: true,
+        // A deferred routine stays withheld until the migration that grants it.
+        execute: !(DEFERRED_RUNTIME_TARGET_ROUTINES as readonly string[]).includes(name),
         publicExecute: (
           RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
         ).includes(name),

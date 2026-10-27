@@ -17,7 +17,7 @@ use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::cpu_share::ProcessorShare;
-use compute_host::fleet::{FleetConfig, Leased, Prepared};
+use compute_host::fleet::{FleetConfig, GuardConfig, Leased, Lossy, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
 use compute_host::observe::canary::{self, CanaryConfig};
@@ -30,6 +30,7 @@ use compute_host::{
     PagerConfig, PoolConfig, Store, Threads, serve,
 };
 use tokio::signal::unix::SignalKind;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 use crate::bench::{BenchArgs, bench, exec};
 
@@ -305,7 +306,8 @@ struct ServeArgs {
     /// Every guest must listen on it: the agent also connects to it to
     /// find guests that stopped while their VMs run on (a power-off, a
     /// halt, a hung kernel), and ends the VM of one that takes no
-    /// connection for five checks thirty seconds apart, as if it crashed.
+    /// connection for five checks thirty seconds apart, as if it crashed;
+    /// one whose kernel said on its console that it halted, at its first.
     #[arg(long)]
     restore_notice_port: Option<u32>,
     /// Keep warm templates: a guest vsock port that accepts connections
@@ -544,12 +546,59 @@ fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output =
     output
 }
 
+/// Runs the guard (`compute-host guard`) until it stops; `log` is the
+/// log it says what it does in, written without waiting.
+async fn guard(config: GuardConfig, log: Option<&Lossy>) -> anyhow::Result<()> {
+    // On a thread of its own: the guard takes over the watchdog and feeds
+    // it while its pages are brought in.
+    std::thread::Builder::new()
+        .name("guard-lock".into())
+        .spawn(|| {
+            if let Err(error) = compute_host::fleet::keep_resident() {
+                tracing::error!(
+                    %error,
+                    "the guard could not lock itself in memory: a host short of memory may stall it until the watchdog resets the machine"
+                );
+            }
+        })?;
+    // Asked to stop, the guard stops at its first step that may feed the
+    // watchdog (see `run_guard`), not where the signal finds it.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
+    let asked = Arc::clone(&stop);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+        asked.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let guarded =
+        tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop)).await?;
+    // What it last said, unless the journal has stalled: the next guard has
+    // to feed the watchdog in time.
+    if let Some(log) = log {
+        let _ = log.flush_within(compute_host::fleet::GUARD_STEP);
+    }
+    guarded
+}
+
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
+    // The guard must never wait on the journal (see `fleet::Lossy`).
+    let guard_log = match &cli.command {
+        Command::Guard(_) => Some(Lossy::new(std::io::stderr())?),
+        _ => None,
+    };
+    let writer = match &guard_log {
+        Some(log) => BoxMakeWriter::new(log.clone()),
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         .init();
     let client = Client::new(&cli.socket);
     match cli.command {
@@ -604,25 +653,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
-        Command::Guard(args) => {
-            let config = args.config();
-            // Asked to stop, the guard stops at its first step that may
-            // feed the watchdog (see `run_guard`), not where the signal
-            // finds it.
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
-            let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
-            let asked = Arc::clone(&stop);
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = terminate.recv() => {}
-                    _ = interrupt.recv() => {}
-                }
-                asked.store(true, std::sync::atomic::Ordering::Relaxed);
-            });
-            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop))
-                .await?
-        }
+        Command::Guard(args) => guard(args.config(), guard_log.as_ref()).await,
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;

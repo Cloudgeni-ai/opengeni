@@ -70,7 +70,8 @@ spec:
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
           {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
-          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled $computeTrusted }}
+          {{- $databasePasswordFiles := include "opengeni.databasePasswordFiles.enabled" . }}
+          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled $computeTrusted $databasePasswordFiles }}
           env:
             {{- with .Values.api.metricsPort }}
             - name: OPENGENI_API_METRICS_PORT
@@ -79,15 +80,17 @@ spec:
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
             {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.env" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
           {{- else }}
           env: []
           {{- end }}
-          {{- if or .Values.api.extraVolumeMounts $computeTrusted }}
+          {{- if or .Values.api.extraVolumeMounts $computeTrusted $databasePasswordFiles }}
           volumeMounts:
             {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.volumeMount" . }}{{ . | nindent 12 }}{{- end }}
             {{- with .Values.api.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,9 +120,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if or .Values.api.extraVolumes $computeTrusted }}
+      {{- if or .Values.api.extraVolumes $computeTrusted $databasePasswordFiles }}
       volumes:
         {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with include "opengeni.databasePasswordFiles.volume" . }}{{ . | nindent 8 }}{{- end }}
         {{- with .Values.api.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
