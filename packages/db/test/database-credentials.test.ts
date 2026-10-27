@@ -3,7 +3,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  databaseLoginAttemptOf,
   databasePasswordFileOptions,
   databasePasswordFileOptionsFromEnvironment,
   databaseUrlPassword,
@@ -12,6 +13,7 @@ import {
   logDatabaseCredentialEvent,
   RotatingDatabasePassword,
   rotatingDatabasePasswordFor,
+  tagDatabaseLoginAttempt,
   withDatabaseAuthenticationRetry,
   type DatabaseCredentialEvent,
 } from "../src/database-credentials";
@@ -36,19 +38,18 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function credential(events: DatabaseCredentialEvent[] = [], now: () => number = () => 1_000) {
+function credential(events: DatabaseCredentialEvent[] = []) {
   return new RotatingDatabasePassword({
     files: { currentPasswordFile: current, previousPasswordFile: previous },
     fallbackPassword: URL_PASSWORD,
     onEvent: (event) => events.push(event),
-    now,
   });
 }
 
-async function rotating(events: DatabaseCredentialEvent[] = [], now?: () => number) {
+async function rotating(events: DatabaseCredentialEvent[] = []) {
   await writeFile(previous, `${OLD_PASSWORD}\n`);
   await writeFile(current, `${NEW_PASSWORD}\n`);
-  const source = credential(events, now);
+  const source = credential(events);
   await source.password();
   return source;
 }
@@ -65,14 +66,26 @@ function refused(): Error {
   });
 }
 
+/** A 28P01 tagged with the login that raised it, as our drivers tag it. */
+function refusedBy(login: object): Error {
+  const error = refused();
+  tagDatabaseLoginAttempt(error, login);
+  return error;
+}
+
 /** A fake server that accepts exactly one password, like PostgreSQL. */
 function server(valid: { password: string }) {
   const attempts: string[] = [];
   return {
     attempts,
-    connect: async (password: string) => {
+    /** `login`: the driver's identity of this login, tagged onto its 28P01. */
+    connect: async (password: string, login?: object) => {
       attempts.push(password === OLD_PASSWORD ? "old" : password === NEW_PASSWORD ? "new" : "?");
-      if (password !== valid.password) throw refused();
+      if (password !== valid.password) {
+        const error = refused();
+        if (login) tagDatabaseLoginAttempt(error, login);
+        throw error;
+      }
       return "ok";
     },
   };
@@ -254,23 +267,67 @@ describe("sticky candidate switch", () => {
     expect(events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
   });
 
-  test("a straggler refused just after the switch does not move the pool back", async () => {
-    let now = 10_000;
-    const source = await rotating([], () => now);
-    source.reportAuthenticationFailure(source.position());
-    now += DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS - 1;
-    source.reportAuthenticationFailure(source.position());
-    expect(await source.password()).toBe(NEW_PASSWORD);
+  test("each login's position is recorded and found again through its tagged 28P01", async () => {
+    const source = await rotating();
+    const login = {};
+    expect(await source.password(login)).toBe(OLD_PASSWORD);
+    // Nested, as drizzle or pg-pool wrap a driver error.
+    const wrapped = new Error("wrapped", { cause: refusedBy(login) });
+    expect(databaseLoginAttemptOf(wrapped)).toBe(login);
+    expect(source.refusedPosition(wrapped)).toEqual({ generation: 0, selection: 0, index: 0 });
+    // Untagged, or a login this source never handed a password: unknown.
+    expect(source.refusedPosition(refused())).toBeUndefined();
+    expect(source.refusedPosition(refusedBy({}))).toBeUndefined();
+    expect(databaseLoginAttemptOf(null)).toBeUndefined();
+    // The tag never leaks into a serialization of the error.
+    expect(JSON.stringify(refusedBy(login))).toBe(JSON.stringify(refused()));
   });
 
-  test("after the grace a refusal of current wraps back to previous", async () => {
-    // For example a release re-provisioned the role with the old password.
-    let now = 10_000;
-    const source = await rotating([], () => now);
+  test("a stale refusal never moves the pool and reports itself as stale", async () => {
+    const events: DatabaseCredentialEvent[] = [];
+    const source = await rotating(events);
+    // Both logins read the previous password before either was refused.
+    const first = {};
+    const straggler = {};
+    await source.password(first);
+    await source.password(straggler);
+    expect(source.reportAuthenticationFailure(source.refusedPosition(refusedBy(first))!)).toBe(
+      "switched",
+    );
+    expect(source.reportAuthenticationFailure(source.refusedPosition(refusedBy(straggler))!)).toBe(
+      "stale",
+    );
+    expect(source.candidateIndex).toBe(1);
+    expect(events.filter((event) => event.type === "candidate_refused")).toEqual([
+      { type: "candidate_refused", index: 0, candidates: 2, stale: false },
+      { type: "candidate_refused", index: 0, candidates: 2, stale: true },
+    ]);
+  });
+
+  test("a refusal of the newly selected password switches back at once: no grace", async () => {
+    // A rollback restored the old password right after the pool switched.
+    const source = await rotating();
     source.reportAuthenticationFailure(source.position());
-    now += DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS;
-    source.reportAuthenticationFailure(source.position());
+    const login = {};
+    expect(await source.password(login)).toBe(NEW_PASSWORD);
+    expect(source.reportAuthenticationFailure(source.refusedPosition(refusedBy(login))!)).toBe(
+      "switched",
+    );
     expect(await source.password()).toBe(OLD_PASSWORD);
+  });
+
+  test("a login from before a switch and back is still stale", async () => {
+    const source = await rotating();
+    const early = {};
+    await source.password(early);
+    source.reportAuthenticationFailure(source.position());
+    source.reportAuthenticationFailure(source.position());
+    // Back on the previous password, but in a later selection.
+    expect(source.candidateIndex).toBe(0);
+    expect(source.reportAuthenticationFailure(source.refusedPosition(refusedBy(early))!)).toBe(
+      "stale",
+    );
+    expect(source.candidateIndex).toBe(0);
   });
 
   test("a single candidate never switches", async () => {
@@ -278,7 +335,7 @@ describe("sticky candidate switch", () => {
     const events: DatabaseCredentialEvent[] = [];
     const source = credential(events);
     await source.password();
-    source.reportAuthenticationFailure(source.position());
+    expect(source.reportAuthenticationFailure(source.position())).toBe("unchanged");
     expect(await source.password()).toBe(NEW_PASSWORD);
     expect(events.map((event) => event.type)).toEqual(["candidate_refused"]);
   });
@@ -361,14 +418,61 @@ describe("connection-layer retry", () => {
   test("a straggler after the switch retries on the selected candidate", async () => {
     const db = server({ password: NEW_PASSWORD });
     const source = await rotating();
+    // Its login read the old password before another login's refusal moved
+    // the pool, so its refusal arrives after the switch: stale.
+    const straggler = {};
+    const stalePassword = await source.password(straggler);
     source.reportAuthenticationFailure(source.position());
     let attempt = 0;
-    // Its first connection had read the old password before the switch.
-    const result = await withDatabaseAuthenticationRetry(source, async () =>
-      db.connect(attempt++ === 0 ? OLD_PASSWORD : await source.password()),
-    );
+    const result = await withDatabaseAuthenticationRetry(source, async () => {
+      if (attempt++ === 0) return db.connect(stalePassword, straggler);
+      const login = {};
+      return db.connect(await source.password(login), login);
+    });
     expect(result).toBe("ok");
     expect(source.candidateIndex).toBe(1);
+    expect(db.attempts).toEqual(["old", "new"]);
+  });
+
+  test("stale refusals do not use up the budget", async () => {
+    const db = server({ password: NEW_PASSWORD });
+    const events: DatabaseCredentialEvent[] = [];
+    const source = await rotating(events);
+    // Three logins read the old password, then another login's refusal moved
+    // the pool; this operation lands on all three before a fresh login.
+    const stragglers = [{}, {}, {}];
+    for (const login of stragglers) await source.password(login);
+    source.reportAuthenticationFailure(source.position());
+    let attempt = 0;
+    const result = await withDatabaseAuthenticationRetry(source, async () => {
+      const straggler = stragglers[attempt++];
+      if (straggler) return db.connect(OLD_PASSWORD, straggler);
+      const login = {};
+      return db.connect(await source.password(login), login);
+    });
+    expect(result).toBe("ok");
+    expect(attempt).toBe(4);
+    expect(events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
+  });
+
+  test("stale refusals stop at the hard cap", async () => {
+    const events: DatabaseCredentialEvent[] = [];
+    const source = await rotating(events);
+    let attempts = 0;
+    const outcome = await withDatabaseAuthenticationRetry(source, async () => {
+      attempts += 1;
+      // Every attempt's login reads a password, then another login's
+      // refusal moves the pool before this one is refused.
+      const login = {};
+      await source.password(login);
+      const other = {};
+      await source.password(other);
+      source.reportAuthenticationFailure(source.refusedPosition(refusedBy(other))!);
+      throw refusedBy(login);
+    }).catch((error: unknown) => error);
+    expect(isDatabaseAuthenticationFailure(outcome)).toBe(true);
+    expect(attempts).toBe(DATABASE_AUTHENTICATION_MAX_ATTEMPTS);
+    expect(events.filter((event) => event.type === "candidates_exhausted")).toHaveLength(1);
   });
 
   test("attempts are bounded by the candidates and the last 28P01 surfaces unchanged", async () => {
@@ -382,7 +486,8 @@ describe("connection-layer retry", () => {
     }).catch((error: unknown) => error);
     expect(errors).toHaveLength(2);
     expect(outcome).toBe(errors.at(-1)!);
-    expect(events.at(-1)).toEqual({ type: "candidates_exhausted", index: 1, candidates: 2 });
+    // Refused on both while selected: the pool switched twice, back to the first.
+    expect(events.at(-1)).toEqual({ type: "candidates_exhausted", index: 0, candidates: 2 });
   });
 
   test("a single password fails fast: one attempt, no retry", async () => {
@@ -441,6 +546,254 @@ describe("connection-layer retry", () => {
   });
 });
 
+type Gate = { promise: Promise<void>; open: () => void };
+function gate(): Gate {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => (open = resolve));
+  return { promise, open };
+}
+
+/**
+ * A pool modeled on postgres.js's connection handling, against a server that
+ * accepts exactly the role's current password. Each of `max` connections
+ * logs in for the operation that opened it (its "initial" query); the next
+ * queued operation waits for a free connection. A login asks for the
+ * password only when the server requests it, passing its own identity as our
+ * postgres.js patch does, and the server answers after the authentication
+ * round trip against the role's password at that moment. A refusal rejects
+ * only that login's operation, tagged with the login, and frees the
+ * connection for the next queued operation's own login. Connections close
+ * after one operation (lifetime churn), so every attempt logs in.
+ */
+class SimulatedPool {
+  readonly events: DatabaseCredentialEvent[] = [];
+  readonly source: RotatingDatabasePassword;
+  /** While set, logins wait here between reading the password and the answer. */
+  hold: Promise<void> | undefined;
+  /** While set, logins wait here before asking for the password. */
+  holdBeforeRead: Promise<void> | undefined;
+  held = 0;
+  #free: number;
+  readonly #waiting: Array<() => void> = [];
+
+  constructor(
+    readonly role: { password: string },
+    readonly max: number,
+  ) {
+    this.#free = max;
+    this.source = credential(this.events);
+  }
+
+  operation(): Promise<"ok"> {
+    return withDatabaseAuthenticationRetry(this.source, () => this.#login());
+  }
+
+  count(type: DatabaseCredentialEvent["type"], since = 0): number {
+    return this.events.slice(since).filter((event) => event.type === type).length;
+  }
+
+  staleRefusals(since = 0): number {
+    return this.events
+      .slice(since)
+      .filter((event) => event.type === "candidate_refused" && event.stale).length;
+  }
+
+  async #login(): Promise<"ok"> {
+    if (this.#free > 0) this.#free -= 1;
+    else await new Promise<void>((resolve) => this.#waiting.push(resolve));
+    try {
+      // TCP connect and startup until the server asks for the password.
+      await Bun.sleep(Math.random() * 2);
+      if (this.holdBeforeRead) await this.holdBeforeRead;
+      const login = {};
+      const password = await this.source.password(login);
+      if (this.hold) {
+        this.held += 1;
+        await this.hold;
+      }
+      // The authentication round trip.
+      await Bun.sleep(Math.random() * 2);
+      if (password !== this.role.password) throw refusedBy(login);
+      return "ok";
+    } finally {
+      const next = this.#waiting.shift();
+      if (next) next();
+      else this.#free += 1;
+    }
+  }
+}
+
+/** Several pools on the same files, as in one api and one worker pod. */
+async function pools(role: { password: string }, sizes: number[]): Promise<SimulatedPool[]> {
+  await writeFile(previous, `${OLD_PASSWORD}\n`);
+  await writeFile(current, `${NEW_PASSWORD}\n`);
+  const created = sizes.map((max) => new SimulatedPool(role, max));
+  for (const pool of created) await pool.source.password();
+  return created;
+}
+
+/**
+ * Hold every connection of every pool between reading its password and the
+ * server's answer, run `operations` per pool, change the role's password
+ * while all those logins are in flight, then let them be answered.
+ */
+async function switchUnderConcurrentLogins(
+  all: SimulatedPool[],
+  role: { password: string },
+  rolePassword: string,
+  operations: number,
+) {
+  const inFlight = gate();
+  for (const pool of all) pool.hold = inFlight.promise;
+  const outcomes = Promise.allSettled(
+    all.map((pool) =>
+      Promise.allSettled(Array.from({ length: operations }, () => pool.operation())),
+    ),
+  );
+  const everyConnection = all.reduce((sum, pool) => sum + pool.max, 0);
+  while (all.reduce((sum, pool) => sum + pool.held, 0) < everyConnection) await Bun.sleep(1);
+  role.password = rolePassword;
+  for (const pool of all) pool.hold = undefined;
+  inFlight.open();
+  const settled = await outcomes;
+  return settled.map((outcome) =>
+    outcome.status === "fulfilled"
+      ? outcome.value.filter((result) => result.status === "rejected").length
+      : Number.NaN,
+  );
+}
+
+describe("concurrent logins at the moment of a switch", () => {
+  const SIZES = [8, 4, 2, 1];
+
+  test("forward: every in-flight login is refused, the pool switches once, no operation fails", async () => {
+    const role = { password: OLD_PASSWORD };
+    const all = await pools(role, SIZES);
+    const failed = await switchUnderConcurrentLogins(all, role, NEW_PASSWORD, 40);
+    expect(failed).toEqual(SIZES.map(() => 0));
+    for (const pool of all) {
+      // One refused login per connection that was logging in with the old
+      // password; the first moved the pool, the others were stale.
+      expect(pool.count("candidate_refused")).toBe(pool.max);
+      expect(pool.staleRefusals()).toBe(pool.max - 1);
+      expect(pool.count("candidate_switched")).toBe(1);
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.source.candidateIndex).toBe(1);
+    }
+  });
+
+  test("mirrored rollback right after the switch: the pool switches back at once, no operation fails", async () => {
+    // The forward rotation just happened: the role has the new password and
+    // every pool switched to it moments ago.
+    const role = { password: NEW_PASSWORD };
+    const all = await pools(role, SIZES);
+    for (const pool of all) pool.source.reportAuthenticationFailure(pool.source.position());
+    const marks = all.map((pool) => pool.events.length);
+    // The rollback restores the old password while every connection is
+    // logging in with the new one.
+    const failed = await switchUnderConcurrentLogins(all, role, OLD_PASSWORD, 40);
+    expect(failed).toEqual(SIZES.map(() => 0));
+    all.forEach((pool, index) => {
+      const since = marks[index]!;
+      expect(pool.count("candidate_refused", since)).toBe(pool.max);
+      expect(pool.staleRefusals(since)).toBe(pool.max - 1);
+      expect(pool.count("candidate_switched", since)).toBe(1);
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.source.candidateIndex).toBe(0);
+    });
+  });
+
+  test("a pool that switched on a refusal of a valid password switches back immediately", async () => {
+    // The role never changed, but the pool moved to the new password (as a
+    // misattributed stale refusal used to do). The first refusal of the new
+    // password must move it back at once, with every operation succeeding.
+    const role = { password: OLD_PASSWORD };
+    const all = await pools(role, SIZES);
+    for (const pool of all) pool.source.reportAuthenticationFailure(pool.source.position());
+    const marks = all.map((pool) => pool.events.length);
+    const failed = await switchUnderConcurrentLogins(all, role, OLD_PASSWORD, 40);
+    expect(failed).toEqual(SIZES.map(() => 0));
+    all.forEach((pool, index) => {
+      expect(pool.count("candidate_switched", marks[index]!)).toBe(1);
+      expect(pool.count("candidate_refused", marks[index]!)).toBe(pool.max);
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.source.candidateIndex).toBe(0);
+    });
+  });
+
+  test("a refusal counts for the password its login used, not the one selected when the operation started", async () => {
+    // The operation starts on the old password, which the role accepts; its
+    // login asks for the password only after the pool moved to the new one.
+    const role = { password: OLD_PASSWORD };
+    const [pool] = await pools(role, [1]);
+    const beforeRead = gate();
+    pool!.holdBeforeRead = beforeRead.promise;
+    const operation = pool!.operation();
+    await Bun.sleep(5);
+    pool!.source.reportAuthenticationFailure(pool!.source.position());
+    const mark = pool!.events.length;
+    pool!.holdBeforeRead = undefined;
+    beforeRead.open();
+    expect(await operation).toBe("ok");
+    // The refusal of the new password was fresh: one switch back, no stale
+    // refusal, and the retry on the old password succeeded.
+    expect(pool!.count("candidate_refused", mark)).toBe(1);
+    expect(pool!.staleRefusals(mark)).toBe(0);
+    expect(pool!.count("candidate_switched", mark)).toBe(1);
+    expect(pool!.count("candidates_exhausted")).toBe(0);
+    expect(pool!.source.candidateIndex).toBe(0);
+  });
+
+  test("a forward rotation and a quick rollback under continuous load fail no operation", async () => {
+    const role = { password: OLD_PASSWORD };
+    const all = await pools(role, SIZES);
+    const running = { value: true };
+    let completed = 0;
+    const failures: unknown[] = [];
+    const lanes = all.flatMap((pool) =>
+      Array.from({ length: pool.max * 3 }, async () => {
+        while (running.value) {
+          await pool.operation().then(
+            () => (completed += 1),
+            (error: unknown) => failures.push(error),
+          );
+        }
+      }),
+    );
+    await Bun.sleep(50);
+    role.password = NEW_PASSWORD;
+    await Bun.sleep(150);
+    role.password = OLD_PASSWORD;
+    await Bun.sleep(150);
+    running.value = false;
+    await Promise.all(lanes);
+    expect(failures).toEqual([]);
+    expect(completed).toBeGreaterThan(100);
+    for (const pool of all) {
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      // Forward, then back: every pool ends on the old password.
+      expect(pool.count("candidate_switched")).toBe(2);
+      expect(pool.source.candidateIndex).toBe(0);
+    }
+  });
+
+  test("a single configured password still fails fast for every concurrent operation", async () => {
+    await writeFile(current, NEW_PASSWORD);
+    const role = { password: OLD_PASSWORD };
+    const pool = new SimulatedPool(role, 4);
+    await pool.source.password();
+    const outcomes = await Promise.allSettled(Array.from({ length: 12 }, () => pool.operation()));
+    expect(outcomes.every((outcome) => outcome.status === "rejected")).toBe(true);
+    for (const outcome of outcomes) {
+      expect(isDatabaseAuthenticationFailure((outcome as PromiseRejectedResult).reason)).toBe(true);
+    }
+    // One login per operation: no retry, no switch, no exhausted event.
+    expect(pool.count("candidate_refused")).toBe(12);
+    expect(pool.count("candidate_switched")).toBe(0);
+    expect(pool.count("candidates_exhausted")).toBe(0);
+  });
+});
+
 describe("no secret in events, logs or errors", () => {
   test("events and the default log lines carry indexes only", async () => {
     await writeFile(current, NEW_PASSWORD);
@@ -462,8 +815,9 @@ describe("no secret in events, logs or errors", () => {
       await source.password();
       source.reportAuthenticationFailure(source.position());
       const outcome = await withDatabaseAuthenticationRetry(source, async () => {
-        await source.password();
-        throw refused();
+        const login = {};
+        await source.password(login);
+        throw refusedBy(login);
       }).catch((error: unknown) => error);
       await writeFile(previous, "");
       await source.password();
@@ -472,8 +826,12 @@ describe("no secret in events, logs or errors", () => {
       expectNoSecret(String(outcome));
       expectNoSecret((outcome as Error).stack ?? "");
       // Single refusals are not logged; switches, exhaustion and reloads are.
+      // The retry is refused on the selected password each time, so the pool
+      // moves on twice before every candidate was refused.
       expect(lines.map((line) => line[0])).toEqual([
         "[database] reloaded database credential candidates",
+        "[database] switched database credential candidate",
+        "[database] switched database credential candidate",
         "[database] switched database credential candidate",
         "[database] every database credential candidate was rejected",
         "[database] reloaded database credential candidates",

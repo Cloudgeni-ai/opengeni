@@ -1435,8 +1435,10 @@ export {
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export {
   DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
-  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_LOGIN_ATTEMPT,
   databaseCredentialEventMessage,
+  databaseLoginAttemptOf,
   databasePasswordFileOptions,
   databasePasswordFileOptionsFromEnvironment,
   rotatingDatabasePasswordFor,
@@ -1445,7 +1447,9 @@ export {
   isDatabaseAuthenticationFailure,
   logDatabaseCredentialEvent,
   RotatingDatabasePassword,
+  tagDatabaseLoginAttempt,
   withDatabaseAuthenticationRetry,
+  type DatabaseAuthenticationRefusal,
   type DatabaseCredentialEvent,
   type DatabaseCredentialEventListener,
   type DatabaseCredentialPosition,

@@ -1248,14 +1248,22 @@ Both are optional. Unset, the runtime uses the URL password exactly as before.
 Each pool that logs in as the runtime role re-reads the files on every new
 connection (trailing newlines are ignored) and keeps the candidates
 `[previous, current]` (previous only when non-empty and different). It starts
-on the previous password, moves to the current one after a single `28P01` and
-then stays there. Only a change in the files' contents starts the order over.
+on the previous password, moves to the current one after the first `28P01` of
+a login that used the previous password, and then stays there. Each refusal is
+attributed to the password that refused login actually used: logins that were
+already authenticating with a password the pool has since replaced are refused
+without moving the pool again (stale refusals). A refusal of the newly selected
+password moves the pool on at once, back to the first candidate after the last
+(for example when a rollback restored the old password); there is no
+time-based grace. Only a change in the files' contents starts the order over.
 Logs and metrics never carry a password; the pools log only content-free
 events such as `switched database credential candidate` with candidate indexes.
 
 A query or transaction start refused with `28P01` is retried on the newly
 selected candidate, but only at the connection layer, only while another
-distinct candidate exists, and at most once per candidate. This is safe
+distinct candidate exists. A stale refusal is retried without counting
+against the operation; otherwise each distinct password gets one attempt, and
+no operation makes more than five attempts. This is safe
 because PostgreSQL raises `28P01` only while authenticating a new connection,
 before any statement runs. With a single candidate (no previous password), a
 wrong password fails fast exactly as before. Session persistence, turn

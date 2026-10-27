@@ -117,7 +117,7 @@ export async function runLifecycleFactBackfillCli(): Promise<void> {
   const sql = postgres(databaseUrl, {
     max: 1,
     onnotice: () => undefined,
-    ...(credential ? { pass: () => credential.password() } : {}),
+    ...(credential ? { pass: (login: object) => credential.password(login) } : {}),
     ...databaseBootConnectOptions(databaseUrl),
   });
   try {

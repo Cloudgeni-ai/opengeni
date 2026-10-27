@@ -38,6 +38,11 @@ import { createManagedAuthDatabasePool } from "../src/auth/managed-auth";
 //   1. the Secret update gives previous = old and current = new (the files are
 //      swapped the way kubelet does it: one atomic symlink switch);
 //   2. ALTER ROLE to the new password: each pool takes one 28P01, then sticks;
+//   2b. a rollback drill right after the switch: ALTER ROLE back to the old
+//      password and, moments later, forward again. Each pool that meets it
+//      switches back and forward at once (no time-based grace), and logins
+//      still in flight with a replaced password never move a pool or use up
+//      an operation's attempts;
 //   3. previous is cleared.
 // No operation may fail and no request may return 500.
 //
@@ -460,6 +465,33 @@ describe("runtime database password rotation", () => {
       expect(refusals["g1:managed-auth"]).toBe(1);
       expect(refusals["g1:persistence"]).toBeLessThanOrEqual(2);
       expect(refusals["g1:api"]).toBeLessThanOrEqual(4);
+      expect(tally.count("candidates_exhausted")).toEqual({});
+      expect(failures).toEqual([]);
+
+      // 2b. Rollback drill, within seconds of the switch (as a failed rotation
+      //     script's rollback does): back to the old password, then forward.
+      await admin.unsafe(`alter role opengeni_app password '${originalPassword}'`);
+      await Bun.sleep(1_500);
+      await admin.unsafe(`alter role opengeni_app password '${rotated}'`);
+      await Bun.sleep(4_000);
+      await restartListener(current);
+      const drillSwitches = tally.count("candidate_switched");
+      const drillRefusals = tally.count("candidate_refused");
+      const staleRefusals: Record<string, number> = {};
+      for (const { pool, event } of tally.events) {
+        if (event.type === "candidate_refused" && event.stale) {
+          staleRefusals[pool] = (staleRefusals[pool] ?? 0) + 1;
+        }
+      }
+      console.info(
+        "[rotation-test] after the rollback drill",
+        JSON.stringify({ switches: drillSwitches, refusals: drillRefusals, staleRefusals }),
+      );
+      for (const pool of pools) {
+        // Every pool ends on the new password: forward, and back and forth
+        // again for each pool that opened a connection during the drill.
+        expect(drillSwitches[`g1:${pool}`]! % 2).toBe(1);
+      }
       expect(tally.count("candidates_exhausted")).toEqual({});
       expect(failures).toEqual([]);
 

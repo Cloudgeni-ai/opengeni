@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
   isDatabaseAuthenticationFailure,
   type RotatingDatabasePassword,
 } from "./database-credentials";
@@ -69,6 +70,8 @@ export function createSessionListChangeSource(
   let schema: string | undefined;
   let generation = 0;
   let wake: (() => void) | undefined;
+  /** Reconnects right after a 28P01 since the last successful LISTEN. */
+  let immediateReconnects = 0;
   const emit = (event: SessionListNotification) => {
     for (const listener of listeners) {
       // One stopped HTTP consumer cannot disconnect every other subscriber.
@@ -100,8 +103,8 @@ export function createSessionListChangeSource(
       idle_timeout: 0,
       max_lifetime: 0,
       // Asked on every (re)connect: re-reads the files, so a rotated password
-      // applies to the next LISTEN.
-      ...(credential ? { pass: () => credential.password() } : {}),
+      // applies to the next LISTEN, and records it for that login.
+      ...(credential ? { pass: (login: object) => credential.password(login) } : {}),
       connection: {
         application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
         ...(options.searchPath ? { search_path: options.searchPath } : {}),
@@ -130,27 +133,35 @@ export function createSessionListChangeSource(
         schema = row?.schema;
         if (!schema) throw new Error("Notification schema unavailable");
         connected = true;
+        immediateReconnects = 0;
         emit({ type: "connected" });
         await lost;
       } catch (error) {
-        // A rejected password moves this connection to the next candidate;
-        // the reconnect below then tries it. Nothing ran on a refused login.
-        let switched = false;
+        // A refused login moves this connection to the next candidate unless
+        // it used a password already replaced (stale); the reconnect below
+        // then tries the selected one. Nothing ran on a refused login.
+        let retryNow = false;
         if (
           credential &&
           observedCandidate !== undefined &&
           isDatabaseAuthenticationFailure(error)
         ) {
-          credential.reportAuthenticationFailure(observedCandidate);
-          const selected = credential.position();
-          switched =
-            selected.generation !== observedCandidate.generation ||
-            selected.index !== observedCandidate.index;
+          const outcome = credential.reportAuthenticationFailure(
+            credential.refusedPosition(error) ?? observedCandidate,
+          );
+          // Another password is selected now: try it at once rather than
+          // after the reconnect delay, a bounded number of times in a row so
+          // two refused passwords cannot alternate without a pause.
+          retryNow =
+            outcome !== "unchanged" &&
+            immediateReconnects < DATABASE_AUTHENTICATION_MAX_ATTEMPTS - 1;
         }
         disconnect();
-        // The next candidate is ready: try it at once rather than after the
-        // reconnect delay.
-        if (switched && !stop.signal.aborted) continue;
+        if (retryNow && !stop.signal.aborted) {
+          immediateReconnects += 1;
+          continue;
+        }
+        immediateReconnects = 0;
       }
       if (!stop.signal.aborted) {
         await delay(options.reconnectDelayMs ?? 1000, undefined, { signal: stop.signal }).catch(

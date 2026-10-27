@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
+import postgres from "postgres";
 
 import { createDb, rawRows, sessionListChangesFor } from "../src/database";
 import {
+  databaseLoginAttemptOf,
   databaseUrlPassword,
   isDatabaseAuthenticationFailure,
+  RotatingDatabasePassword,
+  withDatabaseAuthenticationRetry,
   type DatabaseCredentialEvent,
   type DatabasePasswordFiles,
 } from "../src/database-credentials";
@@ -156,11 +160,19 @@ describe("createDb password files", () => {
     try {
       const outcome = await rawRows(client.db, sql`select 1`).catch((error: unknown) => error);
       expect(isDatabaseAuthenticationFailure(outcome)).toBe(true);
+      // The driver names the refused login, so the refusal is attributed to it.
+      expect(databaseLoginAttemptOf(outcome)).toBeDefined();
       expect(String(outcome)).not.toContain(REFUSED_PASSWORD);
       expect(String(outcome)).not.toContain(validPassword);
-      // One refusal, no retry, no switch.
-      expect(tally.count("candidate_refused")).toBe(1);
+      const transaction = await client.db
+        .transaction(async () => undefined)
+        .catch((error: unknown) => error);
+      expect(isDatabaseAuthenticationFailure(transaction)).toBe(true);
+      expect(databaseLoginAttemptOf(transaction)).toBeDefined();
+      // One refusal per operation, no retry, no switch.
+      expect(tally.count("candidate_refused")).toBe(2);
       expect(tally.count("candidate_switched")).toBe(0);
+      expect(tally.count("candidates_exhausted")).toBe(0);
     } finally {
       await client.close();
     }
@@ -194,5 +206,133 @@ describe("createDb password files", () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+/**
+ * The real postgres.js driver (with our patch) and server: every connection of
+ * the pool starts logging in and waits before it asks for the password until
+ * all of them do; with `selectSecond`, the pool then switches to the second
+ * candidate (after the operations started, before their logins read). Every
+ * login then reads its password and is held until all of them did, and only
+ * then are they answered. Only the server's valid password is fixed; `files`
+ * decide which candidate is the refused one.
+ */
+async function concurrentLoginsAtSwitch(
+  files: { previous: string; current: string },
+  options: { selectSecond: boolean },
+) {
+  const events: DatabaseCredentialEvent[] = [];
+  const source = new RotatingDatabasePassword({
+    files: await passwordFiles(files),
+    fallbackPassword: REFUSED_PASSWORD,
+    onEvent: (event) => events.push(event),
+  });
+  await source.password();
+  let releaseRead!: () => void;
+  let releaseAnswer!: () => void;
+  const held: {
+    reading: number;
+    answering: number;
+    beforeRead?: Promise<void> | undefined;
+    beforeAnswer?: Promise<void> | undefined;
+  } = {
+    reading: 0,
+    answering: 0,
+    beforeRead: new Promise<void>((resolve) => (releaseRead = resolve)),
+    beforeAnswer: new Promise<void>((resolve) => (releaseAnswer = resolve)),
+  };
+  const max = 6;
+  const driver = postgres(shared.appUrl, {
+    max,
+    onnotice: () => undefined,
+    pass: async (login) => {
+      if (held.beforeRead) {
+        held.reading += 1;
+        await held.beforeRead;
+      }
+      const password = await source.password(login);
+      if (held.beforeAnswer) {
+        held.answering += 1;
+        await held.beforeAnswer;
+      }
+      return password;
+    },
+  });
+  const waitFor = async (done: () => boolean) => {
+    const deadline = Date.now() + 15_000;
+    while (!done() && Date.now() < deadline) await Bun.sleep(5);
+    expect(done()).toBe(true);
+  };
+  try {
+    const operations = Array.from({ length: 30 }, (_, index) =>
+      withDatabaseAuthenticationRetry(source, async () => {
+        const [row] = await driver<{ value: number }[]>`select ${index}::int as value`;
+        return row!.value;
+      }),
+    );
+    await waitFor(() => held.reading === max);
+    // The pool switched to the second candidate after these operations started.
+    if (options.selectSecond) source.reportAuthenticationFailure(source.position());
+    const mark = events.length;
+    held.beforeRead = undefined;
+    releaseRead();
+    await waitFor(() => held.answering === max);
+    held.beforeAnswer = undefined;
+    releaseAnswer();
+    const outcomes = await Promise.allSettled(operations);
+    return { events: events.slice(mark), outcomes, source, max };
+  } finally {
+    await driver.end({ timeout: 5 });
+  }
+}
+
+describe("concurrent logins at the moment of a switch (real driver)", () => {
+  test("forward: each in-flight login's refusal counts once, the first switches, no operation fails", async () => {
+    const run = await concurrentLoginsAtSwitch(
+      { previous: REFUSED_PASSWORD, current: validPassword },
+      { selectSecond: false },
+    );
+    expect(run.outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
+    const refusals = run.events.filter((event) => event.type === "candidate_refused");
+    expect(refusals).toHaveLength(run.max);
+    expect(refusals[0]).toEqual({
+      type: "candidate_refused",
+      index: 0,
+      candidates: 2,
+      stale: false,
+    });
+    expect(
+      refusals.filter((event) => event.type === "candidate_refused" && event.stale),
+    ).toHaveLength(run.max - 1);
+    expect(run.events.filter((event) => event.type === "candidate_switched")).toHaveLength(1);
+    expect(run.events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
+    expect(run.source.candidateIndex).toBe(1);
+  });
+
+  test("mirrored rollback: a pool that just switched switches back at once, no operation fails", async () => {
+    const run = await concurrentLoginsAtSwitch(
+      { previous: validPassword, current: REFUSED_PASSWORD },
+      { selectSecond: true },
+    );
+    expect(run.outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
+    const refusals = run.events.filter((event) => event.type === "candidate_refused");
+    expect(refusals).toHaveLength(run.max);
+    // Attributed to the password each login used, not to the one selected
+    // when its operation started: the first refusal is fresh.
+    expect(refusals[0]).toEqual({
+      type: "candidate_refused",
+      index: 1,
+      candidates: 2,
+      stale: false,
+    });
+    expect(
+      refusals.filter((event) => event.type === "candidate_refused" && event.stale),
+    ).toHaveLength(run.max - 1);
+    expect(run.events.filter((event) => event.type === "candidate_switched")).toEqual([
+      { type: "candidate_switched", fromIndex: 1, toIndex: 0, candidates: 2 },
+    ]);
+    expect(run.events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
+    expect(run.source.candidateIndex).toBe(0);
   });
 });
