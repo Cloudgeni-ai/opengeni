@@ -296,6 +296,11 @@ Archiving keeps the published revision, so the Archived view orders by that
 too. A collection's is the newest of its own and that of any non-archived entry or
 sub-collection below it that the reader can see in the selected scope; the walk
 descends through sub-collections by membership. Collection rows show that date.
+Writes keep each collection's newest change, and the member it came through, up
+to date (migration 1008), so a list follows that chain and checks it for the
+reader instead of walking every member. The walk still answers any collection
+whose chain passes a member the reader cannot see or the scope filter excludes,
+the Review queue, and organizations not yet built by their first Knowledge write.
 Search keeps relevance order, with each row's own change breaking ties; an
 **Added** window orders by creation time, the date it filters on. Review groups
 and the Review queue also list the newest proposal first. Collections hides the
