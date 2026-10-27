@@ -340,6 +340,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       // administration also stays owner-only; the old evaluator reports each
       // missing EXECUTE grant and those denials must remain intact.
       "runtime role lacks EXECUTE on private routine evaluate_promotion_abuse(uuid)",
+      "runtime role lacks EXECUTE on private routine list_agent_held_browser_sessions(integer, bigint)",
       "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
       "runtime role lacks EXECUTE on private routine session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "runtime role lacks EXECUTE on private routine set_promotion_decision(uuid, text, text, text, jsonb, text, bigint)",
