@@ -67,6 +67,26 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Startup's permission and organization helpers read these two
+              // small pure modules. Entry-aware grouping can fold them into
+              // the app-context chunk, which imports the API chunk that in
+              // turn imports startup, a load-time cycle. Keep them in a leaf.
+              name: "startup-access-helpers",
+              test: /packages[\\/](?:contracts[\\/]src[\\/]personal-integration-setup|react[\\/]src[\\/]organization-model)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The chat route reads chat-list display helpers. The chat
+              // beside a Site also reaches the command actions, so entry-aware
+              // grouping folds both into one chunk and a direct chat load
+              // downloads the actions for nothing. Keep the helpers in a leaf.
+              name: "session-list-model",
+              test: /packages[\\/]react[\\/]src[\\/]session-list-model\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Relative times, disabled-control reasons and section variants
               // are shared by settings, sign-in methods and the session
               // retention control, never by the first page. The web host's

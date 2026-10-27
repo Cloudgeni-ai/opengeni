@@ -78,7 +78,6 @@ import { useRecordSiteOpened } from "../lib/site-opened";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
-import { SessionRoute } from "./session";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
 // the publish form and the Site's management (a separate lazy entry would
@@ -87,6 +86,11 @@ const SitePublishingPage = lazy(() =>
   import("./artifacts").then((module) => ({
     default: module.SitePublishingPage,
   })),
+);
+// The regular chat route, loaded as the chat page loads it: a static import
+// would make the Site view share the chat's chunks and regroup them.
+const SessionRoute = lazy(() =>
+  import("./session").then((module) => ({ default: module.SessionRoute })),
 );
 
 const SITE_ROUTE = "/workspaces/$workspaceId/sites/$siteId";
@@ -896,27 +900,29 @@ function SiteChatPanel({
             // The regular chat, as on its own page, without the session panel
             // there's no room for beside a Site.
             <SessionUiFeaturesOff features={["dock"]}>
-              <SessionRoute
-                key={selectedId}
-                workspaceId={workspaceId}
-                sessionId={selectedId}
-                placement="panel"
-                onEvent={onEvent}
-                messageContext={messageContext}
-                // The first prompt and anything typed meanwhile carry over.
-                creationHandoff={handedOff?.creation ?? null}
-                initialDraft={handedOff?.draft}
-                // A voice-first chat starts its call once it opens.
-                realtimeAutostartModel={handedOff?.realtimeModel}
-                onRealtimeAutostartConsumed={() =>
-                  setHandoff((current) =>
-                    current?.sessionId === selectedId
-                      ? { ...current, realtimeModel: undefined }
-                      : current,
-                  )
-                }
-                onNewSession={canCreate ? startNew : undefined}
-              />
+              <Suspense fallback={<PanelLoading label="Loading conversation" />}>
+                <SessionRoute
+                  key={selectedId}
+                  workspaceId={workspaceId}
+                  sessionId={selectedId}
+                  placement="panel"
+                  onEvent={onEvent}
+                  messageContext={messageContext}
+                  // The first prompt and anything typed meanwhile carry over.
+                  creationHandoff={handedOff?.creation ?? null}
+                  initialDraft={handedOff?.draft}
+                  // A voice-first chat starts its call once it opens.
+                  realtimeAutostartModel={handedOff?.realtimeModel}
+                  onRealtimeAutostartConsumed={() =>
+                    setHandoff((current) =>
+                      current?.sessionId === selectedId
+                        ? { ...current, realtimeModel: undefined }
+                        : current,
+                    )
+                  }
+                  onNewSession={canCreate ? startNew : undefined}
+                />
+              </Suspense>
             </SessionUiFeaturesOff>
           ) : null}
         </div>
