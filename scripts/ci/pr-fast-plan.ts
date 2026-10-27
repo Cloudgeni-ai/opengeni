@@ -30,8 +30,8 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
     areas: [".github/", "scripts/workflow-execution-graph"],
   },
   {
-    test: "scripts/release-schema-contract.test.ts",
-    areas: ["packages/db/drizzle/", "scripts/release-schema-contract", "scripts/migration-schema"],
+    test: "scripts/check-migration-immutability.test.ts",
+    areas: ["packages/db/drizzle/", "scripts/check-migration-immutability"],
   },
 ];
 

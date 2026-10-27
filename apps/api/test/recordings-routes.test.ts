@@ -530,6 +530,81 @@ describe("recording routes", () => {
     });
   });
 
+  test("a dictation is heard in the language it names, else detected, never the meeting language", async () => {
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"voiceInput":{"enabled":true},"recordings":{"language":"sv"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    // Only the language and keyterms: the workspace's voice input still picks the model.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          purpose: "dictation",
+          tracks: mic,
+          transcription: { language: "nb", model: "scribe_v2" },
+        })
+      ).status,
+    ).toBe(400);
+    const heard = async (transcriptionRequest?: Record<string, unknown>) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        purpose: "dictation",
+        tracks: mic,
+        ...(transcriptionRequest ? { transcription: transcriptionRequest } : {}),
+      });
+      expect(created.status).toBe(201);
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      expect(finalized.status).toBe(200);
+      const [{ options }] = await shared.admin`
+        select options from recording_transcript_versions where recording_id = ${recordingId}`;
+      return options;
+    };
+    expect(await heard({ language: "nb" })).toEqual({ language: "nb" });
+    // People dictate in more languages than they meet in: no language detects it.
+    expect(await heard()).toEqual({});
+    expect(await heard({ language: null })).toEqual({});
+    // The person's vocabulary goes with it, for a model that takes one.
+    expect(await heard({ keyterms: ["Kubernetes", "Ada Lovelace"] })).toEqual({
+      keyterms: ["Kubernetes", "Ada Lovelace"],
+    });
+    expect(await heard({ language: "en", keyterms: ["Kubernetes"] })).toEqual({
+      language: "en",
+      keyterms: ["Kubernetes"],
+    });
+  });
+
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
     const scope = await fixture();
     expect((await scope.owner.call("GET", "/recording-models")).body.language).toBeNull();
@@ -604,6 +679,18 @@ describe("recording routes", () => {
     expect((await scope.admin("PATCH", "/settings", { recordings: {} })).status).toBe(200);
     const people = (await scope.owner.call("GET", "/recording-people")).body.people;
     expect(people.map((person: { voice: unknown }) => person.voice)).toEqual([null, null]);
+  });
+
+  test("the built-in meeting summary is a workspace setting that admins can turn off", async () => {
+    const scope = await fixture();
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { autoSummary: "off" } })).status,
+    ).toBe(400);
+    const off = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: false } });
+    expect(off.status).toBe(200);
+    expect(off.body.settings.recordings).toEqual({ autoSummary: false });
+    const on = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: true } });
+    expect(on.body.settings.recordings).toEqual({ autoSummary: true });
   });
 
   test("people and models", async () => {

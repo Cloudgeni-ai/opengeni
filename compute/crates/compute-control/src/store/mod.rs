@@ -458,8 +458,9 @@ pub trait Store: Send + Sync + 'static {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
 
-    /// The stored image recorded as built from the OCI image `source` (a
-    /// reference pinned by digest), if one was.
+    /// The stored image recorded as built from `source`, if one was: an
+    /// OCI image (a reference pinned by digest), with the guest programs
+    /// it names if it names any ([`crate::images::built_key`]).
     fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 
     /// Records `image` as built from `source` at `at_ms`, unless an image

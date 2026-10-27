@@ -1298,8 +1298,10 @@ const SettingsSchema = z.object({
     })
     .default("gpt-6-luna"),
   // Preferred effort for the credits default. Clamped to the highest effort
-  // the selected model supports at or below this value.
-  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
+  // the selected model supports at or below this value. Medium, the model's
+  // own default: most first chats are everyday questions that should answer
+  // quickly; anyone can raise it per chat or save a higher workspace default.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("medium"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
@@ -5236,6 +5238,32 @@ export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = 
       },
     ],
   },
+  // Reviewed 2026-10-27 against https://developers.openai.com/api/docs/pricing
+  // and https://openai.com/index/introducing-gpt-6-1-terra/. GPT-6.1 Terra is
+  // half of GPT-6.1 Sol: 5% cache reads, 30-minute cache writes at 1.25x
+  // input, and the same whole-request >272K schedule (2x input/cache, 1.5x
+  // output). OpenAI serves no Ultrafast tier for it.
+  "gpt-6.1-terra": {
+    default: {
+      inputMicrosPerMillionTokens: 1_000_000,
+      cachedInputMicrosPerMillionTokens: 50_000,
+      cacheWriteMicrosPerMillionTokens: 1_250_000,
+      outputMicrosPerMillionTokens: 5_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: 100_000,
+          cacheWriteMicrosPerMillionTokens: 2_500_000,
+          outputMicrosPerMillionTokens: 7_500_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
   // xAI Standard API list rates, reviewed 2026-10-03:
   // https://docs.x.ai/developers/models/grok-4.5 (and grok-4.6 / grok-4.7).
   // Preserve the native API's established >=200K boundary. Gateway's separately
@@ -7887,6 +7915,10 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "6 Sol";
     case "gpt-6-luna":
       return "6 Luna";
+    case "gpt-6.1-sol":
+      return "6.1 Sol";
+    case "gpt-6.1-terra":
+      return "6.1 Terra";
     default:
       return null;
   }
@@ -9443,8 +9475,11 @@ export function resolveModelProvider(
   settings: Settings,
   modelId: string,
 ): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined {
-  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
-  const model = configuredModels(settings).find((candidate) => candidate.id === canonicalModelId);
+  // Canonical ids take precedence over aliases within one freshly built catalog.
+  const models = configuredModels(settings);
+  const model =
+    models.find((candidate) => candidate.id === modelId) ??
+    models.find((candidate) => candidate.aliases.includes(modelId));
   if (!model) {
     return undefined;
   }

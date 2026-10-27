@@ -951,6 +951,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createBotTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/bot-templates",
+    "request": [
+      "CreateBotTemplateRequest"
+    ],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
+    ]
+  },
+  {
     "id": "createBrowserIdentity",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-identities",
@@ -1695,6 +1707,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteAutomationTemplate",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/automation-templates/:templateId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteBotTemplate",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
     "request": [],
     "response": []
   },
@@ -3127,6 +3146,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "workspaceId"
     ],
     "response": []
+  },
+  {
+    "id": "getBotTemplate",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+    "request": [],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
+    ]
   },
   {
     "id": "getBrowserActionReceipt",
@@ -4906,6 +4935,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "AvailableOpenGeniSlackBots"
     ],
     "permission": "connections:read"
+  },
+  {
+    "id": "listBotTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/bot-templates",
+    "request": [],
+    "response": [
+      "ListBotTemplatesResponse",
+      "WorkspaceBotTemplate"
+    ]
   },
   {
     "id": "listBrowserDiagnostics",
@@ -8959,6 +8998,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SubscriptionDeviceSignInStart"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.userCode"
     ]
@@ -9236,6 +9276,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "updateBotTemplate",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+    "request": [
+      "UpdateBotTemplateRequest"
+    ],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
     ]
   },
   {

@@ -26,10 +26,8 @@ import {
   loadWorkspaceProviderApiKey,
   organizationModelProviderConnectionActiveForWorkspace,
   loadWorkspaceVercelAiGatewayApiKey,
-  readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
   SUBSCRIPTION_CORE_XAI,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   subscriptionCoreOperationConnections,
   subscriptionCoreXaiRequestAuth,
   type Database,
@@ -342,14 +340,6 @@ const supergrokProvider: RealtimeWebsocketProvider = {
         "credential_unavailable",
         "No eligible connected SuperGrok account is available",
       );
-    const route = await readSubscriptionCoreProviderRouteForWorkspace(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
-    });
-    // SuperGrok realtime runs only on the shared core; any other route
-    // (maintenance, or no receipt) has no eligible account.
-    if (route !== "core") throw unavailable();
     // The deployment switch for SuperGrok subscriptions, as the Codex broker checks its own.
     if (!input.settings.supergrokSubscriptionEnabled) throw unavailable();
     const context = {

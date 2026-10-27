@@ -1,5 +1,63 @@
 # @opengeni/db
 
+## 5.5.1
+
+### Patch Changes
+
+- 1600e2d: A managed browser, or an attached Chrome's debugger connection, is no longer stopped as idle while the agent session that created or is using it is still working (a turn queued, running, recovering, waiting for capacity or waiting on a person) or deliberately waits (`wait_for_input`). Every two minutes the API lists the browsers held this way (`listAgentHeldBrowserSessions`, migration `1002_browser_wait_hold`) and renews a short hold on each running browser's controller (`POST /v1/browser-sessions/:id/wait-hold`, `BrowserControlClient.holdForWait`): keep it at least five more minutes. A hold only ever extends, so overlapping renewals from several API processes are harmless and nothing needs to end one; once the session neither works nor waits the renewals stop, the hold lapses and the normal idle time counts from its end. The idle release keeps the browser, tabs and page state, but never longer than `BROWSER_WAIT_HOLD_MAX_MS` (60 minutes) after the browser's last use, so a long turn or repeated waits cannot keep a browser nobody uses. Renewals reach a Connected Machine or attached Chrome as the person who most recently started a turn of the holding session, through the explicit `browser.hold` operation with no request grant; a browser held only by sessions no person started is renewed only through a sandbox's cached controller endpoint. A browser held at controller shutdown is handed off and kept by the successor, and a renewal after a restart keeps a handed-off browser the new controller has not adopted yet. A sandbox box holding such a browser is not released as idle under the same rule. A renewal never launches, recovers or counts as a use of a browser and never starts a sandbox; a controller that predates it keeps its plain idle release. Browsers that only observed, and browsers no working or waiting session holds, are released as before.
+
+  `list_agent_held_browser_sessions` ships with its runtime `EXECUTE` withheld for one release (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`), because the previous release's readiness rejects a runtime grant on a SECURITY DEFINER routine it does not know. Until a later migration grants it, the API lists nothing and renews no controller holds; the sandbox box release applies the rule from this release on.
+
+- 093b9e2: Rotating the runtime database password no longer fails operations when many connections log in at the moment a pool switches passwords. Each refused login (SQLSTATE `28P01`) is now attributed to the password that login actually used, captured when it asked for its password, instead of to the password the operation saw when it started. A refusal of a password the pool has already replaced (a stale refusal) never moves the pool. An operation is retried whenever the pool then selects another password than the refused login used (a stale refusal, or a fresh one that moved the pool on, including back to a password a rollback made valid again), under a hard cap of five attempts; a single configured password still fails fast. The five-second straggler grace is removed, so a pool switches back at once when the password it switched to is refused (for example during a rollback); `DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS` (now 0) and the `staleFailureGraceMs`/`now` options remain only as ignored, deprecated compatibility shims. `RotatingDatabasePassword.password(login)` records the position per login, `reportAuthenticationFailure` returns whether the refusal was stale, the `candidate_refused` event gains a `stale` flag and `candidates_exhausted` a `reason` (`every_candidate_refused` or `attempt_cap`). The session-list LISTEN connection retries a newly selected password at once at most four times until it listens again or the files change.
+
+  Credential events now reach structured logs with their pool and facts: they are logged under the reviewed public fields `databasePool`, `credentialIndex`, `credentialFromIndex`, `credentialToIndex`, `credentialCandidates`, `credentialStale`, `credentialFile`, `credentialFileErrorCode` and `reason` (previously the public log projection dropped `pool` and the index fields). Refusals are logged too; repeated refusal, switch and exhaustion lines of one pool are rate-limited (once per 10 seconds per kind, with `suppressedCount`). The exhaustion message is now "database credential retries exhausted". New Prometheus counters, labelled by `pool`: `opengeni_database_credential_refusals_total` (`index`, `refusal` = `stale`|`fresh`), `opengeni_database_credential_switches_total` (`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total` (`index`, `reason`) and `opengeni_database_credential_reloads_total` (`candidates`). `observeDatabaseCredentialEvents(pool, observability)` wires both; `databaseCredentialEventAttributes` and `DATABASE_CREDENTIAL_METRICS` are exported.
+
+- a4b57e6: In-chat connection requests now read the same to the person and to the agent, and the sign-in window ends cleanly in embedded chats. When the person in the chat can't connect the requested integration from the card (their access doesn't allow it), `capability_authorization_request` now tells the agent so, instead of the generic "posted for confirmation" message, so it no longer asks them to use a card that can't help them. Results for people who can connect are unchanged. The card and the server share one rule for this decision (`inChatCapabilitySetup` in contracts), and the server applies it to the same access the person's chat has: what their sign-in could do when they sent the turn's message, or their latest message in that chat for a turn the platform started for them, such as a wake-up, a child's result or a goal continuation (an embed token narrows it, and their own workspace counts without a membership). Without such a message it falls back to their membership (`readTurnSenderAccess` in db). The console's chat card uses the same rule, so it no longer offers Connect to a member the agent was told can't connect.
+
+  In-chat connect cards also start sign-in with a new optional `finishInPopup: true` flag on `POST /v1/workspaces/:workspaceId/connect/attempts`. The provider's callback then lands on a small server page that closes the sign-in window (or tells the person they can close it) instead of loading a second copy of the host page in the popup. Without the flag the return URL behaves as before. Against an older server that rejects the unknown field, `ConnectController.begin` starts again without it, so sign-in keeps working and returns to the host page as before. Browser cards set it, because they sign in through a popup. Phone cards don't, because the system sign-in browser returns to the app.
+
+  Reviewed catalog integrations no longer carry an "MCP server" label on their connection cards and dialogs, on the web and on the phone. They read as the service itself, with its name and provider. Servers someone added by hand, and registry entries nobody reviewed, keep the label (`showsMcpServerLabel` in `@opengeni/react/in-chat-connect-model`).
+
+- d569481: `OnboardingUseCase` gains `everyday`, with `isOnboardingUseCase`. The self-service organization setup request accepts `useCase: "everyday"`, and migration 1006 lets the organization keep that answer as itself (the first answer still wins). In the web app, "How do you want to use Opengeni?" now leads with "Get help with everyday things", which creates an organization named after the person and goes straight to the model step and their first chat; the two existing choices are unchanged.
+- 9e8fb2f: A message sent with personal resources (a connected machine, rig or variable set) just after the chat's access changed, for example right after it was made private, now gets a 409 that says the chat's access changed and asks to check the attached resources and send it again. It used to fail with a generic 500. The same refusals for an invalid, unauthorized or conflicting attachment now reach the client as the 422, 403 and 409 they were meant to be, instead of being reported as database persistence failures.
+- 83bd1e4: Closes several trust-boundary gaps reported by Vasu Bansal (#2664). The stream relay now enforces the viewer token's mode: a watch-only token can no longer type into or close a terminal, or send desktop input, and every input or close must name the viewer's own stream. Dropped messages are counted in `opengeni_relay_unauthorized_drops_total`. A connection replaced by a reconnect can no longer act on its successor. Terminal tokens for viewers with terminal access carry input authority, independent of desktop control. Approving a tool call that needs a person's approval now requires a person: an organization API key acting as itself gets 403 and must approve on behalf of a verified external actor (`x-opengeni-external-actor`), after the host shows its own approval UI. Managed sign-in no longer fails when the API host's clock runs ahead of the database, and the device-enrollment rate limiter no longer grows without bound.
+- fbcc3cd: Modal commands now use only the byte-offset task-router locator. The batch-index `modal-control-v1` reader, its `ModalLegacyProviderCommand` schema and the append-then-acknowledge output path that only it used are removed.
+- b56bf3f: Internal cleanup with no behaviour change. `@opengeni/contracts/values` holds the shared `isRecord`, `errorMessage` and `sha256Hex` helpers that packages had each copied, the database package walks nested driver errors with one shared generator, and the SDK's three workspace streams share one reconnecting stream loop.
+- 031e173: The person's current answer to "How do you want to use Opengeni?" is kept on the server per organization (migration 1007). `GET /v1/organization-memberships` returns it as an optional `signupUseCase`, and the new `PUT /v1/auth/organization-onboarding/use-case` changes it for an organization the person belongs to. In the web app, going Back and choosing again updates it, and the new-chat suggestions follow the account to any browser; the first answer is still recorded as before.
+- d450fe5: A published Site in a personal workspace now accepts follow-up messages from guests and signed-in visitors outside the workspace. Prompt admission refused every human-less prompt in a personal workspace with `PERSONAL_SESSION_OWNER_REQUIRED`, while the turn itself already starts there in the Workspace destination with learning off (migration 0868), so a visitor's first turn worked and every later message failed. Admission now treats only private and user-memory sessions as personal memory, matching the turn's own guard.
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [b2e3119]
+- Updated dependencies [c09ae08]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [f980186]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/codemode@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/observability@5.5.0
+  - @opengeni/config@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/network@5.5.0
+  - @opengeni/subscriptions@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes

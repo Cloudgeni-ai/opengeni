@@ -3,15 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  GRANDFATHERED_MIGRATIONS,
-  GRANDFATHERED_VACUOUS_GUARDS,
   MIGRATIONS_DIR,
   analyzeMigrationRlsBackfills,
   readsTable,
   splitStatements,
-  staleAllowlistEntries,
   stripComments,
-  unreviewedFindings,
   writesTable,
 } from "./migration-rls-backfills";
 
@@ -122,6 +118,13 @@ describe("catalog-filtered owner posture window", () => {
   });
 });
 
+describe("the shipped migrations", () => {
+  test("have no FORCE-RLS backfill without an owner-visible window", () => {
+    const violations = analyzeMigrationRlsBackfills(join(import.meta.dir, "..", MIGRATIONS_DIR));
+    expect(violations.map((violation) => `${violation.file}:${violation.statement}`)).toEqual([]);
+  });
+});
+
 describe("splitStatements", () => {
   test("keeps a dollar-quoted body as one statement", () => {
     const statements = splitStatements(
@@ -156,80 +159,50 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
-  test("0697 catalog definition classification requires exact statement bytes", () => {
+  test("0995 catalog definition classification requires exact statement bytes", () => {
     const patch = readFileSync(
-      new URL("../packages/db/drizzle/0697_codex_retry_after_unknown_outcome.sql", import.meta.url),
+      new URL(
+        "../packages/db/drizzle/0995_membership_same_role_keeps_authority.sql",
+        import.meta.url,
+      ),
       "utf8",
     );
     const analyze = (sql: string) =>
       analyzeMigrationRlsBackfills(
         fixture({
-          "0001_base.sql": FORCED_TABLE.replaceAll("widgets", "session_turn_attempts"),
+          "0001_base.sql": FORCED_TABLE.replaceAll("widgets", "organization_memberships"),
           "0002_patch.sql": sql,
         }),
       );
     expect(analyze(patch)).toEqual([]);
     // Even comment-only drift loses the exact source classification.
-    expect(analyze(patch.replace("-- An explicit Retry", "-- A changed Retry"))).toMatchObject([
-      { kind: "vacuous-guard", tables: ["session_turn_attempts"] },
+    expect(
+      analyze(patch.replace("-- Resolve in this deployment", "-- Resolve in the deployment")),
+    ).toMatchObject([{ kind: "write", tables: ["organization_memberships"] }]);
+    expect(
+      analyze(patch.replace("END\n$patch$", "DELETE FROM organization_memberships; END\n$patch$")),
+    ).toMatchObject([{ kind: "write", tables: ["organization_memberships"] }]);
+    expect(analyze(`${patch}\nDELETE FROM organization_memberships;`)).toMatchObject([
+      { kind: "write", statement: 4, tables: ["organization_memberships"] },
     ]);
     expect(
       analyze(
-        patch.replace(
-          "END\n$retry_after_unknown$",
-          "DELETE FROM session_turn_attempts; END\n$retry_after_unknown$",
-        ),
+        `${patch}\nDO $guard$ BEGIN IF EXISTS (SELECT 1 FROM organization_memberships) THEN RAISE EXCEPTION 'actual guard'; END IF; END $guard$;`,
       ),
-    ).toMatchObject([{ kind: "write", tables: ["session_turn_attempts"] }]);
-    expect(analyze(`${patch}\nDELETE FROM session_turn_attempts;`)).toMatchObject([
-      { kind: "write", statement: 2, tables: ["session_turn_attempts"] },
+    ).toMatchObject([
+      { kind: "vacuous-guard", statement: 4, tables: ["organization_memberships"] },
     ]);
-    expect(
-      analyze(
-        `${patch}\nDO $guard$ BEGIN IF EXISTS (SELECT 1 FROM session_turn_attempts) THEN RAISE EXCEPTION 'actual guard'; END IF; END $guard$;`,
-      ),
-    ).toMatchObject([{ kind: "vacuous-guard", statement: 2, tables: ["session_turn_attempts"] }]);
     const changedDynamicSql = patch
       .replace(/anchor := \$old\$[\s\S]*?\$old\$;/, "anchor := $old$OR REPLACE FUNCTION$old$;")
       .replace(
         /\$new\$[\s\S]*?\$new\$/,
-        "$new$TABLE scratch (id int); DELETE FROM session_turn_attempts; CREATE OR REPLACE FUNCTION$new$",
+        "$new$TABLE scratch (id int); DELETE FROM organization_memberships; CREATE OR REPLACE FUNCTION$new$",
       );
     expect(analyze(changedDynamicSql)).toMatchObject([
-      { kind: "write", tables: ["session_turn_attempts"] },
+      { kind: "write", tables: ["organization_memberships"] },
     ]);
   });
 
-  test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
-    const migration = readFileSync(
-      new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),
-      "utf8",
-    );
-    const patch = migration.match(/DO \$resolver\$[\s\S]*?END \$resolver\$;/)![0];
-    const analyze = (sql: string) =>
-      analyzeMigrationRlsBackfills(
-        fixture({
-          "0001_base.sql": FORCED_TABLE.replaceAll(
-            "widgets",
-            "turn_connection_authority_snapshots",
-          ),
-          "0002_patch.sql": sql,
-        }),
-      );
-    expect(analyze(patch)).toEqual([]);
-    expect(
-      analyze(
-        patch.replace(
-          "END $resolver$",
-          `IF EXISTS (SELECT 1 FROM turn_connection_authority_snapshots)
-      THEN RAISE EXCEPTION 'actual migration guard'; END IF; END $resolver$`,
-        ),
-      ),
-    ).toMatchObject([{ kind: "vacuous-guard", tables: ["turn_connection_authority_snapshots"] }]);
-    expect(
-      analyze(patch.replace("EXECUTE replace(definition,anchor,insertion);", "EXECUTE insertion;")),
-    ).toMatchObject([{ kind: "vacuous-guard", tables: ["turn_connection_authority_snapshots"] }]);
-  });
   test("distinguishes catalog routine patches from executed dynamic SQL and real guards", () => {
     const patch = `DO $patch$ DECLARE definition text; replacement text; anchor text;
 BEGIN
@@ -320,6 +293,17 @@ END $patch$;`;
       analyze(
         patch.replace("EXECUTE definition;", "EXECUTE 'DELETE FROM widgets'; EXECUTE definition;"),
       ),
+    ).toHaveLength(1);
+    // Dollar-quoted fragments may hold unbalanced parentheses and semicolons.
+    const fragments = patch
+      .replace(
+        "'anchor one', 'DELETE FROM widgets;'",
+        "$a$f(x$a$, $b$f(g(x, (SELECT 1 FROM widgets);$b$",
+      )
+      .replace("'anchor two', 'UPDATE widgets SET id = id;'", "$c$) y$c$, $c$) z FROM widgets$c$");
+    expect(analyze(fragments)).toHaveLength(0);
+    expect(
+      analyze(fragments.replace("EXECUTE definition;", "EXECUTE definition; DELETE FROM widgets;")),
     ).toHaveLength(1);
   });
   test("treats pg_catalog-qualified routine patch built-ins like their bare forms", () => {
@@ -533,53 +517,6 @@ WHERE capability.enabled = '1';
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
   });
 
-  test("accepts only the exact governed runner capability for its batched migration", () => {
-    const policy = `
-CREATE TABLE new_session_drafts (id uuid PRIMARY KEY);
-ALTER TABLE new_session_drafts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE new_session_drafts FORCE ROW LEVEL SECURITY;
-CREATE POLICY draft_owner_repair ON new_session_drafts
-FOR ALL
-USING (
-  current_user = (
-    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
-    FROM pg_catalog.pg_class relation
-    WHERE relation.oid = 'new_session_drafts'::regclass
-  )
-  AND pg_catalog.current_setting(
-    'opengeni.new_session_draft_project_provenance_backfill_v1', true
-  ) = '1'
-)
-WITH CHECK (
-  current_user = (
-    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
-    FROM pg_catalog.pg_class relation
-    WHERE relation.oid = 'new_session_drafts'::regclass
-  )
-  AND pg_catalog.current_setting(
-    'opengeni.new_session_draft_project_provenance_backfill_v1', true
-  ) = '1'
-);
-`;
-    const backfill = `-- deployment-mode: rolling
--- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
-WITH candidates AS (SELECT id FROM new_session_drafts LIMIT 500)
-UPDATE new_session_drafts SET id = new_session_drafts.id FROM candidates
-WHERE new_session_drafts.id = candidates.id RETURNING new_session_drafts.id;
-`;
-    const accepted = fixture({
-      "0409_new_session_draft_project_provenance.sql": policy,
-      "0411_new_session_draft_project_provenance_backfill.sql": backfill,
-    });
-    expect(analyzeMigrationRlsBackfills(accepted)).toHaveLength(0);
-
-    const wrongFile = fixture({
-      "0409_new_session_draft_project_provenance.sql": policy,
-      "0413_unrelated_backfill.sql": backfill,
-    });
-    expect(analyzeMigrationRlsBackfills(wrongFile)).toHaveLength(1);
-  });
-
   test("does not trust a custom capability without an exact owner-pinned policy", () => {
     const directory = fixture({
       "0001_base.sql": FORCED_TABLE,
@@ -760,40 +697,5 @@ $backfill$;
 `,
     });
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(1);
-  });
-});
-
-describe("the shipped migration ledger", () => {
-  const migrationsDir = join(import.meta.dir, "..", MIGRATIONS_DIR);
-
-  test("has no unreviewed FORCE-RLS backfill", () => {
-    const violations = unreviewedFindings(analyzeMigrationRlsBackfills(migrationsDir));
-    expect(violations.map((violation) => `${violation.file}:${violation.statement}`)).toEqual([]);
-  });
-
-  test("carries no stale grandfathered entry", () => {
-    expect(staleAllowlistEntries(migrationsDir)).toEqual([]);
-  });
-
-  test("still recognises the three statements 0296 repairs", () => {
-    const findings = analyzeMigrationRlsBackfills(migrationsDir).filter(
-      (finding) => finding.kind === "write",
-    );
-    const tablesFor = (file: string) =>
-      findings.filter((finding) => finding.file === file).flatMap((finding) => finding.tables);
-    expect(tablesFor("0256_connection_authority_delegation.sql")).toContain("connections");
-    expect(tablesFor("0262_scoped_connected_machines_and_rigs.sql")).toContain("enrollments");
-    expect(tablesFor("0263_organization_membership_lifecycle.sql")).toContain(
-      "organization_memberships",
-    );
-  });
-
-  test("the repair migration itself is protected, not grandfathered", () => {
-    const repair = "0296_force_rls_backfill_noop_repair.sql";
-    expect(GRANDFATHERED_MIGRATIONS).not.toContain(repair);
-    expect(GRANDFATHERED_VACUOUS_GUARDS).not.toContain(repair);
-    expect(
-      analyzeMigrationRlsBackfills(migrationsDir).filter((finding) => finding.file === repair),
-    ).toEqual([]);
   });
 });

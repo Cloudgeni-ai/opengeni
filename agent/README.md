@@ -209,7 +209,7 @@ until they finish; new commands use the restored operation-cgroup manager.
 A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
 an explicit resource policy then fails closed. Optional per-enrollment memory and
-exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;
+exact integer-millicore CPU limits arrive on each newly admitted exec request;
 an in-flight command keeps its admitted snapshot. Limits compose with stricter local
 `OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` / `OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`
 or ancestor policy. Memory and CPU enforcement are separately advertised. Startup
@@ -295,7 +295,7 @@ the independent capability gate, exact upload lifecycle, supported Linux file
 semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
 transactional filesystem support.
 
-Per-request `run_as` (exec, git, PTY and file operations as another local user)
+Per-request `run_as` (exec, PTY and file operations as another local user)
 is gated by `Capabilities.run_as`, advertised only on Linux by a root agent; see
 [Run as another local user](../docs/connected-machines.md#run-as-another-local-user).
 The credential switches live in `opengeni-agent-linux-ffi`.

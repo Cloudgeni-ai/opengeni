@@ -2,8 +2,7 @@
 // tasks and their firings, agent messages and Steer (the receiving source),
 // child-result notices (the outbox), and the internal turn that delivers an
 // update — as the restricted application role. Values are copied, never
-// recomputed; non-human acceptance freezes the empty value; nothing is
-// written before the cutover.
+// recomputed; non-human acceptance freezes the empty value.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -39,14 +38,7 @@ const EMPTY: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [] };
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1", {
-    // A Codex-only world: the drained SuperGrok and Claude cutovers would write receipts.
-    withheldMigrations: [
-      "0747_subscription_core_xai_cutover.sql",
-      "0748_subscription_core_claude_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);
@@ -277,13 +269,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
 
   test("scheduled tasks freeze v2 once at creation; firings copy it, narrowed for another authorizer", async () => {
     const org = await organization();
-    // Before the cutover nothing is written: v1 stays authoritative.
-    const before = await task(org, org.personalWorkspaceId, {
-      kind: "subject",
-      subjectId: org.ownerSubjectId,
-    });
-    expect(await taskAuthority(before.id)).toEqual({ task: null, revision: null });
-
     await setCutover(org.accountId, true);
     await personalConnection(org);
     // The owner, in their own Personal workspace: their one current generation.
@@ -453,8 +438,6 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     const org = await organization();
     const target = await session(org, org.personalWorkspaceId);
     await acceptedTurn(org, org.personalWorkspaceId, target.id, org.ownerSubjectId, personal(org));
-    // Before the cutover: nothing.
-    expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toBeNull();
     await setCutover(org.accountId, true);
     // The owner's own work keeps the owner's frozen entry ...
     expect(await receiver(org, org.personalWorkspaceId, target.id, org.ownerSubjectId)).toEqual(

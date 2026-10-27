@@ -120,13 +120,11 @@ function payload(
 
 // Public usage/settings shapes now run only through core compatibility projections.
 beforeEach(() => {
-  const cutover = spyOn(opengeniDb, "readCodexCutoverDisposition").mockResolvedValue("core");
   const alias = spyOn(opengeniDb, "resolveSubscriptionCoreCodexConnectionId").mockImplementation(
     async (_db, input) => input.connectionId,
   );
   const wake = spyOn(opengeniDb, "deliverSubscriptionCoreCodexWake").mockResolvedValue(undefined);
   restores.push(
-    () => cutover.mockRestore(),
     () => alias.mockRestore(),
     () => wake.mockRestore(),
   );

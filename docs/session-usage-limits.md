@@ -14,8 +14,7 @@ fixed bound on that overshoot.
 
 Canonical sources: contracts in `packages/contracts/src/session-usage-limits.ts`
 and the zod-free refusal leaf `packages/contracts/src/session-usage-limit-refusal.ts`;
-storage, settlement and import in `packages/db/drizzle/0773_session_usage_limits.sql`
-and `packages/db/src/session-usage-limits.ts`; authority, edge admission and
+storage, settlement and import in `packages/db/src/session-usage-limits.ts`; authority, edge admission and
 write rules in `packages/core/src/session-usage-limits.ts`; worker admission in
 `apps/worker/src/activities/agent-turn/admission.ts`; HTTP routes in
 `apps/api/src/routes/sessions.ts`; diagnostics in
@@ -314,7 +313,7 @@ API and both workers when set. It gates producers only:
 
 1. Apply migrations 0773–0775 and provision the matching database roles. The
    tables live in `opengeni_private` with FORCE RLS and execute-only entry
-   points; the runtime posture and schema-contract checks include them. 0774
+   points; the runtime posture checks include them. 0774
    builds a partial attention index on `session_events` concurrently (rolling;
    its build time scales with the meaningful-event history), and 0775 replaces
    the cursor trigger routine so the attention frontier counts usage-limit

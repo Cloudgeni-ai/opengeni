@@ -238,6 +238,12 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        */
       liveTranscript: z.boolean().optional(),
       /**
+       * Write a summary into each meeting's notes once its transcript is
+       * ready. On when unset; `false` turns it off. An agent session writes
+       * it, like any chat, and never replaces notes someone already saved.
+       */
+      autoSummary: z.boolean().optional(),
+      /**
        * How long meetings are kept, in days after they were recorded. Unset
        * keeps them until someone deletes them. When `audioDays` passes, the
        * audio is deleted and the transcript stays (0 deletes it as soon as
@@ -267,7 +273,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),

@@ -17,11 +17,14 @@ const getBilling = mock(
 );
 const createBillingCheckout = mock(async () => ({ url: "https://checkout.test" }));
 const client = { getBilling, createBillingCheckout };
+// What the page did, in order: the draft saved, then the checkout opened.
+const pageSteps: string[] = [];
 
 mock.module("../lib/navigation", () => ({
   usePage: () => ({
     origin: () => window.location.origin,
-    assign: (url: string) => window.location.assign(url),
+    href: () => window.location.href,
+    assign: (url: string) => void pageSteps.push(`assign ${url}`),
   }),
   Link: ({
     children,
@@ -137,7 +140,7 @@ describe("credit required prompt", () => {
       );
     await render(true);
     expect(container.textContent).toContain("View upgrade options");
-    expect(container.textContent).toContain("Buy credits");
+    expect(container.textContent).toContain("Add credits");
     expect(
       container.querySelector('a[href="/workspaces/workspace-a/organization?section=billing"]'),
     ).not.toBeNull();
@@ -147,7 +150,7 @@ describe("credit required prompt", () => {
     });
     await render(true);
     expect(container.textContent).not.toContain("View upgrade options");
-    expect(container.textContent).toContain("Connect a model");
+    expect(container.textContent).toContain("Use your own provider account");
   });
 
   test("the notice follows selected-model funding rather than the total credit balance", async () => {
@@ -168,7 +171,9 @@ describe("credit required prompt", () => {
         ),
       );
     await render("unavailable");
-    expect(container.textContent).toContain("No credits are available for this model");
+    // Credit is left, only not for this model: say that, never "you don't have any".
+    expect(container.textContent).toContain("This model can't use the Opengeni credits you have");
+    expect(container.textContent).not.toContain("you don't have any");
     await render("promotional");
     expect(container.textContent).toBe("");
     await render("general");
@@ -209,8 +214,8 @@ describe("credit required prompt", () => {
       ),
     );
     expect(container.textContent).toContain("Add Opengeni credits to continue");
-    expect(container.textContent).toContain("Buy credits");
-    expect(container.textContent).toContain("Connect a model");
+    expect(container.textContent).toContain("Add credits");
+    expect(container.textContent).toContain("Use your own provider account");
     expect(
       container.querySelector(
         'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
@@ -218,7 +223,10 @@ describe("credit required prompt", () => {
     ).not.toBeNull();
   });
 
-  test("workspace top-up accepts a $10 gift package without requiring a model", async () => {
+  test("workspace top-up accepts a $10 gift package and returns to the page it started on", async () => {
+    (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(
+      "https://app.example.test/workspaces/workspace-a/sessions?draft=1#composer",
+    );
     createBillingCheckout.mockImplementationOnce(async () => {
       throw new Error("checkout test");
     });
@@ -240,7 +248,7 @@ describe("credit required prompt", () => {
     );
     expect(container.textContent).toContain("Add Opengeni credits");
     expect(container.textContent).toContain("Have a code?");
-    expect(container.textContent).not.toContain("Connect a model");
+    expect(container.textContent).not.toContain("Use your own provider account");
     const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
     await act(async () => {
       preset.value = "10.00";
@@ -253,9 +261,51 @@ describe("credit required prompt", () => {
     expect(createBillingCheckout).toHaveBeenCalledWith({
       amountUsd: 10,
       accountId: "account-a",
-      successUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=cancelled`,
+      successUrl:
+        "https://app.example.test/workspaces/workspace-a/sessions?draft=1&checkoutReturn=success&checkoutAccount=account-a&checkoutSession={CHECKOUT_SESSION_ID}",
+      cancelUrl:
+        "https://app.example.test/workspaces/workspace-a/sessions?draft=1&checkoutReturn=cancelled&checkoutAccount=account-a",
     });
+  });
+
+  test("the draft is saved before the page leaves for checkout, and a failed save doesn't block it", async () => {
+    for (const saves of [true, false]) {
+      pageSteps.length = 0;
+      const beforeLeave = mock(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        pageSteps.push("draft saved");
+        if (!saves) throw new Error("conflict");
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={client as never}
+            purpose="topup"
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            onOpenChange={() => undefined}
+            beforeLeave={beforeLeave}
+          />,
+        ),
+      );
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      await act(async () =>
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "Continue to Stripe")!
+          .click(),
+      );
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(beforeLeave).toHaveBeenCalledTimes(1);
+      expect(pageSteps).toEqual(["draft saved", "assign https://checkout.test"]);
+      await act(async () => root!.unmount());
+      root = undefined;
+      container.remove();
+    }
   });
 
   test("empty-credits notice appears only when the organization balance is empty", async () => {
@@ -273,16 +323,24 @@ describe("credit required prompt", () => {
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).toContain("This model uses Opengeni credits");
-    expect(container.textContent).toContain("Buy credits");
-    expect(container.textContent).toContain("Connect a model");
+    expect(container.textContent).toContain("Add credits to start chatting");
+    expect(container.textContent).toContain("you don't have any right now");
+    // Without an in-page prompt, Add credits opens billing.
+    expect(
+      [...container.querySelectorAll("a")].some(
+        (node) =>
+          node.textContent?.includes("Add credits") &&
+          node.getAttribute("href") === "/workspaces/workspace-a/organization?section=billing",
+      ),
+    ).toBeTrue();
+    expect(container.textContent).toContain("Use your own provider account");
     expect(
       container.querySelector(
         'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
       ),
     ).not.toBeNull();
     const connect = [...container.querySelectorAll("a")].find((node) =>
-      node.textContent?.includes("Connect a model"),
+      node.textContent?.includes("Use your own provider account"),
     );
     expect(connect?.closest(".min-w-0")).not.toBeNull();
 
@@ -303,7 +361,7 @@ describe("credit required prompt", () => {
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).not.toContain("This model uses Opengeni credits");
+    expect(container.textContent).not.toContain("Add credits to start chatting");
   });
 
   test("negative balance uses honest funding copy without claiming this is the first chat", async () => {
@@ -325,8 +383,60 @@ describe("credit required prompt", () => {
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).toContain("No credits are available for this model");
+    expect(container.textContent).toContain("you don't have any right now");
     expect(container.textContent).not.toContain("first chat");
+  });
+
+  test("Add credits opens the page's own prompt when one is given", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0 } });
+    const onAddCredits = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+          creditFunding="unavailable"
+          onAddCredits={onAddCredits}
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    const add = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Add credits",
+    );
+    expect(add).toBeDefined();
+    expect(
+      container.querySelector('a[href="/workspaces/workspace-a/organization?section=billing"]'),
+    ).toBeNull();
+    await act(async () => add!.click());
+    expect(onAddCredits).toHaveBeenCalledTimes(1);
+  });
+
+  test("without billing permission it says who can add credits", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits={false}
+          canReadBilling
+          creditFunding="unavailable"
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(container.textContent).toContain("No credits left");
+    expect(container.textContent).toContain("Ask an organization owner");
+    expect(container.textContent).not.toContain("Add credits");
   });
 
   test("disabled billing never shows an empty-credits notice", async () => {
@@ -364,7 +474,7 @@ describe("credit required prompt", () => {
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
     expect(getBilling).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("This model uses Opengeni credits");
+    expect(container.textContent).not.toContain("Add credits to start chatting");
   });
 
   test("hides purchase actions when billing is disabled", async () => {
@@ -386,7 +496,7 @@ describe("credit required prompt", () => {
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
     expect(
       [...container.querySelectorAll("button")].some(
-        (button) => button.textContent?.trim() === "Buy credits",
+        (button) => button.textContent?.trim() === "Add credits",
       ),
     ).toBeFalse();
   });
@@ -424,7 +534,7 @@ describe("credit required prompt", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const buy = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Buy credits",
+      (button) => button.textContent?.trim() === "Add credits",
     )!;
     expect(buy.disabled).toBeTrue();
     expect(createBillingCheckout).not.toHaveBeenCalled();
@@ -455,9 +565,9 @@ describe("credit required prompt", () => {
       );
     await act(async () => render("account-a"));
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).toContain("This model uses Opengeni credits");
+    expect(container.textContent).toContain("Add credits to start chatting");
     await act(async () => render("account-b"));
-    expect(container.textContent).not.toContain("This model uses Opengeni credits");
+    expect(container.textContent).not.toContain("Add credits to start chatting");
     await act(async () => resolveSecond({ mode: "stripe", balance: { balanceMicros: 1 } }));
   });
 });

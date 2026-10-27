@@ -66,6 +66,18 @@ class FakeChromeProfile {
     });
   }
 
+  /** A navigation of a tab's page starts; Chrome keeps listing the address it
+   * shows until the new page commits. */
+  startNavigation(tabId: string, url: string): void {
+    this.events.push({
+      sequence: this.events.length + 1,
+      tabId,
+      sessionId: null,
+      method: "Page.frameStartedNavigating",
+      params: { frameId: `frame-${tabId}`, url, navigationType: "differentDocument" },
+    });
+  }
+
   bridge(
     options: Pick<AttachedBrowserBridgeOptions, "connectionGeneration">,
   ): AttachedBrowserBridgeTransport {
@@ -275,14 +287,16 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       });
       const first = created.observation.target.id;
       expect(chrome.tabs.get(first)?.url).toBe(BLANK);
-      // The agent opens a second tab and works in it.
+      // The agent opens a second tab and works in it. The empty tab it
+      // started in closes as it moves on.
       const second = (await supervisor.openTarget(session)).target.id;
+      expect(chrome.closed("tabs.close")).toEqual([first]);
       chrome.tabs.get(second)!.url = "https://work.example.test/";
       expect(chrome.attached.size).toBeGreaterThan(0);
 
       clock.now += 11 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
-      // Only the session's own empty tab closed; the person's tab and the
+      // Only the session's own empty tab was closed; the person's tab and the
       // page the agent left stay, and Chrome is no longer being debugged.
       expect(chrome.closed("tabs.close")).toEqual([first]);
       expect([...chrome.tabs.keys()].sort()).toEqual(["1", second].sort());
@@ -308,7 +322,7 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       expect(recovered.observation.target.id).toBe(second);
       expect(chrome.requests.filter((request) => request.type === "tabs.create")).toHaveLength(2);
       await expect(supervisor.observe(session, first)).rejects.toThrow(
-        `this session closed this empty tab when it last released the browser; its current tab is ${second}`,
+        `this session closed this empty tab after it stopped using it; its current tab is ${second}`,
       );
 
       // An end leaves the page; it forgets the session's tabs.
@@ -316,6 +330,56 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       expect(chrome.tabs.has(second)).toBe(true);
       expect(chrome.attached.size).toBe(0);
       expect(ledger(root, 1)).toBeNull();
+    });
+  });
+
+  test("a session closes the empty tab it opened as soon as it moves to another tab, and nothing else", async () => {
+    await withChrome(async ({ chrome, root, open }) => {
+      const supervisor = await open();
+      const session = reference(7);
+      const start = (
+        await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
+      ).observation.target.id;
+      expect(chrome.tabs.get(start)?.url).toBe(BLANK);
+
+      // The agent moves to the person's tab: the empty tab it started in
+      // closes then, not ten idle minutes later.
+      await supervisor.selectTarget(session, "1");
+      expect(chrome.closed("tabs.close")).toEqual([start]);
+      await expect(supervisor.observe(session, start)).rejects.toThrow(
+        "browser target does not exist: this session closed this empty tab after it stopped using it; its current tab is 1",
+      );
+
+      // Moving away from the person's tab, or from a page the agent opened,
+      // closes nothing.
+      const page = (await supervisor.openTarget(session)).target.id;
+      chrome.tabs.get(page)!.url = "https://work.example.test/";
+      await supervisor.selectTarget(session, "1");
+      expect(chrome.closed("tabs.close")).toEqual([start]);
+      expect([...chrome.tabs.keys()].sort()).toEqual(["1", page].sort());
+      expect(ledger(root, 7)).toMatchObject({
+        createdTabs: [page],
+        selectedTab: "1",
+        closedBlankTabs: [start],
+      });
+    });
+  });
+
+  test("an empty tab on its way to a page stays when the session moves away from it", async () => {
+    await withChrome(async ({ chrome, open }) => {
+      const supervisor = await open();
+      const session = reference(8);
+      const start = (
+        await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
+      ).observation.target.id;
+      // A navigation started in the empty tab; Chrome still lists it blank.
+      chrome.startNavigation(start, "https://slow.example.test/");
+      await Bun.sleep(300);
+      expect(chrome.tabs.get(start)?.url).toBe(BLANK);
+
+      await supervisor.selectTarget(session, "1");
+      expect(chrome.closed("tabs.close")).toEqual([]);
+      expect(chrome.tabs.has(start)).toBe(true);
     });
   });
 

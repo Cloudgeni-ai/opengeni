@@ -88,63 +88,52 @@ function databaseUrl(database: string, role?: string, password?: string): string
 // contract. The container OUTLIVES checkouts — it persists across sessions and
 // is shared by every worktree on the machine — so a bare name would freeze the
 // schema/ACLs at whichever checkout first built it. Baking every template input
-// into the name gives each exact contract its own immutable template.
+// into the name gives each exact contract its own immutable template. Inputs are
+// identified by their path INSIDE the db package, never by absolute path, so
+// every checkout with the same contract (parallel worktrees, fresh clones)
+// shares one template instead of building its own.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
-/** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
-const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+/** This checkout's @opengeni/db package, whose `migrate()` builds the template. */
+const DB_PACKAGE_DIR = fileURLToPath(new URL("../../db", import.meta.url));
+/** Template inputs besides the migrations, relative to the db package. */
 const TEMPLATE_CONTRACT_FILES = [
-  fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/migration-postgres-compatibility.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/knowledge-migration.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
+  "src/migrate.ts",
+  "src/migration-baseline.ts",
+  "src/provision-roles.ts",
+  "src/runtime-posture.ts",
 ] as const;
 
 let templateDbNameMemo: string | undefined;
 
 /**
- * Migrations a variant template records in its ledger without applying, for
- * test files that characterize the world before a maintenance cutover (for
- * example a provider's legacy runtime before its drained subscription-core
- * cutover). Every other migration applies as usual.
+ * `og_test_template_<12-hex>` for the migration chain and template contract of
+ * the db package at `dbPackageDir`. Depends only on file names and contents
+ * relative to that package, so identical checkouts get the same template.
  */
-export type SharedTestDatabaseOptions = {
-  withheldMigrations?: readonly string[];
-};
-
-/** `og_test_template_<12-hex>` — the fingerprint of THIS checkout's migration
- *  chain, plus `_w<8-hex>` for a variant that withholds migrations. Memoized
- *  (the chain cannot change within a process lifetime). */
-async function templateDbName(withheld: readonly string[] = []): Promise<string> {
-  const base = await baseTemplateDbName();
-  if (withheld.length === 0) return base;
-  const variant = new Bun.CryptoHasher("sha256")
-    .update([...new Set(withheld)].sort().join("\0"))
-    .digest("hex")
-    .slice(0, 8);
-  return `${base}_w${variant}`;
-}
-
-async function baseTemplateDbName(): Promise<string> {
-  if (templateDbNameMemo) {
-    return templateDbNameMemo;
-  }
-  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => file.endsWith(".sql")).sort();
+export async function sharedTestTemplateName(dbPackageDir: string): Promise<string> {
+  const migrationsDir = join(dbPackageDir, "drizzle");
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const hasher = new Bun.CryptoHasher("sha256");
   for (const file of files) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
+    hasher.update(await readFile(join(migrationsDir, file)));
     hasher.update("\0");
   }
   for (const file of TEMPLATE_CONTRACT_FILES) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(file));
+    hasher.update(await readFile(join(dbPackageDir, file)));
     hasher.update("\0");
   }
-  templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+  return `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+}
+
+/** THIS checkout's template name. Memoized (the chain cannot change within a
+ *  process lifetime). */
+async function templateDbName(): Promise<string> {
+  templateDbNameMemo ??= await sharedTestTemplateName(DB_PACKAGE_DIR);
   return templateDbNameMemo;
 }
 
@@ -457,11 +446,11 @@ async function waitForReady(url: string): Promise<void> {
 }
 
 /** Is the migrated template database present and marked ready? */
-async function templateReady(withheld: readonly string[] = []): Promise<boolean> {
+async function templateReady(): Promise<boolean> {
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     const rows = await root`
-      SELECT 1 FROM pg_database WHERE datname = ${await templateDbName(withheld)} AND datistemplate`;
+      SELECT 1 FROM pg_database WHERE datname = ${await templateDbName()} AND datistemplate`;
     return rows.length > 0;
   } catch {
     return false;
@@ -479,14 +468,14 @@ async function templateReady(withheld: readonly string[] = []): Promise<boolean>
  * `datistemplate` guard makes it idempotent and self-healing after a crash
  * mid-build (a leftover non-template DB of the same name is dropped + rebuilt).
  */
-async function ensureTemplateBuilt(withheld: readonly string[] = []): Promise<void> {
-  if (await templateReady(withheld)) {
+async function ensureTemplateBuilt(): Promise<void> {
+  if (await templateReady()) {
     return;
   }
   const { migrate } = await import("@opengeni/db/migrate");
   const { provisionRoles } = await import("@opengeni/db/provision-roles");
   // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
-  const TEMPLATE_DB = await templateDbName(withheld);
+  const TEMPLATE_DB = await templateDbName();
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     await root.unsafe(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
@@ -496,28 +485,8 @@ async function ensureTemplateBuilt(withheld: readonly string[] = []): Promise<vo
   }
 
   const templateUrl = databaseUrl(TEMPLATE_DB);
-  if (withheld.length > 0) {
-    // A variant records its withheld migrations as applied so migrate()
-    // skips exactly those (same ledger shape migrate() creates).
-    const known = new Set((await readdir(MIGRATIONS_DIR)).filter((file) => file.endsWith(".sql")));
-    const unknown = withheld.filter((name) => !known.has(name));
-    if (unknown.length > 0) {
-      throw new Error(`shared-pg: unknown withheld migrations: ${unknown.join(", ")}`);
-    }
-    const ledger = postgres(templateUrl, { max: 1, onnotice: () => undefined });
-    try {
-      await ledger.unsafe(
-        `CREATE TABLE "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
-      );
-      for (const name of new Set(withheld)) {
-        await ledger`INSERT INTO "schema_migrations" ("name") VALUES (${name})`;
-      }
-    } finally {
-      await ledger.end().catch(() => undefined);
-    }
-  }
-  // Apply the full migration chain once (pgvector extension is created by
-  // 0000_initial inside migrate()).
+  // Apply the full migration chain once (the baseline creates the pgvector
+  // extension inside migrate()).
   await migrate(templateUrl);
 
   // Apply the exact production role/DML contract. Clones inherit these object
@@ -746,15 +715,13 @@ async function createDatabase(dbName: string): Promise<void> {
  * the template as "being accessed by other users" — a transient that clears in
  * milliseconds — so retry a few times before giving up.
  */
-async function cloneFromTemplate(dbName: string, withheld: readonly string[] = []): Promise<void> {
+async function cloneFromTemplate(dbName: string): Promise<void> {
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {
-        await root.unsafe(
-          `CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName(withheld)}"`,
-        );
+        await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`);
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
@@ -808,14 +775,11 @@ function uniqueDbName(label: string): string {
  */
 export async function acquireSharedTestDatabase(
   label = "test",
-  options: SharedTestDatabaseOptions = {},
 ): Promise<SharedTestDatabase | null> {
   const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;
   }
-  const withheld = options.withheldMigrations ?? [];
-
   const dbName = uniqueDbName(label);
   const adminUrl = databaseUrl(dbName);
   const appUrl = databaseUrl(dbName, "opengeni_app", APP_PASSWORD);
@@ -824,8 +788,7 @@ export async function acquireSharedTestDatabase(
     // Clone this file's database from the once-migrated template. Postgres does a
     // file-level copy, so the fully-migrated schema + opengeni_app grants land in
     // ~100ms instead of replaying the whole migration chain per file.
-    if (withheld.length > 0) await withLock(() => ensureTemplateBuilt(withheld));
-    await cloneFromTemplate(dbName, withheld);
+    await cloneFromTemplate(dbName);
 
     const admin = postgres(adminUrl, { max: 4 });
 

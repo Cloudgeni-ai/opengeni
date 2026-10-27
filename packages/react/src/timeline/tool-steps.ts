@@ -84,6 +84,7 @@ export const TOOL_STEP_IDS = [
   "runCode",
   "runCommand",
   "runSchedule",
+  "saveBotTemplate",
   "saveGuide",
   "saveMeetingNotes",
   "saveNote",
@@ -127,6 +128,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   // Chats, goals and notifications
   set_session_title: "nameChat",
   set_other_session_title: "nameChat",
+  bot_template_save: "saveBotTemplate",
   notify_user: "notify",
   notification_withdraw: "withdrawNotification",
   inbox_tidy: "tidyInbox",

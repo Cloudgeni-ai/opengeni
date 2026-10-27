@@ -14,8 +14,12 @@ class FakeNotification extends EventEmitter {
 export const electronStub = {
   app: { isPackaged: true },
   BaseWindow: EventEmitter,
+  BrowserWindow: EventEmitter,
   WebContentsView: EventEmitter,
   clipboard: {},
+  contextBridge: { exposeInMainWorld: (_key: string, _api: unknown): void => {} },
+  ipcRenderer: new EventEmitter(),
+  nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
   nativeTheme: {},
   screen: {},
   shell: { openExternal: async (_url: string): Promise<void> => {} },

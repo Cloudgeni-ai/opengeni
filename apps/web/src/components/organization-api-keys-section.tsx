@@ -49,7 +49,7 @@ type CreateOrganizationApiKeyRequest = Parameters<
 >[1];
 type CreateApiKeyResponse = Awaited<ReturnType<OpenGeniBrowserClient["createOrganizationApiKey"]>>;
 
-export type OrganizationApiKeysSectionProps = {
+type OrganizationApiKeysSectionProps = {
   organizationId: string;
   canManage: boolean;
   listApiKeys: () => Promise<ApiKey[]>;

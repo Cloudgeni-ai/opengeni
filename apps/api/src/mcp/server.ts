@@ -185,6 +185,12 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import {
+  SESSION_PROFILE_TOOL_GUIDANCE,
+  registerBotTemplateTools,
+  sessionProfileToolInputShape,
+  setSessionProfileFromTool,
+} from "./session-profile-tools";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
@@ -319,7 +325,6 @@ import {
   sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
-  updateSessionTitle,
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -1239,20 +1244,30 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description:
-          "Set this session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once on a new session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
-        inputSchema: { title: z4.string().min(1).max(200) },
+        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        inputSchema: {
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
+        },
       },
-      async ({ title }) => {
+      async (input) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
-        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, sessionId, input));
       },
     );
+  }
+  // A bot saves itself as a template people can start new bots from.
+  if (sessionId !== null) {
+    registerBotTemplateTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
@@ -6828,22 +6843,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "set_other_session_title",
       {
-        description:
-          "Set another session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. The target session must belong to this workspace. Replaces an existing automatic title unless a human has manually set it.",
+        description: `Name a chat other than this one, by its session_id, or set its description and avatar. A title is a concise 3-7 word topic label with the same rules as set_session_title, unless the person gave the name. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           session_id: z4.string().uuid(),
-          title: z4.string().min(1).max(200),
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
         },
       },
-      async ({ session_id, title }) => {
+      async ({ session_id, ...input }) => {
         await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, session_id, input));
       },
     );
 

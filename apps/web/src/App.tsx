@@ -25,6 +25,7 @@
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
+//   /workspaces/:id/bot-templates            → bot templates saved in the workspace (start, import, export)
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -252,6 +253,10 @@ const LazyEventSourceDetailRoute = lazyRouteComponent(
 const LazyAutomationTemplatesRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "AutomationTemplatesRoute",
+);
+const LazyBotTemplatesRoute = lazyRouteComponent(
+  () => import("@/routes/bot-templates"),
+  "BotTemplatesRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -772,6 +777,11 @@ const workspaceAutomationTemplatesRoute = createRoute({
   path: "automations/templates",
   component: AutomationTemplates,
 });
+const workspaceBotTemplatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "bot-templates",
+  component: BotTemplates,
+});
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
 const workspaceLegacySchedulesRoute = createRoute({
@@ -1072,6 +1082,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
     workspaceLegacyScheduleDetailRoute,
@@ -1340,6 +1351,11 @@ function EventSourceDetail() {
 function AutomationTemplates() {
   const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
   return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
+}
+
+function BotTemplates() {
+  const { workspaceId } = workspaceBotTemplatesRoute.useParams();
+  return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
 }
 
 function LegacySchedulesRedirect() {

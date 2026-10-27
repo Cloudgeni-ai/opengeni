@@ -60,9 +60,6 @@ function fixture() {
   const actions: string[] = [];
   const persistence: ProviderCommandPersistence = {
     load: async () => structuredClone(retained),
-    acknowledge: async () => {
-      throw new Error("not legacy");
-    },
     reserveInput: async () => {
       if (intent) throw new Error("cancelled");
       actions.push("stdin-admitted");

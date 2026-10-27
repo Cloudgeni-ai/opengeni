@@ -104,7 +104,7 @@ mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
       </div>
     ) : null,
 }));
-const { ReviewTab, useReviewQueue } = await import("./knowledge-review");
+const { ReviewTab, useReviewQueue, newestReviewItemsFirst } = await import("./knowledge-review");
 
 function Harness() {
   const queue = useReviewQueue(workspaceId, 0);
@@ -241,4 +241,17 @@ test("an empty queue says so instead of showing an empty list", async () => {
     container.remove();
     instructions = true;
   }
+});
+
+test("changes waiting for review list newest first, undated ones after them", () => {
+  const item = (key: string, createdAt: string | null) => ({ key, createdAt });
+  expect(
+    newestReviewItemsFirst([
+      item("old knowledge", "2026-10-01T00:00:00.000Z"),
+      item("skill", null),
+      item("new knowledge", "2026-10-05T00:00:00.000Z"),
+      item("instruction", "2026-10-03T00:00:00.000Z"),
+      item("other skill", null),
+    ]).map((each) => each.key),
+  ).toEqual(["new knowledge", "instruction", "old knowledge", "skill", "other skill"]);
 });

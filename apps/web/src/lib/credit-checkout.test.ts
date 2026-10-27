@@ -2,7 +2,9 @@ import { describe, expect, mock, test } from "bun:test";
 
 import {
   billingCheckoutReturnUrl,
+  checkoutPageReturnUrl,
   checkoutTabReturnUrl,
+  readCheckoutPageReturn,
   startCreditCheckout,
   waitForCheckoutCredits,
 } from "@opengeni/react/app/lib/credit-checkout";
@@ -70,6 +72,41 @@ describe("credit checkout", () => {
     expect(parseCheckoutSessionId("{CHECKOUT_SESSION_ID}")).toBeNull();
     expect(parseCheckoutSessionId("cs_<script>")).toBeNull();
     expect(parseCheckoutSessionId(42)).toBeNull();
+  });
+
+  test("a purchase started from a chat returns to that page, replacing an earlier return", () => {
+    const success = checkoutPageReturnUrl(
+      "https://app.test/workspaces/ws/sessions/s1?draft=1&checkoutReturn=cancelled#composer",
+      "account-1",
+      "success",
+    );
+    expect(success).toBe(
+      "https://app.test/workspaces/ws/sessions/s1?draft=1&checkoutReturn=success&checkoutAccount=account-1&checkoutSession={CHECKOUT_SESSION_ID}",
+    );
+    expect(
+      checkoutPageReturnUrl("https://app.test/workspaces/ws/sessions", "account-1", "cancelled"),
+    ).toBe(
+      "https://app.test/workspaces/ws/sessions?checkoutReturn=cancelled&checkoutAccount=account-1",
+    );
+    const returned = new URL(success.replace("{CHECKOUT_SESSION_ID}", "cs_test_a1B2"));
+    expect(readCheckoutPageReturn(returned.searchParams)).toEqual({
+      outcome: "success",
+      accountId: "account-1",
+      checkoutSessionId: "cs_test_a1B2",
+    });
+  });
+
+  test("a malformed or missing chat return is ignored", () => {
+    const read = (query: string) => readCheckoutPageReturn(new URLSearchParams(query));
+    expect(read("")).toBeNull();
+    expect(read("checkoutReturn=cancelled")).toEqual({ outcome: "cancelled" });
+    expect(read("checkoutReturn=success&checkoutAccount=a")).toBeNull();
+    expect(read("checkoutReturn=success&checkoutSession=cs_test_1")).toBeNull();
+    expect(
+      read("checkoutReturn=success&checkoutAccount=a&checkoutSession={CHECKOUT_SESSION_ID}"),
+    ).toBeNull();
+    expect(read("checkoutReturn=success&checkoutAccount=a&checkoutSession=cs_<x>")).toBeNull();
+    expect(read("checkoutReturn=other&checkoutAccount=a&checkoutSession=cs_test_1")).toBeNull();
   });
 
   test("a code-only checkout opens in the tab the click opened", async () => {

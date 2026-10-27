@@ -3,7 +3,7 @@
  * Loaded lazily by MeetingRecorderProvider; renders nothing.
  */
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { desktopCapability } from "../app/lib/desktop";
+import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import { useRecorder } from "../recordings";
 
 import type { MeetingRecorderStore } from "./recorder-context";
@@ -51,7 +51,7 @@ export default function RecorderHost({
   // The desktop app doesn't offer to record a call while this page records
   // one, and offers to stop when the recorded call ends.
   useEffect(() => {
-    const detection = desktopCapability("meetingDetection")?.meetingDetection;
+    const detection = getDesktopMeetingDetection();
     if (!detection) return;
     detection.setRecording(capturing);
     return () => detection.setRecording(false);

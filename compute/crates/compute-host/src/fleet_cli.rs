@@ -87,6 +87,9 @@ pub struct Described<'a> {
     /// The names of what it offers sandboxes to reach (`--offer`), in
     /// order.
     pub offers: Vec<String>,
+    /// The digest of the guest programs it builds images with, if it
+    /// builds any.
+    pub guest: Option<String>,
 }
 
 impl FleetArgs {
@@ -123,6 +126,7 @@ impl FleetArgs {
                 boot: None,
             },
             image: self.image.clone(),
+            guest: host.guest.clone(),
             listen: self.listen,
             tls: TlsFiles {
                 cert: required(&self.cert, "--fleet-cert")?,

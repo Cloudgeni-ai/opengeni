@@ -23,6 +23,10 @@ export type UseNativeDictationOptions = {
   enabled?: boolean | undefined;
   value: string;
   setValue: (value: string) => void;
+  /** The language spoken ("nb", "en"); omitted or null detects it. */
+  language?: string | null | undefined;
+  /** Asked before each new dictation takes the microphone (a consent prompt); false keeps it off. */
+  beforeStart?: (() => boolean | Promise<boolean>) | undefined;
   /** Changing this (another session) ends a running capture; real speech is kept. */
   scope?: string | undefined;
   /** Host feedback (haptics) when recording starts and stops. */
@@ -50,6 +54,8 @@ export function useNativeDictation(options: UseNativeDictationOptions): NativeVo
     value: options.value,
     setValue: options.setValue,
     focusInput: () => undefined,
+    language: options.language ?? null,
+    ...(options.beforeStart ? { beforeStart: options.beforeStart } : {}),
     platform: options.platform,
     ...(options.recordings ? { recordings: options.recordings } : {}),
   });
