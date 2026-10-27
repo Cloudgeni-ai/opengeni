@@ -174,6 +174,15 @@ pub struct Capacity {
     pub awake: u32,
     /// Sandboxes it holds.
     pub sandboxes: u32,
+    /// The digest of the guest programs it builds sandbox images with now
+    /// (`sha256:<hex>`, what its bundle's base image is named by): the
+    /// service builds each release's images with the programs most live
+    /// hosts say. Told with what it can take on rather than in
+    /// [`HostInfo`], since an agent upgraded in place keeps its
+    /// registration. `None` from a host that builds none, or of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
 }
 
 /// A sandbox a registering host still has, under the owner epoch its

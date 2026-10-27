@@ -28,6 +28,7 @@ import {
 // Thresholds/cache-write rows corroborated by https://ai-gateway.vercel.sh/v1/models
 const reviewedRows = [
   ["gpt-6.1-sol", 2, 0.1, 2.5, 10],
+  ["gpt-6.1-terra", 1, 0.05, 1.25, 5],
   ["grok-4.5", 2, 0.3, null, 6],
   ["grok-4.6", 2, 0.5, null, 6],
   ["grok-4.7", 2, 0.5, null, 6],
@@ -61,6 +62,11 @@ function catalogSettings() {
     ...codex.models[0]!,
     id: "codex/gpt-6.1-sol",
     upstreamModelId: "gpt-6.1-sol",
+  });
+  codex.models.push({
+    ...codex.models[0]!,
+    id: "codex/gpt-6.1-terra",
+    upstreamModelId: "gpt-6.1-terra",
   });
   settings = { ...settings, modelProvidersJson: JSON.stringify(providers) };
   settings = withXaiSubscriptionCatalogProvider(settings);
@@ -111,6 +117,18 @@ describe("reviewed supported-model list prices", () => {
     });
   });
 
+  test("prices GPT-6.1 Terra at half of GPT-6.1 Sol with the same whole-request 272K tier", () => {
+    const schedule = reviewedModelListPricing["gpt-6.1-terra"]!;
+    expect(selectModelPricing(schedule, 272_000)).toEqual(schedule.default);
+    expect(selectModelPricing(schedule, 272_001)).toEqual({
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 7_500_000,
+      marginBps: 500,
+    });
+  });
+
   test.each(["grok-4.5", "grok-4.6", "grok-4.7"])(
     "preserves the native API's inclusive 200K boundary for %s",
     (id) => {
@@ -132,7 +150,7 @@ describe("reviewed supported-model list prices", () => {
     expect(
       models.filter((model) => prices[model.id] === undefined).map((model) => model.id),
     ).toEqual([]);
-    expect(models.length).toBe(55);
+    expect(models.length).toBe(56);
     for (const model of models) {
       if (model.credentialSource.kind === "connected_subscription") {
         expect(model.billing).toEqual({
@@ -149,6 +167,7 @@ describe("reviewed supported-model list prices", () => {
       }
     }
     expect(prices["codex/gpt-6.1-sol"]).toEqual(reviewedModelListPricing["gpt-6.1-sol"]);
+    expect(prices["codex/gpt-6.1-terra"]).toEqual(reviewedModelListPricing["gpt-6.1-terra"]);
     expect(prices["supergrok/grok-4.7"]).toEqual(reviewedModelListPricing["grok-4.7"]);
   });
 

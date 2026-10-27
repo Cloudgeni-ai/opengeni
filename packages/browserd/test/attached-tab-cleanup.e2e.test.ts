@@ -70,7 +70,8 @@ e2e(
       supervisors.push(supervisor);
       const session = reference(1);
 
-      // The agent works in its own tab and leaves a second one empty.
+      // The agent works in its own tab and opens a second one it leaves
+      // empty: that tab closes as soon as the agent moves back to its work.
       const work = (
         await supervisor.createSession({
           ...session,
@@ -82,10 +83,13 @@ e2e(
       const empty = (await supervisor.openTarget(session)).target.id;
       expect((await bridge.pages()).find((page) => page.id === empty)?.url).toBe("data:text/html,");
       await supervisor.selectTarget(session, work);
+      expect((await bridge.pages()).map((page) => page.id).sort()).toEqual(
+        [...person, work].sort(),
+      );
       expect(bridge.attachedTabs().length).toBeGreaterThan(0);
 
-      // Ten minutes without use: the empty tab closes and Chrome is no
-      // longer debugged; the page and the person's tab stay.
+      // Ten minutes without use: Chrome is no longer debugged; the page and
+      // the person's tab stay.
       clock.now += 11 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
       expect((await bridge.pages()).map((page) => page.id).sort()).toEqual(
@@ -103,7 +107,7 @@ e2e(
       expect(recovered.observation.target.title).toBe("Work");
       expect((await bridge.pages()).length).toBe(person.length + 1);
       await expect(supervisor.observe(session, empty)).rejects.toThrow(
-        `this session closed this empty tab when it last released the browser; its current tab is ${work}`,
+        `this session closed this empty tab after it stopped using it; its current tab is ${work}`,
       );
 
       // A controller shutdown (an agent update or restart) cleans up too.

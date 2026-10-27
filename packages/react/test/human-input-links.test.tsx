@@ -4,7 +4,7 @@ import {
   type HumanInputQuestion,
   type HumanInputSecretSpec,
 } from "@opengeni/sdk";
-import type { ReactNode } from "react";
+import { act, type ReactNode } from "react";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
@@ -52,7 +52,21 @@ function question(overrides: Partial<HumanInputQuestion>): HumanInputQuestion {
 }
 
 function links(container: HTMLElement): HTMLAnchorElement[] {
-  return [...container.querySelectorAll<HTMLAnchorElement>("a")];
+  // Only what the person can see: earlier and later steps are hidden.
+  return [...container.querySelectorAll<HTMLAnchorElement>("a")].filter(
+    (anchor) => !anchor.closest("[hidden]"),
+  );
+}
+
+/** Moves a multi-question card to its next step; true when the step changed. */
+async function nextStep(container: HTMLElement): Promise<boolean> {
+  const formElement = container.querySelector("form")!;
+  const before = formElement.dataset.humanInputStep;
+  await act(async () => {
+    formElement.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+  });
+  return formElement.dataset.humanInputStep !== before;
 }
 
 function form(questions: HumanInputQuestion[], wrap?: (node: ReactNode) => ReactNode) {
@@ -152,7 +166,7 @@ describe("links in human-input questions", () => {
     expect(anchors[0]!.parentElement!.className).toContain("[overflow-wrap:anywhere]");
   });
 
-  test("prompts and help text in a multi-question request are linked too", async () => {
+  test("prompts and help text in a multi-question request are linked on each step", async () => {
     mounted = await renderComponent(
       <HumanInputForm
         request={{
@@ -160,7 +174,12 @@ describe("links in human-input questions", () => {
           allowSkip: false,
           expiresAt: null,
           questions: [
-            question({ id: "a", label: "First", prompt: "See https://example.com/one" }),
+            question({
+              id: "a",
+              label: "First",
+              prompt: "See https://example.com/one",
+              required: false,
+            }),
             question({
               id: "b",
               prompt: "Docs at https://example.com/two?",
@@ -174,6 +193,10 @@ describe("links in human-input questions", () => {
     );
     expect(links(mounted.container).map((anchor) => anchor.getAttribute("href"))).toEqual([
       "https://example.com/one",
+    ]);
+    const moved = await nextStep(mounted.container);
+    expect(moved).toBe(true);
+    expect(links(mounted.container).map((anchor) => anchor.getAttribute("href"))).toEqual([
       "https://example.com/two",
       "https://example.com/three",
     ]);

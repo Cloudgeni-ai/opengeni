@@ -768,22 +768,22 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
     readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);
-    let budget = policy
-        .admission
+    let prepare =
+        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
+    // Only a host with a store to keep them builds images.
+    let guest = prepare
         .as_ref()
-        .map_or(0, |admission| admission.budget);
-    let fleet = args.fleet.config(&fleet_cli::Described {
-        root: &args.root,
-        memory_profile: memory_profile.to_string(),
-        cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
-        memory_bytes: budget,
-        cpu_millis: policy
-            .cpu_budget
-            .context("a serving host guarantees processor time")?,
-        offers: network
-            .as_ref()
-            .map_or_else(Vec::new, NetworkConfig::offer_names),
-    })?;
+        .filter(|_| args.store.is_some())
+        .map(|config| config.guest_digest.clone());
+    let fleet = fleet_of(
+        &args.fleet,
+        &args.root,
+        &engine,
+        memory_profile,
+        &policy,
+        network.as_ref(),
+        guest,
+    )?;
     let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
@@ -797,8 +797,6 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
          the control service only"
     );
-    let prepare =
-        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -851,6 +849,33 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         fleet.zip(prepared),
     ))
     .await
+}
+
+/// The fleet this host joins, if any, told what the host is: its shape,
+/// what it offers sandboxes and, when it builds images, its guest programs.
+fn fleet_of(
+    fleet: &fleet_cli::FleetArgs,
+    root: &std::path::Path,
+    engine: &Firecracker,
+    memory_profile: MemoryProfile,
+    policy: &compute_core::HostPolicy,
+    network: Option<&NetworkConfig>,
+    guest: Option<String>,
+) -> anyhow::Result<Option<FleetConfig>> {
+    fleet.config(&fleet_cli::Described {
+        root,
+        memory_profile: memory_profile.to_string(),
+        cpu_template: compute_engine::Engine::runtime(engine).to_owned(),
+        memory_bytes: policy
+            .admission
+            .as_ref()
+            .map_or(0, |admission| admission.budget),
+        cpu_millis: policy
+            .cpu_budget
+            .context("a serving host guarantees processor time")?,
+        offers: network.map_or_else(Vec::new, NetworkConfig::offer_names),
+        guest,
+    })
 }
 
 /// The memory profile the CPU's hypervisor flag calls for, when the
