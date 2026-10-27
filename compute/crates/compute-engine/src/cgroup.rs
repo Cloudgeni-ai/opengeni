@@ -13,10 +13,9 @@ use std::time::Duration;
 /// one written counts every child's.
 static PARENT_LOW: Mutex<()> = Mutex::new(());
 
-/// How long [`Cgroup::set_memory_high`] waits for its write before leaving
-/// the kernel to reclaim on: far longer than parsing and setting the
-/// limit take, far shorter than anything that must not wait on reclaim.
-const MEMORY_HIGH_WAIT: Duration = Duration::from_secs(1);
+/// How often [`Cgroup::set_memory_high`] looks whether the limit it is
+/// writing applies yet.
+const MEMORY_HIGH_LOOK: Duration = Duration::from_millis(20);
 
 /// The controllers a parent group hands its VMs' groups.
 const CONTROLLERS: &str = "+memory +cpu";
@@ -235,15 +234,21 @@ impl Cgroup {
     /// writeback of dirty disk pages included. The writer would wait all
     /// that time: a starting host agent, for one, before it renews its
     /// lease. So the write runs on a thread of its own, and this returns
-    /// its result if it ends within [`MEMORY_HIGH_WAIT`], or `Ok` once that
-    /// passes, the limit set and the kernel still reclaiming toward it on
-    /// that thread.
+    /// its result when it ends, or `Ok` as soon as the group shows the new
+    /// limit while the kernel goes on reclaiming toward it on that thread.
+    /// It never returns before the limit applies: a later setting cannot be
+    /// overtaken by this one.
     pub fn set_memory_high(&self, bytes: Option<u64>) -> io::Result<()> {
         let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
         let path = self.path.join("memory.high");
-        write_waiting_at_most(MEMORY_HIGH_WAIT, move || {
-            write_nonblocking(&path, value.as_bytes())
-        })
+        // The kernel keeps whole pages, and shows what it keeps.
+        let page = u64::try_from(rustix::param::page_size()).unwrap_or(4096);
+        let shown = bytes.map(|bytes| bytes - bytes % page);
+        write_until_applied(
+            MEMORY_HIGH_LOOK,
+            move || write_nonblocking(&path, value.as_bytes()),
+            || Ok(self.memory_high()? == shown),
+        )
     }
 
     /// The group's `memory.high` as it is now: `None` for no limit
@@ -737,24 +742,32 @@ fn write_nonblocking(path: &Path, value: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Runs `write` on a thread of its own and returns its result if it ends
-/// within `wait`, or `Ok` once `wait` passes while it goes on.
-fn write_waiting_at_most(
-    wait: Duration,
+/// Runs `write` on a thread of its own and returns its result once it
+/// ends, or `Ok` once `applied` says its effect shows while it goes on,
+/// looking every `look`.
+fn write_until_applied(
+    look: Duration,
     write: impl FnOnce() -> io::Result<()> + Send + 'static,
+    applied: impl Fn() -> io::Result<bool>,
 ) -> io::Result<()> {
     let (done, outcome) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("cgroup-write".to_owned())
         .spawn(move || {
-            // Nobody listens once the wait is over.
+            // Nobody listens once the effect showed.
             let _ = done.send(write());
         })?;
-    match outcome.recv_timeout(wait) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Ok(()),
-        Err(RecvTimeoutError::Disconnected) => {
-            Err(io::Error::other("the cgroup write ended without a result"))
+    loop {
+        match outcome.recv_timeout(look) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {
+                if applied()? {
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the cgroup write ended without a result"));
+            }
         }
     }
 }
@@ -911,24 +924,48 @@ mod tests {
             missing.set_memory_high(Some(1 << 30)).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
-        let refused = write_waiting_at_most(Duration::from_secs(5), || {
-            Err(io::Error::from(io::ErrorKind::InvalidInput))
-        });
+        let never = || Ok(false);
+        let refused = write_until_applied(
+            Duration::from_millis(5),
+            || Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            never,
+        );
         assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-        let panicked = write_waiting_at_most(Duration::from_secs(5), || panic!("in the write"));
+        let panicked =
+            write_until_applied(Duration::from_millis(5), || panic!("in the write"), never);
         assert!(panicked.is_err());
+        // Late, after the caller has been looking for a while: still told.
+        let late = write_until_applied(
+            Duration::from_millis(5),
+            || {
+                thread::sleep(Duration::from_millis(200));
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            never,
+        );
+        assert_eq!(late.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
     fn a_cgroup_write_the_kernel_holds_for_reclaim_is_not_waited_out() {
         // As an older kernel holds a write of `memory.high` below what the
-        // group holds until it has reclaimed the difference.
+        // group holds until it has reclaimed the difference, the limit
+        // already set.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("memory.high");
+        fs::write(&file, "max").unwrap();
         let (release, held) = mpsc::channel::<()>();
         let started = std::time::Instant::now();
-        write_waiting_at_most(Duration::from_millis(50), move || {
-            let _ = held.recv_timeout(Duration::from_secs(30));
-            Ok(())
-        })
+        let written = file.clone();
+        write_until_applied(
+            Duration::from_millis(5),
+            move || {
+                fs::write(&written, "1024")?;
+                let _ = held.recv_timeout(Duration::from_secs(30));
+                Ok(())
+            },
+            || Ok(fs::read_to_string(&file)? == "1024"),
+        )
         .unwrap();
         let waited = started.elapsed();
         drop(release);
@@ -936,6 +973,34 @@ mod tests {
             waited < Duration::from_secs(5),
             "waited {waited:?} for a held write"
         );
+    }
+
+    #[test]
+    fn a_cgroup_write_held_before_it_applies_is_waited_for() {
+        // Nothing may count on a limit that is not set yet, and a later
+        // setting must not be overtaken by this one.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("memory.high");
+        fs::write(&file, "max").unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            release.send(()).unwrap();
+        });
+        let started = std::time::Instant::now();
+        let written = file.clone();
+        write_until_applied(
+            Duration::from_millis(5),
+            move || {
+                let _ = held.recv_timeout(Duration::from_secs(30));
+                fs::write(&written, "1024")
+            },
+            || Ok(fs::read_to_string(&file)? == "1024"),
+        )
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "1024");
+        releaser.join().unwrap();
     }
 
     #[test]

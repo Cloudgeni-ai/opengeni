@@ -161,8 +161,9 @@ pick a VM.
   without `O_NONBLOCK` for the file reclaim in the write itself, dirty
   disk pages included, for as long as that makes progress, and a
   starting agent waiting on that could run out its lease before renewing
-  it. The write runs on a thread of its own; the limit applies before the
-  kernel starts reclaiming. The agent reads the limit back each time it
+  it. The write runs on a thread of its own, and the agent waits only
+  until the group shows the new limit (or the write fails), which the
+  kernel records before it starts reclaiming. The agent reads the limit back each time it
   samples, so `max` written by hand lifts its accounting along with the
   kernel's slowing. Their
   VMMs, pagers and the page cache of their disks and images count, as in
