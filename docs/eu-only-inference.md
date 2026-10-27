@@ -119,7 +119,7 @@ title freezes its accepted route's record in its request; a title whose route
 was never resolved records `unknown`, not the turn's record. Facts rebuilt from
 usage events keep the event's value. A new call whose route has no readable
 record is recorded as `unknown`; null means only that the call was recorded
-before calls carried one (migration 1001). A stored `eu` claim reads back as
+before calls carried one (migration 1003). A stored `eu` claim reads back as
 `eu` only under the same rules as the route record (an EU-capable deployment
 type and, for Azure and Bedrock, EU regions only); anything else reads as
 `unknown`. Insights calls expose each call's `processingGeography`; it is

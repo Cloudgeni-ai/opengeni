@@ -9,7 +9,7 @@ SET LOCAL lock_timeout = '5s';
 ALTER TABLE model_call_facts
   ADD COLUMN IF NOT EXISTS processing_residency jsonb;
 COMMENT ON COLUMN model_call_facts.processing_residency IS
-  'Processing residency claim of the route that served the call: geography, deploymentType and regions. Never evidence text. Null for calls recorded before 1001.';
+  'Processing residency claim of the route that served the call: geography, deploymentType and regions. Never evidence text. Null for calls recorded before 1003.';
 
 -- The Insights calls reader returns each call's processing geography only when
 -- the caller asks for it with the private processingGeography query key, which

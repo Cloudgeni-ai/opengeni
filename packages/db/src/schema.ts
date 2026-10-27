@@ -13305,7 +13305,7 @@ export const modelCallFacts = pgTable(
     // PromptCacheDiagnostics); null before 0979 and for repaired facts.
     promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     // Processing residency claim of the route that served the call (see
-    // ModelCallProcessingResidencyV1), never evidence; null before 1001.
+    // ModelCallProcessingResidencyV1), never evidence; null before 1003.
     processingResidency: jsonb("processing_residency").$type<ModelCallProcessingResidencyV1>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),

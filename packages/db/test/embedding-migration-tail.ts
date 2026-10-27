@@ -121,7 +121,7 @@ export const embeddingMigrationTail = [
   "0794_site_ai_insights.sql",
   "0795_site_lifecycle_cancellation.sql",
   // Patches the calls reader from withheld 0604 (as rewritten by 0794).
-  "1001_model_call_facts_processing_residency.sql",
+  "1003_model_call_facts_processing_residency.sql",
   // Patches the sender-owned capture from withheld 0478 and reads the frozen
   // subscription authority installed by withheld 0598; replay after both.
   "0608_receiver_execution_context.sql",

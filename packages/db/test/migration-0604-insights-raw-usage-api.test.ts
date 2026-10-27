@@ -59,7 +59,7 @@ const deferredMigrations = [
   "0818_insights_usage_hourly_reader.sql",
   // Patches the calls reader that 0604 and 0794 install, so it replays with
   // the final group, after both.
-  "1001_model_call_facts_processing_residency.sql",
+  "1003_model_call_facts_processing_residency.sql",
 ];
 let rawInputDefinition: string;
 let rawScopedDefinition: string;

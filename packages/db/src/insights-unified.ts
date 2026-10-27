@@ -429,7 +429,7 @@ function validCursorTimestamp(value: unknown): value is string {
 }
 
 /**
- * Private reader keys added to the calls query (migration 1001). The SQL filter
+ * Private reader keys added to the calls query (migration 1003). The SQL filter
  * ignores them; the reader returns the added fields only when asked, so the
  * previous release keeps receiving the response shape it parses.
  */

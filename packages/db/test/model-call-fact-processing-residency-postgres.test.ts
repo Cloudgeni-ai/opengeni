@@ -216,7 +216,7 @@ test("Insights calls expose each call's processing geography", async () => {
   await fact(base, "eu", { processingResidency: EU as never, occurredAt: at });
   await fact(base, "unknown", { occurredAt: at });
   await fact(base, "us", { processingResidency: US as never, occurredAt: at });
-  // A fact written before 1001, stored values the writer never produces, and
+  // A fact written before 1003, stored values the writer never produces, and
   // valid eu claims. The SQL reader and the TypeScript parser must agree on
   // every one: an eu claim that breaks the eu rules reads as unknown.
   const stored = [

@@ -8,13 +8,13 @@ import {
   MODEL_PROCESSING_GEOGRAPHIES,
 } from "@opengeni/contracts";
 
-// The Insights calls reader patched by 1001 decides in SQL whether a stored
+// The Insights calls reader patched by 1003 decides in SQL whether a stored
 // claim reads as eu, with copies of the contracts lists. Keep them identical,
 // so the SQL reader and parseModelCallProcessingResidency always agree (the
 // Postgres test checks the agreement row by row).
-test("1001's eu rule uses exactly the contracts deployment types and regions", () => {
+test("1003's eu rule uses exactly the contracts deployment types and regions", () => {
   const migration = readFileSync(
-    new URL("../drizzle/1001_model_call_facts_processing_residency.sql", import.meta.url),
+    new URL("../drizzle/1003_model_call_facts_processing_residency.sql", import.meta.url),
     "utf8",
   );
   const regionless = EU_CAPABLE_DEPLOYMENT_TYPES.filter(
