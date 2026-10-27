@@ -59,7 +59,7 @@ diff --git a/src/connection.js b/src/connection.js
    function connected() {
      try {
 +      // One identity per login attempt: the password function receives it,
-+      // and an error raised before any query ran carries it, so a caller can
++      // and an error raised while it logs in carries it, so a caller can
 +      // tell which password a refused login used.
 +      login = {}
        statements = {}
@@ -96,7 +96,16 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +595,12 @@
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -110,7 +119,7 @@ diff --git a/src/connection.js b/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
-@@ -748,7 +787,7 @@
+@@ -748,7 +789,7 @@
  
    function Pass() {
      return Promise.resolve(typeof options.pass === 'function'
@@ -119,7 +128,7 @@ diff --git a/src/connection.js b/src/connection.js
        : options.pass
      )
    }
-@@ -814,7 +853,9 @@
+@@ -814,7 +855,9 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {
@@ -191,7 +200,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
    function connected() {
      try {
 +      // One identity per login attempt: the password function receives it,
-+      // and an error raised before any query ran carries it, so a caller can
++      // and an error raised while it logs in carries it, so a caller can
 +      // tell which password a refused login used.
 +      login = {}
        statements = {}
@@ -228,7 +237,16 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +595,12 @@
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -242,7 +260,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
-@@ -748,7 +787,7 @@
+@@ -748,7 +789,7 @@
  
    function Pass() {
      return Promise.resolve(typeof options.pass === 'function'
@@ -251,7 +269,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        : options.pass
      )
    }
-@@ -814,7 +853,9 @@
+@@ -814,7 +855,9 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {

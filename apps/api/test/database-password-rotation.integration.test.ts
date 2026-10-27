@@ -495,6 +495,9 @@ describe("runtime database password rotation", () => {
         // Every pool ends on the new password: forward, and back and forth
         // again for each pool that opened a connection during the drill.
         expect(drillSwitches[`g1:${pool}`]! % 2).toBe(1);
+        // A handful of refused logins per pool for three password changes
+        // (#6210's attribution refused hundreds per pool in this drill).
+        expect(drillRefusals[`g1:${pool}`]!).toBeLessThanOrEqual(12);
       }
       expect(tally.count("candidates_exhausted")).toEqual({});
       expect(failures).toEqual([]);
@@ -532,7 +535,11 @@ describe("runtime database password rotation", () => {
           refusals: since(beforeRestore, "candidate_refused"),
         }),
       );
-      for (const pool of pools) expect(restoreSwitches[`g1:${pool}`]).toBe(1);
+      const restoreRefusals = since(beforeRestore, "candidate_refused");
+      for (const pool of pools) {
+        expect(restoreSwitches[`g1:${pool}`]).toBe(1);
+        expect(restoreRefusals[`g1:${pool}`]!).toBeLessThanOrEqual(6);
+      }
       expect(tally.count("candidates_exhausted")).toEqual({});
       expect(failures).toEqual([]);
 

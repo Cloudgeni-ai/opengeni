@@ -555,9 +555,10 @@ const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
 
 /**
  * Run a pool query again after its connection was refused with 28P01, on the
- * pool's next password candidate (see `withDatabaseAuthenticationRetry`): only
- * while another distinct candidate exists; stale refusals do not count, each
- * distinct password gets one attempt, under a small hard cap.
+ * password candidate the pool then selects (see
+ * `withDatabaseAuthenticationRetry`): only while the pool selects another
+ * password than the refused login used, under a small hard cap; a single
+ * password fails fast.
  *
  * Repeating is safe: PostgreSQL raises 28P01 only while authenticating a NEW
  * connection, before the server has run any statement on it. postgres.js

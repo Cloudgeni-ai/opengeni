@@ -72,6 +72,7 @@ export function createSessionListChangeSource(
   let wake: (() => void) | undefined;
   /** Reconnects right after a 28P01 since the last successful LISTEN. */
   let immediateReconnects = 0;
+  let immediateReconnectsGeneration: number | undefined;
   const emit = (event: SessionListNotification) => {
     for (const listener of listeners) {
       // One stopped HTTP consumer cannot disconnect every other subscriber.
@@ -150,8 +151,14 @@ export function createSessionListChangeSource(
             credential.refusedPosition(error) ?? observedCandidate,
           );
           // Another password is selected now: try it at once rather than
-          // after the reconnect delay, a bounded number of times in a row so
-          // two refused passwords cannot alternate without a pause.
+          // after the reconnect delay, a bounded number of times until this
+          // connection listens again or the files change, so passwords that
+          // are all refused cannot alternate without a pause.
+          const filesGeneration = credential.position().generation;
+          if (filesGeneration !== immediateReconnectsGeneration) {
+            immediateReconnectsGeneration = filesGeneration;
+            immediateReconnects = 0;
+          }
           retryNow =
             outcome !== "unchanged" &&
             immediateReconnects < DATABASE_AUTHENTICATION_MAX_ATTEMPTS - 1;
@@ -161,7 +168,6 @@ export function createSessionListChangeSource(
           immediateReconnects += 1;
           continue;
         }
-        immediateReconnects = 0;
       }
       if (!stop.signal.aborted) {
         await delay(options.reconnectDelayMs ?? 1000, undefined, { signal: stop.signal }).catch(

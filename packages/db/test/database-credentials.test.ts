@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createObservability } from "@opengeni/observability";
 import {
   DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
   DATABASE_CREDENTIAL_METRICS,
   databaseCredentialEventAttributes,
   databaseLoginAttemptOf,
@@ -476,10 +477,13 @@ describe("connection-layer retry", () => {
     }).catch((error: unknown) => error);
     expect(isDatabaseAuthenticationFailure(outcome)).toBe(true);
     expect(attempts).toBe(DATABASE_AUTHENTICATION_MAX_ATTEMPTS);
-    expect(events.filter((event) => event.type === "candidates_exhausted")).toHaveLength(1);
+    // Only stale refusals: the cap, not every candidate, ended it.
+    expect(events.filter((event) => event.type === "candidates_exhausted")).toEqual([
+      { type: "candidates_exhausted", index: 1, candidates: 2, reason: "attempt_cap" },
+    ]);
   });
 
-  test("attempts are bounded by the candidates and the last 28P01 surfaces unchanged", async () => {
+  test("with no valid password, attempts stop at the hard cap and the last 28P01 surfaces unchanged", async () => {
     const events: DatabaseCredentialEvent[] = [];
     const source = await rotating(events);
     const errors: Error[] = [];
@@ -488,10 +492,65 @@ describe("connection-layer retry", () => {
       errors.push(error);
       throw error;
     }).catch((error: unknown) => error);
-    expect(errors).toHaveLength(2);
+    expect(errors).toHaveLength(DATABASE_AUTHENTICATION_MAX_ATTEMPTS);
     expect(outcome).toBe(errors.at(-1)!);
-    // Refused on both while selected: the pool switched twice, back to the first.
-    expect(events.at(-1)).toEqual({ type: "candidates_exhausted", index: 0, candidates: 2 });
+    // Refused on each while selected: the pool alternated, five switches.
+    expect(events.filter((event) => event.type === "candidate_switched")).toHaveLength(5);
+    expect(events.at(-1)).toEqual({
+      type: "candidates_exhausted",
+      index: 1,
+      candidates: 2,
+      reason: "every_candidate_refused",
+    });
+  });
+
+  test("a rollback that lands while the retry logs in: the restored password is tried again", async () => {
+    // Forward rotation: the server has the new password. The operation's
+    // first login used the old one; its retry reads the new one, and the
+    // rollback restores the old password before that retry is answered.
+    const valid = { password: NEW_PASSWORD };
+    const db = server(valid);
+    const events: DatabaseCredentialEvent[] = [];
+    const source = await rotating(events);
+    let attempts = 0;
+    const result = await withDatabaseAuthenticationRetry(source, async () => {
+      attempts += 1;
+      const login = {};
+      const password = await source.password(login);
+      if (attempts === 2) valid.password = OLD_PASSWORD; // the rollback
+      return db.connect(password, login);
+    });
+    expect(result).toBe("ok");
+    expect(attempts).toBe(3);
+    expect(db.attempts).toEqual(["old", "new", "old"]);
+    expect(events.filter((event) => event.type === "candidate_switched")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
+    expect(source.candidateIndex).toBe(0);
+  });
+
+  test("a stale refusal after the files drop to one password retries on it (runbook step 3)", async () => {
+    const db = server({ password: NEW_PASSWORD });
+    const events: DatabaseCredentialEvent[] = [];
+    const source = await rotating(events);
+    // A login read the old password while it was still selected...
+    const straggler = {};
+    const stalePassword = await source.password(straggler);
+    // ...another login's refusal moved the pool to the new one, and the
+    // previous file is cleared before the straggler's refusal arrives.
+    source.reportAuthenticationFailure(source.position());
+    await writeFile(previous, "");
+    expect(await source.password()).toBe(NEW_PASSWORD);
+    expect(source.candidateCount).toBe(1);
+    let attempts = 0;
+    const result = await withDatabaseAuthenticationRetry(source, async () => {
+      attempts += 1;
+      if (attempts === 1) return db.connect(stalePassword, straggler);
+      const login = {};
+      return db.connect(await source.password(login), login);
+    });
+    expect(result).toBe("ok");
+    expect(db.attempts).toEqual(["old", "new"]);
+    expect(events.filter((event) => event.type === "candidates_exhausted")).toEqual([]);
   });
 
   test("a single password fails fast: one attempt, no retry", async () => {
@@ -577,6 +636,8 @@ class SimulatedPool {
   /** While set, logins wait here before asking for the password. */
   holdBeforeRead: Promise<void> | undefined;
   held = 0;
+  /** The most attempts any one operation of this pool needed. */
+  maxAttempts = 0;
   #free: number;
   readonly #waiting: Array<() => void> = [];
 
@@ -588,8 +649,16 @@ class SimulatedPool {
     this.source = credential(this.events);
   }
 
-  operation(): Promise<"ok"> {
-    return withDatabaseAuthenticationRetry(this.source, () => this.#login());
+  async operation(): Promise<"ok"> {
+    let attempts = 0;
+    try {
+      return await withDatabaseAuthenticationRetry(this.source, () => {
+        attempts += 1;
+        return this.#login();
+      });
+    } finally {
+      this.maxAttempts = Math.max(this.maxAttempts, attempts);
+    }
   }
 
   count(type: DatabaseCredentialEvent["type"], since = 0): number {
@@ -685,6 +754,8 @@ describe("concurrent logins at the moment of a switch", () => {
       expect(pool.staleRefusals()).toBe(pool.max - 1);
       expect(pool.count("candidate_switched")).toBe(1);
       expect(pool.count("candidates_exhausted")).toBe(0);
+      // A stale or fresh refusal costs an operation one extra attempt.
+      expect(pool.maxAttempts).toBeLessThanOrEqual(2);
       expect(pool.source.candidateIndex).toBe(1);
     }
   });
@@ -706,6 +777,7 @@ describe("concurrent logins at the moment of a switch", () => {
       expect(pool.staleRefusals(since)).toBe(pool.max - 1);
       expect(pool.count("candidate_switched", since)).toBe(1);
       expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.maxAttempts).toBeLessThanOrEqual(2);
       expect(pool.source.candidateIndex).toBe(0);
     });
   });
@@ -724,6 +796,7 @@ describe("concurrent logins at the moment of a switch", () => {
       expect(pool.count("candidate_switched", marks[index]!)).toBe(1);
       expect(pool.count("candidate_refused", marks[index]!)).toBe(pool.max);
       expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.maxAttempts).toBeLessThanOrEqual(2);
       expect(pool.source.candidateIndex).toBe(0);
     });
   });
@@ -778,6 +851,8 @@ describe("concurrent logins at the moment of a switch", () => {
     expect(completed).toBeGreaterThan(100);
     for (const pool of all) {
       expect(pool.count("candidates_exhausted")).toBe(0);
+      // At most one extra attempt per change of the server's password.
+      expect(pool.maxAttempts).toBeLessThanOrEqual(3);
       // Forward, then back: every pool ends on the old password.
       expect(pool.count("candidate_switched")).toBe(2);
       expect(pool.source.candidateIndex).toBe(0);
@@ -817,6 +892,7 @@ describe("concurrent logins at the moment of a switch", () => {
       expect(pool.staleRefusals(since)).toBe(pool.max - 1);
       expect(pool.count("candidate_switched", since)).toBe(1);
       expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.maxAttempts).toBeLessThanOrEqual(2);
       expect(pool.source.candidateIndex).toBe(1);
     });
   });
@@ -851,6 +927,7 @@ describe("concurrent logins at the moment of a switch", () => {
     expect(completed).toBeGreaterThan(100);
     for (const pool of all) {
       expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.maxAttempts).toBeLessThanOrEqual(3);
       // One switch forward; the reversal itself reselects new without a
       // switch; one switch when the server returns to old.
       expect(pool.count("candidate_switched")).toBe(2);
@@ -907,17 +984,18 @@ describe("no secret in events, logs or errors", () => {
       expectNoSecret(String(outcome));
       expectNoSecret((outcome as Error).stack ?? "");
       // Every event is logged. The retry is refused on the selected password
-      // each time, so the pool moves on twice before every candidate was
-      // refused.
+      // each time, so the pool moves on with every attempt until the cap.
+      const refusedAndSwitched = [
+        "[database] database credential candidate refused",
+        "[database] switched database credential candidate",
+      ];
       expect(lines.map((line) => line[0])).toEqual([
         "[database] reloaded database credential candidates",
-        "[database] database credential candidate refused",
-        "[database] switched database credential candidate",
-        "[database] database credential candidate refused",
-        "[database] switched database credential candidate",
-        "[database] database credential candidate refused",
-        "[database] switched database credential candidate",
-        "[database] every database credential candidate was rejected",
+        ...Array.from(
+          { length: 1 + DATABASE_AUTHENTICATION_MAX_ATTEMPTS },
+          () => refusedAndSwitched,
+        ).flat(),
+        "[database] database credential retries exhausted",
         "[database] reloaded database credential candidates",
       ]);
       expect(lines[0]?.[1]).toEqual({ databasePool: "test-pool", credentialCandidates: 2 });
@@ -933,10 +1011,11 @@ describe("no secret in events, logs or errors", () => {
         credentialToIndex: 1,
         credentialCandidates: 2,
       });
-      expect(lines[7]?.[1]).toEqual({
+      expect(lines.at(-2)?.[1]).toEqual({
         databasePool: "test-pool",
-        credentialIndex: 1,
+        credentialIndex: 0,
         credentialCandidates: 2,
+        reason: "every_candidate_refused",
       });
       // The object itself does not expose a password through serialization.
       expectNoSecret(source);
@@ -993,7 +1072,10 @@ describe("credential event metrics and structured logs", () => {
     listen({ type: "candidate_refused", index: 0, candidates: 2, stale: false }, "pool");
     listen({ type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 }, "pool");
     listen({ type: "candidate_refused", index: 0, candidates: 2, stale: true }, "pool");
-    listen({ type: "candidates_exhausted", index: 1, candidates: 2 }, "notifications");
+    listen(
+      { type: "candidates_exhausted", index: 1, candidates: 2, reason: "attempt_cap" },
+      "notifications",
+    );
     listen({ type: "password_file_unreadable", file: "current", code: "EACCES" }, "pool");
     expect(counters).toEqual([
       {
@@ -1014,7 +1096,7 @@ describe("credential event metrics and structured logs", () => {
       },
       {
         name: "opengeni_database_credential_exhaustions_total",
-        labels: { pool: "worker-notifications", index: "1" },
+        labels: { pool: "worker-notifications", index: "1", reason: "attempt_cap" },
       },
     ]);
     expect(DATABASE_CREDENTIAL_METRICS.refusals.name).toBe(
@@ -1026,7 +1108,7 @@ describe("credential event metrics and structured logs", () => {
       "database credential candidate refused",
       "switched database credential candidate",
       "database credential candidate refused",
-      "every database credential candidate was rejected",
+      "database credential retries exhausted",
       "database password file unreadable; treating it as missing",
     ]);
     expect(warnings[3]?.[1]).toEqual({
@@ -1035,7 +1117,51 @@ describe("credential event metrics and structured logs", () => {
       credentialCandidates: 2,
       credentialStale: true,
     });
-    expect(warnings[4]?.[1].databasePool).toBe("worker-notifications");
+    expect(warnings[4]?.[1]).toEqual({
+      databasePool: "worker-notifications",
+      credentialIndex: 1,
+      credentialCandidates: 2,
+      reason: "attempt_cap",
+    });
+  });
+
+  test("repeated refusals, switches and exhaustions of a pool are logged once per interval; counters stay exact", () => {
+    const { counters, warnings, observer } = recordingObserver();
+    let now = 1_000_000;
+    const listen = observeDatabaseCredentialEvents("worker", observer, { now: () => now });
+    const refusal = { type: "candidate_refused", index: 0, candidates: 2, stale: true } as const;
+    for (let index = 0; index < 5; index += 1) listen(refusal, "pool");
+    // Another kind or index is logged at once.
+    listen({ ...refusal, stale: false }, "pool");
+    listen({ type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 }, "pool");
+    listen({ type: "candidate_switched", fromIndex: 1, toIndex: 0, candidates: 2 }, "pool");
+    listen({ type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 }, "pool");
+    // Another pool is throttled separately.
+    listen(refusal, "notifications");
+    now += DATABASE_CREDENTIAL_LOG_INTERVAL_MS;
+    listen(refusal, "pool");
+    listen({ type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 }, "pool");
+    expect(
+      warnings.map(([message, attributes]) => [
+        message,
+        attributes.databasePool,
+        attributes.suppressedCount,
+      ]),
+    ).toEqual([
+      ["database credential candidate refused", "worker", undefined],
+      ["database credential candidate refused", "worker", undefined],
+      ["switched database credential candidate", "worker", undefined],
+      ["switched database credential candidate", "worker", undefined],
+      ["database credential candidate refused", "worker-notifications", undefined],
+      ["database credential candidate refused", "worker", 4],
+      ["switched database credential candidate", "worker", 1],
+    ]);
+    expect(
+      counters.filter((counter) => counter.name === "opengeni_database_credential_refusals_total"),
+    ).toHaveLength(8);
+    expect(
+      counters.filter((counter) => counter.name === "opengeni_database_credential_switches_total"),
+    ).toHaveLength(4);
   });
 
   test("a failing observer never reaches the pool", async () => {
@@ -1143,7 +1269,8 @@ describe("credential event metrics and structured logs", () => {
         record.message === "database credential candidate refused" &&
         record.credentialStale === true,
     );
-    expect(stale).toHaveLength(2);
+    // The second stale refusal is counted (above), not logged again.
+    expect(stale).toHaveLength(1);
     expect(stale[0]).toMatchObject({ databasePool: "worker-control", credentialIndex: 0 });
   });
 });

@@ -258,14 +258,18 @@ export function createManagedAuthDatabasePool(
  * and whose connect error names that login, so a 28P01 is attributed to the
  * password this client actually tried rather than to whatever the pool
  * selects by the time the refusal arrives. Each `pg` client logs in once.
+ * The login's identity is a private empty object, never the client: after a
+ * refused login `pg` keeps the password it tried on the client.
  */
 export function rotatingPasswordClient(credential: RotatingDatabasePassword): typeof Client {
   return class RotatingPasswordClient extends Client {
+    readonly #login: object = {};
+
     constructor(config?: string | ClientConfig) {
       super(config);
       // `pg` asks `this.password()` once, while this client logs in.
       (this as unknown as { password: () => Promise<string> }).password = () =>
-        credential.password(this);
+        credential.password(this.#login);
     }
 
     override connect(): Promise<Client>;
@@ -275,12 +279,12 @@ export function rotatingPasswordClient(credential: RotatingDatabasePassword): ty
     ): Promise<Client> | void {
       if (!callback) {
         return super.connect().catch((error: unknown) => {
-          tagDatabaseLoginAttempt(error, this);
+          tagDatabaseLoginAttempt(error, this.#login);
           throw error;
         });
       }
       super.connect(((error: Error | null, ...rest: unknown[]) => {
-        if (error) tagDatabaseLoginAttempt(error, this);
+        if (error) tagDatabaseLoginAttempt(error, this.#login);
         (callback as (error: Error | null, ...rest: unknown[]) => void)(error, ...rest);
       }) as (err: Error) => void);
     }
@@ -289,13 +293,13 @@ export function rotatingPasswordClient(credential: RotatingDatabasePassword): ty
 
 /**
  * Make the pool's checkouts (and so `pool.query`, which checks out through
- * `connect`) try again after a 28P01 on the next password candidate, only
- * while another distinct candidate exists. A 28P01 is raised only while a new
- * connection authenticates, before any statement runs, so retrying a checkout
- * cannot repeat work. Stale refusals do not count, each distinct password gets
- * one attempt, under a small hard cap; the last 28P01 surfaces unchanged.
+ * `connect`) try again after a 28P01 on the password candidate the pool then
+ * selects (see `withDatabaseAuthenticationRetry`). A 28P01 is raised only
+ * while a new connection authenticates, before any statement runs, so
+ * retrying a checkout cannot repeat work. A single password fails fast; the
+ * last 28P01 surfaces unchanged.
  */
-function retryConnectAfterAuthenticationFailure(
+export function retryConnectAfterAuthenticationFailure(
   pool: Pool,
   credential: RotatingDatabasePassword,
 ): void {

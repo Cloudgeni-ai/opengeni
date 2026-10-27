@@ -2,12 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import {
   databaseLoginAttemptOf,
   databaseUrlPassword,
   isDatabaseAuthenticationFailure,
   RotatingDatabasePassword,
-  withDatabaseAuthenticationRetry,
   type DatabaseCredentialEvent,
   type DatabasePasswordFiles,
 } from "@opengeni/db";
@@ -15,7 +15,11 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { Pool, type PoolConfig } from "pg";
 import { parse as parseConnectionString } from "pg-connection-string";
 
-import { createManagedAuthDatabasePool, rotatingPasswordClient } from "../src/auth/managed-auth";
+import {
+  createManagedAuthDatabasePool,
+  retryConnectAfterAuthenticationFailure,
+  rotatingPasswordClient,
+} from "../src/auth/managed-auth";
 
 // The managed-auth `pg` pool against a real server: each refused login is
 // attributed to the password that client used. The previous file holds a
@@ -79,8 +83,13 @@ describe("managed-auth pool credentials", () => {
       const viaConnect = await pool.connect().catch((error: unknown) => error);
       for (const outcome of [viaQuery, viaConnect]) {
         expect(isDatabaseAuthenticationFailure(outcome)).toBe(true);
-        expect(databaseLoginAttemptOf(outcome)).toBeDefined();
+        // The tag is a bare identity: it holds nothing, least of all the
+        // password `pg` keeps on the client that tried it.
+        const login = databaseLoginAttemptOf(outcome);
+        expect(login).toBeDefined();
+        expect(Reflect.ownKeys(login!)).toEqual([]);
         expect(String(outcome)).not.toContain(REFUSED_PASSWORD);
+        expect(inspect(outcome, { showHidden: true, depth: 8 })).not.toContain(REFUSED_PASSWORD);
       }
       // One login per operation: no retry, no switch, no exhausted event.
       expect(typesOf(events, "candidate_refused")).toHaveLength(2);
@@ -197,11 +206,13 @@ describe("managed-auth pool credentials", () => {
       return password;
     };
     const max = 6;
+    // The production pieces: the client class and the checkout retry.
     const pool = new Pool({
       ...(parseConnectionString(shared.appUrl) as unknown as PoolConfig),
       max,
       Client: rotatingPasswordClient(source) as unknown as PoolConfig["Client"],
     });
+    retryConnectAfterAuthenticationFailure(pool, source);
     const waitFor = async (done: () => boolean) => {
       const deadline = Date.now() + 15_000;
       while (!done() && Date.now() < deadline) await Bun.sleep(5);
@@ -209,9 +220,7 @@ describe("managed-auth pool credentials", () => {
     };
     try {
       const operations = Array.from({ length: 24 }, (_, index) =>
-        withDatabaseAuthenticationRetry(source, () =>
-          pool.query<{ value: number }>("select $1::int as value", [index]),
-        ),
+        pool.query<{ value: number }>("select $1::int as value", [index]),
       );
       await waitFor(() => held.reading === max);
       // The pool switched to the new password moments ago (the forward

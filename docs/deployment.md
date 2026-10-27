@@ -1259,27 +1259,33 @@ time-based grace. Only a change in the files' contents starts the order over.
 Logs and metrics never carry a password. Each pool logs one content-free
 warning per event (`reloaded database credential candidates`, `database
 credential candidate refused`, `switched database credential candidate`,
-`every database credential candidate was rejected`, `database password file
+`database credential retries exhausted`, `database password file
 unreadable; treating it as missing`) with the fields `databasePool` (`api`,
 `managed-auth`, `worker`, `worker-readiness`, `worker-activities`, with a
 `-notifications` suffix for the API's LISTEN connection), `credentialIndex`,
 `credentialFromIndex`, `credentialToIndex`, `credentialCandidates`,
 `credentialStale` (refusals), and `credentialFile` and
-`credentialFileErrorCode` (unreadable files). Index 0 is the first candidate.
+`credentialFileErrorCode` (unreadable files), plus `reason` on exhaustion
+lines. Indexes are positions in `[previous, current]`: while both files are
+set, 0 is the previous password and 1 the current one.
 The same events are counted, labelled by `pool`, in
 `opengeni_database_credential_refusals_total` (`index`, and `refusal` =
 `stale` or `fresh`), `opengeni_database_credential_switches_total`
 (`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total`
-(`index`) and `opengeni_database_credential_reloads_total` (`candidates`). A
-rotation should show exactly one switch per pool and no exhaustion; stale
-refusals are expected, at most one per connection that was logging in when the
-password changed.
+(`index`, and `reason` = `every_candidate_refused` or `attempt_cap`, also on
+the log line) and `opengeni_database_credential_reloads_total`
+(`candidates`). The counters are exact; repeated refusal, switch and
+exhaustion lines of one pool are logged at most once per 10 seconds per kind,
+the next line carrying `suppressedCount`. A rotation should show exactly one
+switch per pool and no exhaustion; stale refusals are expected, at most one per
+connection that was logging in when the password changed.
 
 A query or transaction start refused with `28P01` is retried on the newly
-selected candidate, but only at the connection layer, only while another
-distinct candidate exists. A stale refusal is retried without counting
-against the operation; otherwise each distinct password gets one attempt, and
-no operation makes more than five attempts. This is safe
+selected candidate, but only at the connection layer, and only when the pool
+now selects another password than the refused login used (a stale refusal, or
+a fresh one that moved the pool on). A rotation costs an operation at most one
+extra attempt (two when a rollback lands while it retries), and no operation
+makes more than five attempts. This is safe
 because PostgreSQL raises `28P01` only while authenticating a new connection,
 before any statement runs. With a single candidate (no previous password), a
 wrong password fails fast exactly as before. Session persistence, turn

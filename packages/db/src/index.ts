@@ -1436,7 +1436,9 @@ export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./da
 export {
   DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
   DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
   DATABASE_CREDENTIAL_METRICS,
+  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
   DATABASE_LOGIN_ATTEMPT,
   databaseCredentialEventAttributes,
   databaseCredentialEventMessage,
@@ -1455,6 +1457,7 @@ export {
   type DatabaseAuthenticationRefusal,
   type DatabaseCredentialEvent,
   type DatabaseCredentialEventListener,
+  type DatabaseCredentialExhaustion,
   type DatabaseCredentialObserver,
   type DatabaseCredentialPosition,
   type DatabasePasswordFiles,

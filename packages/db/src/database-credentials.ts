@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createLogThrottle } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
 
 /**
@@ -60,10 +61,16 @@ export type DatabaseCredentialEvent =
       candidates: number;
     }
   | {
-      /** An operation was refused on every candidate; its 28P01 surfaces. */
+      /**
+       * An operation gave up after a 28P01; its 28P01 surfaces. `reason`:
+       * `every_candidate_refused` (each candidate refused this operation
+       * while selected: the files hold no valid password) or `attempt_cap`
+       * ({@link DATABASE_AUTHENTICATION_MAX_ATTEMPTS} attempts were made).
+       */
       type: "candidates_exhausted";
       index: number;
       candidates: number;
+      reason: DatabaseCredentialExhaustion;
     }
   | {
       /** A configured file exists but could not be read; it is treated as missing. */
@@ -71,6 +78,9 @@ export type DatabaseCredentialEvent =
       file: "current" | "previous";
       code: string;
     };
+
+/** Why an operation gave up after a 28P01 (see `candidates_exhausted`). */
+export type DatabaseCredentialExhaustion = "every_candidate_refused" | "attempt_cap";
 
 /**
  * Receives a pool's credential events. `createDb` also says which of its
@@ -190,7 +200,7 @@ export function databaseCredentialEventMessage(event: DatabaseCredentialEvent): 
     case "candidate_switched":
       return "switched database credential candidate";
     case "candidates_exhausted":
-      return "every database credential candidate was rejected";
+      return "database credential retries exhausted";
     case "password_file_unreadable":
       return "database password file unreadable; treating it as missing";
   }
@@ -230,6 +240,7 @@ export function databaseCredentialEventAttributes(
         databasePool,
         credentialIndex: event.index,
         credentialCandidates: event.candidates,
+        reason: event.reason,
       };
     case "password_file_unreadable":
       return { databasePool, credentialFile: event.file, credentialFileErrorCode: event.code };
@@ -238,10 +249,9 @@ export function databaseCredentialEventAttributes(
 
 /**
  * One content-free log line per event: the message and
- * {@link databaseCredentialEventAttributes}. Refusals are logged too (their
- * number is bounded by the logins in flight when the password changes).
+ * {@link databaseCredentialEventAttributes}. Refusals are logged too.
  * Defaults to `console.warn`, for processes without structured logging (CLIs,
- * scripts).
+ * scripts); {@link observeDatabaseCredentialEvents} also rate-limits.
  */
 export function logDatabaseCredentialEvent(
   pool: string,
@@ -261,8 +271,10 @@ export function logDatabaseCredentialEvent(
 /**
  * Prometheus counters of credential events, labelled by pool (`pool`, with a
  * `-notifications` suffix for a LISTEN connection) and candidate index, never
- * by a password. Indexes are positions in the candidate list: 0 is the current
- * file (or the URL password), 1 the previous file.
+ * by a password. Indexes are positions in the candidate list
+ * `[previous, current]`: with two candidates, 0 is the previous file's
+ * password and 1 the current file's; with one, 0 is the only password (the
+ * current file, or the URL password).
  */
 export const DATABASE_CREDENTIAL_METRICS = {
   /** Labels: pool, index (the refused login's candidate), refusal ("stale" | "fresh"). */
@@ -275,10 +287,13 @@ export const DATABASE_CREDENTIAL_METRICS = {
     name: "opengeni_database_credential_switches_total",
     help: "Database pools that moved to the next password candidate after a fresh 28P01, by pool.",
   },
-  /** Labels: pool, index (the selected candidate when the operation gave up). */
+  /**
+   * Labels: pool, index (the selected candidate when the operation gave up),
+   * reason ("every_candidate_refused" | "attempt_cap").
+   */
   exhaustions: {
     name: "opengeni_database_credential_exhaustions_total",
-    help: "Database operations whose 28P01 surfaced after every password candidate was refused, by pool.",
+    help: "Database operations that gave up after a 28P01 and surfaced it, by pool and reason.",
   },
   /** Labels: pool, candidates (how many passwords the reloaded files offer). */
   reloads: {
@@ -311,7 +326,7 @@ function databaseCredentialEventCounter(
     case "candidates_exhausted":
       return {
         ...DATABASE_CREDENTIAL_METRICS.exhaustions,
-        labels: { pool, index: String(event.index) },
+        labels: { pool, index: String(event.index), reason: event.reason },
       };
     case "candidates_reloaded":
       return {
@@ -324,30 +339,63 @@ function databaseCredentialEventCounter(
 }
 
 /**
- * Logs every credential event through `observability.warn` (see
- * {@link logDatabaseCredentialEvent}) and counts refusals, switches,
- * exhaustions and reloads ({@link DATABASE_CREDENTIAL_METRICS}). An observer
- * failure never reaches the pool.
+ * How often {@link observeDatabaseCredentialEvents} logs a repeated refusal,
+ * switch or exhaustion of one pool (same kind and indexes). A rotation logs
+ * each pool's first refusal and its switch; a wrong password that refuses
+ * every login does not flood the logs. The counters stay exact.
+ */
+export const DATABASE_CREDENTIAL_LOG_INTERVAL_MS = 10_000;
+
+/** The throttle key of a repetitive event, or null to always log it. */
+function databaseCredentialLogKey(pool: string, event: DatabaseCredentialEvent): string | null {
+  switch (event.type) {
+    case "candidate_refused":
+      return `${pool}:refused:${event.index}:${event.stale}`;
+    case "candidate_switched":
+      return `${pool}:switched:${event.fromIndex}:${event.toIndex}`;
+    case "candidates_exhausted":
+      return `${pool}:exhausted:${event.index}:${event.reason}`;
+    case "candidates_reloaded":
+    case "password_file_unreadable":
+      return null;
+  }
+}
+
+/**
+ * Logs credential events through `observability.warn` (see
+ * {@link logDatabaseCredentialEvent}), repeated refusals, switches and
+ * exhaustions at most once per {@link DATABASE_CREDENTIAL_LOG_INTERVAL_MS}
+ * per pool and kind (the next logged line carries `suppressedCount`), and
+ * counts every refusal, switch, exhaustion and reload
+ * ({@link DATABASE_CREDENTIAL_METRICS}). An observer failure never reaches the
+ * pool.
  */
 export function observeDatabaseCredentialEvents(
   pool: string,
   observability: DatabaseCredentialObserver,
+  options: { logIntervalMs?: number; now?: () => number } = {},
 ): DatabaseCredentialEventListener {
-  const log = logDatabaseCredentialEvent(pool, (message, attributes) =>
-    observability.warn(message, attributes),
-  );
+  const throttle = createLogThrottle({
+    intervalMs: options.logIntervalMs ?? DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
+    maxKeys: 64,
+    ...(options.now ? { now: options.now } : {}),
+  });
   return (event, connection) => {
+    const name = connection === "notifications" ? `${pool}-notifications` : pool;
     try {
-      const counter = databaseCredentialEventCounter(
-        connection === "notifications" ? `${pool}-notifications` : pool,
-        event,
-      );
+      const counter = databaseCredentialEventCounter(name, event);
       if (counter) observability.incrementCounter(counter);
     } catch {
       // Metrics are best effort.
     }
     try {
-      log(event, connection);
+      const key = databaseCredentialLogKey(name, event);
+      const admitted = key === null ? { suppressedCount: 0 } : throttle.admit(key);
+      if (!admitted) return;
+      observability.warn(databaseCredentialEventMessage(event), {
+        ...databaseCredentialEventAttributes(pool, event, connection),
+        ...(admitted.suppressedCount > 0 ? { suppressedCount: admitted.suppressedCount } : {}),
+      });
     } catch {
       // Logging is best effort.
     }
@@ -405,12 +453,20 @@ export function isDatabaseAuthenticationFailure(error: unknown): boolean {
 }
 
 /**
- * Hard cap on the attempts of one operation, stale refusals included. An
- * operation normally needs at most one attempt per distinct password; stale
- * refusals (logins that read a password the pool has since replaced) are
- * retried without counting, and this bounds them.
+ * Hard cap on the attempts of one operation. A refused operation is retried
+ * whenever the pool selects another password than the refused login used, so
+ * a rotation costs it one extra attempt, and a rollback that lands while it
+ * retries one more; this bounds the rest, such as files with no valid
+ * password.
  */
 export const DATABASE_AUTHENTICATION_MAX_ATTEMPTS = 5;
+
+/**
+ * @deprecated There is no time-based grace any more: a refusal is attributed
+ * to the password its own login used, so stale refusals never move a pool.
+ * Kept, at 0, for compatibility; nothing reads it.
+ */
+export const DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS = 0;
 
 /**
  * Which candidate a login used. `generation` counts changes of the files'
@@ -440,6 +496,10 @@ export type RotatingDatabasePasswordOptions = {
   onEvent?: DatabaseCredentialEventListener;
   /** Test seam; defaults to reading the file as UTF-8. */
   readPasswordFile?: (path: string) => Promise<string>;
+  /** @deprecated Ignored: there is no time-based grace any more. */
+  staleFailureGraceMs?: number;
+  /** @deprecated Ignored: there is no time-based grace any more. */
+  now?: () => number;
 };
 
 type FileRead = { value: string } | { missing: true } | { unreadable: string };
@@ -591,12 +651,13 @@ export class RotatingDatabasePassword {
     return "switched";
   }
 
-  /** Record that an operation was refused on every attempt it was allowed. */
-  reportExhausted(): void {
+  /** Record that an operation gave up after a 28P01 (see `candidates_exhausted`). */
+  reportExhausted(reason: DatabaseCredentialExhaustion = "every_candidate_refused"): void {
     this.#emit({
       type: "candidates_exhausted",
       index: this.#index,
       candidates: this.#candidates.length,
+      reason,
     });
   }
 
@@ -640,14 +701,15 @@ export class RotatingDatabasePassword {
 
 /**
  * Run `attempt` again after a 28P01, on the candidate the pool then selects.
- * The budget follows the refused login's own password, not the operation's:
- * - a stale refusal (the pool already selects another password than the one
- *   the refused login used) is retried without counting;
- * - otherwise each distinct password gets one attempt: once every candidate
- *   was refused for this operation, its last 28P01 surfaces;
+ * The decision follows the refused login's own password, not the operation's:
+ * - the pool now selects another password than the refused login used (a
+ *   stale refusal, or a fresh one that moved the pool on): retry;
+ * - the refused login used the selected password and no other candidate
+ *   exists (a single password): fail fast, as before;
  * - and never more than {@link DATABASE_AUTHENTICATION_MAX_ATTEMPTS} attempts.
- * Without a credential (no password files), or with a single candidate, this
- * is just `attempt()`: a wrong password fails fast, as before.
+ * A password refused earlier in the operation is tried again when the pool
+ * comes back to it: a rollback can make it valid again while the operation
+ * retries. Without a credential (no password files) this is just `attempt()`.
  *
  * The refused login is identified by the driver's login tag
  * ({@link DATABASE_LOGIN_ATTEMPT}); an untagged 28P01 is attributed to the
@@ -667,7 +729,8 @@ export async function withDatabaseAuthenticationRetry<T>(
 ): Promise<T> {
   if (!credential) return attempt();
   // Candidate indexes of the current generation this operation was refused
-  // on while they were selected (fresh refusals).
+  // on while they were selected (fresh refusals); only for the exhaustion
+  // reason.
   const refusedCandidates = new Set<number>();
   let refusedGeneration: number | undefined;
   for (let attempts = 1; ; attempts += 1) {
@@ -678,18 +741,20 @@ export async function withDatabaseAuthenticationRetry<T>(
       if (!isDatabaseAuthenticationFailure(error) || !canRetry()) throw error;
       const refused = credential.refusedPosition(error) ?? started;
       const outcome = credential.reportAuthenticationFailure(refused);
-      // A single password: nothing else to try, so fail fast.
-      if (credential.candidateCount < 2) throw error;
-      if (outcome !== "stale") {
+      // The selected password itself was refused and there is no other one
+      // (a single password): nothing else to try, so fail fast.
+      if (outcome === "unchanged") throw error;
+      if (outcome === "switched") {
         if (refused.generation !== refusedGeneration) refusedCandidates.clear();
         refusedGeneration = refused.generation;
         refusedCandidates.add(refused.index);
       }
-      if (
-        refusedCandidates.size >= credential.candidateCount ||
-        attempts >= DATABASE_AUTHENTICATION_MAX_ATTEMPTS
-      ) {
-        credential.reportExhausted();
+      if (attempts >= DATABASE_AUTHENTICATION_MAX_ATTEMPTS) {
+        credential.reportExhausted(
+          refusedCandidates.size >= credential.candidateCount
+            ? "every_candidate_refused"
+            : "attempt_cap",
+        );
         throw error;
       }
     }

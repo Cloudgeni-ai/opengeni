@@ -7,6 +7,7 @@ import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import { createDb, rawRows, sessionListChangesFor } from "../src/database";
+import { createSessionListChangeSource } from "../src/session-list-notifications";
 import {
   databaseLoginAttemptOf,
   databaseUrlPassword,
@@ -27,6 +28,7 @@ let validPassword: string;
 let refusedUrl: string;
 let directory: string;
 const REFUSED_PASSWORD = ["refused", "pw", "T4v"].join("-");
+const OTHER_REFUSED_PASSWORD = ["refused", "pw", "W6n"].join("-");
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("password-files");
@@ -147,6 +149,33 @@ describe("createDb password files", () => {
       unsubscribe();
       await client.close();
     }
+  });
+
+  test("with both passwords wrong, the LISTEN connection retries at once only a few times, then at the reconnect delay", async () => {
+    const tally = recorder();
+    const source = new RotatingDatabasePassword({
+      files: await passwordFiles({ previous: REFUSED_PASSWORD, current: OTHER_REFUSED_PASSWORD }),
+      fallbackPassword: REFUSED_PASSWORD,
+      onEvent: (event) => tally.listener(event, "notifications"),
+    });
+    const listener = createSessionListChangeSource(refusedUrl, {
+      reconnectDelayMs: 250,
+      credential: source,
+    });
+    const unsubscribe = listener.subscribe(() => undefined);
+    try {
+      await Bun.sleep(1_600);
+    } finally {
+      unsubscribe();
+      await listener.close();
+    }
+    const refusals = tally.count("candidate_refused", "notifications");
+    // The first login and at most four immediate retries, then one login per
+    // 250 ms delay: about 11 in 1.6 s. Resetting the immediate retries after
+    // every delay would allow five logins per delay (about 35).
+    expect(refusals).toBeGreaterThanOrEqual(5);
+    expect(refusals).toBeLessThanOrEqual(14);
+    expect(tally.count("candidates_exhausted", "notifications")).toBe(0);
   });
 
   test("a single wrong password (current file only) fails fast with 28P01", async () => {
