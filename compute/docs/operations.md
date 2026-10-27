@@ -1056,8 +1056,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   disk is writable again.
 - **Lifting the VMs' memory limit.** `echo max > /sys/fs/cgroup/compute/memory.high`
   (the group under `--cgroup`) lifts it until the agent next starts, which
-  sets it again. Without it, guests bursting together can take the
-  host's memory faster than relief saves them (see Capacity and cost).
+  sets it again. The agent reads it back as it samples, so its count of
+  available memory stops counting the limit at once. Without it, guests
+  bursting together can take the host's memory faster than relief saves
+  them (see Capacity and cost).
 
 ## Network
 

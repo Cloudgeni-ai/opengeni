@@ -182,9 +182,6 @@ pub struct Firecracker {
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
     memory: MemoryProfile,
-    /// The parent group's `memory.high`: what the VMs may hold together
-    /// before the kernel slows them down; `None` for no limit.
-    memory_high: Option<u64>,
 }
 
 impl Firecracker {
@@ -234,7 +231,6 @@ impl Firecracker {
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
             memory: MemoryProfile::bare_metal(),
-            memory_high: None,
         })
     }
 
@@ -252,9 +248,10 @@ impl Firecracker {
     /// as in each VM's own group. A guest past it waits on its own
     /// allocations while the kernel reclaims from the VMs' groups first,
     /// so the host's other processes keep their memory; nothing is ended.
-    pub fn with_memory_high(mut self, bytes: Option<u64>) -> io::Result<Self> {
+    /// Returns without waiting for the kernel to reclaim down to it; see
+    /// [`Cgroup::set_memory_high`].
+    pub fn with_memory_high(self, bytes: Option<u64>) -> io::Result<Self> {
         self.cgroups.set_memory_high(bytes)?;
-        self.memory_high = bytes;
         Ok(self)
     }
 
@@ -1053,7 +1050,13 @@ impl Engine for Firecracker {
     }
 
     fn memory_room(&self) -> Result<Option<u64>, EngineError> {
-        let Some(high) = self.memory_high else {
+        // The limit as it is now, not as the agent set it: an operator may
+        // lift it while the agent runs.
+        let Some(high) = self
+            .cgroups
+            .memory_high()
+            .map_err(|error| EngineError::io("memory_room", error))?
+        else {
             return Ok(None);
         };
         let held = self

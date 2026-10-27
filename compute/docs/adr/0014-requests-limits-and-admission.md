@@ -156,7 +156,15 @@ pick a VM.
   less the high watermark before the kernel slows them down: their parent
   group's `memory.high`, set as the agent starts (and lifted where it
   does not apply, so no earlier setting lingers). By default that is the
-  memory capacity, so the host keeps the headroom it was promised. Their
+  memory capacity, so the host keeps the headroom it was promised. The
+  agent does not wait for the kernel to reclaim down to it: kernels
+  without `O_NONBLOCK` for the file reclaim in the write itself, dirty
+  disk pages included, for as long as that makes progress, and a
+  starting agent waiting on that could run out its lease before renewing
+  it. The write runs on a thread of its own; the limit applies before the
+  kernel starts reclaiming. The agent reads the limit back each time it
+  samples, so `max` written by hand lifts its accounting along with the
+  kernel's slowing. Their
   VMMs, pagers and the page cache of their disks and images count, as in
   each VM's own group; the kernel drops that page cache first. Running
   guests are never swapped, so when sandboxes in use go
