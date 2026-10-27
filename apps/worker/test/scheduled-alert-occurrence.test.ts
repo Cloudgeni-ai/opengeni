@@ -295,8 +295,8 @@ async function taskFixture(
                     credentialHookIds: [options.rig.credentialHookId],
                   }
                 : null,
-              requiredVariableSetNames: [],
-              requiredVariableNames: [],
+              requiredVaultNames: [],
+              requiredSecretNames: [],
               dataSource: {
                 kind: "prometheus" as const,
                 queryPath: "/api/v1/query" as const,

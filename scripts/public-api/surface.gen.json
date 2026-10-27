@@ -12856,7 +12856,7 @@
         "$": "object",
         "$.expectedScopeVersion": "integer!",
         "$.reason": "string!",
-        "$.scope": "ref(VariableSetScope)!"
+        "$.scope": "ref(ResourceAuthorityScope)!"
       }
     },
     "Channel": {
@@ -12895,7 +12895,7 @@
         "$.lastRefreshAt": "string! null",
         "$.plan": "string! null",
         "$.reach": "ref(SubscriptionAccountReach)?",
-        "$.scope": "ref(VariableSetScope)!",
+        "$.scope": "ref(ResourceAuthorityScope)!",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
         "$.subject": "string!",
         "$.usage": "ref(ClaudeSubscriptionUsage)?",
@@ -12913,7 +12913,7 @@
         "$.activeAccountId": "string! null",
         "$.organizationId": "string!",
         "$.settings": "ref(SubscriptionPoolSettings)!",
-        "$.source": "ref(VariableSetScope)!"
+        "$.source": "ref(ResourceAuthorityScope)!"
       }
     },
     "ClaudeSubscriptionOAuthCompleteRequest": {
@@ -12935,7 +12935,7 @@
         "$.accountId": "string!",
         "$.connected": "const!=[\"true\"]",
         "$.credentialVersion": "integer!",
-        "$.scope": "ref(VariableSetScope)!"
+        "$.scope": "ref(ResourceAuthorityScope)!"
       }
     },
     "ClaudeSubscriptionOAuthStartRequest": {
@@ -15055,7 +15055,7 @@
         "$.precedenceRank": "integer?",
         "$.provenanceSource": "enum?=[\"\\\"agent\\\"\",\"\\\"call_transcript\\\"\",\"\\\"human\\\"\",\"\\\"imported_document\\\"\",\"\\\"knowledge_proposal\\\"\",\"\\\"meeting_transcript\\\"\",\"\\\"onboarding\\\"\",\"\\\"portable_skill\\\"\",\"\\\"slack\\\"\"]",
         "$.provenanceSourceId": "string? null",
-        "$.scope": "ref(VariableSetScope)!",
+        "$.scope": "ref(ResourceAuthorityScope)!",
         "$.stableKey": "string!",
         "$.title": "string!"
       }
@@ -15154,8 +15154,6 @@
         "$.checks[]": "ref(RigCheck)",
         "$.credentialHooks": "array?",
         "$.credentialHooks[]": "string",
-        "$.defaultVariableSetIds": "array?",
-        "$.defaultVariableSetIds[]": "string",
         "$.description": "string?",
         "$.image": "unknown?",
         "$.name": "string!",
@@ -15185,7 +15183,6 @@
         "$|1.agentLearning.scope": "ref(ConnectionOwnership)!",
         "$|1.agentLearning.settings": "ref(AgentLearningOverrides)!",
         "$|1.connectionAuthorities": "unknown?",
-        "$|1.environmentId": "string? null",
         "$|1.events": "ref(ScheduledTaskEventsInput)?",
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
@@ -15199,7 +15196,6 @@
         "$|1.schedule": "ref(ScheduledTaskScheduleSpec)!",
         "$|1.status": "enum?=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]",
         "$|1.targetSessionId": "string? null",
-        "$|1.variableSetId": "string? null",
         "$|1.vaultPolicy": "ref(VaultPolicy)?",
         "$|1.visibility": "ref(SessionVisibility)?",
         "$|runMode=existing_session": "ref(CreateSessionScheduledTaskRequest)"
@@ -15222,7 +15218,6 @@
         "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
         "$.connectionAuthorities": "unknown?",
         "$.endUser": "unknown?",
-        "$.environmentId": "string?",
         "$.excludedMcpServerIds": "array?",
         "$.excludedMcpServerIds[]": "string",
         "$.expectedNewSessionDraftRevision": "integer?",
@@ -15274,9 +15269,6 @@
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)",
         "$.usageLimitMicros": "integer? null",
-        "$.variableSetId": "string?",
-        "$.variableSetIds": "array?",
-        "$.variableSetIds[]": "string",
         "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "enum?=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.workingDir": "string?"
@@ -15327,7 +15319,6 @@
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
         "$.effectiveTools": "ref(AgentEffectiveTools)? null",
-        "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
         "$.failureDiagnostics.occurredAt": "string!",
@@ -15410,9 +15401,6 @@
         "$.unread": "boolean!",
         "$.updatedAt": "string!",
         "$.usageLimit": "ref(SessionUsageLimit)?",
-        "$.variableSetId": "string! null",
-        "$.variableSetIds": "array!",
-        "$.variableSetIds[]": "string",
         "$.waitingForEvents": "boolean?",
         "$.workingDir": "string! null",
         "$.workspaceId": "string!"
@@ -16760,8 +16748,6 @@
         "$.idempotencyKey": "string!",
         "$.rigId": "string? null",
         "$.sourceEventId": "string?",
-        "$.variableSetIds": "array?",
-        "$.variableSetIds[]": "string",
         "$.visibility": "ref(SessionVisibility)!",
         "$.workspaceSharedAcknowledged": "boolean!"
       }
@@ -18151,18 +18137,18 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"kind=first_party\",\"kind=mcp\",\"kind=rig_credential_hook\",\"kind=variable_set\"]",
+        "$": "union=[\"kind=first_party\",\"kind=mcp\",\"kind=rig_credential_hook\",\"kind=vault\"]",
         "$|kind=mcp": "object",
         "$|kind=mcp.kind": "const!=[\"\\\"mcp\\\"\"]",
         "$|kind=mcp.serverId": "string!",
         "$|kind=first_party": "object",
         "$|kind=first_party.kind": "const!=[\"\\\"first_party\\\"\"]",
         "$|kind=first_party.tool": "ref(FirstPartyMcpToolName)!",
-        "$|kind=variable_set": "object",
-        "$|kind=variable_set.kind": "const!=[\"\\\"variable_set\\\"\"]",
-        "$|kind=variable_set.variableNames": "array!",
-        "$|kind=variable_set.variableNames[]": "string",
-        "$|kind=variable_set.variableSetName": "string!",
+        "$|kind=vault": "object",
+        "$|kind=vault.kind": "const!=[\"\\\"vault\\\"\"]",
+        "$|kind=vault.secretNames": "array!",
+        "$|kind=vault.secretNames[]": "string",
+        "$|kind=vault.vaultName": "string!",
         "$|kind=rig_credential_hook": "object",
         "$|kind=rig_credential_hook.credentialHookId": "string!",
         "$|kind=rig_credential_hook.kind": "const!=[\"\\\"rig_credential_hook\\\"\"]"
@@ -18198,10 +18184,10 @@
         "$.requiredRig.credentialHookIds": "array?",
         "$.requiredRig.credentialHookIds[]": "string",
         "$.requiredRig.name": "string!",
-        "$.requiredVariableNames": "array?",
-        "$.requiredVariableNames[]": "string",
-        "$.requiredVariableSetNames": "array?",
-        "$.requiredVariableSetNames[]": "string"
+        "$.requiredSecretNames": "array?",
+        "$.requiredSecretNames[]": "string",
+        "$.requiredVaultNames": "array?",
+        "$.requiredVaultNames[]": "string"
       }
     },
     "IncidentTelemetrySeriesMetadata": {
@@ -21598,9 +21584,6 @@
         "$.rigId": "string?",
         "$.sandboxBackend": "ref(SandboxBackend)?",
         "$.targetSandboxId": "string?",
-        "$.variableSetId": "string?",
-        "$.variableSetIds": "array?",
-        "$.variableSetIds[]": "string",
         "$.visibility": "ref(SessionVisibility)?",
         "$.workingDir": "string?"
       }
@@ -22954,7 +22937,7 @@
         "$.provenance": "ref(PreferenceRegistryDescriptorProvenance)!",
         "$.retrievalHandle": "string!",
         "$.revisionId": "string!",
-        "$.scope": "ref(VariableSetScope)!",
+        "$.scope": "ref(ResourceAuthorityScope)!",
         "$.stableKey": "string!",
         "$.title": "string!"
       }
@@ -23052,7 +23035,7 @@
         "$.conflictsWith": "array!",
         "$.conflictsWith[]": "string",
         "$.rank": "integer!",
-        "$.tier": "ref(VariableSetScope)!"
+        "$.tier": "ref(ResourceAuthorityScope)!"
       }
     },
     "PreferenceRegistryProvenance": {
@@ -23120,7 +23103,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.scope": "ref(VariableSetScope)!",
+        "$.scope": "ref(ResourceAuthorityScope)!",
         "$.subjectId": "string! null",
         "$.workspaceId": "string! null"
       }
@@ -24191,6 +24174,15 @@
         "$": "enum=[\"\\\"deployment_default\\\"\",\"\\\"inherited\\\"\",\"\\\"legacy_conversion\\\"\",\"\\\"request\\\"\",\"\\\"workspace_default\\\"\"]"
       }
     },
+    "ResourceAuthorityScope": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
+      }
+    },
     "ResourceRef": {
       "io": [
         "input",
@@ -24319,7 +24311,7 @@
         "$.generation": "integer!",
         "$.id": "string!",
         "$.name": "string!",
-        "$.scope": "ref(VariableSetScope)!",
+        "$.scope": "ref(ResourceAuthorityScope)!",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"revoked\\\"\"]",
         "$.updatedAt": "string!",
         "$.versionCount": "integer!",
@@ -24412,8 +24404,6 @@
         "$.checks[]": "ref(RigCheck)",
         "$.credentialHooks": "array?",
         "$.credentialHooks[]": "string",
-        "$.defaultVariableSetIds": "array?",
-        "$.defaultVariableSetIds[]": "string",
         "$.image": "unknown?",
         "$.setupScript": "string? null"
       }
@@ -24492,8 +24482,6 @@
         "$.createdBy": "string! null",
         "$.credentialHooks": "array!",
         "$.credentialHooks[]": "string",
-        "$.defaultVariableSetIds": "array!",
-        "$.defaultVariableSetIds[]": "string",
         "$.id": "string!",
         "$.image": "string! null",
         "$.providerImages": "object!",
@@ -24858,7 +24846,7 @@
         "$.latencyMode": "ref(LatencyMode)!",
         "$.model": "string!",
         "$.modelProvided": "boolean?",
-        "$.options": "ref(NewSessionDraftOptions)?",
+        "$.options": "ref(NewSessionDraftOptions)!",
         "$.reasoningEffort": "ref(ReasoningEffort)!",
         "$.resources": "array!",
         "$.resources[]": "ref(ResourceRef)",
@@ -24920,7 +24908,6 @@
         "$.createdBy.subjectId": "string!",
         "$.createdByContext": "object!",
         "$.createdByContext{}": "unknown",
-        "$.environmentId": "string! null",
         "$.events": "ref(ScheduledTaskEvents)?",
         "$.executionDigest": "string!",
         "$.id": "string!",
@@ -24938,7 +24925,6 @@
         "$.targetSessionId": "string! null",
         "$.temporalScheduleId": "string!",
         "$.updatedAt": "string!",
-        "$.variableSetId": "string! null",
         "$.vaultPolicy": "union!=[\"mode=all\",\"mode=selected\"]",
         "$.vaultPolicy|mode=all": "object",
         "$.vaultPolicy|mode=all.mode": "const!=[\"\\\"all\\\"\"]",
@@ -25445,7 +25431,6 @@
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
         "$.effectiveTools": "ref(AgentEffectiveTools)? null",
-        "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
         "$.failureDiagnostics.occurredAt": "string!",
@@ -25527,9 +25512,6 @@
         "$.unread": "boolean!",
         "$.updatedAt": "string!",
         "$.usageLimit": "ref(SessionUsageLimit)?",
-        "$.variableSetId": "string! null",
-        "$.variableSetIds": "array!",
-        "$.variableSetIds[]": "string",
         "$.waitingForEvents": "boolean?",
         "$.workingDir": "string! null",
         "$.workspaceId": "string!"
@@ -29706,7 +29688,6 @@
         "$.agentLearning.scope": "ref(ConnectionOwnership)!",
         "$.agentLearning.settings": "ref(AgentLearningOverrides)!",
         "$.connectionAuthorities": "unknown?",
-        "$.environmentId": "string? null",
         "$.events": "ref(ScheduledTaskEventsInput)?",
         "$.expectedExecutionDigest": "string?",
         "$.metadata": "object?",
@@ -29722,7 +29703,6 @@
         "$.schedule": "ref(ScheduledTaskScheduleSpec)?",
         "$.status": "ref(ScheduledTaskStatus)?",
         "$.targetSessionId": "string? null",
-        "$.variableSetId": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?",
         "$.visibility": "ref(SessionVisibility)?"
       }
@@ -30247,15 +30227,6 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"connection\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"variable_set\\\"\"]"
-      }
-    },
-    "VariableSetScope": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "VaultAvailability": {

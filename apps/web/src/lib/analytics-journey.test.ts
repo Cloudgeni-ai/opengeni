@@ -31,12 +31,11 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/reset-password/private", "?token=private")).toEqual({ page: "other" });
   });
-  test("labels every workspace page, including agents, variable sets, and environments", () => {
+  test("labels every workspace page, including agents and secrets", () => {
     for (const page of [
       "read-only-chats",
       "agents",
-      "variable-sets",
-      "environments",
+      "secrets",
       "rigs",
       "capabilities",
       "plugins",

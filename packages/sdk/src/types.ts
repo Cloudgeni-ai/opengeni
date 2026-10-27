@@ -1911,12 +1911,6 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetIds?: string[] | undefined;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
@@ -3608,17 +3602,17 @@ export type IncidentTelemetrySeriesMetadata = {
 export type IncidentTelemetryDataRoute =
   | { kind: "mcp"; serverId: string }
   | { kind: "first_party"; tool: FirstPartyMcpToolName }
-  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "vault"; vaultName: string; secretNames: string[] }
   | { kind: "rig_credential_hook"; credentialHookId: string };
 
 export type IncidentTelemetryPreflight = {
   requiredResources: ResourceRef[];
   requiredMcpServerIds: string[];
   requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
-  requiredFirstPartyMcpPermissions: Permission[];
+  requiredFirstPartyMcpPermissions: KnownPermission[];
   requiredRig: { name: string; credentialHookIds: string[] } | null;
-  requiredVariableSetNames: string[];
-  requiredVariableNames: string[];
+  requiredVaultNames: string[];
+  requiredSecretNames: string[];
   dataSource: {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
@@ -3637,16 +3631,16 @@ export type IncidentTelemetryPreflightInput = Omit<
   | "requiredFirstPartyMcpTools"
   | "requiredFirstPartyMcpPermissions"
   | "requiredRig"
-  | "requiredVariableSetNames"
-  | "requiredVariableNames"
+  | "requiredVaultNames"
+  | "requiredSecretNames"
 > & {
   requiredResources?: ResourceRef[] | undefined;
   requiredMcpServerIds?: string[] | undefined;
   requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
-  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredFirstPartyMcpPermissions?: KnownPermission[] | undefined;
   requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
-  requiredVariableSetNames?: string[] | undefined;
-  requiredVariableNames?: string[] | undefined;
+  requiredVaultNames?: string[] | undefined;
+  requiredSecretNames?: string[] | undefined;
 };
 
 export type ScheduledTaskAgentConfig = {
@@ -3751,10 +3745,6 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
   /** Vaults every run may resolve secret references from (the task vault is always included). */
@@ -3984,7 +3974,7 @@ export type CreateSessionRequest = {
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  /** Atomically attach the server-derived personal rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -7948,8 +7938,6 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
-  defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;

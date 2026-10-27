@@ -112,12 +112,12 @@ export interface SettingsShellProps {
   currentScope?: string;
   /**
    * The page header of a settings page. `null` when the page brings its own: a
-   * sub-page (an account, a key, a form) or a full page (Agents, Variable sets).
+   * sub-page (an account, a key, a form) or a full page (Agents, Secrets).
    */
   page: SettingsShellPage | null;
   /**
    * `settings`: the shell draws the standard-width scroller around the page.
-   * `page`: the page brings its own `ContentPage` (Agents, Variable sets).
+   * `page`: the page brings its own `ContentPage` (Agents, Secrets).
    */
   layout?: "settings" | "page";
   /** Workspace-wide state above the page (the paused banner). */

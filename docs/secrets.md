@@ -501,19 +501,11 @@ Migration `0739_vaults.sql` (maintenance mode) runs in one transaction:
 3. Variable values are deleted, and variable names are scrubbed from persisted
    sandbox env in session envelopes and lease resume state.
 
-Set header rows, attachments and the set database routines stay for now,
-because scheduled-run admission still fences on them; they are inert. A later
-contract migration drops them.
-
-After the migration:
-
-- `/variable-sets/*`, `/environments/*` and `PUT /sessions/:id/variable-sets`
-  are gone and answer 404.
-- Non-empty `variableSetIds`, `variableSetId`, `environmentId` and rig
-  `defaultVariableSetIds` return 422 `variable_sets_removed`. Empty arrays and
-  null are accepted and ignored.
-- `@opengeni/sdk` 2.0.0 drops the Variable Set methods and types.
-- The Variable Sets settings page redirects to Secrets.
+The old set tables are inert: nothing reads or writes them, and a later
+contract migration drops them. The Variable Set routes, request and response
+fields, SDK methods and settings page are gone, and the retired
+`variable-sets:*` and `environments:*` permissions were rewritten to the
+matching `secrets:*` permissions.
 
 Anything that read a set's variables from the environment must now reference
 them explicitly.

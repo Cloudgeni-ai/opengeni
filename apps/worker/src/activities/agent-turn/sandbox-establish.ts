@@ -410,9 +410,9 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   // backend is "none" -> never resolve (no box to touch).
   //
   // Established AFTER sandboxEnvironment is computed (not before) so the box's
-  // manifest is created with the SAME variableSet the agent declares — the SDK
+  // manifest is created with the SAME environment the agent declares — the SDK
   // applies the agent's manifest to this provided session and throws on ANY
-  // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
+  // environment delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
   // here makes current==target so the delta is empty.
   recordTurnStartupPhase(observability, {
     phase: "runtime_preparation",

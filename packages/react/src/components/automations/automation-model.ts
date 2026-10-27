@@ -329,7 +329,6 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_causal_membership_changed: "automations.run.error.accessUnavailable",
   connection_account_unavailable: "automations.run.error.accountUnavailable",
   scheduled_model_unavailable: "automations.run.error.modelUnavailable",
-  variable_set_unavailable: "automations.run.error.variableSetUnavailable",
   rig_version_unavailable: "automations.run.error.rigUnavailable",
   insufficient_credits: "automations.run.error.outOfCredits",
   allowance_exhausted: "automations.run.error.allowanceUsed",

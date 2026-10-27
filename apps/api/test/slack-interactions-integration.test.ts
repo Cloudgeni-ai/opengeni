@@ -33,7 +33,7 @@ import {
   upsertCapabilityCatalogItem,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
   getSlackBotUserLink,
@@ -699,7 +699,7 @@ function fakeSlack(
 function encryptedBotCredential(settings: Settings): string {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) throw new Error("test connection encryption key was not configured");
-  return encryptVariableSetValue(
+  return encryptEnvironmentValue(
     key,
     JSON.stringify({
       headers: {

@@ -208,7 +208,6 @@ async function prepareRunCredentialsObserved(
                 turn,
                 attemptId: input.attemptId,
                 effectiveSandboxBackend: effectiveRunCredentialBackend,
-                variableSet: null,
               }),
           ),
           cancellationSignal,

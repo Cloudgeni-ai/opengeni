@@ -214,7 +214,6 @@ function ChangePayload({
   if (Array.isArray(payload.checks)) {
     touched.push(`checks (${payload.checks.length})`);
   }
-  if (Array.isArray(payload.defaultVariableSetIds)) touched.push("default variable sets");
   const setupScript = typeof payload.setupScript === "string" ? payload.setupScript : null;
   const changelog = typeof payload.changelog === "string" ? payload.changelog : "";
   return (
