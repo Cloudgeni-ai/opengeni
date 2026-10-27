@@ -137,7 +137,8 @@ export function VoiceInputPreferences({
           checked={enabled && available}
           pending={saving}
           disabled={Boolean(reason)}
-          disabledReason={reason}
+          // The description already says "Not supported in EU".
+          disabledReason={regionRestricted ? undefined : reason}
           onCheckedChange={(next) =>
             void save(
               { enabled: next },

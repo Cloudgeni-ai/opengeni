@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { createRef, useMemo, useState } from "react";
 import type { WorkspaceRecordingSettings } from "@opengeni/contracts";
 import {
   OpenGeniApiError,
@@ -6,7 +6,19 @@ import {
   type OrganizationInferenceResidency,
   type Workspace,
 } from "@opengeni/sdk";
-import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
+import {
+  ChatComposer,
+  ModelPolicyPicker,
+  projectPickerRows,
+  type ComposerState,
+} from "@opengeni/react";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { composerTranscription } from "@opengeni/react/app/components/Composer";
+import {
+  RealtimeModelPickerMenu,
+  RealtimeVoiceControl,
+  type RealtimeModelOption,
+} from "@opengeni/react/realtime";
 import { AgentCapabilityPicker } from "@opengeni/react/app/components/agent/agent-capability-picker";
 import { VoiceInputPreferences } from "@opengeni/react/app/components/transcription-settings";
 import {
@@ -15,10 +27,17 @@ import {
   type AgentCapabilityDraft,
 } from "@opengeni/react/app/lib/agent-capabilities";
 import { t } from "@opengeni/react/app/lib/console-text";
-import { MeetingDefaultsView } from "@opengeni/react/meetings";
+import {
+  createMeetingRecorderStore,
+  MeetingDefaultsView,
+  MeetingRecorderStoreProvider,
+  MeetingsListPage,
+} from "@opengeni/react/meetings";
 import { createMeetingsFixture } from "@opengeni/react/testing/meetings";
 import { Section } from "@opengeni/react/ui/section";
 import { InferenceResidencyRow } from "@/components/organization/security-page";
+import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
+import { CodeSearchPreferenceRow } from "@/routes/workspace-settings";
 import { galleryModelRows } from "@/dev/composer-chrome-fixtures";
 import { KitSection, StateCell, StatesGrid } from "../kit";
 
@@ -146,8 +165,13 @@ const EU_ONLY_CONFIG = {
     enabled: true,
     defaultForNewSessions: true,
     capabilities: [
-      { id: "webSearch", available: false, reason: "Not supported in EU" },
-      { id: "media", available: false, reason: "Not supported in EU" },
+      {
+        id: "webSearch",
+        available: false,
+        reason: "Not supported in EU",
+        code: "region_restricted",
+      },
+      { id: "media", available: false, reason: "Not supported in EU", code: "region_restricted" },
     ],
   },
   inferenceFeatures: [
@@ -155,7 +179,11 @@ const EU_ONLY_CONFIG = {
     { id: "image_generation", available: false, unavailableReason: "region_restricted" },
     { id: "video_generation", available: false, unavailableReason: "region_restricted" },
     { id: "voice_input", available: false, unavailableReason: "region_restricted" },
+    { id: "meeting_transcription", available: false, unavailableReason: "region_restricted" },
+    { id: "code_search", available: false, unavailableReason: "region_restricted" },
   ],
+  // Offered by the deployment; EU-only switches it off here.
+  codeSearch: { available: true, workspaceDefault: "off" },
   voiceInput: {
     available: false,
     providers: [],
@@ -245,6 +273,31 @@ export default function EuOnlySection() {
             <EuOnlyMeetingSettings />
           </div>
         </StateCell>
+        <StateCell label="Composer mic" align="stretch" span="full">
+          <div data-preview="composer-mic" className="w-full max-w-[720px]">
+            <EuOnlyComposer />
+          </div>
+        </StateCell>
+        <StateCell label="Workspace settings: video and code search" align="stretch" span="full">
+          <div data-preview="workspace-rows" className="w-full max-w-[720px]">
+            <AppContext.Provider value={EU_ONLY_APP_CONTEXT}>
+              <Section title="Agents">
+                <VideoGenerationPreferenceRow workspaceId={WORKSPACE_ID} canManage refreshKey={0} />
+                <CodeSearchPreferenceRow workspaceId={WORKSPACE_ID} canManage />
+              </Section>
+            </AppContext.Provider>
+          </div>
+        </StateCell>
+        <StateCell label="Meetings" align="stretch" span="full">
+          <div data-preview="meetings" className="w-full max-w-[720px]">
+            <EuOnlyMeetings />
+          </div>
+        </StateCell>
+        <StateCell label="Live voice" align="stretch" span="full">
+          <div data-preview="realtime" className="flex w-full flex-wrap items-start gap-6">
+            <EuOnlyRealtime />
+          </div>
+        </StateCell>
       </StatesGrid>
     </KitSection>
   );
@@ -285,5 +338,149 @@ function EuOnlyMeetingSettings() {
         return true;
       }}
     />
+  );
+}
+
+/** Video was on before EU-only; the deployment offers fast code search. */
+const EU_ONLY_APP_CONTEXT = {
+  client: {
+    getVideoGenerationSettings: async () => ({
+      schemaVersion: 1,
+      policy: { enabledModelIds: ["bytedance/seedance-2.5"], fundingSource: "workspace_gateway" },
+      fundingOptions: [
+        {
+          source: "workspace_gateway",
+          label: "AI Gateway",
+          description: "This workspace's key",
+          available: true,
+          unavailableReason: null,
+        },
+      ],
+      availableModels: [],
+      capabilities: null,
+    }),
+  },
+  clientConfig: EU_ONLY_CONFIG,
+  workspaces: [{ id: WORKSPACE_ID, settings: { codeSearchEnabled: true } }],
+  captureWorkspaceInvocation: () => null,
+  ownsWorkspaceInvocation: () => false,
+  updateWorkspaceSettings: async () => null,
+} as unknown as AppContextValue;
+
+function EuOnlyComposer() {
+  const [value, setValue] = useState("");
+  const composer: ComposerState = {
+    value,
+    setValue,
+    hasDraftContent: () => value.length > 0,
+    send: async () => true,
+    steer: async () => true,
+    sending: false,
+    canSend: value.trim().length > 0,
+    pause: async () => {},
+    pausing: false,
+    resume: async () => {},
+    resumeScope: async () => {},
+    resuming: false,
+    draft: null,
+    draftRevision: 0,
+    draftLoading: false,
+    draftSaving: false,
+    draftConflict: null,
+    applyDraft: () => {},
+    reloadDraft: async () => {},
+    resolveDraftConflict: async () => {},
+    restoredResources: [],
+    removeRestoredResource: () => {},
+    error: null,
+    clearError: () => {},
+  };
+  return (
+    <ChatComposer
+      composer={composer}
+      placeholder="Ask anything"
+      transcription={composerTranscription(EU_ONLY_APP_CONTEXT, WORKSPACE_ID)}
+    />
+  );
+}
+
+/** Meetings where the server switched transcription off for the region. */
+function EuOnlyMeetings() {
+  const fixture = useMemo(() => createMeetingsFixture(), []);
+  const store = useMemo(() => createMeetingRecorderStore(), []);
+  return (
+    <MeetingRecorderStoreProvider value={store}>
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        recordingOff={t("inferenceRegion.notSupportedInEu")}
+        meetingHref={(id) => `#meeting-${id}`}
+        onOpen={() => {}}
+      />
+    </MeetingRecorderStoreProvider>
+  );
+}
+
+const EU_ONLY_VOICE_MODEL: RealtimeModelOption = {
+  id: "opengeni-gateway/openai/gpt-realtime-2.1",
+  label: "GPT Realtime 2.1",
+  provider: "OpenGeni",
+  description: "Best overall voice intelligence",
+  available: false,
+  unavailableReason: "Not supported in EU",
+  unavailableCode: "region_restricted",
+  recommended: true,
+};
+
+/** The live voice button and its model list, with no EU voice route here. */
+function EuOnlyRealtime() {
+  const noop = async () => {};
+  return (
+    <>
+      <div data-preview="realtime-button">
+        <RealtimeVoiceControl
+          snapshot={{
+            status: "idle",
+            realtimeId: null,
+            mode: null,
+            bridge: null,
+            microphone: "inactive",
+            inputMuted: false,
+            audibleOutput: "inactive",
+            outputMuted: false,
+            connectionGeneration: 0,
+            reconnectAttempt: 0,
+            diagnostic: null,
+            error: null,
+          }}
+          canStart={false}
+          admissionBlocker="Not supported in EU"
+          modelAvailable={false}
+          selectedModel={EU_ONLY_VOICE_MODEL}
+          models={[EU_ONLY_VOICE_MODEL]}
+          audioRef={createRef<HTMLAudioElement>()}
+          onStart={noop}
+          onStop={noop}
+          onRetry={noop}
+          onRetryAudibleOutput={noop}
+          onSetInputMuted={() => {}}
+          onSetOutputMuted={() => {}}
+        />
+      </div>
+      <div
+        data-preview="realtime-picker"
+        className="w-[320px] rounded-lg border border-border bg-popover p-1 shadow-md"
+      >
+        <RealtimeModelPickerMenu
+          models={[EU_ONLY_VOICE_MODEL]}
+          selectedModel={EU_ONLY_VOICE_MODEL}
+          provider="OpenGeni"
+          direction={1}
+          disabled={false}
+          onProviderChange={() => {}}
+          onSelect={() => {}}
+        />
+      </div>
+    </>
   );
 }

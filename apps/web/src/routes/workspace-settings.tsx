@@ -683,7 +683,7 @@ function BusySendPreferenceRow({
  * with, so its cached prompt stays stable; Off also pauses the tool in running
  * sessions until it is switched back.
  */
-function CodeSearchPreferenceRow({
+export function CodeSearchPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -692,7 +692,8 @@ function CodeSearchPreferenceRow({
 }) {
   const context = useAppContext();
   const capability = context.clientConfig.codeSearch;
-  // EU-only workspace without an EU decision model: shown, switched off.
+  // Offered by the deployment, but EU-only and without an EU decision model:
+  // shown, switched off. Not offered at all: not shown.
   const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "code_search");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const explicit = workspace?.settings?.codeSearchEnabled;
@@ -704,7 +705,7 @@ function CodeSearchPreferenceRow({
         ? "off"
         : "default";
   const [saving, setSaving] = useState(false);
-  if (capability?.available !== true && !regionRestricted) return null;
+  if (capability?.available !== true) return null;
   const defaultPhrase =
     capability?.workspaceDefault === "on"
       ? "Default turns it on"
@@ -732,8 +733,9 @@ function CodeSearchPreferenceRow({
     }
   }
 
+  // The description already says "Not supported in EU".
   const reason =
-    regionRestricted ?? (canManage ? undefined : "Only workspace admins can change this.");
+    regionRestricted || canManage ? undefined : "Only workspace admins can change this.";
   return (
     <SettingRow
       label="Fast code search"

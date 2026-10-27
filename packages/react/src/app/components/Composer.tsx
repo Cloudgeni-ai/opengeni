@@ -12,8 +12,8 @@ import type { SlashCommandContext } from "../../hooks/use-slash-commands";
 import type { ComposerQueuedRecall } from "../../hooks/use-queued-prompt-recall";
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/browser";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
-import { useRef, type ReactNode } from "react";
-import { useAppContext } from "../app-context";
+import { useRef, type ComponentProps, type ReactNode } from "react";
+import { useAppContext, type AppContextValue } from "../app-context";
 import { useAppShotTarget } from "./desktop/app-shots";
 import { MessageContextPills } from "./message-context-pills";
 import { ComposerUsageNotice } from "./usage/usage-entry";
@@ -25,6 +25,35 @@ export function useDraftAttachments(
   scope: "workspace" | "personal" = "workspace",
 ): UseFileAttachmentsResult {
   return useFileAttachments({ workspaceId, scope });
+}
+
+/**
+ * The composer's mic for this workspace. EU-only without an EU speech-to-text
+ * route: the mic stays, switched off, and says "Not supported in EU". Voice
+ * input not available here: no mic.
+ */
+export function composerTranscription(
+  context: Pick<AppContextValue, "client" | "clientConfig" | "workspaces">,
+  workspaceId: string,
+): ComponentProps<typeof ChatComposer>["transcription"] {
+  const restricted = inferenceFeatureRestriction(t, context.clientConfig, "voice_input");
+  if (restricted) {
+    return {
+      client: null,
+      workspaceId,
+      capability: null,
+      workspaceEnabled: false,
+      messages: { unavailable: restricted },
+    };
+  }
+  if (!context.clientConfig.voiceInput?.available) return undefined;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
+  return {
+    client: context.client,
+    workspaceId,
+    capability: context.clientConfig.voiceInput,
+    workspaceEnabled: resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true,
+  };
 }
 
 export function ConsoleComposer(props: {
@@ -64,11 +93,7 @@ export function ConsoleComposer(props: {
   running?: boolean | undefined;
 }) {
   const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
-  const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
-  // EU-only workspace without an EU speech-to-text route: the mic stays,
-  // switched off, and says why.
-  const voiceInputRestricted = inferenceFeatureRestriction(t, context.clientConfig, "voice_input");
+  const transcription = composerTranscription(context, props.workspaceId);
   // In the desktop app, the app-shot shortcut attaches the captured window here.
   const regionRef = useRef<HTMLDivElement>(null);
   useAppShotTarget(props.fileUploadsEnabled ? props.attachments : null, regionRef);
@@ -106,26 +131,7 @@ export function ConsoleComposer(props: {
         controlsStart={props.controls}
         actionsStart={props.actions}
         transcriptionSuppressed={props.transcriptionSuppressed === true}
-        {...(voiceInputRestricted
-          ? {
-              transcription: {
-                client: null,
-                workspaceId: props.workspaceId,
-                capability: null,
-                workspaceEnabled: false,
-                messages: { unavailable: voiceInputRestricted },
-              },
-            }
-          : context.clientConfig.voiceInput?.available
-            ? {
-                transcription: {
-                  client: context.client,
-                  workspaceId: props.workspaceId,
-                  capability: context.clientConfig.voiceInput,
-                  workspaceEnabled: voiceInputEnabled,
-                },
-              }
-            : {})}
+        {...(transcription ? { transcription } : {})}
       />
     </div>
   );

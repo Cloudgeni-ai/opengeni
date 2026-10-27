@@ -211,6 +211,28 @@ describe("Meetings list", () => {
     }
   });
 
+  test("an EU-only workspace without an EU route says Not supported in EU instead of recording", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        recordingOff="Not supported in EU"
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const notice = view.container.querySelector('[data-tone="info"]');
+      expect(notice?.textContent).toBe("Not supported in EU");
+      const buttons = [...view.container.querySelectorAll("button")];
+      expect(buttons.some((button) => button.textContent?.includes("Start recording"))).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a host can show only its own meetings inside its page, with a reminder at Start", async () => {
     const fixture = createMeetingsFixture();
     await fixture.client.updateRecording(fixture.workspaceId, fixture.readyId, {

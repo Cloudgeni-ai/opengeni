@@ -70,7 +70,7 @@ import {
 import { type MicrophoneAccess, useMicrophoneAccess } from "./microphone-access";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { errorMessage } from "@opengeni/contracts/values";
-import { regionRestrictedText } from "../inference-region";
+import { isRegionRestricted, regionRestrictedText } from "../inference-region";
 
 export {
   codexRealtimeAdmissionAllowed,
@@ -494,7 +494,9 @@ export function RealtimeVoiceControl(props: {
   const failureText =
     status.label === t("realtime.realtimeControl.voiceUnavailable")
       ? status.detail
-      : t("realtime.realtimeControl.labelDetail", { label: status.label, detail: status.detail });
+      : !status.detail
+        ? status.label
+        : t("realtime.realtimeControl.labelDetail", { label: status.label, detail: status.detail });
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
@@ -507,7 +509,9 @@ export function RealtimeVoiceControl(props: {
       : modeOwned
         ? t("realtime.realtimeControl.endVoiceConversation")
         : !startable && (status.phase === "unavailable" || status.phase === "checking")
-          ? `${status.label}: ${status.detail}`
+          ? status.detail
+            ? `${status.label}: ${status.detail}`
+            : status.label
           : startFailed
             ? t("realtime.realtimeControl.tryVoiceAgain")
             : t("realtime.realtimeControl.startVoice");
@@ -741,7 +745,7 @@ export function RealtimeVoiceControl(props: {
               !(
                 status.phase === "unavailable" &&
                 pickerProvider === selectedModel.provider &&
-                selectedModel.unavailableReason === status.detail
+                (selectedModel.unavailableReason === status.detail || !status.detail)
               ) ? (
                 <>
                   {modelsKnown ? <DropdownMenuSeparator /> : null}
@@ -753,7 +757,9 @@ export function RealtimeVoiceControl(props: {
                       />
                       {status.label}
                     </div>
-                    <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+                    {status.detail ? (
+                      <p className="mt-1 text-og-xs leading-5 text-og-fg-subtle">{status.detail}</p>
+                    ) : null}
                   </div>
                 </>
               ) : null}
@@ -790,7 +796,7 @@ export function RealtimeVoiceControl(props: {
       </div>
 
       <span className="sr-only" role="status" aria-live="polite">
-        {status.label}. {status.detail}
+        {status.detail ? `${status.label}. ${status.detail}` : status.label}
       </span>
       {props.snapshot.error ? (
         <span className="sr-only" role="alert">
@@ -1305,12 +1311,14 @@ function statusContent(
         };
       }
       if (!modelAvailable) {
+        const refusal = realtimeRefusalLabel(t, unavailableCode);
+        const detail = admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel");
         return {
           phase: "unavailable",
-          label:
-            realtimeRefusalLabel(t, unavailableCode) ??
-            t("realtime.realtimeControl.voiceModelUnavailable"),
-          detail: admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel"),
+          label: refusal ?? t("realtime.realtimeControl.voiceModelUnavailable"),
+          // Say it once: "Not supported in EU" needs no second line.
+          detail:
+            refusal !== null && (detail === refusal || isRegionRestricted(detail)) ? "" : detail,
         };
       }
       if (!canStart && admissionBlocker) {

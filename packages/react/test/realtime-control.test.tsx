@@ -749,6 +749,44 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
   });
 
+  test("the voice model picker marks a model EU-only switched off and won't pick it", async () => {
+    const models: RealtimeModelOption[] = [
+      {
+        id: "opengeni-gateway/openai/gpt-realtime-2.1",
+        label: "GPT Realtime 2.1",
+        provider: "OpenGeni",
+        description: "Best overall voice intelligence",
+        available: false,
+        unavailableReason: "Off here",
+        unavailableCode: "region_restricted",
+        recommended: true,
+      },
+    ];
+    const picked: string[] = [];
+    await act(async () =>
+      root.render(
+        <RealtimeModelPickerMenu
+          models={models}
+          selectedModel={models[0]!}
+          provider="OpenGeni"
+          direction={1}
+          disabled={false}
+          onProviderChange={() => undefined}
+          onSelect={(id) => void picked.push(id)}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("GPT Realtime 2.1");
+    expect(container.textContent).toContain("Not supported in EU");
+    expect(container.textContent).not.toContain("Off here");
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.includes("GPT Realtime 2.1"),
+    );
+    expect(row?.disabled).toBe(true);
+    await act(async () => row?.click());
+    expect(picked).toEqual([]);
+  });
+
   test("sets the conversation language for models that need one, defaulting to the app language", async () => {
     localStorage.removeItem("opengeni:realtime-language");
     const eleven: RealtimeModelOption = {
@@ -1731,6 +1769,46 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "Voice model unavailable",
     );
+  });
+
+  test("a voice model EU-only switched off says Not supported in EU once", async () => {
+    const restricted = {
+      id: "gpt-realtime-3",
+      label: "GPT Realtime",
+      provider: "openai",
+      description: "",
+      available: false,
+      unavailableReason: "Not supported in EU",
+      unavailableCode: "region_restricted",
+      recommended: false,
+    } as const;
+    await act(async () => {
+      root.render(
+        <RealtimeVoiceControl
+          snapshot={idle}
+          canStart={false}
+          admissionBlocker="Not supported in EU"
+          modelAvailable={false}
+          selectedModel={restricted as never}
+          models={[restricted as never]}
+          audioRef={createRef<HTMLAudioElement>()}
+          onStart={async () => undefined}
+          onStop={async () => undefined}
+          onRetry={async () => undefined}
+          onRetryAudibleOutput={async () => undefined}
+          onSetInputMuted={() => undefined}
+          onSetOutputMuted={() => undefined}
+        />,
+      );
+    });
+
+    const start = container.querySelector<HTMLButtonElement>(
+      '[data-testid="realtime-primary-action"]',
+    );
+    expect(start?.disabled).toBe(true);
+    expect(start?.getAttribute("aria-label")).toBe("Not supported in EU");
+    const status = container.querySelector('[role="status"]')?.textContent ?? "";
+    expect(status).toBe("Not supported in EU");
   });
 
   test("says it is checking voice, not Connect Codex, until the catalog arrives", async () => {

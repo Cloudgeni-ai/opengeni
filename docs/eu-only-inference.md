@@ -291,6 +291,9 @@ session's effective tools omit them.
   Surfaces read the reason
   through one helper, `inferenceFeatureRestriction` / `regionRestrictedText` in
   `@opengeni/react`.
+- The app reads these lists for the open workspace
+  (`GET /v1/config/client?workspaceId=`), again when the workspace changes,
+  when the window regains focus and after the setting changes.
 - No label says EU: names and labels never decide residency.
 
 ### Recording the region

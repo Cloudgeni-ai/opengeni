@@ -152,6 +152,11 @@ export type AppContextValue = {
   revalidatePrincipalAccess: () => void;
   /** Refreshes the current principal's organization and workspace grants in place. */
   refreshPrincipalAccess: () => Promise<boolean>;
+  /**
+   * Reads the open workspace's client config again, for example after
+   * EU-only inference changed. Absent outside the stock app state.
+   */
+  refreshWorkspaceConfig?: () => void;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (

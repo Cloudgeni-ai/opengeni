@@ -1,11 +1,14 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 
 GlobalRegistrator.register({ url: "https://app.example/settings/organization/security?tab=1" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
+
+// React DOM loads after the DOM is registered, so later files in the same
+// process get working events too.
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
 
 let selectedSlotId: string | null = "slot-1";
 const beginReauth = mock(async (_slotId: string) => ({ transactionId: "t-1" }));

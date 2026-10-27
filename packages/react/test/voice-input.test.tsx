@@ -10,6 +10,7 @@ import {
 } from "@opengeni/sdk/recordings";
 import { act, useState } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
+import { composerTranscription } from "../src/app/components/Composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
@@ -1120,6 +1121,56 @@ describe("composer dictation", () => {
     });
     expect(mounted.container.querySelector(blocked)).toBeNull();
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+  });
+});
+
+describe("the mic in an EU-only workspace", () => {
+  const context = (config: Record<string, unknown>) =>
+    ({
+      client: { transcribeAudio: async () => ({ text: "", languages: [] }) },
+      workspaces: [{ id: "ws-1", settings: {} }],
+      clientConfig: config,
+    }) as unknown as Parameters<typeof composerTranscription>[0];
+
+  test("stays, switched off, and says Not supported in EU", async () => {
+    const transcription = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [
+          { id: "voice_input", available: false, unavailableReason: "region_restricted" },
+        ],
+      }),
+      "ws-1",
+    );
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <ChatComposer composer={composerState("", () => {}, sends)} transcription={transcription} />,
+    );
+    const mic = mounted.container.querySelector<HTMLButtonElement>(
+      "[aria-label='Not supported in EU']",
+    );
+    expect(mic).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeNull();
+    await act(async () => {
+      mic!.click();
+      await settle();
+    });
+    expect(mounted.container.querySelector("[data-voice-waveform]")).toBeNull();
+  });
+
+  test("an available mic is unchanged; without voice input there is no mic", () => {
+    const available = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [{ id: "voice_input", available: true, unavailableReason: null }],
+      }),
+      "ws-1",
+    );
+    expect(available?.capability?.available).toBe(true);
+    expect(available?.workspaceEnabled).toBe(true);
+    expect(composerTranscription(context({ voiceInput: { available: false } }), "ws-1")).toBe(
+      undefined,
+    );
   });
 });
 

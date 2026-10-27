@@ -73,6 +73,7 @@ export function OrganizationSecurityPage() {
             client={client}
             identity={directory.identity}
             canTurnOn={administrator}
+            onChanged={appContext.refreshWorkspaceConfig}
           />
         </Section>
       ) : null}
@@ -209,6 +210,8 @@ type ResidencyRowProps = {
   >;
   identity: OrganizationAdminIdentity;
   canTurnOn: boolean;
+  /** After a change: the open workspace's models and features change with it. */
+  onChanged?: (() => void) | undefined;
 };
 
 /** The row with this browser's way of signing in again (browser accounts or sign-out). */
@@ -247,6 +250,7 @@ export function InferenceResidencyRow({
   client,
   identity,
   canTurnOn,
+  onChanged,
   signInAgain,
 }: ResidencyRowProps & {
   /** Signs in again when turning off needs a recent sign-in. */
@@ -296,6 +300,7 @@ export function InferenceResidencyRow({
         });
         if (!owns(operation)) return "failed";
         setValue(saved);
+        onChanged?.();
         toast.success(euOnly ? "EU-only inference is on" : "EU-only inference is off");
         return "saved";
       } catch (saveError) {
@@ -316,7 +321,7 @@ export function InferenceResidencyRow({
         if (owns(operation)) setPending(null);
       }
     },
-    [claim, client, identity.organizationId, load, owns],
+    [claim, client, identity.organizationId, load, onChanged, owns],
   );
 
   if (error && value === null) {
@@ -365,7 +370,7 @@ export function InferenceResidencyRow({
         size="sm"
         title="Turn off EU-only inference?"
         description="Models and features outside the EU become available again."
-        error={signInError ?? signInNeeded ?? undefined}
+        error={signInError ?? undefined}
         submitLabel={signInNeeded ? "Sign in again" : "Turn off"}
         pendingLabel="Turning off…"
         tone={signInNeeded ? "default" : "destructive"}
@@ -384,7 +389,10 @@ export function InferenceResidencyRow({
           return (await save(value, false)) !== "sign_in";
         }}
         onSubmitted={() => setConfirmOff(false)}
-      />
+      >
+        {/* A step to take, not a failure. */}
+        {signInNeeded && !signInError ? <Notice tone="info">{signInNeeded}</Notice> : null}
+      </FormDialog>
     </SettingRowGroup>
   );
 }

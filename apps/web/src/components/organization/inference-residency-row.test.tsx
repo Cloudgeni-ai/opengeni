@@ -1,9 +1,6 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import * as SonnerPackage from "sonner";
 
 import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
 import type { OrganizationInferenceResidency } from "@opengeni/react/app/types";
@@ -11,6 +8,12 @@ import type { OrganizationInferenceResidency } from "@opengeni/react/app/types";
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
+
+// React DOM loads after the DOM is registered, so later files in the same
+// process get working events too.
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
+const SonnerPackage = await import("sonner");
 const toastSuccess = mock((_message: string) => undefined);
 const toastError = mock((_message: string, _options?: { description?: string }) => undefined);
 mock.module("sonner", () => ({
@@ -77,6 +80,7 @@ const client = {
   updateOrganizationInferenceResidency: updateResidency,
 };
 const signInAgain = mock((_onSignedIn: () => void, _onError: (message: string) => void) => {});
+const onChanged = mock(() => {});
 
 beforeEach(() => {
   document.body.replaceChildren();
@@ -85,6 +89,7 @@ beforeEach(() => {
   toastSuccess.mockClear();
   toastError.mockClear();
   signInAgain.mockClear();
+  onChanged.mockClear();
   failWith = null;
   failLoad = null;
   residency = state(false, 3, false);
@@ -102,6 +107,7 @@ async function render(canTurnOn: boolean) {
         client={client}
         identity={identity}
         canTurnOn={canTurnOn}
+        onChanged={onChanged}
         signInAgain={signInAgain}
       />,
     );
@@ -258,6 +264,10 @@ test("turning off without a recent sign-in offers Sign in again, then Turn off",
   // The confirmation stays open with the server's reason and one action.
   const dialog = document.body.querySelector('[role="dialog"]')!;
   expect(dialog.textContent).toContain("Sign in again to turn EU-only off.");
+  // A step to take, shown as information rather than a failure.
+  const notice = dialog.querySelector('[data-tone="info"]');
+  expect(notice?.textContent).toContain("Sign in again to turn EU-only off.");
+  expect(dialog.querySelector('[role="alert"]')).toBeNull();
   expect(dialogButton("Turn off")).toBeUndefined();
   expect(toastError).not.toHaveBeenCalled();
   expect(residencySwitch(container).getAttribute("aria-checked")).toBe("true");
@@ -277,6 +287,8 @@ test("turning off without a recent sign-in offers Sign in again, then Turn off",
   expect(updateResidency).toHaveBeenCalledTimes(2);
   expect(residencySwitch(container).getAttribute("aria-checked")).toBe("false");
   expect(toastSuccess).toHaveBeenCalledWith("EU-only inference is off");
+  // The open workspace's models and features are read again; the refusal didn't count.
+  expect(onChanged).toHaveBeenCalledTimes(1);
   await act(async () => root.unmount());
 });
 

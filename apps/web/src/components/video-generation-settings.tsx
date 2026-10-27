@@ -164,7 +164,8 @@ export function VideoGenerationPreferenceRow({
           checked={enabled}
           pending={saving || (!settings && !failed)}
           disabled={Boolean(reason)}
-          disabledReason={reason}
+          // The description already says "Not supported in EU".
+          disabledReason={regionRestricted ? undefined : reason}
           onCheckedChange={() => void toggle()}
         />
       }

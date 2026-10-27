@@ -468,11 +468,8 @@ function MeetingDefaultsViewContent({
               checked={liveTranscript && !liveRestricted}
               pending={saving}
               disabled={!canManage || liveRestricted !== null}
-              {...(liveRestricted
-                ? { disabledReason: liveRestricted }
-                : reason
-                  ? { disabledReason: reason }
-                  : {})}
+              // The description already says "Not supported in EU".
+              {...(!liveRestricted && reason ? { disabledReason: reason } : {})}
               onCheckedChange={chooseLiveTranscript}
             />
           }

@@ -16,6 +16,7 @@ import {
   liveTranscriptRestriction,
   transcriptionModelUnavailableReason,
 } from "../src/meetings/meeting-settings";
+import { transcribeAgainModelOptions } from "../src/meetings/meeting-detail-page";
 import { createOpenGeniText } from "../src/messages/runtime";
 import {
   availabilityReasonLabel,
@@ -123,6 +124,14 @@ describe("features in an EU-only workspace", () => {
     } as RecordingTranscriptionModel;
     expect(transcriptionModelUnavailableReason(model)).toBe(NOT_SUPPORTED);
     expect(transcriptErrorText(REGION_RESTRICTED)).toBe(NOT_SUPPORTED);
+    // Transcribe again says why too, instead of asking to connect the provider.
+    const [restricted, missingKey] = transcribeAgainModelOptions([
+      { ...model, usdPerHour: null },
+      { ...model, model: "nova-2", unavailableReason: null, usdPerHour: null },
+    ]);
+    expect(restricted?.disabled).toBe(true);
+    expect(restricted?.disabledReason).toBe(NOT_SUPPORTED);
+    expect(missingKey?.disabledReason).toBe("Connect Deepgram first");
   });
 
   test("the live transcript says Not supported in EU only when no live model is left", () => {
