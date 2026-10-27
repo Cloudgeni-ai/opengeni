@@ -122,6 +122,10 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background input refused before anything was sent: the addressed element
   // could not be proven to be in the addressed window.
   element_outside_target_window: "invalid_action",
+  // Input refused before anything was sent: the window is no longer one of
+  // its app's windows on screen (an earlier action closed or hid it, or it is
+  // on another Space).
+  off_space_or_ax_unresolved: "invalid_action",
   // Pointer or key input refused before anything was sent: the element is in
   // a bubble or popover attached to the window, which takes accessibility
   // actions only.
