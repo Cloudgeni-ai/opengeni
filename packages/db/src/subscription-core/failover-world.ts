@@ -223,7 +223,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       )
     )
       return { status: "home_only" } as const;
-    if (!(await readSubscriptionCoreFailoverProvider(tx, identity.accountId, homeId)))
+    if (!(await readSubscriptionCoreFailoverProvider(tx, homeId)))
       return { status: "home_only" } as const;
     const effective = await readSubscriptionEffectiveSettings(
       tx,
@@ -235,7 +235,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
     const providers = new Map<string, SubscriptionCoreProvider>();
     for (const id of subscriptionCoreProviderIds()) {
       if (id !== homeId && !crossing) continue;
-      const registered = await readSubscriptionCoreFailoverProvider(tx, identity.accountId, id);
+      const registered = await readSubscriptionCoreFailoverProvider(tx, id);
       if (registered) providers.set(id, registered);
     }
     if (!providers.has(homeId)) return { status: "home_only" } as const;

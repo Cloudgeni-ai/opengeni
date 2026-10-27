@@ -66,6 +66,8 @@ export const selfhostedProvider: ProviderRegistration = {
   instanceIdFields: ["agentId"],
   workspaceCapturePolicy: () => null,
   descriptor: CAPABILITY_DESCRIPTORS.selfhosted,
+  // Same session as compute: no agent stdin, whatever the person's terminal has.
+  sessionSupportsPty: false,
   /**
    * No per-box credentials: the machine is reached over the agent's own
    * enrollment. The enrollment-signing + relay-token secrets are deployment-level

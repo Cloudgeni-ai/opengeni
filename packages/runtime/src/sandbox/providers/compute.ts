@@ -22,6 +22,10 @@ export const computeProvider: ProviderRegistration = {
   // capture that rotates, archives or moves a workspace; no warm checkpoints.
   workspaceCapturePolicy: () => ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.compute,
+  // Commands run over the Connected Machine operation stream; long ones become
+  // background commands, not stdin sessions. The relay PTY in the descriptor is
+  // the person's terminal.
+  sessionSupportsPty: false,
   validateCredentials(settings) {
     const issues = computeSettingsIssues(settings);
     if (issues.length > 0) throw new SandboxConfigError("compute", issues.join("; "));

@@ -83,8 +83,13 @@ function main(argv) {
   const up = $.CGEventCreateKeyboardEvent(source, 9, false);
   $.CGEventSetFlags(down, 0x100000);
   $.CGEventSetFlags(up, 0x100000);
+  // Posted back to back, or by a helper that quits at once, the keys are
+  // sometimes dropped: about one paste in five on a real Mac. A short press,
+  // like a person's, and a moment before quitting make every paste land.
   $.CGEventPost(0, down);
+  delay(0.03);
   $.CGEventPost(0, up);
+  delay(0.1);
   return JSON.stringify({ ok: true });
 }
 `);

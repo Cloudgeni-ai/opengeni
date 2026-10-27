@@ -821,7 +821,6 @@ function sdk(cookie: string, actorEpoch: string): OpenGeniClient {
 async function createActualUser(input: {
   displayName: string;
   email: string;
-  organizationName: string;
 }): Promise<AccountFixture> {
   if (!owned) throw new Error("database fixture unavailable");
   const signUp = await fetch(`${publicOrigin}/v1/auth/sign-up/email`, {
@@ -838,7 +837,7 @@ async function createActualUser(input: {
   return {
     displayName: input.displayName,
     email: input.email,
-    organizationName: input.organizationName,
+    organizationName: input.displayName,
     organizationId: "",
     workspaceId: "",
     sessionId: "",
@@ -2326,9 +2325,13 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       );
     }
     await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
-    await page.getByLabel("Organization name").fill(account.organizationName);
-    await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    expect(await page.getByLabel("Organization name").count()).toBe(0);
+    await page
+      .getByText(`Your organization is called ${account.organizationName}.`, {
+        exact: false,
+      })
+      .waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
@@ -3401,12 +3404,10 @@ beforeAll(async () => {
   alpha = await createActualUser({
     displayName: "Account Alpha",
     email: `account-alpha-${RUN_ID}@example.test`,
-    organizationName: "Account Alpha Organization",
   });
   beta = await createActualUser({
     displayName: "Account Beta",
     email: `account-beta-${RUN_ID}@example.test`,
-    organizationName: "Account Beta Organization",
   });
 }, 900_000);
 
@@ -5297,7 +5298,6 @@ describe("provider-neutral browser account acceptance", () => {
     const reviewAccount = await createActualUser({
       displayName: "Review Reader",
       email: `review-reader-${RUN_ID}@example.test`,
-      organizationName: "Review Reader Organization",
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
     let diagnostics: ReturnType<typeof createFiniteReviewReadDiagnostics> | undefined;

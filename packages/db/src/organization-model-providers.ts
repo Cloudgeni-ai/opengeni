@@ -10,12 +10,10 @@ import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
-import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
 import {
   subscriptionCoreClaudeCustomModelAdmitted,
   type SubscriptionCoreClaudeAdmissionCarrier,
 } from "./subscription-core-claude-reads";
-import { readSubscriptionCoreProviderRoute } from "./subscription-core/provider-route";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
@@ -833,25 +831,16 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   return await withOrganizationModelProviderCustomModelReadLock(db, input, async (scopedDb) => {
     if (input.providerKind === "claude_subscription") {
       if (!input.claudeAuthority) return null;
-      // Claude's provider route (design 5.3, C2a): legacy keeps the v1
-      // admission; maintenance admits nothing; the core admits from the
-      // organization pool and never reads a v1 snapshot.
-      const route = await readSubscriptionCoreProviderRoute(scopedDb, {
-        accountId: input.accountId,
-        provider: SUBSCRIPTION_CORE_CLAUDE_PROVIDER,
-      });
-      if (route !== "core") return null;
-      if (route === "core") {
-        if (
-          !(await subscriptionCoreClaudeCustomModelAdmitted(scopedDb, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            upstreamModelId: input.upstreamModelId,
-            carrier: claudeAdmissionCarrier(input.claudeAuthority),
-          }))
-        )
-          return null;
-      }
+      // The core admits from the organization pool and never reads a v1 snapshot.
+      if (
+        !(await subscriptionCoreClaudeCustomModelAdmitted(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          upstreamModelId: input.upstreamModelId,
+          carrier: claudeAdmissionCarrier(input.claudeAuthority),
+        }))
+      )
+        return null;
     }
     const [row] = await scopedDb
       .select()

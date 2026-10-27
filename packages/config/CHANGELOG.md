@@ -1,5 +1,42 @@
 # @opengeni/config
 
+## 5.5.1
+
+### Minor Changes
+
+- 220c431: Record where every model route processes data. Each configured model carries a
+  residency record (geography, deployment type, regions and evidence); registry
+  providers and the built-in provider can declare it, other providers use reviewed
+  built-in rules, and an undeclared route is unknown, never EU. The model catalog
+  exposes the residency verdict without the evidence text.
+
+### Patch Changes
+
+- b2e3119: Resolve canonical model ids and aliases from one freshly constructed catalog instead of constructing it twice per provider lookup. Configuration and provider credentials remain freshly read on each call.
+- c09ae08: GPT-6.1 Terra (`gpt-6.1-terra`) now has a reviewed list price, so usage insights can show what its Codex and OpenAI-route turns would cost at API rates: $1 input, $0.05 cached input, $1.25 cache write and $5 output per million tokens, and $2, $0.10, $2.50 and $7.50 for the whole request once input exceeds 272K tokens. GPT-6.1 Sol and GPT-6.1 Terra also get compact picker labels ("6.1 Sol", "6.1 Terra") when they come from the built-in model lists.
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [d569481]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [18c7cfa]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [031e173]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@5.5.0
+  - @opengeni/xai-subscription@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes

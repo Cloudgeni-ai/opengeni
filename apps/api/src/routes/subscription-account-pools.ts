@@ -19,7 +19,6 @@ import {
   coreWorkspaceDisconnect,
   coreWorkspaceRename,
   coreWorkspaceSettings,
-  requireSubscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./subscription-pool-core";
 import { parseRequestBody } from "../http/request-body";
@@ -28,12 +27,6 @@ import { parseRequestBody } from "../http/request-body";
 
 /** The legacy pool account shape SuperGrok and Claude share (SuperGrok's metadata defines it). */
 export type SubscriptionPoolAccount = XaiSubscriptionAccountMetadata;
-/**
- * The repository of a provider whose legacy runtime was deleted after its
- * cutover: its routes serve only the core (`requireSubscriptionCoreRoute`
- * refuses any other route first), so no legacy handler can reach these.
- */
-
 /** Account CRUD uses one authority, allocator and wake contract for every pool. */
 export function registerSubscriptionAccountPoolRoutes(
   app: Hono,
@@ -58,14 +51,9 @@ export function registerSubscriptionAccountPoolRoutes(
     accountJson: options.accountJson,
     listedAccountJson: core.listedAccountJson ?? options.accountJson,
   };
-  /**
-   * The pool's runtime for this organization: `legacy` without a core
-   * binding; a core-only pool (no legacy repository) serves only `core`.
-   */
-  const route = (accountId: () => Promise<string>) =>
-    requireSubscriptionCoreRoute(deps, options.provider, options.displayName, accountId);
-  const workspaceRoute = (c: Context, workspaceId: string) =>
-    route(async () => (await requireAccessGrant(c, deps, workspaceId, "workspace:read")).accountId);
+  const requireWorkspaceRead = async (c: Context, workspaceId: string) => {
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+  };
   const workspacePath = `/v1/workspaces/:workspaceId/${options.route}`;
   const organizationPath = `/v1/organizations/:organizationId/${options.route}`;
   const requireEnabled = () => {
@@ -84,7 +72,6 @@ export function registerSubscriptionAccountPoolRoutes(
 
   app.get(`${organizationPath}/accounts`, async (c) => {
     const actor = await organizationActor(c);
-    await route(async () => actor.organizationId);
     return await coreOrganizationAccounts(c, coreContext!, actor);
   });
   app.patch(`${organizationPath}/settings`, async (c) => {
@@ -97,7 +84,6 @@ export function registerSubscriptionAccountPoolRoutes(
         message: "rotationEnabled is required",
       },
     );
-    await route(async () => actor.organizationId);
     return await coreOrganizationSettings(c, coreContext!, actor, parsed.rotationEnabled);
   });
   const updateOrganizationAccount = async (
@@ -111,7 +97,6 @@ export function registerSubscriptionAccountPoolRoutes(
     },
   ) => {
     const actor = await organizationActor(c, true);
-    await route(async () => actor.organizationId);
     return await coreOrganizationAccount(
       c,
       coreContext!,
@@ -164,7 +149,7 @@ export function registerSubscriptionAccountPoolRoutes(
   app.get(`${workspacePath}/accounts`, async (c) => {
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
     return await coreWorkspaceAccounts(c, coreContext!, workspaceId);
   });
 
@@ -172,7 +157,7 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
     return await coreWorkspaceActivate(c, coreContext!, workspaceId, credentialId);
   });
 
@@ -187,7 +172,7 @@ export function registerSubscriptionAccountPoolRoutes(
         message: "rotationEnabled is required",
       },
     );
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
     return await coreWorkspaceSettings(c, coreContext!, workspaceId, parsed.rotationEnabled);
   });
 
@@ -195,7 +180,7 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
 
     const parsed = parseRequestBody(
       SubscriptionAccountToggleRequest,
@@ -212,7 +197,7 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
 
     const parsed = parseRequestBody(
       SubscriptionAccountRenameRequest,
@@ -235,7 +220,7 @@ export function registerSubscriptionAccountPoolRoutes(
     requireEnabled();
     const workspaceId = c.req.param("workspaceId")!;
     const credentialId = c.req.param("accountId")!;
-    await workspaceRoute(c, workspaceId);
+    await requireWorkspaceRead(c, workspaceId);
     return await coreWorkspaceDisconnect(c, coreContext!, workspaceId, credentialId);
   });
 }
