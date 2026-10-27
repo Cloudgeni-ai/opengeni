@@ -11,10 +11,13 @@ import {
   APP_ACTION_CALL_TOOL_NAME,
   appActionChangesState,
   appActionCallCarriesSecrets,
+  appActionNeedsConfirmation,
+  appActionPaymentPage,
   findAppAction,
   type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
 import { hasPermission } from "@opengeni/core";
+import type { PresentedAppActionPage } from "@opengeni/contracts/session-history";
 import {
   listConfirmedAppActionChanges,
   resolveSessionAppActionAuthority,
@@ -82,6 +85,27 @@ const SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
 const EXTERNAL_PERSON_SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
+
+// What's true of each kind of page, added to its successful result.
+const EXACT_LINK =
+  "If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
+const PAYMENT_PAGE: Record<PresentedAppActionPage, string> = {
+  credits: `The chat shows the person this page as a button that opens it, and confirms there with their new balance once they've paid, so you needn't repeat the link. ${EXACT_LINK}`,
+  subscription: `The chat shows the person this page as a button that opens it, so you needn't repeat the link. ${EXACT_LINK}`,
+  portal:
+    "The chat shows the person this page as a button that opens it, so you needn't repeat the link. Anyone with this link can change the organization's payment method or plan until it expires, so give it only to this person, never in a shared place.",
+};
+
+// A payment page the person isn't allowed to open: the route's 403 names a
+// permission, which neither they nor the agent should have to decode.
+const PAYMENT_PAGE_FORBIDDEN: Record<PresentedAppActionPage, string> = {
+  credits:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
+  subscription:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't subscribe here. Tell them an owner or admin of the organization can change the plan in the app.",
+  portal:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't open its billing page here. Tell them an owner or admin of the organization can do it in the app.",
+};
 
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
@@ -166,7 +190,7 @@ function isExternalPerson(subjectId: string): boolean {
 function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
   if (!actionInOneWorkspace(entry)) return false;
   if (authority.kind === "full_access") return true;
-  if (authority.kind === "read_only" && appActionChangesState(entry)) return false;
+  if (authority.kind === "read_only" && appActionNeedsConfirmation(entry)) return false;
   if (appActionCallCarriesSecrets(entry, undefined)) return false;
   return (
     entry.permission === undefined ||
@@ -357,11 +381,15 @@ export function registerSessionAdminAccessTools(input: {
         appActionCallCarriesSecrets(entry, args.body)
       )
         return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
-      if (authority.kind === "read_only" && entry && appActionChangesState(entry))
+      // Opening a checkout charges nothing, so it runs without a confirmation
+      // here and in an embed alike; the page itself asks, and the route still
+      // checks that this person may pay. A billing portal link keeps both
+      // safeguards (see appActionNeedsConfirmation).
+      if (authority.kind === "read_only" && entry && appActionNeedsConfirmation(entry))
         return failure(
           isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
         );
-      if (authority.kind === "confirm" && entry && appActionChangesState(entry)) {
+      if (authority.kind === "confirm" && entry && appActionNeedsConfirmation(entry)) {
         // Enforced here, not only in the chat: the change runs only if this
         // attempt is executing exactly these arguments, which this same
         // person approved.
@@ -376,13 +404,18 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
-      return await callOrganizationAction(reach.actAs(authority), {
-        id: args.id,
-        // After the confirmation check, which compares the call as the model made it.
-        pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
-        query: args.query,
-        ...(args.body !== undefined ? { body: args.body } : {}),
-      });
+      const page = entry ? appActionPaymentPage(entry) : undefined;
+      return await callOrganizationAction(
+        reach.actAs(authority),
+        {
+          id: args.id,
+          // After the confirmation check, which compares the call as the model made it.
+          pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
+          query: args.query,
+          ...(args.body !== undefined ? { body: args.body } : {}),
+        },
+        page ? { note: PAYMENT_PAGE[page], billingForbidden: PAYMENT_PAGE_FORBIDDEN[page] } : {},
+      );
     },
   );
 }

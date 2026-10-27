@@ -12,6 +12,8 @@
 //!   409 for one that runs.
 //! - `POST /sandboxes/{id}/timeout` (204).
 //! - `GET /templates`.
+//! - Snapshots ([`snapshots`]): `POST /sandboxes/{id}/snapshots`, `GET
+//!   /snapshots` and `DELETE /templates/{id}`.
 //!
 //! Failures answer E2B's JSON, `{"code": <status>, "message": ...}`.
 
@@ -23,7 +25,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use compute_protocol::host::Id;
 
 use super::lifecycle::{self, OnTimeout, Record, State as Stage};
@@ -35,6 +37,8 @@ use super::wire::{
 use super::{Front, Refused};
 use crate::service::Failure;
 use crate::store::{LifecycleRow, SandboxRow, Store};
+
+mod snapshots;
 
 /// The client id answers carry: E2B's names the cluster.
 const CLIENT_ID: &str = "compute";
@@ -413,7 +417,10 @@ pub fn router<S: Store>(front: Arc<Front<S>>) -> Router {
         .route("/sandboxes/{id}/resume", post(resume::<S>))
         .route("/v2/sandboxes/{id}/connect", post(connect::<S>))
         .route("/sandboxes/{id}/timeout", post(set_timeout::<S>))
+        .route("/sandboxes/{id}/snapshots", post(snapshots::create::<S>))
+        .route("/snapshots", get(snapshots::list::<S>))
         .route("/templates", get(templates::<S>))
+        .route("/templates/{key}", delete(snapshots::delete::<S>))
         .fallback(|| async { Refused::new(404, "not found here").into_response() })
         .with_state(front)
 }

@@ -17,36 +17,32 @@
 
 use crate::v1;
 
-/// A map-free `ControlResponse` carrying a structured git status. Used for the
-/// strict byte-equality cross-stack check.
+/// A map-free `ControlResponse` carrying a directory listing (strings, an enum,
+/// and 64/32-bit integers). Used for the strict byte-equality cross-stack check.
 #[must_use]
 pub fn canonical_control_response() -> v1::ControlResponse {
     v1::ControlResponse {
         request_id: "req-0001".to_string(),
         error: None,
-        result: Some(v1::control_response::Result::Git(v1::GitResponse {
-            exit_code: 0,
-            stdout: prost::bytes::Bytes::from_static(b"on branch main\n"),
-            stderr: prost::bytes::Bytes::new(),
-            status: Some(v1::GitStatus {
-                branch: "main".to_string(),
-                upstream: "origin/main".to_string(),
-                ahead: 2,
-                behind: 0,
-                files: vec![
-                    v1::GitFileStatus {
-                        path: "src/lib.rs".to_string(),
-                        code: " M".to_string(),
-                        staged: false,
-                    },
-                    v1::GitFileStatus {
-                        path: "README.md".to_string(),
-                        code: "??".to_string(),
-                        staged: false,
-                    },
-                ],
-                clean: false,
-            }),
+        result: Some(v1::control_response::Result::FsList(v1::FsListResponse {
+            entries: vec![
+                v1::FsEntry {
+                    name: "lib.rs".to_string(),
+                    path: "src/lib.rs".to_string(),
+                    kind: v1::FsEntryKind::File as i32,
+                    size: 4096,
+                    modified_ms: 1_767_225_600_000,
+                    mode: 0o644,
+                },
+                v1::FsEntry {
+                    name: "docs".to_string(),
+                    path: "docs".to_string(),
+                    kind: v1::FsEntryKind::Directory as i32,
+                    size: 0,
+                    modified_ms: 1_767_225_660_000,
+                    mode: 0o755,
+                },
+            ],
         })),
     }
 }

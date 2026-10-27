@@ -76,6 +76,7 @@ export type {
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
   ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export {

@@ -29,7 +29,7 @@ import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Linking, Pressable, Text, View } from "react-native";
+import { Alert, Linking, Platform, Pressable, Share, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
@@ -197,6 +197,12 @@ function inChatConnectOptions(
     returnUrl: desktopAppReturnUrl(conversation, origin),
     openUrl: (url) => void Linking.openURL(url),
     attemptHints: connectAttemptHints,
+    // A computer connects from the computer itself: send this chat there.
+    // iOS shares a URL as a link; Android shares text.
+    shareConversation: () =>
+      void Share.share(
+        Platform.OS === "ios" ? { url: conversation } : { message: conversation },
+      ).catch(() => {}),
   };
 }
 

@@ -247,6 +247,8 @@ export function createMeetingsFixture(
     pinned?: boolean;
     /** The workspace meeting language the server reports. */
     language?: string | null;
+    /** Whether the server reports the workspace's recorders start with live text on. */
+    liveTranscript?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -469,6 +471,7 @@ export function createMeetingsFixture(
   const models: ListRecordingModelsResponse = {
     ...(options.pinned ? pinnedModels : unpinnedModels),
     ...(options.language !== undefined ? { language: options.language } : {}),
+    ...(options.liveTranscript !== undefined ? { liveTranscript: options.liveTranscript } : {}),
   };
   const liveSegments: RecordingLiveSegment[] = LIVE_LINES.map(
     ([trackNumber, seconds, text], index) => ({

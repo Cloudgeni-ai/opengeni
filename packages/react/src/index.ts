@@ -661,6 +661,7 @@ export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
   ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
@@ -897,6 +898,10 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  PaymentPageActivityProvider,
+  type PaymentPageActivity,
+} from "./timeline/payment-page-activity";
 export {
   LearningRefusalActionsProvider,
   type LearningRefusalActions,

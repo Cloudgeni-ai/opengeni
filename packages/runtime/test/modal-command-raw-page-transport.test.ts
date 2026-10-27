@@ -425,10 +425,10 @@ test("a failed sibling joins partial-byte read and poll without returning a fabr
   expect(expected).toEqual(cursor());
 });
 
-test("native raw reads reject legacy locators and pre-cancellation before any RPC", async () => {
+test("native raw reads reject unknown locators and pre-cancellation before any RPC", async () => {
   const f = await fixture();
   await expect(
-    f.control.readRaw({ ...cursor(), kind: "modal-control-v1" } as never, 1),
+    f.control.readRaw({ ...cursor(), kind: "unknown-kind" } as never, 1),
   ).rejects.toThrow();
   const cancellation = new AbortController();
   const reason = new Error("cancelled before raw read");

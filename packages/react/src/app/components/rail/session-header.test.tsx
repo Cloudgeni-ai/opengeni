@@ -119,7 +119,8 @@ describe("SessionHeader mobile touch targets", () => {
       const title = container.querySelector('button[title$="· click to rename"]');
       expect(access).not.toBeNull();
       expect(title).not.toBeNull();
-      expect(access?.parentElement?.contains(title ?? null)).toBe(true);
+      // Access sits on the title's row.
+      expect(access?.closest("[data-session-title-row]")?.contains(title ?? null)).toBe(true);
       expect(container.querySelector('[aria-label="Open workspace"]')).not.toBeNull();
       await act(async () => root.render(render(true)));
       expect(container.querySelector('[aria-label="Hide workspace"]')).not.toBeNull();

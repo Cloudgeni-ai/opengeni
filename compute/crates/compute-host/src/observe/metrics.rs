@@ -135,13 +135,15 @@ pub enum RequestKind {
     /// From the control service: build a sandbox image from an OCI image,
     /// unless the store holds it.
     Prepare,
+    /// From the control service: store a saved sandbox's disk as an image.
+    Capture,
     /// A request that could not be read.
     Invalid,
 }
 
 impl RequestKind {
     /// Every kind.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Create,
         Self::Remove,
         Self::Touch,
@@ -154,6 +156,7 @@ impl RequestKind {
         Self::Adopt,
         Self::HandOff,
         Self::Prepare,
+        Self::Capture,
         Self::Invalid,
     ];
 
@@ -173,6 +176,7 @@ impl RequestKind {
             Self::Adopt => "adopt",
             Self::HandOff => "hand_off",
             Self::Prepare => "prepare",
+            Self::Capture => "capture",
             Self::Invalid => "invalid",
         }
     }

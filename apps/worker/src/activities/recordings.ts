@@ -954,6 +954,10 @@ export function createRecordingActivities(
                   audio: piece.bytes,
                   mimeType: piece.mimeType,
                   durationSeconds: piece.durationMilliseconds / 1_000,
+                  // The language the dictation was started in; detected when none.
+                  ...(claimed.version.options.language
+                    ? { language: claimed.version.options.language }
+                    : {}),
                   // A fresh request per attempt; billing stays per piece below.
                   requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),
