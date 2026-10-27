@@ -505,8 +505,8 @@ describe("computerObservationDiff", () => {
       observation: unchanged,
     };
     const line =
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
-    expect(Buffer.byteLength(line)).toBe(133);
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again, or look for the same command in the app's menu bar.";
+    expect(Buffer.byteLength(line)).toBe(185);
     expect(
       computerActionText({ ...receipt, unconfirmedInput: true as const })
         .split("\n")

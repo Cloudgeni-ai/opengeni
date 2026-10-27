@@ -394,6 +394,80 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a macOS window named by its id is a target while its app lists it on any level", async () => {
+    // A dialog an app raises above the levels of its working windows (a
+    // sign-in dialog) is left out of the listing of every app, while CUA reads
+    // it by its id, and its app's own listing has it.
+    class RaisedDialogFixture extends Fixture {
+      dialog = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "list_windows" && args.pid === 42) {
+          this.calls.push({ name, args });
+          const listed = await super.callTool("list_windows", "{}");
+          this.calls.pop();
+          const { windows } = JSON.parse(listed.structuredJson!) as { windows: unknown[] };
+          return result({
+            windows: [
+              ...windows,
+              ...(this.dialog
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 7,
+                      title: "Sign in",
+                      app_name: "Fixture",
+                      bounds: { x: 80, y: 80, width: 120, height: 60 },
+                      layer: 20,
+                      is_on_screen: true,
+                    },
+                  ]
+                : []),
+            ],
+          });
+        }
+        if (name === "get_window_state") {
+          const read = await super.callTool(name, argumentsJson);
+          const state = JSON.parse(read.structuredJson!) as Record<string, unknown>;
+          read.structuredJson = JSON.stringify({ ...state, window_id: args.window_id });
+          return read;
+        }
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new RaisedDialogFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+      const observed = await backend.observe("cua:window:42:7");
+      expect(observed.target).toMatchObject({ id: "cua:window:42:7", title: "Sign in" });
+      expect(
+        fixture.calls.some((call) => call.name === "get_window_state" && call.args.window_id === 7),
+      ).toBe(true);
+      // It stays a target while its app lists it, and is never the focused one.
+      const targets = await backend.targets();
+      expect(targets.map((target) => target.id)).toEqual(["cua:window:42:1", "cua:window:42:7"]);
+      expect(targets.find((target) => target.id === "cua:window:42:7")?.focused).toBe(false);
+      // Once its app no longer lists it, it is gone, and only its own pid was asked.
+      fixture.dialog = false;
+      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+      await expect(backend.observe("cua:window:42:7")).rejects.toMatchObject({
+        code: "target_not_found",
+      });
+      expect(
+        fixture.calls
+          .filter((call) => call.name === "list_windows" && call.args.pid !== undefined)
+          .every((call) => call.args.pid === 42),
+      ).toBe(true);
+      // An id that is not a window this app lists is still refused at once.
+      await expect(backend.observe("cua:window:43:9")).rejects.toMatchObject({
+        code: "target_not_found",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("the frontmost ordinary window is the focused target", async () => {
     class StackFixture extends LinuxPermissionsFixture {
       windows: Array<Record<string, unknown>> = [];
@@ -849,7 +923,7 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("a click or key press CUA only sent is reported as unconfirmed, unlike confirmed or semantic actions", async () => {
+  test("a click, key press or element press CUA only sent is reported as unconfirmed, unlike confirmed ones", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture);
     try {
@@ -877,12 +951,19 @@ describe("CUA desktop boundary", () => {
         undefined,
         () => reported.push("key"),
       );
-      await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
-        reported.push("invoke"),
-      );
+      // An app in the background can take a press through accessibility and
+      // do nothing, as a toolbar button that opens a menu only while its app
+      // is active does.
+      const invoke = async (label: string) =>
+        await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
+          reported.push(label),
+        );
+      fixture.mutation = result({ effect: "unverifiable", route: "accessibility" });
+      await invoke("invoke");
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       await click("confirmed click");
-      expect(reported).toEqual(["click", "key"]);
+      await invoke("confirmed invoke");
+      expect(reported).toEqual(["click", "key", "invoke"]);
     } finally {
       await backend.close();
     }

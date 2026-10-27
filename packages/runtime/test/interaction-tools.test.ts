@@ -4117,7 +4117,7 @@ describe("interaction attempt tools", () => {
       return (result.content[0] as { text: string }).text;
     };
     const line =
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again, or look for the same command in the app's menu bar.";
     const invoke = { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" };
     // The first reading in this attempt is shown whole.
     expect(await act(invoke)).not.toContain(line);

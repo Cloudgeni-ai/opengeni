@@ -185,6 +185,11 @@ export class CuaComputerBackend implements ComputerBackend {
   /** macOS windows on the current Space that their app never shows. A window
    * stays this way until it comes on screen or goes away. */
   private readonly neverShown = new Set<string>();
+  /** macOS windows named by their id that the listing of every app leaves
+   * out, because they sit on a level above an app's working windows (a
+   * sign-in or other dialog an app raises there). CUA reads any window by its
+   * id, so they stay targets while their app lists them. */
+  private readonly namedWindows = new Set<string>();
 
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
@@ -421,8 +426,10 @@ export class CuaComputerBackend implements ComputerBackend {
       const known = new Set(this.targetsById.keys());
       const fronted = await this.front(acted.windowId, operations);
       let report = "";
-      // A click or key press CUA could only send, with nothing confirming
-      // the app acted on it.
+      // A click, key press or press of an element CUA could only send, with
+      // nothing confirming the app acted on it. An app in the background can
+      // take a press through accessibility and do nothing (a button that
+      // opens a menu only while its app is active).
       const rawInput =
         command.action.type === "keyboard" ||
         (command.action.type === "pointer" &&
@@ -434,7 +441,11 @@ export class CuaComputerBackend implements ComputerBackend {
           try {
             const call = await callDesktop(this.runtime, operation.name, operation.args, true);
             report += openedWindowsReport(call.result.text);
-            if (rawInput && deliveredUnconfirmed(call)) unconfirmedInput = true;
+            const press =
+              command.action.type === "semantic" &&
+              command.action.action === "invoke" &&
+              operation.name === "click";
+            if ((rawInput || press) && deliveredUnconfirmed(call)) unconfirmedInput = true;
           } catch (error) {
             if (index > 0)
               throw new ComputerBackendError(
@@ -905,7 +916,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private async discover(): Promise<ComputerBackendTarget[]> {
     const { data } = await callDesktop(this.runtime, "list_windows", {});
     const macos = this.identity.platform === "macos";
-    const windows = Windows.parse(data).windows.filter(
+    const listed = Windows.parse(data).windows;
+    const windows = [...listed, ...(await this.namedWindowsListed(listed))].filter(
       (window) =>
         // Another CUA worker's cursor overlay (another computer session, or
         // another agent on this desktop) spans the screen above every app. It
@@ -1028,7 +1040,7 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   private async target(targetId: string): Promise<Target> {
-    const target = this.targetsById.get(targetId);
+    const target = this.targetsById.get(targetId) ?? (await this.findTarget(targetId));
     if (!target)
       throw new ComputerBackendError(
         "target_not_found",
@@ -1037,6 +1049,43 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     return target;
+  }
+
+  /** A target the last listing does not have: the listing may predate the
+   * window, or, on macOS, leave it out because it sits above the levels of an
+   * app's working windows while CUA still reads it by its id. */
+  private async findTarget(targetId: string): Promise<Target | undefined> {
+    const named =
+      this.identity.platform === "macos" && /^cua:window:\d{1,10}:\d{1,10}$/.test(targetId);
+    if (named) this.namedWindows.add(targetId);
+    await this.discover().catch(() => undefined);
+    const target = this.targetsById.get(targetId);
+    if (!target) this.namedWindows.delete(targetId);
+    return target;
+  }
+
+  /** The windows in {@link namedWindows} that their app still lists, on any
+   * level, beside the windows `listed` for every app. A window its app no
+   * longer lists leaves the set. */
+  private async namedWindowsListed(listed: readonly ListedWindow[]): Promise<ListedWindow[]> {
+    const seen = new Set(listed.map((window) => `cua:window:${window.pid}:${window.window_id}`));
+    const pids = new Set<number>();
+    for (const id of this.namedWindows)
+      if (seen.has(id)) this.namedWindows.delete(id);
+      else pids.add(Number(id.split(":")[2]));
+    const found: ListedWindow[] = [];
+    for (const pid of pids) {
+      const windows = await callDesktop(this.runtime, "list_windows", { pid })
+        .then(({ data }) => Windows.parse(data).windows)
+        .catch(() => null);
+      for (const id of this.namedWindows) {
+        if (Number(id.split(":")[2]) !== pid) continue;
+        const window = windows?.find((own) => `cua:window:${own.pid}:${own.window_id}` === id);
+        if (window) found.push(window);
+        else this.namedWindows.delete(id);
+      }
+    }
+    return found;
   }
 
   /** A window that is not on screen (minimized, hidden, on another Space or

@@ -674,7 +674,7 @@ export function computerActionText(
     semantic.removedRefs.length === 0
   )
     lines.push(
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.",
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again, or look for the same command in the app's menu bar.",
     );
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(

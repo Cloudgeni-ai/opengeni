@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`03323b47d041ba0b0d6c0936b35a624daeb7501d`: upstream `cua-driver-rs-v0.37.0`
+`6c821745e9c1207d9f3673732988a082b760a9d9`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -71,6 +71,16 @@ When `set_value` refuses after opening a menu it could not tell for the
 select's, Escape follows `AXCancel` only while WindowServer still shows a menu
 window opened since, so it cannot land in the app's window; when a menu could
 not be seen to close, the refusal says it may still be open.
+On macOS an accessibility press the app answers with an error is done when
+the window it was sent to then leaves the screen within a second (a dialog's
+Allow or OK button that closes the dialog before the app answers), and the
+result says so. A `run_steps` press that was sent again after a first try,
+and refused because its window is gone, reports the first press as done
+instead of failing the batch. `get_desktop_state` says how long ago the
+keyboard, mouse or trackpad was last used (`person_input_idle_seconds`),
+from the per-event-type HID timers: input agents send to apps in the
+background resets `HIDIdleTime` but not these, so the reading tells whether a
+person is at the computer.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -256,10 +266,18 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   whose menu item is disabled while the app is in the background (Terminal's
   Close Window) are reported as a likely no-op.
 - On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
-  click, double-click or key press the driver reports as unverifiable, with no
-  element changed after it, is reported as possibly not taken effect. The
-  native Linux helper (the default for Linux host desktops) does not report
+  click, double-click, key press or element invoke the driver reports as
+  unverifiable, with no element changed and no window opened after it, is
+  reported as possibly not taken effect, with the app's menu bar as the next
+  place to look. An app in the background can take an accessibility press and
+  do nothing: some toolbar buttons that open a menu do so only while their app
+  is active, while the same command in the menu bar works in the background.
+  The native Linux helper (the default for Linux host desktops) does not report
   unconfirmed input, so its results never carry that line.
+- A macOS window named by its id is a target even when the listing of every
+  app leaves it out because its app raised it above the levels of working
+  windows (a sign-in or other dialog): CUA reads any window by its id, and the
+  adapter looks it up in its app's own listing.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
@@ -284,7 +302,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/03323b47d041ba0b0d6c0936b35a624daeb7501d/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/6c821745e9c1207d9f3673732988a082b760a9d9/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
