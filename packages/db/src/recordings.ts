@@ -457,7 +457,7 @@ export async function listRecordings(
     if (input.ownPrivateOnly) {
       conditions.push(
         eq(schema.recordings.ownerSubjectId, input.subjectId),
-        eq(schema.recordings.visibility, "private"),
+        eq(schema.recordings.visibility, "user_private"),
       );
     }
     if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
@@ -1607,7 +1607,11 @@ export async function finalizeRecording(
         requestedBySubjectId: input.subjectId,
         creditAttribution: input.transcription.creditAttribution ?? null,
         ...(refusedCode
-          ? { state: "failed" as const, errorCode: refusedCode, completedAt: sql`clock_timestamp()` }
+          ? {
+              state: "failed" as const,
+              errorCode: refusedCode,
+              completedAt: sql`clock_timestamp()`,
+            }
           : {}),
       })
       .returning();

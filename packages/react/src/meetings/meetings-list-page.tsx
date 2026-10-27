@@ -21,6 +21,7 @@ import {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  useOwnRecordingsElsewhere,
   useRecordingModels,
   useRecordings,
   useRecordingsClient,
@@ -39,6 +40,7 @@ import { MetaChip } from "../ui/meta-chip";
 import { Notice } from "../ui/notice";
 import { PageHeader } from "../ui/page-header";
 import { RelativeTime } from "../ui/relative-time";
+import { Section } from "../ui/section";
 import { StatusBadge } from "../ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
@@ -71,6 +73,83 @@ function useNarrow(): boolean {
   return narrow;
 }
 
+/**
+ * The person's own Only me meetings from their other workspaces. Each stays
+ * in, and opens in, the workspace it was recorded in, where it is managed.
+ */
+function FromOtherWorkspaces({
+  override,
+  narrow,
+  meetingHrefIn,
+  onOpenIn,
+}: {
+  override: RecordingsClientOverride;
+  narrow: boolean;
+  meetingHrefIn: (workspaceId: string, recordingId: string) => string;
+  onOpenIn: (workspaceId: string, recordingId: string) => void;
+}) {
+  const msg = useOpenGeniText();
+  const elsewhere = useOwnRecordingsElsewhere(override);
+  if (elsewhere.recordings.length === 0) return null;
+  const columns: RowListColumn[] = [
+    { id: "workspace", label: msg("meetings.listPage.workspace"), width: 160 },
+    { id: "length", label: msg("meetings.listPage.length"), width: 96 },
+    { id: "recorded", label: msg("meetings.listPage.recorded"), width: 148 },
+  ];
+  return (
+    <Section
+      title={msg("meetings.listPage.fromOtherWorkspaces")}
+      description={msg("meetings.listPage.onlyYouSeeTheseEachOpens")}
+    >
+      <RowList
+        label={msg("meetings.listPage.fromOtherWorkspaces")}
+        columns={narrow ? [] : columns}
+        flush
+      >
+        {elsewhere.recordings.map(({ workspaceId, workspaceName, recording }) => {
+          const status = meetingStatusLabel(meetingPhase(recording), msg);
+          return (
+            <ListRow
+              key={`${workspaceId}:${recording.id}`}
+              leading={<LogoTile icon={<AudioLinesIcon />} />}
+              title={meetingTitle(recording, msg)}
+              status={
+                status ? (
+                  <StatusBadge variant="dot" tone={status.tone} pulse={status.tone === "progress"}>
+                    {status.label}
+                  </StatusBadge>
+                ) : undefined
+              }
+              meta={
+                narrow
+                  ? [
+                      <span key="workspace">{workspaceName}</span>,
+                      <RelativeTime key="recorded" date={recording.startedAt} />,
+                    ]
+                  : undefined
+              }
+              cells={{
+                workspace: <span className="truncate">{workspaceName}</span>,
+                length:
+                  recording.durationMilliseconds > 0 ? (
+                    <span className="tabular-nums">
+                      {formatDuration(recording.durationMilliseconds, msg)}
+                    </span>
+                  ) : (
+                    <span className="text-fg-subtle">—</span>
+                  ),
+                recorded: <RelativeTime date={recording.startedAt} />,
+              }}
+              href={meetingHrefIn(workspaceId, recording.id)}
+              linkProps={{ onClick: inAppClick(() => onOpenIn(workspaceId, recording.id)) }}
+            />
+          );
+        })}
+      </RowList>
+    </Section>
+  );
+}
+
 function MeetingsListPageContent({
   workspaceId,
   liveTranscriptDefault,
@@ -79,6 +158,8 @@ function MeetingsListPageContent({
   recordings: recordingsClient,
   meetingHref,
   onOpen,
+  meetingHrefIn,
+  onOpenIn,
   externalRef = null,
   notice = null,
   header = true,
@@ -102,6 +183,13 @@ function MeetingsListPageContent({
   recordings?: RecordingsClientOverride["recordings"];
   meetingHref: (recordingId: string) => string;
   onOpen: (recordingId: string) => void;
+  /**
+   * Where a meeting of another workspace opens. With `onOpenIn`, the page also
+   * lists the person's own Only me meetings from their other workspaces.
+   */
+  meetingHrefIn?: ((workspaceId: string, recordingId: string) => string) | undefined;
+  /** Opens a meeting in the workspace it was recorded in. */
+  onOpenIn?: ((workspaceId: string, recordingId: string) => void) | undefined;
   /**
    * Show only the meetings with this id of the host's, such as a project, and
    * give new recordings started here the same id.
@@ -402,6 +490,14 @@ function MeetingsListPageContent({
             </div>
           ) : null}
         </div>
+        {meetingHrefIn && onOpenIn && !externalRef && !query ? (
+          <FromOtherWorkspaces
+            override={override}
+            narrow={narrow}
+            meetingHrefIn={meetingHrefIn}
+            onOpenIn={onOpenIn}
+          />
+        ) : null}
       </div>
       <DeleteMeetingDialog
         recording={

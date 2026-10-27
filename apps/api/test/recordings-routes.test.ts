@@ -151,8 +151,8 @@ async function fixture(
         JSON.stringify({ mode: "external", identity: { source, externalId: identity.externalId } }),
       ),
     };
-    const call = async (method: string, path: string, body?: unknown) => {
-      const response = await app.request(`/v1/workspaces/${workspace.id}${path}`, {
+    const callIn = async (workspaceId: string, method: string, path: string, body?: unknown) => {
+      const response = await app.request(`/v1/workspaces/${workspaceId}${path}`, {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -160,7 +160,28 @@ async function fixture(
       const text = await response.text();
       return { status: response.status, body: text ? JSON.parse(text) : null };
     };
-    return { subjectId: identity.subjectId, call };
+    const call = (method: string, path: string, body?: unknown) =>
+      callIn(workspace.id, method, path, body);
+    /** A request outside any one workspace, such as `/v1/recordings/own`. */
+    const get = async (path: string) => {
+      const response = await app.request(path, { headers });
+      const text = await response.text();
+      return { status: response.status, body: text ? JSON.parse(text) : null };
+    };
+    /** Makes this person a member of another workspace of the organization too. */
+    const join = async (workspaceId: string) => {
+      const joined = await app.request(`/v1/workspaces/${workspaceId}/external-members`, {
+        method: "POST",
+        headers: service,
+        body: JSON.stringify({
+          identity: { source, externalId: identity.externalId },
+          permissions: memberPermissions,
+          operationId: crypto.randomUUID(),
+        }),
+      });
+      expect(joined.status).toBe(200);
+    };
+    return { subjectId: identity.subjectId, call, callIn, get, join };
   };
   const admin = async (method: string, path: string, body?: unknown) => {
     const response = await app.request(`/v1/workspaces/${workspace.id}${path}`, {
@@ -174,7 +195,10 @@ async function fixture(
   return {
     accountId,
     workspaceId: workspace.id,
+    /** Another workspace of the same organization. */
+    otherWorkspace: async (name: string) => await createWorkspace(db.db, { accountId, name }),
     serviceSubjectId: `api_key:${serviceKey.id}`,
+    service: async (path: string) => (await app.request(path, { headers: service })).status,
     objects,
     started,
     admin,
@@ -251,7 +275,10 @@ describe("recording routes", () => {
       });
 
     // Chosen for this recording, the refused model isn't swapped for another.
-    const chosen = await capturedRecording(scope, { providerId: "openai", model: "gpt-transcribe" });
+    const chosen = await capturedRecording(scope, {
+      providerId: "openai",
+      model: "gpt-transcribe",
+    });
     const failed = await finalize(chosen);
     expect(failed.status).toBe(200);
     expect(failed.body.recording.state).toBe("failed");
@@ -476,6 +503,73 @@ describe("recording routes", () => {
     expect(issued.length).toBeGreaterThan(0);
     expect(JSON.stringify(issued)).not.toContain("storage.example");
     expect(JSON.stringify(issued)).not.toContain("workspaces/");
+  });
+
+  test("a person's own Only me recordings from their other workspaces, and nothing else", async () => {
+    const scope = await fixture();
+    const elsewhere = await scope.otherWorkspace("Sales");
+    await scope.owner.join(elsewhere.id);
+    await scope.other.join(elsewhere.id);
+    const track = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }];
+    const create = async (
+      person: typeof scope.owner,
+      workspaceId: string,
+      title: string,
+      startedAt: string,
+    ) => {
+      const recordingId = crypto.randomUUID();
+      const created = await person.callIn(workspaceId, "POST", "/recordings", {
+        recordingId,
+        title,
+        startedAt,
+        tracks: track,
+      });
+      expect(created.status).toBe(201);
+      return recordingId;
+    };
+    const older = await create(
+      scope.owner,
+      elsewhere.id,
+      "Pipeline review",
+      "2026-10-26T08:00:00Z",
+    );
+    const newer = await create(scope.owner, elsewhere.id, "Forecast", "2026-10-27T08:00:00Z");
+    const allHands = await create(scope.owner, elsewhere.id, "All hands", "2026-10-27T09:00:00Z");
+    expect(
+      (
+        await scope.owner.callIn(elsewhere.id, "PATCH", `/recordings/${allHands}`, {
+          visibility: "workspace",
+        })
+      ).status,
+    ).toBe(200);
+    await create(scope.other, elsewhere.id, "Someone else's", "2026-10-27T10:00:00Z");
+    const here = await create(scope.owner, scope.workspaceId, "Here", "2026-10-27T11:00:00Z");
+
+    const listed = await scope.owner.get(
+      `/v1/recordings/own?excludeWorkspaceId=${scope.workspaceId}`,
+    );
+    expect(listed.status).toBe(200);
+    expect(
+      listed.body.recordings.map(
+        (row: { workspaceId: string; workspaceName: string; recording: { id: string } }) => [
+          row.workspaceId,
+          row.workspaceName,
+          row.recording.id,
+        ],
+      ),
+    ).toEqual([
+      [elsewhere.id, "Sales", newer],
+      [elsewhere.id, "Sales", older],
+    ]);
+    const all = await scope.owner.get("/v1/recordings/own?limit=2");
+    expect(
+      all.body.recordings.map((row: { recording: { id: string } }) => row.recording.id),
+    ).toEqual([here, newer]);
+    // The other person sees none of the owner's recordings, shared or not.
+    const theirs = await scope.other.get(`/v1/recordings/own?excludeWorkspaceId=${elsewhere.id}`);
+    expect(theirs).toMatchObject({ status: 200, body: { recordings: [] } });
+    // Keys and services act through workspaces, never as a person.
+    expect(await scope.service("/v1/recordings/own")).toBe(403);
   });
 
   test("a workspace default shares new recordings; only the owner deletes", async () => {

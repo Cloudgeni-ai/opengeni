@@ -18,6 +18,17 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
+A recording stays in, and belongs to, the workspace it was recorded in: its
+agents, data residency and access rules are that workspace's. So a person
+can still find their meetings from anywhere, `GET /v1/recordings/own`
+lists the signed-in person's own Only me meetings across the workspaces they
+can still read sessions in, newest first, each with its `workspaceId` and
+`workspaceName` (`excludeWorkspaceId` leaves out the one you are in;
+`limit` is at most 50). Only a person may ask, never a key, a service or an
+agent, and nobody else's recordings and no shared ones are listed. The
+Meetings page shows them under **From other workspaces** when the host
+passes `meetingHrefIn` and `onOpenIn`; each opens in its own workspace.
+
 ## Language
 
 A meeting is transcribed in `transcription.language` when the create request
@@ -47,7 +58,20 @@ never loses audio.
    `POST …/recordings/:recordingId/chunks/complete`. The server checks each
    object and answers which chunks are uploaded and which are still missing.
 4. When capture ends, `POST …/recordings/:recordingId/finalize` with every
-   track's chunk count. Finishing again is harmless.
+   track's chunk count. Finishing again is harmless. Finishing always ends
+   capture, even when the transcript can't be paid for: when the workspace
+   picked no model and the automatic one would be refused for credits, a
+   model that costs the payer nothing (a connected subscription or the
+   workspace's own key) transcribes it instead; otherwise version 1 fails at
+   once with the refusal's code (`insufficient_credits`,
+   `allowance_exhausted`, `monthly_model_cost_limit`, `policy_blocked`), and
+   the meeting can be transcribed again once that is fixed.
+
+The SDK's `RecordingUploader` keeps a recording's chunks on the device until
+the server has them, and resumes on the next start of the app, or when a
+page creates the uploader again. A failure retrying can't fix stays in its
+status as `failed`, with the chunks kept; `retry(recordingId)` tries it again,
+and the React recorder offers that as **Try again** on the meeting's page.
 
 Chunk start times are milliseconds from the recording's start. A new capture
 session on the same track (after a reload, say) simply continues the chunk
@@ -286,6 +310,11 @@ follows a recording from another device.
 All processing runs in the background worker. It joins each track's chunks
 into one seekable file (kept for playback and re-runs), transcribes each
 track and stores transcript version 1.
+
+Each transcript has a time budget, counted from when it was asked for and
+including waiting and retries: half an hour plus three times the audio's
+length, at most twelve hours. Past it the version fails as `timed_out`
+rather than staying in progress, and can be transcribed again.
 
 When a recording has computer or tab audio (a `system` track), the
 microphone track is the person recording and the system track is everyone

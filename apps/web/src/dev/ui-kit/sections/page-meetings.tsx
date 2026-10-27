@@ -23,6 +23,8 @@ import {
 type View = "list" | "meeting" | "settings";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
+/** An earlier meeting this device still holds audio of, while the recorder is idle. */
+type BackgroundUpload = "none" | "uploading" | "failed";
 
 /**
  * The live preview as the recorder holds it: four lines heard, one still
@@ -68,6 +70,7 @@ function fakeRecorder(
   startedAt: number,
   audio: "desktop" | "display",
   preview: LivePreview = "off",
+  background: BackgroundUpload = "none",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
   // Just stopped: the last few seconds of audio are on their way, so it reads Transcribing.
@@ -121,7 +124,25 @@ function fakeRecorder(
     systemAudioSupported: true,
     systemAudioKind: audio,
     recovered: [],
-    uploads: {},
+    uploads:
+      background === "none" || held
+        ? {}
+        : {
+            [LIVE_RECORDING_ID]: {
+              recordingId: LIVE_RECORDING_ID,
+              created: true,
+              pendingChunks: 3,
+              pendingBytes: 360_000,
+              uploading: background === "uploading",
+              retryingAfterError: null,
+              failed:
+                background === "failed"
+                  ? { code: "conflict", message: "The recording changed on the server" }
+                  : null,
+              finalized: false,
+              discarded: false,
+            },
+          },
     retryUpload: () => false,
     start: async () => {},
     pause: () => {},
@@ -168,8 +189,10 @@ export default function PageMeetingsSection() {
   // ?failure=missing_provider_key makes the failed meeting's transcript fail
   // for a provider that isn't connected, instead of a used-up provider account.
   const failure = initial.get("failure");
+  // ?elsewhere=off hides the viewer's Only me meetings from another workspace.
+  const otherWorkspaces = initial.get("elsewhere") !== "off";
   const fixture = useMemo(() => {
-    const base = createMeetingsFixture({ state: data, pinned });
+    const base = createMeetingsFixture({ state: data, pinned, otherWorkspaces });
     if (!failure) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
@@ -178,20 +201,23 @@ export default function PageMeetingsSection() {
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure]);
+  }, [data, pinned, failure, otherWorkspaces]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
   const audio = initial.get("audio") === "desktop" ? "desktop" : "display";
+  // ?upload=uploading|failed: this device still holds the meeting in
+  // progress's audio, uploading it in the background or refused for good.
+  const background = (initial.get("upload") as BackgroundUpload | null) ?? "none";
   useEffect(() => {
-    store.set(fakeRecorder(mode, startedAt, audio, preview));
+    store.set(fakeRecorder(mode, startedAt, audio, preview, background));
     if (mode !== "recording") return;
     const timer = window.setInterval(
-      () => store.set(fakeRecorder(mode, startedAt, audio, preview)),
+      () => store.set(fakeRecorder(mode, startedAt, audio, preview, background)),
       250,
     );
     return () => window.clearInterval(timer);
-  }, [mode, startedAt, store, audio, preview]);
+  }, [mode, startedAt, store, audio, preview, background]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
   // records, or elsewhere while it is idle. ?open=failed opens the one whose
   // transcript failed.
@@ -289,6 +315,8 @@ export default function PageMeetingsSection() {
                   setOpenId(id);
                   setView("meeting");
                 }}
+                meetingHrefIn={(workspaceId, id) => `#meeting-${workspaceId}-${id}`}
+                onOpenIn={() => {}}
               />
             ) : (
               <MeetingDetailPage

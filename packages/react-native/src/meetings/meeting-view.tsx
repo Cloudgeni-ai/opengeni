@@ -263,10 +263,7 @@ export function useMeetingView({
                 text={msg("native.meetings.meetingView.waitingForTheRestOfTheAudio")}
               />
             ) : phase?.kind === "transcribing" || transcribingHere ? (
-              <PhaseNote
-                spinning
-                text={transcribingText(recording.durationMilliseconds, msg)}
-              />
+              <PhaseNote spinning text={transcribingText(recording.durationMilliseconds, msg)} />
             ) : phase?.kind === "failed" ? (
               <PhaseNote
                 tone="danger"

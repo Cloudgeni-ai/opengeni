@@ -528,7 +528,7 @@ export function registerRecordingRoutes(
     const subjectId = inboxSubjectForContext(context);
     if (!subjectId) {
       throw new ApiHttpError(403, {
-        code: "permission_denied",
+        code: "forbidden",
         message: "Only a signed-in person can list their own recordings across workspaces.",
         retryable: false,
       });

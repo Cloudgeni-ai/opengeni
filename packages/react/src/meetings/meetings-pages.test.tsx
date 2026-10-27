@@ -146,6 +146,67 @@ describe("Meetings list", () => {
     }
   });
 
+  test("a host that can't open other workspaces lists only this one's meetings", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => undefined}
+      />,
+    );
+    try {
+      await settle();
+      // Without a way to open another workspace's meeting, the page lists only its own.
+      expect(view.container.textContent).not.toContain("From other workspaces");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the person's own Only me meetings from other workspaces open in their workspace", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const opened: [string, string][] = [];
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => undefined}
+        meetingHrefIn={(workspaceId, id) => `/workspaces/${workspaceId}/meetings/${id}`}
+        onOpenIn={(workspaceId, id) => opened.push([workspaceId, id])}
+      />,
+    );
+    try {
+      await waitForText(view.container, "From other workspaces");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Only you see these. Each opens in the workspace it was recorded in.");
+      expect(text).toContain("Pipeline review");
+      expect(text).toContain("Sales");
+      const section = [...view.container.querySelectorAll("section")].find((element) =>
+        element.textContent?.includes("From other workspaces"),
+      )!;
+      const rows = [...section.querySelectorAll<HTMLAnchorElement>("a[href]")];
+      expect(rows.map((row) => row.getAttribute("href"))).toEqual([
+        "/workspaces/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e/meetings/3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b",
+        "/workspaces/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e/meetings/4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
+      ]);
+      // They are managed where they were recorded: no delete here.
+      expect(section.querySelector('[aria-label^="More actions"]')).toBeNull();
+      await act(async () => {
+        rows[0]!.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      expect(opened).toEqual([
+        ["b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b"],
+      ]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("search finds meetings by transcript words and says what it searches", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -989,7 +1050,9 @@ describe("Meeting page", () => {
     try {
       await waitForText(view.container, "Transcribe with ChatGPT dictation");
       const text = view.container.textContent ?? "";
-      expect(text).toContain("MAI-Transcribe-2 uses credits, and this organization is out of them.");
+      expect(text).toContain(
+        "MAI-Transcribe-2 uses credits, and this organization is out of them.",
+      );
       // One direct fix: the free model, not a purchase as well.
       const labels = [...view.container.querySelectorAll("button")].map((button) =>
         button.textContent?.trim(),
@@ -1104,7 +1167,12 @@ describe("Meeting page", () => {
         view.store.set({
           ...recorder,
           uploads: {
-            [LIVE_RECORDING_ID]: { ...failedUpload, failed: null, uploading: true, pendingChunks: 3 },
+            [LIVE_RECORDING_ID]: {
+              ...failedUpload,
+              failed: null,
+              uploading: true,
+              pendingChunks: 3,
+            },
           },
         }),
       );

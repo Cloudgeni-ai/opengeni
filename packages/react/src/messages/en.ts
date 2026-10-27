@@ -2442,6 +2442,7 @@ export const englishMessages = {
   "meetings.listPage.earlierRecordingsWereStillSaved_other":
     "Uploading {count} earlier recordings that didn't finish.",
   "meetings.listPage.error": "Error",
+  "meetings.listPage.fromOtherWorkspaces": "From other workspaces",
   "meetings.listPage.length": "Length",
   "meetings.listPage.loading": "Loading",
   "meetings.listPage.meetings": "Meetings",
@@ -2449,6 +2450,8 @@ export const englishMessages = {
   "meetings.listPage.noMeetingsMatchQuery": "No meetings match “{query}”.",
   "meetings.listPage.noMeetingsYet": "No meetings yet",
   "meetings.listPage.onlyMe": "Only me",
+  "meetings.listPage.onlyYouSeeTheseEachOpens":
+    "Only you see these. Each opens in the workspace it was recorded in.",
   "meetings.listPage.recordAMeetingAndGet":
     "Record a meeting and get a transcript of who said what.",
   "meetings.listPage.recorded": "Recorded",
@@ -2459,6 +2462,7 @@ export const englishMessages = {
   "meetings.listPage.startARecordingAboveWhen":
     "Record a meeting above. When you stop, you get a transcript of who said what.",
   "meetings.listPage.tryAgain": "Try again",
+  "meetings.listPage.workspace": "Workspace",
   "meetings.liveTranscript.connecting": "Connecting",
   "meetings.liveTranscript.latest": "Latest",
   "meetings.liveTranscript.livePreviewUnavailableTheRecording":

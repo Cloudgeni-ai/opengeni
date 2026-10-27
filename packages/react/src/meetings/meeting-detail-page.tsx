@@ -109,12 +109,7 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import {
-  liveSpeakerName,
-  RecordingBar,
-  recorderLiveLines,
-  useOnline,
-} from "./recorder-panel";
+import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
 import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
 import { meetingMentionResolver } from "./meeting-mentions";

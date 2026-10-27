@@ -177,7 +177,11 @@ const PROVIDER_FAILURES = new Set([
   "policy_blocked",
 ]);
 /** Failures of the model: another model, even the same provider's, may work. */
-const MODEL_FAILURES = new Set(["provider_too_large", "provider_not_supported", "model_unavailable"]);
+const MODEL_FAILURES = new Set([
+  "provider_too_large",
+  "provider_not_supported",
+  "model_unavailable",
+]);
 
 /**
  * The model to transcribe a failed meeting with instead, as its one direct

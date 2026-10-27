@@ -8,6 +8,7 @@
  */
 export {
   useLiveTranscript,
+  useOwnRecordingsElsewhere,
   useRecorder,
   useRecording,
   useRecordingModels,
@@ -18,8 +19,10 @@ export {
   useTranscript,
 } from "./hooks/use-recordings";
 export type {
+  OwnRecordingElsewhere,
   UseLiveTranscriptOptions,
   UseLiveTranscriptResult,
+  UseOwnRecordingsElsewhereResult,
   UseRecorderOptions,
   UseRecorderResult,
   UseRecordingOptions,
