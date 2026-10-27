@@ -424,6 +424,15 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 
 class DialogOpenedSignal extends Error {}
 
+/** A frame skipped because another capture of its tab, still within that
+ * capture's own deadline, had not been answered. Frames are latest-only, so
+ * the stream waits for its next round instead of counting a failure. */
+class CaptureBusyError extends Error {
+  constructor() {
+    super("browser frame skipped behind another capture of the tab");
+  }
+}
+
 /** Whether an error is about the browser's transport rather than the page:
  * the browser or the connection to it or to the tab is gone, or a command
  * deadline passed (which the unresponsive-tab path reports). */
@@ -725,9 +734,9 @@ type TargetState = {
    * capture and puts back what it saw when it began, which would undo a
    * change that landed in between. */
   framesPaused?: Promise<void> | undefined;
-  /** Captures of this tab Chromium has not answered yet. At most one runs at
-   * a time (see sendCapture). */
-  capturesRunning: Set<Promise<void>>;
+  /** Captures of this tab not answered yet, each with the time its caller
+   * stops waiting for it. At most one is sent at a time (see sendCapture). */
+  capturesRunning: Map<Promise<void>, number>;
 };
 
 /** The page's size, screen and scale as it reports them, in CSS pixels, and
@@ -2523,6 +2532,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
+      // A screenshot of the tab still within its deadline holds the first
+      // frame back for up to a screenshot's deadline, not a frame's.
+      const seedBusyUntil = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
       let seedFailure: unknown;
       for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
         try {
@@ -2531,6 +2543,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           break;
         } catch (error) {
           seedFailure = error;
+          if (error instanceof CaptureBusyError && Date.now() < seedBusyUntil) {
+            attempt -= 1;
+            continue;
+          }
           if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
         }
       }
@@ -3760,7 +3776,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       navigationSequence: 0,
       navigationPending: false,
       screencasts: new Map(),
-      capturesRunning: new Set(),
+      capturesRunning: new Map(),
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
@@ -4595,30 +4611,36 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * emulation it saw when the capture began. A capture that began while
    * another ran would take that temporary size for the tab's own and put it
    * back last, leaving the tab drawn small for good. So a capture counts as
-   * running until Chromium answers it, even after the caller stops waiting or
-   * its frame stream closes, and the next capture of the tab starts only
-   * after it, within its own deadline. */
+   * running until the connection settles it (Chromium answers, or the
+   * connection gives up on it), even after the caller stops waiting or its
+   * frame stream closes, and the next capture of the tab is sent only after
+   * that, within its own deadline. A frame (`frame: true`) still behind a
+   * capture that is within its own deadline throws CaptureBusyError, so a
+   * slow screenshot is not counted against the live view. */
   private async sendCapture<T>(
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
+    options: { frame?: boolean } = {},
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
     while (state.capturesRunning.size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
+        if (options.frame && [...state.capturesRunning.values()].some((due) => due > Date.now()))
+          throw new CaptureBusyError();
         throw new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId);
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
-        Promise.all([...state.capturesRunning]),
+        Promise.all(state.capturesRunning.keys()),
         new Promise<void>((resolve) => {
           timer = setTimeout(resolve, remaining);
         }),
       ]).finally(() => clearTimeout(timer));
     }
     // Registered in the same step as the check above, so two waiting
-    // captures cannot both start.
+    // captures cannot both be sent.
     const answered = this.sendTarget<T>(state, "Page.captureScreenshot", params, {
       timeoutMs: Math.max(SCREENSHOT_CAPTURE_TIMEOUT_MS, timeoutMs),
     });
@@ -4626,7 +4648,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
       () => undefined,
     );
-    state.capturesRunning.add(running);
+    state.capturesRunning.set(running, deadline);
     void running.then(() => state.capturesRunning.delete(running));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -4646,7 +4668,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Resolves once no capture of this tab is running in the browser. */
   private async capturesSettled(state: TargetState): Promise<void> {
-    while (state.capturesRunning.size > 0) await Promise.all([...state.capturesRunning]);
+    while (state.capturesRunning.size > 0) await Promise.all(state.capturesRunning.keys());
   }
 
   /** Sends a viewport change and checks that the page took it, sending it
@@ -5846,6 +5868,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         captureBeyondViewport: false,
       },
       FRAME_CAPTURE_TIMEOUT_MS,
+      { frame: true },
     );
     if (state.screencasts.get(expected.key) !== expected) return null;
     const data = decodeBoundedBase64Image(response.data);
@@ -5907,6 +5930,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           },
         },
         FRAME_CAPTURE_TIMEOUT_MS,
+        { frame: true },
       );
       data = decodeBoundedBase64Image(response.data);
       dimensions = imageDimensions(data, expected.options.format);
@@ -5950,6 +5974,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.captureFallbackFrame(targetId, expected);
           consecutiveFailures = 0;
         } catch (error) {
+          if (error instanceof CaptureBusyError) continue;
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);

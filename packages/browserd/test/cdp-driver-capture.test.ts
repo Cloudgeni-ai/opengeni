@@ -333,18 +333,19 @@ test("frames of a tab in a person's own Chrome never resize or emulate the tab",
       maxHeight: 1200,
     });
     const iterator = frames[Symbol.asyncIterator]();
-    for (let index = 0; index < 3; index += 1) {
-      const frame = (await iterator.next()).value!;
+    const received = [];
+    for (let index = 0; index < 3; index += 1) received.push((await iterator.next()).value!);
+    const captures = fixture.calls.filter((call) => call.method === "Page.captureScreenshot");
+    expect(captures.length).toBeGreaterThanOrEqual(3);
+    for (const capture of captures) expect(capture.params?.clip).toBeUndefined();
+    expect(fixture.calls.filter((call) => TAB_SIZE_CHANGES.has(call.method))).toEqual([]);
+    for (const frame of received) {
       expect([frame.width, frame.height]).toEqual([1920, 1017]);
       const decoded = await new Bun.Image(frame.data).metadata();
       expect([decoded.width, decoded.height, decoded.format]).toEqual([1920, 1017, "jpeg"]);
       // A pixel of the frame still maps back to the same CSS point.
       expect(frame.deviceScaleFactor).toBeCloseTo(1920 / 1511, 9);
     }
-    const captures = fixture.calls.filter((call) => call.method === "Page.captureScreenshot");
-    expect(captures.length).toBeGreaterThanOrEqual(3);
-    for (const capture of captures) expect(capture.params?.clip).toBeUndefined();
-    expect(fixture.calls.filter((call) => TAB_SIZE_CHANGES.has(call.method))).toEqual([]);
   } finally {
     await frames?.close();
     await fixture.driver.close();
@@ -407,6 +408,77 @@ test.each(["chromium", "chrome"] as const)(
   },
   15_000,
 );
+
+const fullPageCapture = (params: Record<string, any> | undefined) =>
+  params?.captureBeyondViewport === true;
+
+test("a slow full-page screenshot does not end the live view of its tab", async () => {
+  // Frames wait for every earlier capture of the tab. One that is slow but
+  // within its own deadline is not a failed frame: three of those used to
+  // end the stream while the screenshot was still being drawn.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    fixture.stallNext("Page.captureScreenshot", fullPageCapture);
+    const shot = fixture.driver.captureScreenshot("target-1", { format: "jpeg", fullPage: true });
+    await fixture.waitUntilStalled();
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    const answered = fixture.calls.length;
+    fixture.replyToStalled();
+    expect(await shot).toMatchObject({ targetId: "target-1" });
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      !fixture.calls
+        .slice(answered)
+        .some((call) => call.method === "Page.captureScreenshot" && !fullPageCapture(call.params))
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    expect(
+      fixture.calls
+        .slice(answered)
+        .some((call) => call.method === "Page.captureScreenshot" && !fullPageCapture(call.params)),
+    ).toBe(true);
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
+  // The wait for the frame comes out of the screenshot's own 3 s, not on top.
+  const fixture = await captureFixture(undefined, "chrome");
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setCaptureData(await realJpeg(3, 2));
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    fixture.stallNext("Page.captureScreenshot");
+    await fixture.waitUntilStalled();
+    const started = Date.now();
+    const shot = fixture.driver.captureScreenshot("target-1", { format: "png" }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    fixture.stallNext("Page.captureScreenshot", (params) => params?.format === "png");
+    fixture.replyToStalled();
+    const error = await shot;
+    const elapsed = Date.now() - started;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("browser screenshot stalled");
+    expect(elapsed).toBeGreaterThanOrEqual(2_900);
+    expect(elapsed).toBeLessThan(4_200);
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 15_000);
 
 test("a viewport change or reset the page did not take is an unknown outcome, never a success", async () => {
   const fixture = await captureFixture();
@@ -890,7 +962,7 @@ async function captureFixture(
     params?: Record<string, any>;
   }> = [];
   let raster: { width: number; height: number; density: number } | null = null;
-  // Real encoded pixels every capture returns instead of a sized header.
+  // Real encoded pixels an unclipped capture returns instead of a sized header.
   let captureData: string | null = null;
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
@@ -902,6 +974,7 @@ async function captureFixture(
   const viewportOn = new Map<string, unknown>();
   let viewportFailure: string | null = null;
   let stalledMethod: string | null = null;
+  let stalledWhen: ((params: Record<string, any> | undefined) => boolean) | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
   let reachedStall = () => {};
   let waitingForStall = Promise.resolve();
@@ -995,7 +1068,7 @@ async function captureFixture(
     if (command.method === "Page.captureScreenshot") {
       const data = Buffer.from(jpeg, "base64");
       const presented = staleRasters.shift() ?? raster;
-      if (captureData) {
+      if (captureData && !command.params?.clip) {
         result = { data: captureData };
       } else if (presented) {
         const scale = Number(command.params?.clip?.scale ?? 1) * presented.density;
@@ -1017,8 +1090,9 @@ async function captureFixture(
     const command = JSON.parse(raw) as (typeof calls)[number];
     calls.push(command);
     if (viewportOn.has(command.method)) viewport = viewportOn.get(command.method);
-    if (command.method === stalledMethod) {
+    if (command.method === stalledMethod && (!stalledWhen || stalledWhen(command.params))) {
       stalledMethod = null;
+      stalledWhen = null;
       stalled = command;
       reachedStall();
     } else {
@@ -1080,8 +1154,9 @@ async function captureFixture(
     delayNext(method: string, delayMs: number) {
       delays.set(method, delayMs);
     },
-    stallNext(method: string) {
+    stallNext(method: string, when?: (params: Record<string, any> | undefined) => boolean) {
       stalledMethod = method;
+      stalledWhen = when ?? null;
       waitingForStall = new Promise<void>((resolve) => {
         reachedStall = resolve;
       });
