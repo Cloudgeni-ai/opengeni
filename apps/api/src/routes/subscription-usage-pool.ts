@@ -3,7 +3,6 @@ import { readSubscriptionUsagePool, resolveNamedManagedPersonalWorkspaceGrant } 
 import { SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
 import type { Hono } from "hono";
 import { requireOrganizationCodexHuman } from "./codex";
-import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 
 /** Cached observations only; provider checks stay on the page's existing Refresh path. */
@@ -17,7 +16,6 @@ export function registerSubscriptionUsagePoolRoutes(app: Hono, deps: ApiRouteDep
     const pools = [];
     // The RLS transaction's scope is mutable, so do not race providers on it.
     for (const provider of providers) {
-      await requireSubscriptionCoreRoute(deps, provider, provider, async () => input.accountId);
       const pool = await readSubscriptionUsagePool(deps.db, { ...input, provider });
       if (pool.windows.some((window) => window.accounts.length > 0)) pools.push(pool);
     }

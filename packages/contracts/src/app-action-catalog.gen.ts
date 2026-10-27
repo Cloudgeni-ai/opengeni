@@ -8998,6 +8998,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SubscriptionDeviceSignInStart"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.userCode"
     ]

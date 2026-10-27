@@ -241,8 +241,6 @@ describe("transcription providers", () => {
   test.each([200, 429])(
     "SUB-FAIL-10 prefers Codex and never switches providers after its response %i",
     async (status) => {
-      // An enabled cutover with a shared connection selects the core path.
-      const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
       const candidates = spyOn(
         dbModule,
         "listSubscriptionCoreCodexOperationCandidates",
@@ -311,22 +309,13 @@ describe("transcription providers", () => {
         expect(otherProviderCalls).toBe(0);
         expect(url).toContain("/backend-api/transcribe");
       } finally {
-        for (const spy of [
-          disposition,
-          candidates,
-          acquired,
-          renewed,
-          released,
-          resolver,
-          operationFetch,
-        ])
+        for (const spy of [candidates, acquired, renewed, released, resolver, operationFetch])
           spy.mockRestore();
       }
     },
   );
 
   test("a credit refusal before any audio is sent falls back to the connected Codex subscription", async () => {
-    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
     const candidates = spyOn(
       dbModule,
       "listSubscriptionCoreCodexOperationCandidates",
@@ -415,50 +404,37 @@ describe("transcription providers", () => {
       ).rejects.toMatchObject({ code: "policy_blocked" });
       expect(openAiSends).toBe(0);
     } finally {
-      for (const spy of [
-        disposition,
-        candidates,
-        acquired,
-        renewed,
-        released,
-        resolver,
-        operationFetch,
-      ])
+      for (const spy of [candidates, acquired, renewed, released, resolver, operationFetch])
         spy.mockRestore();
     }
   });
 
   test("falls through to OpenAI when Codex is not attached to the workspace", async () => {
-    const accounts = spyOn(dbModule, "listCodexAccountStatuses").mockResolvedValue([]);
-    try {
-      let openaiSends = 0;
-      const service = createTranscriptionService({
-        settings: testSettings({
-          codexSubscriptionEnabled: true,
-          voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
-        }),
-        db: {} as never,
-        codexFetch: async () => {
-          throw new Error("codex should not be selected");
-        },
-        fetch: async () => {
-          openaiSends += 1;
-          return Response.json({ text: "from-openai", language: "en" });
-        },
-      });
-      const result = await service.transcribe({
-        workspaceId: "workspace",
-        accountId: "account",
-        audio,
-        mimeType: "audio/webm",
-        requestId: "request",
-      });
-      expect(result.text).toBe("from-openai");
-      expect(result.providerId).toBe("openai");
-      expect(openaiSends).toBe(1);
-    } finally {
-      accounts.mockRestore();
-    }
+    let openaiSends = 0;
+    const service = createTranscriptionService({
+      settings: testSettings({
+        codexSubscriptionEnabled: true,
+        voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
+      }),
+      db: {} as never,
+      codexFetch: async () => {
+        throw new Error("codex should not be selected");
+      },
+      fetch: async () => {
+        openaiSends += 1;
+        return Response.json({ text: "from-openai", language: "en" });
+      },
+    });
+    const result = await service.transcribe({
+      workspaceId: "workspace",
+      accountId: "account",
+      audio,
+      mimeType: "audio/webm",
+      requestId: "request",
+    });
+    expect(result.text).toBe("from-openai");
+    expect(result.providerId).toBe("openai");
+    expect(openaiSends).toBe(1);
   });
 });
 

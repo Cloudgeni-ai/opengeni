@@ -1,18 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  codexCutoverDisposition,
   selectCodexTurnCapacity,
   type CapacityPhaseDeps,
 } from "../src/activities/agent-turn/codex-capacity";
 
-describe("Codex provider cutover routing", () => {
-  test("fails closed when the one-way cutover row is missing", () => {
-    expect(codexCutoverDisposition("not_configured")).toBe("fail_closed");
-    expect(codexCutoverDisposition("disabled")).toBe("fail_closed");
-    expect(codexCutoverDisposition("enabled")).toBe("core");
-  });
-
-  test("does not consult Codex cutover state for a non-Codex turn", async () => {
+describe("Codex turn capacity", () => {
+  test("does not consult Codex capacity state for a non-Codex turn", async () => {
     const deps = new Proxy(
       { billingState: { isCodexTurn: false } },
       {

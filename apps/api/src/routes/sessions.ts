@@ -67,7 +67,6 @@ import {
   getSubscriptionCoreSessionCodexAccounts,
   pinSubscriptionCoreSessionCodexAccount,
 } from "@opengeni/db";
-import { codexRouteDisposition } from "./codex-core";
 import {
   loadCodexSessionPointerProjection,
   type CodexSessionPointerProjection,
@@ -2586,7 +2585,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     // authorizeSessionHttp has already enforced private-session and agent scope.
-    await codexRouteDisposition(deps, grant.accountId);
     const projection = await getSubscriptionCoreSessionCodexAccounts(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -2638,7 +2636,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    await codexRouteDisposition(deps, grant.accountId);
 
     const core = await pinSubscriptionCoreSessionCodexAccount(db, {
       accountId: grant.accountId,
