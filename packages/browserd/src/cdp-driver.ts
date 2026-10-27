@@ -5838,6 +5838,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "type":
         if (action.locator) {
           const node = await this.resolveActionLocator(state, action.locator);
+          // Check the target before focusing it: focus is an input effect,
+          // so a refusal after it would surface as an unknown outcome.
+          if (
+            action.text &&
+            action.mode !== "keys" &&
+            this.engine !== "lightpanda" &&
+            (await this.callOnNode(state, node.backendDOMNodeId, TEXT_INSERT_TARGET_FUNCTION, [
+              { value: false },
+            ])) === false
+          ) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+            );
+          }
           await this.focusNode(state, node.backendDOMNodeId);
         }
         if (
@@ -5872,11 +5887,35 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           // Such pages usually move focus a frame after the key (React
           // effects), so the next key waits for that frame; sent at once,
           // keys land in the old box and overwrite or drop characters.
+          // A character with no US key goes as text only. A text field takes
+          // it; a page that reads physical keys (a remote desktop) gets
+          // nothing, so say which characters may not have arrived. Focus is
+          // checked as each one is sent: earlier keys may have opened an
+          // editor (a grid cell).
+          const mayBeLost = new Set<string>();
           let first = true;
           for (const character of action.text) {
             if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
             first = false;
-            await this.pressKey(state, characterKey(character));
+            const key = characterKey(character);
+            if (
+              key.code === "" &&
+              this.engine !== "lightpanda" &&
+              !mayBeLost.has(key.text) &&
+              (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+            )
+              mayBeLost.add(key.text);
+            await this.pressKey(state, key);
+          }
+          if (mayBeLost.size > 0) {
+            const characters = [...mayBeLost];
+            throw new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `${TYPE_KEYS_TEXT_ONLY_MESSAGE}${characters
+                .slice(0, 20)
+                .map((character) => JSON.stringify(character))
+                .join(", ")}${characters.length > 20 ? ", …" : ""}`,
+            );
           }
           return;
         }
@@ -8167,39 +8206,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // person presses it: pages that track physical keys (remote-desktop
     // viewers sending scancodes) only see a modifier that was pressed.
     const modifiers = MODIFIER_KEYS.filter((modifier) => (key.modifiers & modifier.bit) !== 0);
+    const pressed: (typeof MODIFIER_KEYS)[number][] = [];
     let held = 0;
-    for (const modifier of modifiers) {
-      held |= modifier.bit;
-      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: modifier.key,
-        code: modifier.code,
-        modifiers: held,
-        windowsVirtualKeyCode: modifier.keyCode,
-        location: 1,
-      });
-    }
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-      ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
-      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
-        ? { commands: ["selectAll"] }
-        : {}),
-    });
-    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: key.key,
-      code: key.code,
-      modifiers: key.modifiers,
-      windowsVirtualKeyCode: key.keyCode,
-    });
-    for (const modifier of [...modifiers].reverse()) {
+    const keyUp = { type: "keyUp", key: key.key, code: key.code, modifiers: key.modifiers };
+    const releaseModifier = (modifier: (typeof MODIFIER_KEYS)[number]) => {
       held &= ~modifier.bit;
-      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+      return this.sendActionTarget(state, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key: modifier.key,
         code: modifier.code,
@@ -8207,6 +8219,53 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         windowsVirtualKeyCode: modifier.keyCode,
         location: 1,
       });
+    };
+    let keyDown = false;
+    try {
+      for (const modifier of modifiers) {
+        // Counted as down before it is sent: a send that fails may still
+        // have reached the page.
+        pressed.push(modifier);
+        held |= modifier.bit;
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: modifier.key,
+          code: modifier.code,
+          modifiers: held,
+          windowsVirtualKeyCode: modifier.keyCode,
+          location: 1,
+        });
+      }
+      keyDown = true;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: key.key,
+        code: key.code,
+        modifiers: key.modifiers,
+        windowsVirtualKeyCode: key.keyCode,
+        ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+        ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+          ? { commands: ["selectAll"] }
+          : {}),
+      });
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        ...keyUp,
+        windowsVirtualKeyCode: key.keyCode,
+      });
+      keyDown = false;
+      while (pressed.length) await releaseModifier(pressed.pop()!);
+    } catch (error) {
+      // Release whatever may be down, so no key stays held on the page (a
+      // remote desktop would keep Ctrl or Shift pressed), then report the
+      // original failure.
+      if (keyDown) {
+        await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+          ...keyUp,
+          windowsVirtualKeyCode: key.keyCode,
+        }).catch(() => undefined);
+      }
+      while (pressed.length) await releaseModifier(pressed.pop()!).catch(() => undefined);
+      throw error;
     }
   }
 
@@ -10102,11 +10161,14 @@ function parseKey(input: string, mac: boolean): ParsedKey {
     throw new InteractionDefiniteDriverError("invalid_action", "browser key is unsupported");
   }
   const upper = rawKey.toUpperCase();
+  // A digit or symbol is the key that gives it on a US keyboard, with Shift
+  // held when that key needs it, as typed text is.
+  const symbol = /[a-z]/iu.test(rawKey) ? undefined : US_SYMBOL_KEY_BY_CHARACTER.get(rawKey);
   return {
     key: rawKey,
-    code: /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
-    keyCode: upper.codePointAt(0) ?? 0,
-    modifiers,
+    code: symbol ? symbol.code : /[a-z]/iu.test(rawKey) ? `Key${upper}` : rawKey,
+    keyCode: symbol ? symbol.keyCode : (upper.codePointAt(0) ?? 0),
+    modifiers: symbol?.shift ? modifiers | SHIFT_MODIFIER : modifiers,
     text: modifiers === 0 ? rawKey : "",
   };
 }
@@ -11482,25 +11544,36 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
 const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
   "no text field is focused, so inserted text would not arrive and nothing was typed; focus a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
 
-/** Whether inserted text can reach the focused element: true for a text
- * field or editable content, false for an element that takes no text (the
- * page itself, a canvas, a button), null when focus is inside a frame, a
- * plugin or a closed shadow root that this document cannot see. */
-const TEXT_INSERT_TARGET_EXPRESSION = `(() => { try {
-  let element = document.activeElement;
-  while (element && element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
-  if (document.designMode === "on") return true;
-  if (!(element instanceof Element)) return false;
-  if (element.isContentEditable) return true;
-  if (element === document.body || element === document.documentElement) return false;
+const TYPE_KEYS_TEXT_ONLY_MESSAGE =
+  "keys were sent, but these characters have no key on a US keyboard and went as text only, which a canvas or remote desktop that reads key presses may not receive; check the screen: ";
+
+/** Whether inserted text can reach an element: true for a text field,
+ * editable content or an EditContext element (code editors), false for an
+ * element that takes no text (the page itself, a canvas, a button), null
+ * for a frame, a plugin or a shadow host whose focused part this document
+ * cannot see. With `focused`, `this` is a document's active element and the
+ * check follows focus into open shadow roots and same-origin frames. */
+const TEXT_INSERT_TARGET_FUNCTION = `function (focused) { try {
+  let element = this;
+  while (focused && element) {
+    if (element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+    else if ((element.localName === "iframe" || element.localName === "frame") && element.contentDocument && element.contentDocument.activeElement) element = element.contentDocument.activeElement;
+    else break;
+  }
+  if (!element || element.nodeType !== 1) return false;
+  const owner = element.ownerDocument;
+  if (owner.designMode === "on" || element.isContentEditable || element.editContext) return true;
+  if (element === owner.body || element === owner.documentElement) return false;
   const tag = element.localName;
   if (tag === "textarea") return true;
   if (tag === "input") return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(element.type);
-  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-")) return null;
+  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-") || element.shadowRoot) return null;
   // An element focused in its own right takes no text. A shadow host focused
   // for a field inside its closed shadow root is not focusable itself.
   return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;
-} catch { return null; } })()`;
+} catch { return null; } }`;
+
+const TEXT_INSERT_TARGET_EXPRESSION = `(${TEXT_INSERT_TARGET_FUNCTION}).call(document.activeElement, true)`;
 
 const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
   const element = document.activeElement;

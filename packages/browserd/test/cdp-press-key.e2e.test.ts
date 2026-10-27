@@ -331,3 +331,144 @@ e2e(
   },
   60_000,
 );
+
+e2e(
+  "typing reaches code editors, refuses a non-text target before focusing it, reports text-only characters a canvas may miss, and never leaves a modifier held",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-canvas-edge-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    // A canvas that reads physical keys and Shift (a remote desktop), an
+    // EditContext editor (how Monaco and VS Code for the web take text), a
+    // button and a text field.
+    const script = `
+      const screen = document.querySelector("canvas");
+      globalThis.remote = ""; globalThis.held = new Set();
+      screen.addEventListener("keyup", (e) => { held.delete(e.code); e.preventDefault(); });
+      screen.addEventListener("keydown", (e) => {
+        e.preventDefault();
+        held.add(e.code);
+        const shift = held.has("ShiftLeft");
+        if (e.code.startsWith("Key")) remote += shift ? e.code.slice(3) : e.code.slice(3).toLowerCase();
+        else if (e.code === "Digit1") remote += shift ? "!" : "1";
+      });
+      const editor = document.querySelector("#editor");
+      globalThis.context = new EditContext();
+      editor.editContext = context;
+      context.addEventListener("textupdate", (e) => context.updateSelection(e.selectionEnd, e.selectionEnd));
+      editor.focus();`;
+    const fixture = `data:text/html,${encodeURIComponent(
+      `<!doctype html><title>Edges</title><canvas tabindex="0" width="200" height="100" aria-label="Remote screen"></canvas><div id="editor" tabindex="0" aria-label="Code"></div><button>Save</button><input aria-label="Note"><script>${script}</script>`,
+    )}`;
+    try {
+      const initial = await driver.start(fixture);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) =>
+        (
+          await cdp!.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            { sessionId: attached.sessionId },
+          )
+        ).result.value;
+      const run = (action: BrowserActionCommand["action"]) =>
+        controller.run({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: initial.target.id,
+          expectedTargetGeneration: initial.target.targetGeneration,
+          expectedDocumentGeneration: initial.target.documentGeneration!,
+          expectedFrameId: initial.frameId!,
+          actor: { kind: "human", subjectId: "canvas-edge-fixture" },
+          observationMode: "none",
+          action,
+        });
+
+      // An EditContext editor takes inserted text.
+      expect(await evaluate("document.activeElement.id")).toBe("editor");
+      const edited = await run({ type: "type", text: "const x = 1;" });
+      expect(edited.state).toBe("completed");
+      expect(await evaluate("context.text")).toBe("const x = 1;");
+
+      // A locator that names a button is refused before focus moves, as a
+      // definite failure rather than an unknown outcome.
+      const refused = await run({
+        type: "type",
+        locator: { kind: "role", role: "button", name: "Save", exact: true },
+        text: "lost",
+      });
+      expect(refused.state).toBe("failed");
+      expect(refused.error?.code).toBe("invalid_action");
+      expect(await evaluate("document.activeElement.id")).toBe("editor");
+
+      // A character with no US key reaches a text field as text...
+      const field = await run({
+        type: "type",
+        locator: { kind: "label", text: "Note" },
+        text: "blåbær",
+        mode: "keys",
+      });
+      expect(field.state).toBe("completed");
+      expect(await evaluate('document.querySelector("input").value')).toBe("blåbær");
+      // ...but a canvas reading physical keys gets nothing for it, so the
+      // result names it instead of reporting the text as typed.
+      await evaluate('document.querySelector("canvas").focus()');
+      const canvas = await run({ type: "type", text: "blåbær", mode: "keys" });
+      expect(canvas.state).not.toBe("completed");
+      expect(canvas.error?.code).toBe("outcome_unknown");
+      expect(canvas.error?.message).toContain('"å", "æ"');
+      expect(await evaluate("remote")).toBe("blbr");
+
+      // A pressed symbol is its US key with Shift held.
+      await evaluate('remote = ""');
+      expect((await run({ type: "press", key: "!" })).state).toBe("completed");
+      expect(await evaluate("remote")).toBe("!");
+
+      // A key that fails to send still releases the modifiers pressed for it.
+      const internals = driver as unknown as {
+        sendActionTarget: (state: unknown, method: string, params?: unknown) => Promise<unknown>;
+      };
+      const send = internals.sendActionTarget.bind(driver);
+      internals.sendActionTarget = async (state, method, params) => {
+        const event = params as { type?: string; code?: string } | undefined;
+        if (
+          method === "Input.dispatchKeyEvent" &&
+          event?.type === "keyDown" &&
+          event.code === "KeyV"
+        )
+          throw new Error("injected key failure");
+        return send(state, method, params);
+      };
+      const failed = await run({ type: "press", key: "Ctrl+Shift+V" });
+      internals.sendActionTarget = send;
+      expect(failed.state).not.toBe("completed");
+      expect(await evaluate("[...held]")).toEqual([]);
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
