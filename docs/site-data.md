@@ -467,7 +467,9 @@ no person, such as a service key) and `:viewer_email` (the verified email in
 lowercase, or NULL) are bound by the API from the verified caller. Published
 viewers carry access and email from their Site session; callers through the
 workspace are `member`, and their email is read only for statements that name
-`:viewer_email`. A request that supplies one is refused with `validation`, so
+`:viewer_email`; an embedding host's `userProfileLookup` address counts only
+when the profile sets `emailVerified: true`. A member previewing the Site as a
+visitor binds that role with their own email. A request that supplies one is refused with `validation`, so
 a Site cannot impersonate another viewer:
 
 ```sql

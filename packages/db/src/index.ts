@@ -4079,8 +4079,8 @@ export async function getManagedUserProfilesByIds(
 /**
  * A person's verified email address in lowercase, or null when the subject is
  * not a managed user (`user:<id>`), has no email, or has not verified it.
- * Embedded hosts answer through their `userProfileLookup`, which vouches for
- * the addresses it returns.
+ * Embedded hosts answer through their `userProfileLookup`; their address
+ * counts only when the profile says `emailVerified: true`.
  */
 export async function getVerifiedSubjectEmail(
   db: Database,
@@ -4092,7 +4092,8 @@ export async function getVerifiedSubjectEmail(
   const binding = dbBindingFor(db);
   if (binding?.userProfileLookup) {
     const [profile] = await binding.userProfileLookup(db, [userId]);
-    return profile?.email?.trim().toLowerCase() || null;
+    if (profile?.emailVerified !== true) return null;
+    return profile.email?.trim().toLowerCase() || null;
   }
   const [row] = await rawRows<{ email: string | null }>(
     db,

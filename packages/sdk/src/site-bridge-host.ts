@@ -30,6 +30,7 @@ import {
   isOpenGeniSiteBridgeCancelMessage,
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
+  isOpenGeniReservedSitePath,
   openGeniSiteLocationValue,
   resolveOpenGeniSiteLocation,
   sanitizeOpenGeniSiteToolCallRequest,
@@ -55,8 +56,10 @@ import type {
 
 export type { SiteHttpRequest } from "./site-http";
 export {
+  isOpenGeniReservedSitePath,
   openGeniSiteLocationHref,
   openGeniSiteLocationValue,
+  openGeniSitePath,
   resolveOpenGeniSiteLocation,
   type OpenGeniSiteLocationValue,
 } from "./site";
@@ -444,10 +447,10 @@ export async function handleSiteBridgeRequest(
       message.payload.to,
       ...(location.origin ? [location.origin] : []),
     );
-    if (!to)
+    if (!to || isOpenGeniReservedSitePath(to.path))
       throw siteBridgeHostError(
         "invalid_location",
-        "Navigate only to addresses of this Site; open other addresses with a link or window.open",
+        "Navigate only to this Site's own pages (not /_og or /__opengeni); open other addresses with a link or window.open",
       );
     return await location.navigate(to, { replace: message.payload.replace === true });
   }

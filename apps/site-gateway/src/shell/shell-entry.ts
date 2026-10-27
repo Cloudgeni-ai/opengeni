@@ -9,7 +9,6 @@
  * Requests outside the allowlist never leave the page.
  */
 import {
-  SITE_GATEWAY_PREFIX,
   SITE_GATEWAY_API_PREFIX,
   SITE_GATEWAY_LOGIN_PATH,
   matchSiteOperation,
@@ -19,6 +18,7 @@ import {
 import {
   SiteBridgeHost,
   openGeniSiteLocationHref,
+  openGeniSitePath,
   type OpenGeniSiteLocationValue,
   type SiteBridgeLocationHandlers,
   type SiteBridgeToolHandlers,
@@ -215,12 +215,13 @@ const viewerHandlers: SiteBridgeViewerHandlers = {
   },
 };
 
+/** This page's address as the Site's location; `//x` reads as `/x`, never as another origin. */
 function pageLocation(): OpenGeniSiteLocationValue {
-  return { path: location.pathname || "/", search: location.search, hash: location.hash };
-}
-
-function gatewayOwned(path: string): boolean {
-  return path === SITE_GATEWAY_PREFIX || path.startsWith(`${SITE_GATEWAY_PREFIX}/`);
+  return {
+    path: openGeniSitePath(location.pathname || "/"),
+    search: location.search,
+    hash: location.hash,
+  };
 }
 
 function loadTurnstile(): Promise<TurnstileApi> {
@@ -275,11 +276,8 @@ if (frame) {
   const locationHandlers: SiteBridgeLocationHandlers = {
     get: pageLocation,
     origin: location.origin,
+    // The bridge has already refused other origins and /_og addresses.
     navigate: (to, { replace }) => {
-      if (gatewayOwned(to.path))
-        throw Object.assign(new Error("Addresses under /_og belong to Opengeni"), {
-          code: "invalid_location",
-        });
       const href = openGeniSiteLocationHref(to);
       if (replace) history.replaceState(history.state, "", href);
       else history.pushState(null, "", href);

@@ -5,8 +5,10 @@ import {
   createOpenGeniSiteClient,
   isOpenGeniSiteBridgeEventMessage,
   isOpenGeniSiteBridgeRequestMessage,
+  isOpenGeniReservedSitePath,
   openGeniSiteLinkTarget,
   openGeniSiteLocationValue,
+  openGeniSitePath,
   resolveOpenGeniSiteLocation,
   type OpenGeniSiteLocation,
   type OpenGeniSiteLocationValue,
@@ -29,7 +31,7 @@ const tools: SiteBridgeToolHandlers = {
 
 function connect(
   source: ConstructorParameters<typeof SiteBridgeHost>[0],
-  linkDocument?: Pick<Document, "addEventListener" | "removeEventListener">,
+  linkTarget?: Pick<EventTarget, "addEventListener" | "removeEventListener">,
 ) {
   const host = new SiteBridgeHost(source);
   let bootstrap: MessagePort | undefined;
@@ -41,7 +43,7 @@ function connect(
   const site = createOpenGeniSiteClient({
     bootstrapPort: bootstrap!,
     connectTimeoutMs: 2000,
-    ...(linkDocument ? { linkDocument } : {}),
+    ...(linkTarget ? { linkTarget } : {}),
   });
   return { host, site };
 }
@@ -144,6 +146,18 @@ describe("Site location", () => {
       "mailto:a@example.com",
     ])
       expect(resolveOpenGeniSiteLocation(at, outside)).toBeNull();
+    // A path never starts with `//`, so it can't read as another origin.
+    for (const sneaky of ["/.//evil.test/x", "/%2e%2e//evil.test/x", "/a/..//evil.test/x"])
+      expect(resolveOpenGeniSiteLocation(at, sneaky)?.path).toBe("/evil.test/x");
+    expect(
+      resolveOpenGeniSiteLocation({ path: "//evil.test/a", search: "", hash: "" }, "b"),
+    ).toEqual({ path: "/evil.test/b", search: "", hash: "" });
+    expect(resolveOpenGeniSiteLocation(at, `/${"a".repeat(2048)}`)).toBeNull();
+    expect(openGeniSitePath("///x//y")).toBe("/x//y");
+    for (const reserved of ["/_og", "/_og/auth/login", "/__opengeni/site-tools/client.js"])
+      expect(isOpenGeniReservedSitePath(reserved)).toBe(true);
+    for (const own of ["/", "/_ogre", "/admin/_og", "/__opengenius"])
+      expect(isOpenGeniReservedSitePath(own)).toBe(false);
   });
 
   test("validates wire values", () => {
@@ -155,6 +169,7 @@ describe("Site location", () => {
     for (const bad of [
       null,
       { path: "x", search: "", hash: "" },
+      { path: "//evil.test", search: "", hash: "" },
       { path: "/", search: "a=1", hash: "" },
       { path: "/", search: "", hash: "top" },
       { path: "/", search: "" },
@@ -233,6 +248,14 @@ describe("Site location", () => {
         (error: unknown) => error,
       );
       expect(refused).toMatchObject({ code: "invalid_location" });
+      // Opengeni's own addresses are refused by every host, before it moves.
+      for (const reserved of ["/_og/auth/login", "/__opengeni/site-tools/client.js"]) {
+        const error = await site.navigate(reserved).then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+        expect(error).toMatchObject({ code: "invalid_location" });
+      }
       expect(memory.moves).toHaveLength(2);
     } finally {
       site.close();
@@ -295,6 +318,10 @@ describe("Site location", () => {
       expect(openGeniSiteLinkTarget(linkClick(attributes))).toBeNull();
     for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { button: 1 }])
       expect(openGeniSiteLinkTarget(linkClick({ href: "/a" }, init))).toBeNull();
+    // The Site's own handler took the click (a router, a confirm dialog).
+    const handled = linkClick({ href: "/a" });
+    handled.preventDefault();
+    expect(openGeniSiteLinkTarget(handled)).toBeNull();
     // Not on a link at all.
     expect(
       openGeniSiteLinkTarget({ button: 0, target: { closest: () => null } } as unknown as Event),
@@ -337,7 +364,7 @@ describe("Site location", () => {
     const optedOut = createOpenGeniSiteClient({
       bootstrapPort: bootstrap!,
       links: false,
-      linkDocument: page,
+      linkTarget: page,
     });
     try {
       expect(await first.site.location).toBeNull();
@@ -348,6 +375,78 @@ describe("Site location", () => {
       first.host.close();
       optedOut.close();
       host.close();
+    }
+  });
+
+  test("a local preview moves the page itself and tells every client on it", async () => {
+    const page = new URL("http://localhost:3000/");
+    const popListeners = new Set<() => void>();
+    const scope = globalThis as unknown as Record<string, unknown>;
+    const saved = {
+      location: scope.location,
+      history: scope.history,
+      addEventListener: scope.addEventListener,
+      removeEventListener: scope.removeEventListener,
+    };
+    const move = (href: string) => {
+      const next = new URL(href, page);
+      page.pathname = next.pathname;
+      page.search = next.search;
+      page.hash = next.hash;
+    };
+    Object.assign(scope, {
+      location: {
+        get origin() {
+          return page.origin;
+        },
+        get pathname() {
+          return page.pathname;
+        },
+        get search() {
+          return page.search;
+        },
+        get hash() {
+          return page.hash;
+        },
+      },
+      history: {
+        state: null,
+        pushState: (_state: unknown, _title: string, href: string) => move(href),
+        replaceState: (_state: unknown, _title: string, href: string) => move(href),
+      },
+      addEventListener: (type: string, listener: () => void) => {
+        if (type === "popstate") popListeners.add(listener);
+      },
+      removeEventListener: (type: string, listener: () => void) => {
+        if (type === "popstate") popListeners.delete(listener);
+      },
+    });
+    const local = { localCodemodePath: "/__opengeni/site-tools" };
+    const first = createOpenGeniSiteClient(local);
+    const second = createOpenGeniSiteClient(local);
+    try {
+      expect((await first.location)?.href).toBe("/");
+      const heard = nextChange(second);
+      expect((await first.navigate("/admin?tab=2")).href).toBe("/admin?tab=2");
+      expect((await heard).href).toBe("/admin?tab=2");
+      const refused = await first.navigate("/__opengeni/site-tools/client.js").then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(refused).toMatchObject({ code: "invalid_location" });
+      // Back/Forward is watched only while someone listens.
+      const stop = second.onLocationChange(() => undefined);
+      expect(popListeners.size).toBe(1);
+      const back = nextChange(first);
+      move("/");
+      for (const listener of popListeners) listener();
+      expect((await back).href).toBe("/");
+      stop();
+      expect(popListeners.size).toBe(0);
+    } finally {
+      first.close();
+      second.close();
+      Object.assign(scope, saved);
     }
   });
 
