@@ -339,7 +339,7 @@ import { registerPersonalApiKeyRoutes } from "./routes/personal-api-keys";
 import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
-import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
+import { registerBrowserSessionRoutes, type BrowserHoldRenewal } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { createVaultInteractionSecretsPort } from "./interaction-secrets-vault";
 import { registerGitHubRoutes } from "./routes/github";
@@ -510,6 +510,9 @@ function signedStateSecret(
 export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
+  /** One pass renewing the holds of the browsers agent sessions hold; the
+   * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
+  renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -2393,7 +2396,7 @@ export function createAppComposition(deps: AppDependencies): {
       }),
     log: (event, fields) => console.warn(event, fields),
   });
-  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  const browserSessionRoutes = registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);
@@ -2585,7 +2588,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps };
+  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {

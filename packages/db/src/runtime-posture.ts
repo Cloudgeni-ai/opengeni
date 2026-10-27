@@ -51,8 +51,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * control worker's content-free queued-turn hold summary (0988) and the only
- * writer of the EU-only inference setting and its history (1002). Each is
+ * control worker's content-free queued-turn hold summary (0988), the API's
+ * inventory of browsers an agent session holds (1002) and the only writer of
+ * the EU-only inference setting and its history (1010). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -67,6 +68,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
+  "list_agent_held_browser_sessions(integer, bigint)",
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const;
 
@@ -82,13 +84,16 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
- * 1002 withholds the EU-only change function; until it is granted the setting
+ * 1002 withholds the held-browser inventory; until it is granted, the API
+ * renews no browser holds.
+ * 1010 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
+  "list_agent_held_browser_sessions(integer, bigint)",
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
@@ -137,6 +142,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
   "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "list_agent_held_browser_sessions(integer, bigint)": [
+    "browser_sessions",
+    "browser_session_associations",
+    "sessions",
+    "session_turns",
+  ],
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
     "organization_inference_residency",
     "organization_inference_residency_events",
