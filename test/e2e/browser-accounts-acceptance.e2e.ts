@@ -2325,10 +2325,11 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         { cause: error },
       );
     }
+    // Running agents for yourself creates an organization named after the person,
+    // without asking for a name.
     await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
-    await page.getByLabel("Organization name").fill(account.organizationName);
-    await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByText(`Your organization is called ${account.displayName}.`).waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
@@ -2342,6 +2343,16 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     const membership = memberships.memberships[0]!;
     account.organizationId = membership.organizationId;
     account.workspaceId = membership.personalWorkspaceId;
+    // Renamed so the organization's name is a tenant value distinct from the person's.
+    const created = await accountClient.getOrganizationAdministrationOverview(
+      account.organizationId,
+    );
+    expect(created.organization.name).toBe(account.displayName);
+    await accountClient.updateOrganizationName(account.organizationId, {
+      name: account.organizationName,
+      expectedUpdatedAt: created.organization.updatedAt,
+      operationId: crypto.randomUUID(),
+    });
     const session = await accountClient.createSession(account.workspaceId, {
       initialMessage: `${account.displayName} account acceptance`,
       idempotencyKey: crypto.randomUUID(),

@@ -505,21 +505,22 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
     await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
-    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
-    await page.getByRole("heading", { name: "Create your organization" }).waitFor();
-    expect(await page.getByLabel("Organization name").count()).toBe(1);
-    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
-    expect(await page.getByText(/create another organization/i).count()).toBe(0);
-    await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
     const setupSettled = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
     );
-    await page.getByRole("button", { name: "Create organization" }).click();
+    // Running agents for yourself never asks for an organization name: one named
+    // after the person is created right away, and the model step says what it's called.
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     expect((await setupSettled).ok()).toBe(true);
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
+    await page
+      .getByText(
+        "Your organization is called Onboarding Owner. You can rename it any time in Organization settings.",
+      )
+      .waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
@@ -528,6 +529,16 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(memberships.memberships).toHaveLength(1);
     const organizationId = memberships.memberships[0]!.organizationId;
     const personalWorkspaceId = memberships.memberships[0]!.personalWorkspaceId;
+    // Renamed the way the step promises, so the organization and its owner have
+    // distinct names in the people and invitation checks below.
+    const created = await owner.getOrganizationAdministrationOverview(organizationId);
+    expect(created.organization.name).toBe("Onboarding Owner");
+    const renamed = await owner.updateOrganizationName(organizationId, {
+      name: "Onboarding Greenfield Org",
+      expectedUpdatedAt: created.organization.updatedAt,
+      operationId: crypto.randomUUID(),
+    });
+    expect(renamed.name).toBe("Onboarding Greenfield Org");
     const ownerUserId = await databaseUserId(ownerEmail);
     const ownerSubjectId = `user:${ownerUserId}`;
     state = {
@@ -1463,6 +1474,11 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await signUpAndVerify(page, { name: "Onboarding Builder", email });
     await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     await page.getByRole("button", { name: /^Add AI agents to my product/ }).click();
+    // The developer path still names its organization, in a form with no workspace field.
+    await page.getByRole("heading", { name: "Create your organization" }).waitFor();
+    expect(await page.getByLabel("Organization name").count()).toBe(1);
+    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
+    expect(await page.getByText(/create another organization/i).count()).toBe(0);
     await page.getByLabel("Organization name").fill("Onboarding Product Org");
     await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
