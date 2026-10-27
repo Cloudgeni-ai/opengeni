@@ -11,6 +11,7 @@ import { useHostTheme } from "../lib/host-theme";
 import { cn } from "../lib/cn";
 import type { NewSessionRealtimeControl } from "../realtime/realtime-control";
 import { ChatComposer } from "./chat-composer";
+import type { ComposerVoiceInputOptions } from "./composer-transcription-control";
 import { ModelPolicyPicker } from "./model-policy-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
@@ -40,7 +41,8 @@ const DEFAULT_LABELS = (t: OpenGeniText): NewConversationLabels => ({
 type Presentation = {
   composerProps?: SessionConversationProps["composerProps"] | undefined;
   modelPickerProps?: SessionConversationProps["modelPickerProps"] | undefined;
-  voiceInput?: boolean | undefined;
+  /** The composer microphone: false hides it; options set its language or a check before it starts. */
+  voiceInput?: boolean | ComposerVoiceInputOptions | undefined;
   realtimeVoiceProps?: SessionConversationProps["realtimeVoiceProps"] | undefined;
   labels?: Partial<NewConversationLabels> | undefined;
   theme?: SessionConversationProps["theme"] | undefined;
@@ -104,6 +106,7 @@ export function NewConversationView({
     creation.client,
     creation.workspaceId,
     voiceInput && available ? config.voiceInput : null,
+    typeof voiceInput === "object" ? voiceInput : undefined,
   );
   const models = useRealtimeVoiceModels(
     creation.client,
