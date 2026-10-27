@@ -590,6 +590,12 @@ export type ComposerState = {
   stoppingAttempt?: "current" | "previous" | null | undefined;
   sending: boolean;
   canSend: boolean;
+  /**
+   * Something Send needs is still loading (the model list, a saved draft).
+   * While it is, a Send or Enter with a draft waits and sends once it is
+   * ready, instead of doing nothing.
+   */
+  preparing?: boolean | undefined;
   /** Pause the session without deleting its prompt queue. */
   pause: (reason?: string) => Promise<void>;
   pausing: boolean;
@@ -3153,6 +3159,10 @@ export function useComposer(
         visibleValue.trim().length > 0 ||
         hasReadyResources ||
         annotations.length > 0),
+    // The saved draft is still loading: an early Send waits for it.
+    preparing: identityMatches
+      ? Boolean(sessionId) && draftLoading
+      : Boolean(sessionId) && durableDrafts,
     pause,
     pausing: identityMatches ? pausing : false,
     resume,

@@ -25,6 +25,7 @@ import { PortalContainerProvider } from "../../ui/portal-container";
 import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "../components/common";
+import { ConversationRenderBoundary } from "../../components/conversation-render-boundary";
 import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
@@ -347,7 +348,11 @@ function SessionAppWorkspace({
             <RailProvider workspaceId={workspaceId}>
               <ActionsProvider>
                 <SessionShell slots={slots}>
-                  <SessionAppRoutes workspaceId={workspaceId} />
+                  {/* Contains a failure (including code that didn't download)
+                      inside the app instead of blanking the host page. */}
+                  <ConversationRenderBoundary resetKey={workspaceId}>
+                    <SessionAppRoutes workspaceId={workspaceId} />
+                  </ConversationRenderBoundary>
                 </SessionShell>
               </ActionsProvider>
             </RailProvider>

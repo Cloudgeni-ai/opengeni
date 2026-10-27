@@ -39,6 +39,11 @@ import {
   type WorkbookLinkState,
 } from "@opengeni/sdk/office";
 import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
+import {
+  availableSessionStorage,
+  currentViteBuildId,
+  installVitePreloadRecovery,
+} from "../../src/lib/vite-preload-recovery";
 import "./pane.css";
 
 const apiBaseUrl =
@@ -53,6 +58,18 @@ const RETRY_MIN_MS = 600;
 
 // The session panel's terminal, desktop viewer, code editor and highlighted diffs.
 enableWorkbench();
+
+// A lazy part of the pane that fails to download reloads the pane once, as
+// the web app does; a second failure shows the chat's Reload message.
+const preloadRecoveryStorage = availableSessionStorage(window);
+if (preloadRecoveryStorage) {
+  installVitePreloadRecovery({
+    target: window,
+    storage: preloadRecoveryStorage,
+    buildId: currentViteBuildId(document),
+    reload: () => window.location.reload(),
+  });
+}
 
 const surfaces: SessionAppSurfaces = {
   pdfPreview: lazy(() => import("../../src/components/artifacts/pdf-file-preview")),

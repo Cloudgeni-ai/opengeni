@@ -7,6 +7,7 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
+import { bootRecoveryPlugin } from "./vite-boot-recovery";
 import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
 import { eagerGraphPlugin } from "./vite-eager-graph";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
@@ -698,6 +699,8 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    // A page whose code fails to download reloads once, then says so.
+    bootRecoveryPlugin(),
     chunkEvaluationOrderPlugin(),
     // Chats are opened directly from links and reloads. Allow a little
     // coalesced shell code, but fail when lazy-only code rides along.

@@ -106,6 +106,7 @@ export type ComposerDelivery = Pick<
   | "steer"
   | "sending"
   | "canSend"
+  | "preparing"
   | "error"
   | "clearError"
   | "reconnecting"
@@ -556,6 +557,32 @@ export function useChatComposerController({
   const annotationsIncomplete = (delivery.annotations ?? []).some(
     (annotation) => annotation.note.trim().length === 0,
   );
+  // Send can be pressed before everything it needs has loaded (right after the
+  // page opens). A draft sent then waits, shown as sending, and goes out once
+  // the delivery is ready instead of being silently ignored.
+  const preparing = delivery.preparing === true;
+  const hasDraftText = visibleValue.trim().length > 0 || (attachments?.attachments.length ?? 0) > 0;
+  const waitsForPreparation = preparing && hasDraftText;
+  const heldSendRef = useRef<((ready: boolean) => void) | null>(null);
+  // A held Send uses the composer as it is when it is released.
+  const latestSendRef = useRef({ delivery, resumesOnSend, singleSend });
+  useLayoutEffect(() => {
+    latestSendRef.current = { delivery, resumesOnSend, singleSend };
+  });
+  const deliveryCanSend = delivery.canSend;
+  useEffect(() => {
+    const release = heldSendRef.current;
+    if (!release || waitsForPreparation) return;
+    heldSendRef.current = null;
+    release(!preparing && deliveryCanSend && !disabled);
+  }, [deliveryCanSend, disabled, preparing, waitsForPreparation]);
+  useEffect(
+    () => () => {
+      heldSendRef.current?.(false);
+      heldSendRef.current = null;
+    },
+    [],
+  );
 
   const submitBlocker: ComposerSubmitBlocker = disabled
     ? "disabled"
@@ -567,7 +594,7 @@ export function useChatComposerController({
           ? "command"
           : annotationsIncomplete
             ? "annotations"
-            : delivery.canSend
+            : delivery.canSend || waitsForPreparation
               ? null
               : "empty";
   const canSubmit = submitBlocker === null;
@@ -587,17 +614,26 @@ export function useChatComposerController({
         delivery.requestAnnotationReview?.();
         return false;
       }
-      if (!delivery.canSend) return false;
+      if (!delivery.canSend && !waitsForPreparation) return false;
       submittingRef.current = true;
       setSubmitting(true);
       setSubmittingMode(mode);
       try {
-        if (resumesOnSend) return await delivery.steer();
+        if (!delivery.canSend) {
+          const ready = await new Promise<boolean>((resolve) => {
+            heldSendRef.current = resolve;
+          });
+          if (!ready) return false;
+        }
+        const current = latestSendRef.current;
+        if (current.resumesOnSend) return await current.delivery.steer();
         // With one Send, Cmd/Ctrl+Enter is just Send.
-        if (mode !== "steer" || singleSend) return await delivery.send();
+        if (mode !== "steer" || current.singleSend) return await current.delivery.send();
         // Cmd/Ctrl+Enter and the button beside Send send the other way:
         // Steer when Send queues, queue when Send steers.
-        return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
+        return current.delivery.sendAlternate
+          ? await current.delivery.sendAlternate()
+          : await current.delivery.steer();
       } finally {
         submittingRef.current = false;
         if (mountedRef.current) {
@@ -614,8 +650,7 @@ export function useChatComposerController({
       disabled,
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
-      resumesOnSend,
-      singleSend,
+      waitsForPreparation,
     ],
   );
 
