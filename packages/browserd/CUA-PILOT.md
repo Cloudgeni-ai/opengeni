@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`8bd11ecda75cd0a4efb749d3b302a93a107187cf`: upstream `cua-driver-rs-v0.37.0`
+`03323b47d041ba0b0d6c0936b35a624daeb7501d`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -54,8 +54,23 @@ focus instead of being refused as `window_not_key`; an Open or Save panel
 (`open-panel`, `save-panel`) drops keys posted to a background app, so keys
 stay refused there and its controls take accessibility actions. A sheet on
 another window of the app is neither read nor given keys through this window.
+A sheet takes keys only when the app's focused element is the sheet or its
+top-level element is the sheet (AppKit names the host window as the
+`AXWindow` of a sheet's controls, and of a sheet with only buttons that holds
+the focus itself): a panel whose contents another process serves, as a file
+panel's are, shows no focused element, so keys stay refused there whatever
+the panel calls itself.
 Finding the window a sheet belongs to is bounded by the window read's own
-deadline; a lookup cut short adds no sheet.
+deadline; a lookup cut short adds no sheet. Before background keys, each
+reading of the app's focus (its focused window, the window of its focused
+element, the sheet it may be) has 1 s in all; what it could not ask in time
+counts as unknown, and keys are refused. When the app named no focused
+window at all, the refusal says where keys would go is unknown
+(`key_focus_unknown`) instead of naming another window.
+When `set_value` refuses after opening a menu it could not tell for the
+select's, Escape follows `AXCancel` only while WindowServer still shows a menu
+window opened since, so it cannot land in the app's window; when a menu could
+not be seen to close, the refusal says it may still be open.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -104,7 +119,8 @@ while they show a menu) gets `degraded_reason` `ax_app_unresponsive` and an
 empty tree, keeps its last snapshot and element tokens, and Opengeni shows the
 reading as cut short because the app answered too slowly, with the screenshot,
 instead of failing it after 7 s. Refs of the last reading still act through
-it, but keys are refused on it, since it shows no focused element. Top-level
+it, but keys are refused on it, since it shows no focused element, and so are
+keys based on it once a later reading has answered. Top-level
 children the lookup had no time to ask about are left out of the walk, as they
 may be other windows. A web `<select>` in a WebKit view (apps that
 embed a WKWebView) lists its open menu in the window's tree with no parent and
@@ -115,10 +131,13 @@ them is refused with
 whether it opened the menu itself or found it open, and closes a menu it
 opened even though the button always reads as not expanded. Neither the
 button's expanded nor focused state says whose menu is open, so a menu found
-open counts as the button's only when exactly one of its items reads as
-selected, that item matches what the button shows, and it lies over the
+open counts as the button's only when its chosen item (the one item it marks
+as chosen, or, in a menu that marks none, the one item reading as selected,
+which follows the highlight) matches what the button shows and lies over the
 button (AppKit lays the chosen item over its button); another select's menu
-open over it is not used. After pressing an item of such a menu, `set_value`
+open over it is not used. When `set_value` opened a menu and then refuses, it
+also closes any menu opened since, even one it could not tell for the
+button's. After pressing an item of such a menu, `set_value`
 reads the button's value back and fails plainly if it does not show the
 option.
 The walk asks an element once more when its one-request read times out with
@@ -127,7 +146,8 @@ twice as unread, so the read reports truncation; a walk without a time limit
 keeps it as an empty row. WebKit times out the first request made of the
 element hosting a WKWebView's web content, which made the first read of such
 a window omit the whole page. The window-number request made of each of the
-app's windows while finding the target window is bounded by the same deadline.
+app's windows while finding the target window is bounded by the same deadline,
+and none is made once it has passed: the windows left count as unread.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -264,7 +284,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8bd11ecda75cd0a4efb749d3b302a93a107187cf/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/03323b47d041ba0b0d6c0936b35a624daeb7501d/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
