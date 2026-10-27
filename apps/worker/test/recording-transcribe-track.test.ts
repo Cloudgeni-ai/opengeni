@@ -132,4 +132,53 @@ describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
       Array.from({ length: 25 }, (_, index) => index),
     );
   });
+
+  test("each piece of a long track is its own request, which a provider sends once", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const counting = countingProvider(sent);
+    const identities: string[] = [];
+    // Like a subscription provider, which refuses a request identity it has sent.
+    const provider = {
+      ...counting,
+      async transcribe(input, credentials) {
+        const identity = input.scope!.requestId;
+        if (identities.includes(identity)) throw new Error(`already sent ${identity}`);
+        identities.push(identity);
+        return await counting.transcribe(input, credentials);
+      },
+    } satisfies RecordingTranscriptionProvider;
+    const scope = {
+      accountId: "account",
+      workspaceId: "workspace",
+      subjectId: "subject",
+      requestId: "version:a1:0",
+    };
+    const long = await transcribeTrack({
+      provider,
+      spec: {
+        model: "m",
+        name: "M",
+        capabilities: { ...capabilities, maxDurationSeconds: 12 },
+        usdPerHour: null,
+      },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: null,
+      request: { ...request, scope },
+    });
+    expect(long.words.length).toBeGreaterThan(0);
+    expect(identities).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
+    // A track sent whole keeps the attempt's identity.
+    await transcribeTrack({
+      provider,
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: null,
+      request: { ...request, scope: { ...scope, requestId: "version:a2:0" } },
+    });
+    expect(identities.at(-1)).toBe("version:a2:0");
+  });
 });

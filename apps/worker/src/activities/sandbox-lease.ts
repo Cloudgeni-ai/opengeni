@@ -57,6 +57,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  summarizeQueuedTurnsByHold,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -238,6 +239,7 @@ import {
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
+  recordQueuedTurnHoldGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -3624,6 +3626,17 @@ async function refreshQueueLeaseAndCreditGauges(
         recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        // Publishes nothing until a later migration grants 0988's withheld
+        // runtime EXECUTE (the summary is null).
+        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }

@@ -927,6 +927,19 @@ async function expectEachConversationOnce(titles: string[]) {
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();
+  // Its newest conversation is 2 minutes old, but its row sits at its last
+  // publish: below a chat active an hour ago.
+  expect(
+    await page.evaluate(() =>
+      [
+        ...document.querySelectorAll(
+          '[role="group"][aria-label="Default"] :is(a[data-session-row], [data-site-row] a)',
+        ),
+      ]
+        .slice(0, 2)
+        .map((row) => row.getAttribute("aria-label")?.split(".")[0]),
+    ),
+  ).toEqual(["Open Slack community connection test", "Open Opengeni usage"]);
   // Collapsed by default with a count; nothing from the Site at the top level.
   for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
   await sidebar()

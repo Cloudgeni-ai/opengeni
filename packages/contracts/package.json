@@ -70,6 +70,10 @@
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
     },
+    "./passkey-only-account": {
+      "types": "./src/passkey-only-account.ts",
+      "default": "./src/passkey-only-account.ts"
+    },
     "./client-error-report": {
       "types": "./src/client-error-report.ts",
       "default": "./src/client-error-report.ts"

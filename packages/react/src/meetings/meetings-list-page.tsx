@@ -4,7 +4,15 @@
  * progress elsewhere or transcribing say so and update on their own.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
@@ -123,8 +131,28 @@ function MeetingsListPageContent({
     ...(externalRef ? { externalRef } : {}),
   });
   const { client } = useRecordingsClient(override);
-  const { recorder, finished } = useMeetingRecorder();
+  const {
+    recorder,
+    finished,
+    workspaceId: recorderWorkspaceId,
+    openMeeting,
+  } = useMeetingRecorder();
   const online = useOnline();
+  // A recording started in another workspace keeps going here; its meeting
+  // opens in its own workspace.
+  const openRecorded = useCallback(
+    (recordingId: string) => {
+      if (
+        recorderWorkspaceId &&
+        recorderWorkspaceId !== workspaceId &&
+        openMeeting(recordingId, recorderWorkspaceId)
+      ) {
+        return;
+      }
+      onOpen(recordingId);
+    },
+    [recorderWorkspaceId, workspaceId, openMeeting, onOpen],
+  );
   const models = useRecordingModels(override);
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   // A desktop call notification's Record waits for the live model list, so
@@ -170,8 +198,8 @@ function MeetingsListPageContent({
         {showRecorder ? (
           <RecorderPanel
             recorder={recorder}
-            onStopped={onOpen}
-            onOpenNotes={onOpen}
+            onStopped={openRecorded}
+            onOpenNotes={openRecorded}
             defaultLanguage={defaultLanguage !== undefined ? defaultLanguage : models.language}
             autoStart={autoStart}
             externalRef={externalRef}

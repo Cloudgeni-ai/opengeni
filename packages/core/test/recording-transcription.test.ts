@@ -11,7 +11,9 @@ import {
   planRecordingTracks,
   recordingDiarizationKind,
   RecordingTranscriptionError,
+  withoutMicrophoneEchoes,
   type RecordingTranscribedWord,
+  type RecordingTrackWords,
 } from "../src/recording-transcription";
 
 function word(
@@ -374,5 +376,70 @@ describe("registry and cost", () => {
     );
     expect(live?.spec.capabilities.live).toBe(true);
     expect(estimateRecordingTranscriptionCostMicros(live!.spec, 3_600_000)).toBe(390_000);
+  });
+});
+
+describe("withoutMicrophoneEchoes", () => {
+  const sources = [
+    { trackNumber: 0, source: "microphone" as const },
+    { trackNumber: 1, source: "system" as const },
+  ];
+  /** One word every 300 ms from `start`; a lone "." is punctuation glued to the word before. */
+  function said(sentence: string, start: number): RecordingTranscribedWord[] {
+    return sentence
+      .split(" ")
+      .map((text, index) =>
+        word(text, start + index * 300, start + index * 300 + 250, null, text !== "."),
+      );
+  }
+  function tracks(microphone: RecordingTranscribedWord[], computer: RecordingTranscribedWord[]) {
+    const result: RecordingTrackWords[] = [
+      { trackNumber: 0, fixedLabel: "track-0", words: microphone },
+      { trackNumber: 1, fixedLabel: null, words: computer },
+    ];
+    return result;
+  }
+  const text = (track: RecordingTrackWords) => track.words.map((item) => item.text).join(" ");
+
+  test("drops what the microphone heard from the speakers, a little late", () => {
+    const [microphone, computer] = withoutMicrophoneEchoes(
+      tracks(
+        [
+          ...said("Vi kommer på mandag klokka åtte .", 1_150),
+          ...said("Takk , da sier jeg fra til snekkeren", 5_000),
+        ],
+        said("Vi kommer på mandag klokka åtte.", 1_000),
+      ),
+      sources,
+    );
+    expect(text(microphone!)).toBe("Takk , da sier jeg fra til snekkeren");
+    expect(computer!.words).toHaveLength(6);
+  });
+
+  test("drops an echo with a misheard word or two, and keeps the person talking right after", () => {
+    const [microphone] = withoutMicrophoneEchoes(
+      tracks(
+        said("vi kommer på mandag klokka åtta for å legge kabler jeg tar med nøkkelen", 1_100),
+        said("Vi kommer på mandag klokka åtte for å legge kabler", 1_000),
+      ),
+      sources,
+    );
+    expect(text(microphone!)).toBe("jeg tar med nøkkelen");
+  });
+
+  test("keeps a word both happen to say at once, and words said at another time", () => {
+    const microphone = [...said("ja", 2_000), ...said("vi kommer på mandag", 30_000)];
+    const [kept] = withoutMicrophoneEchoes(
+      tracks(microphone, [...said("Ja.", 2_100), ...said("Vi kommer på mandag", 1_000)]),
+      sources,
+    );
+    expect(kept!.words).toEqual(microphone);
+  });
+
+  test("leaves recordings without computer audio as they are", () => {
+    const microphone = said("vi kommer på mandag", 1_000);
+    const only: RecordingTrackWords[] = [{ trackNumber: 0, fixedLabel: null, words: microphone }];
+    const [kept] = withoutMicrophoneEchoes(only, [{ trackNumber: 0, source: "microphone" }]);
+    expect(kept).toBe(only[0]);
   });
 });

@@ -323,6 +323,12 @@ restricts dictation to the pinned model, with no fallback.
   Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
   and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
   the underlying model for pricing when the deployment has a custom name.
+  Without a key or token, the deployment's own Microsoft Entra identity
+  (`AZURE_TENANT_ID` and `AZURE_CLIENT_ID` with a federated token or secret)
+  signs in to the endpoint named here. A gpt-4o-transcribe or
+  gpt-4o-mini-transcribe deployment also streams the live transcript preview
+  over the Realtime API (see `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` in
+  `docs/recordings.md`).
 - `azure-speech` (formerly `azure-mai`, which is still accepted) uses Azure
   Speech's fast transcription API with MAI-Transcribe-2. It is the same
   provider meetings use: with `OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT` set
