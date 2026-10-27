@@ -40,7 +40,12 @@ const CHORDS: DesktopDictationModifier[][] = [
   ["shift", "fn"],
 ];
 /** Key combinations offered to a new shortcut where modifier keys can't be watched. */
-const ACCELERATORS = ["Control+Shift+Space", "Control+Alt+Space", "Control+Shift+D", "Control+Alt+D"];
+const ACCELERATORS = [
+  "Control+Shift+Space",
+  "Control+Alt+Space",
+  "Control+Shift+D",
+  "Control+Alt+D",
+];
 const CHORD_ORDER: DesktopDictationModifier[] = ["command", "option", "control", "shift", "fn"];
 
 export type UseDesktopDictationResult = {
@@ -63,10 +68,7 @@ export function useDesktopDictation(
   given?: DesktopDictation | null | undefined,
 ): UseDesktopDictationResult {
   const t = useOpenGeniText();
-  const dictation = useMemo(
-    () => (given === undefined ? getDesktopDictation() : given),
-    [given],
-  );
+  const dictation = useMemo(() => (given === undefined ? getDesktopDictation() : given), [given]);
   const [status, setStatus] = useState<DesktopDictationStatus | null>(null);
   const [history, setHistory] = useState<DesktopDictationHistoryEntry[]>([]);
   const [saving, setSaving] = useState(false);
@@ -211,9 +213,7 @@ export function DesktopDictationSettings({
     const language = value === DETECT ? null : value;
     saveProfiles(
       profiles.map((profile) =>
-        profile.id === id
-          ? { ...profile, language, name: profileName(language, t) }
-          : profile,
+        profile.id === id ? { ...profile, language, name: profileName(language, t) } : profile,
       ),
     );
   };
@@ -290,7 +290,9 @@ export function DesktopDictationSettings({
                   }}
                   onShortcut={(shortcut) =>
                     saveProfiles(
-                      profiles.map((item) => (item.id === profile.id ? { ...item, shortcut } : item)),
+                      profiles.map((item) =>
+                        item.id === profile.id ? { ...item, shortcut } : item,
+                      ),
                     )
                   }
                   onLanguage={(value) => setLanguage(profile.id, value)}
@@ -419,7 +421,9 @@ export function DesktopDictationSettings({
                   {profiles.length > 1 ? ` · ${entry.profileName}` : null}
                 </>
               }
-              control={<CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />}
+              control={
+                <CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />
+              }
             />
           ))}
         </Section>
@@ -640,9 +644,7 @@ function freeShortcut(
     ? CHORDS.map((modifiers) => ({ kind: "modifierChord", modifiers }))
     : [];
   for (const accelerator of ACCELERATORS) candidates.push({ kind: "accelerator", accelerator });
-  return (
-    candidates.find((candidate) => !usedByAnother(profiles, "", candidate)) ?? null
-  );
+  return candidates.find((candidate) => !usedByAnother(profiles, "", candidate)) ?? null;
 }
 
 function newProfileId(profiles: DesktopDictationProfile[]): string {

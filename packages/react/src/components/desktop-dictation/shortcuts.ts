@@ -27,7 +27,10 @@ const MAC_KEYS: Record<string, string> = {
 };
 
 /** "⌥ Option" on a Mac, "Alt" elsewhere. */
-export function modifierName(modifier: DesktopDictationModifier, platform: DesktopPlatform): string {
+export function modifierName(
+  modifier: DesktopDictationModifier,
+  platform: DesktopPlatform,
+): string {
   const name = MODIFIER_NAMES[modifier];
   return platform === "macos" ? name.mac : name.other;
 }
