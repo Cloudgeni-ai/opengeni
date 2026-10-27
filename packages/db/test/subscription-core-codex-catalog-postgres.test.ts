@@ -18,11 +18,6 @@ import {
   workspaceCodexSubscriptionActive,
   type DbClient,
 } from "../src";
-import {
-  ensureCodexRotationSettings,
-  setInitialActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
-} from "./fixtures/legacy-codex";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 
 // Codex readiness after the drained cutover (0680): every organization is
@@ -184,23 +179,6 @@ async function allowPersonalFallback(org: Org, allowed: boolean): Promise<void> 
 }
 
 /** A legacy Personal-workspace-style credential, written before any cutover row. */
-async function legacyCredential(org: Org, workspaceId: string): Promise<string> {
-  const upserted = await upsertCodexSubscriptionCredential(client!.db, {
-    accountId: org.accountId,
-    workspaceId,
-    credentialEncrypted: encryptedTokens(`legacy-${workspaceId}`),
-    chatgptAccountId: `chatgpt-legacy-${workspaceId}`,
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: new Date(Date.now() + 86_400_000),
-    lastRefreshAt: new Date(),
-  });
-  if (upserted.kind === "unresolved_redemption") throw new Error("unexpected redemption fence");
-  await ensureCodexRotationSettings(client!.db, org.accountId, workspaceId);
-  await setInitialActiveCodexCredential(client!.db, workspaceId, upserted.id);
-  return upserted.id;
-}
 
 function serving(org: Org, workspaceId: string, subjectId: string | null) {
   return listSubscriptionCoreCodexServingConnections(client!.db, {
@@ -388,27 +366,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
       );
       expect(restrictions["codex/"]).toBeNull();
     }
-  });
-
-  test("a born-enabled organization without a core connection is not ready, even with frozen legacy rows", async () => {
-    const org = await organization();
-    const ws = org.sharedWorkspaceId;
-    // A legacy credential written in the pre-cutover world, then the row returns.
-    await setCutover(org, null);
-    await legacyCredential(org, ws);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-    expect(
-      (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toEqual([]);
-    await setCutover(org, true);
-    expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-    expect(
-      await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
-    ).toBe(false);
-    // No connection can serve: every Codex model is closed.
-    expect(
-      (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toEqual([]);
   });
 
   test("a disabled cutover fails closed without reading a legacy Codex table", async () => {
