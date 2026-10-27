@@ -15,10 +15,9 @@ import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { organizationReadApiKeyPermissions } from "../src/routes/api-keys";
 
-// Every response that returns a Session shows the Codex pointers by the
-// organization's cutover disposition (M3 PR 2b): legacy ids without a cutover
-// row, the core binding with an enabled one, nulls with a disabled one, and
-// never a failed read because of Codex state.
+// Every response that returns a Session shows the Codex pointers from the
+// shared subscription core binding, and never fails a read because of Codex
+// state.
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const DELEGATION_SECRET = "codex-core-session-pointers-delegation-secret";
@@ -280,7 +279,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
-  test("an enabled cutover projects the core binding everywhere", async () => {
+  test("every Session response projects the core binding", async () => {
     await setCutover(true);
     expectEverywhere(
       await everySessionResponse(),
