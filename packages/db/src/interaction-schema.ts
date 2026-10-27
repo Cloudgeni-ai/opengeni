@@ -618,7 +618,7 @@ export const browserSessions = pgTable(
     engineVersion: text("engine_version"),
     headless: boolean("headless").notNull(),
     /** How the controller last launched this headed browser: "window" or
-     * "offscreen". Null before migration 0988, for headless, remote and
+     * "offscreen". Null before migration 1001, for headless, remote and
      * attached browsers, and from controllers that do not report it. */
     display: text("display"),
     identityId: uuid("identity_id"),
