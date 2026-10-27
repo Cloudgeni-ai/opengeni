@@ -19,7 +19,7 @@ import {
 import { useAppContext } from "../../app-context";
 import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
 import { requestCommandMenu } from "../../lib/actions/events";
-import { desktopBridge, desktopCapability } from "../../lib/desktop";
+import { desktopCapability, desktopPlatform } from "../../lib/desktop";
 import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
 import { workspaceManagementLocation } from "../../lib/workspace-management-location";
 import { useUiEventTarget } from "../../lib/ui-events";
@@ -35,7 +35,7 @@ export const RAIL_DRAWER_BREAKPOINT = 1024;
  * its minimum width, where the person can still collapse it.
  */
 const DESKTOP_RAIL_DRAWER_BREAKPOINT = 640;
-const railDrawerBreakpoint = desktopBridge
+const railDrawerBreakpoint = desktopPlatform
   ? DESKTOP_RAIL_DRAWER_BREAKPOINT
   : RAIL_DRAWER_BREAKPOINT;
 /** Resize bounds for the expanded desktop rail (px). */
@@ -46,7 +46,7 @@ export const RAIL_MAX_WIDTH = 480;
  * and the sidebar is its main way around, so it starts wide enough for real
  * session titles beside each row's status and time.
  */
-export const RAIL_DEFAULT_WIDTH = desktopBridge ? 288 : 244;
+export const RAIL_DEFAULT_WIDTH = desktopPlatform ? 288 : 244;
 
 function clampRailWidth(width: number): number {
   if (!Number.isFinite(width)) {
