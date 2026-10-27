@@ -11063,6 +11063,11 @@
       visibility: hidden;
     }
   }
+:where(.og-root).pointer-coarse\:static,:where(.og-root) .pointer-coarse\:static {
+    @media (pointer: coarse) {
+      position: static;
+    }
+  }
 :where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {
     @media (pointer: coarse) {
       top: calc(var(--spacing) * 13);
@@ -11091,6 +11096,11 @@
 :where(.og-root).pointer-coarse\:-left-5\.5,:where(.og-root) .pointer-coarse\:-left-5\.5 {
     @media (pointer: coarse) {
       left: calc(var(--spacing) * -5.5);
+    }
+  }
+:where(.og-root).pointer-coarse\:order-last,:where(.og-root) .pointer-coarse\:order-last {
+    @media (pointer: coarse) {
+      order: 9999;
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {
@@ -11234,6 +11244,11 @@
       width: auto;
     }
   }
+:where(.og-root).pointer-coarse\:min-w-0,:where(.og-root) .pointer-coarse\:min-w-0 {
+    @media (pointer: coarse) {
+      min-width: calc(var(--spacing) * 0);
+    }
+  }
 :where(.og-root).pointer-coarse\:min-w-11,:where(.og-root) .pointer-coarse\:min-w-11 {
     @media (pointer: coarse) {
       min-width: calc(var(--spacing) * 11);
@@ -11242,6 +11257,39 @@
 :where(.og-root).pointer-coarse\:min-w-\[44px\],:where(.og-root) .pointer-coarse\:min-w-\[44px\] {
     @media (pointer: coarse) {
       min-width: 44px;
+    }
+  }
+:where(.og-root).pointer-coarse\:flex-1,:where(.og-root) .pointer-coarse\:flex-1 {
+    @media (pointer: coarse) {
+      flex: 1;
+    }
+  }
+:where(.og-root).pointer-coarse\:shrink-0,:where(.og-root) .pointer-coarse\:shrink-0 {
+    @media (pointer: coarse) {
+      flex-shrink: 0;
+    }
+  }
+:where(.og-root).pointer-coarse\:items-start,:where(.og-root) .pointer-coarse\:items-start {
+    @media (pointer: coarse) {
+      align-items: flex-start;
+    }
+  }
+:where(.og-root).pointer-coarse\:rounded-og-md,:where(.og-root) .pointer-coarse\:rounded-og-md {
+    @media (pointer: coarse) {
+      border-radius: var(--og-radius-md);
+    }
+  }
+:where(.og-root).pointer-coarse\:bg-og-surface-1\/70,:where(.og-root) .pointer-coarse\:bg-og-surface-1\/70 {
+    @media (pointer: coarse) {
+      background-color: var(--og-color-surface-1);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--og-color-surface-1) 70%, transparent);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:bg-transparent,:where(.og-root) .pointer-coarse\:bg-transparent {
+    @media (pointer: coarse) {
+      background-color: transparent;
     }
   }
 :where(.og-root).pointer-coarse\:p-1\.5,:where(.og-root) .pointer-coarse\:p-1\.5 {
