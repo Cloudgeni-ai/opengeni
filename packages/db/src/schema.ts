@@ -3317,6 +3317,11 @@ export const slackInteractionInbox = pgTable(
       table.createdAt,
       table.id,
     ),
+    // Thread-context reads (migration 1006): a mention in a mapped thread
+    // attaches the untagged messages recorded since the last invocation.
+    threadContext: index("slack_interaction_inbox_thread_context_idx")
+      .on(table.connectionId, table.slackChannelId, table.slackThreadTs, table.createdAt.desc())
+      .where(sql`${table.slackThreadTs} is not null`),
   }),
 );
 

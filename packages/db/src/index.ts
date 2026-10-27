@@ -14876,6 +14876,107 @@ function mapSlackBotUserLink(row: typeof schema.slackBotUserLinks.$inferSelect):
   return row;
 }
 
+export type SlackThreadContextMessage = {
+  slackUserId: string;
+  slackMessageTs: string;
+  text: string;
+  hasFiles: boolean;
+};
+
+/** Numeric order of two Slack message timestamps (`seconds.micros`). */
+export function compareSlackMessageTs(left: string, right: string): number {
+  const [leftSeconds = "", leftFraction = ""] = left.split(".");
+  const [rightSeconds = "", rightFraction = ""] = right.split(".");
+  const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const seconds = order(leftSeconds.padStart(20, "0"), rightSeconds.padStart(20, "0"));
+  if (seconds !== 0) return seconds;
+  return order(leftFraction.padEnd(12, "0"), rightFraction.padEnd(12, "0"));
+}
+
+/**
+ * The untagged messages people posted in one Slack thread since Opengeni was
+ * last invoked there, oldest first.
+ *
+ * In channels an untagged thread reply never starts a turn; its signed inbox
+ * row is the record. When someone next mentions the bot in that thread, this
+ * read supplies those rows as context without a rate-limited Slack history
+ * call. The walk goes back from `beforeMessageTs` and stops at the previous
+ * mention (the last invocation), at rows older than `notBefore` (the
+ * interaction's creation, whose own invocation already imported the earlier
+ * thread), or at `limit` messages, reported as `truncated`. Rows carry HOME
+ * tenancy, the installation that received them.
+ */
+export async function listSlackThreadMessagesSinceLastInvocation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    slackChannelId: string;
+    slackThreadTs: string;
+    beforeMessageTs: string;
+    notBefore: Date;
+    limit: number;
+  },
+): Promise<{ messages: SlackThreadContextMessage[]; truncated: boolean }> {
+  const limit = Math.max(1, Math.min(Math.floor(input.limit), 100));
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          triggerKind: schema.slackInteractionInbox.triggerKind,
+          slackUserId: schema.slackInteractionInbox.slackUserId,
+          slackMessageTs: schema.slackInteractionInbox.slackMessageTs,
+          text: schema.slackInteractionInbox.text,
+          hasFiles: schema.slackInteractionInbox.hasFiles,
+        })
+        .from(schema.slackInteractionInbox)
+        .where(
+          and(
+            eq(schema.slackInteractionInbox.accountId, input.accountId),
+            eq(schema.slackInteractionInbox.workspaceId, input.workspaceId),
+            eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+            eq(schema.slackInteractionInbox.slackChannelId, input.slackChannelId),
+            eq(schema.slackInteractionInbox.slackThreadTs, input.slackThreadTs),
+            gte(schema.slackInteractionInbox.createdAt, input.notBefore),
+            inArray(schema.slackInteractionInbox.triggerKind, ["thread_reply", "app_mention"]),
+          ),
+        )
+        .orderBy(
+          desc(schema.slackInteractionInbox.createdAt),
+          desc(schema.slackInteractionInbox.id),
+        )
+        // Mentions interleave with replies, so read past the message limit to
+        // find the boundary; anything beyond is reported as truncated.
+        .limit(limit * 2 + 1),
+  );
+  const newestFirst = rows
+    .filter((row) => compareSlackMessageTs(row.slackMessageTs, input.beforeMessageTs) < 0)
+    .sort((left, right) => compareSlackMessageTs(right.slackMessageTs, left.slackMessageTs));
+  const messages: SlackThreadContextMessage[] = [];
+  let truncated = false;
+  for (const row of newestFirst) {
+    if (row.triggerKind === "app_mention") break;
+    if (messages.length >= limit) {
+      truncated = true;
+      break;
+    }
+    messages.push({
+      slackUserId: row.slackUserId,
+      slackMessageTs: row.slackMessageTs,
+      text: row.text,
+      hasFiles: row.hasFiles,
+    });
+  }
+  if (!truncated && messages.length === newestFirst.length && rows.length > limit * 2) {
+    // The read window filled without reaching the previous mention.
+    truncated = true;
+  }
+  return { messages: messages.reverse(), truncated };
+}
+
 function mapSlackInteractionInbox(
   row: typeof schema.slackInteractionInbox.$inferSelect | Record<string, unknown>,
 ): SlackInteractionInboxEntry {
