@@ -2,6 +2,7 @@
 // sandbox-lease.test.ts. Every role and database here carries a unique
 // prefix, so nothing touches other runs' roles on a shared cluster.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { hostname } from "node:os";
 import postgres from "postgres";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 
@@ -136,6 +137,16 @@ describe("scratch bypass role cleanup", () => {
     await admin.unsafe(`GRANT ${quote(`${scope}_group`)} TO ${quote(stale)}`);
     await admin.unsafe(`CREATE ROLE ${quote(live)} LOGIN PASSWORD '${password}'`);
     await admin.unsafe(`GRANT ${quote(`${scope}_group`)} TO ${quote(live)}`);
+    // An idle role whose owner record names a live process here.
+    const owned = `${scope}_stale_${hex(32)}`;
+    await admin.unsafe(`CREATE ROLE ${quote(owned)} NOLOGIN`);
+    await admin.unsafe(`GRANT ${quote(`${scope}_group`)} TO ${quote(owned)}`);
+    const record = `opengeni-test-db:v1 ${JSON.stringify({ host: hostname(), pid: process.pid })}`;
+    await admin.unsafe(`COMMENT ON ROLE ${quote(owned)} IS '${record}'`);
+    // A grant-only leftover no longer breaks anyone: left for later.
+    const grantOnly = `${scope}_stale_${hex(32)}`;
+    await admin.unsafe(`CREATE ROLE ${quote(grantOnly)} NOLOGIN`);
+    await grantIn(await createDatabase(`og_${scope}_g_${hex(12)}`), grantOnly);
     const url = new URL(adminUrl);
     url.username = live;
     url.password = password;
@@ -148,9 +159,40 @@ describe("scratch bypass role cleanup", () => {
       expect(await roleExists(stale)).toBe(false);
       expect(await roleExists(live)).toBe(true);
       expect(await memberships(live)).toBe(1);
+      expect(await roleExists(owned)).toBe(true);
+      expect(await memberships(owned)).toBe(1);
+      expect(await roleExists(grantOnly)).toBe(true);
     } finally {
       await holder.end();
     }
+  }, 120_000);
+
+  test("keeps a role that owns objects, and stops at its deadline", async () => {
+    if (!admin) return;
+    const owner = `${scope}_bypass_${hex(32)}`;
+    await admin.unsafe(`CREATE ROLE ${quote(owner)} NOLOGIN`);
+    await admin.unsafe(`GRANT ${quote(`${scope}_group`)} TO ${quote(owner)}`);
+    const database = await createDatabase(`og_${scope}_o_${hex(12)}`);
+    const sql = postgres(urlFor(database), { max: 1, onnotice: () => undefined });
+    try {
+      await sql.unsafe(`CREATE TABLE kept (id int)`);
+      await sql.unsafe(`ALTER TABLE kept OWNER TO ${quote(owner)}`);
+    } finally {
+      await sql.end();
+    }
+    const notes = await dropScratchBypassRole(admin, adminUrl, owner);
+    expect(notes).toEqual([`${owner}: owns objects in ${database}`]);
+    expect(await roleExists(owner)).toBe(true);
+    expect(await memberships(owner)).toBe(0);
+
+    const late = `${scope}_bypass_${hex(32)}`;
+    await admin.unsafe(`CREATE ROLE ${quote(late)} NOLOGIN`);
+    await grantIn(database, late);
+    const lateNotes = await dropScratchBypassRole(admin, adminUrl, late, {
+      deadline: Date.now() - 1,
+    });
+    expect(lateNotes[0]).toBe(`${late}: out of time before ${database}`);
+    expect(await roleExists(late)).toBe(true);
   }, 120_000);
 
   test("errors are reported, never thrown", async () => {
