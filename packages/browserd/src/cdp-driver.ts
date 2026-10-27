@@ -4019,6 +4019,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  /** Viewport emulation needs a browser this driver controls: Lightpanda has
+   * none, and the person's own Chrome keeps its tabs at the window's size
+   * (the extension does not admit Emulation commands). */
+  private assertViewportEmulation(): void {
+    if (this.engine === "chromium") return;
+    throw new InteractionDefiniteDriverError(
+      "unsupported",
+      "this browser engine does not support viewport emulation",
+    );
+  }
+
+  /** Lets the page lay out and present one frame at its new size, so the next
+   * read or capture sees it. Bounded: a throttled page never blocks. */
+  private async presentFrame(state: TargetState): Promise<void> {
+    await this.sendTarget(
+      state,
+      "Runtime.evaluate",
+      {
+        expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      { timeoutMs: 1_000 },
+    ).catch(() => undefined);
+  }
+
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
     if (this.focusEmulation) {
       // Hidden pages otherwise pause animation callbacks when no viewer is
@@ -5357,13 +5383,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.frontTargetId = state.targetId;
         return;
       case "viewport":
+        this.assertViewportEmulation();
         for (const stream of state.screencasts.values()) stream.captureScale = null;
-        if (this.engine === "lightpanda") {
-          throw new InteractionDefiniteDriverError(
-            "unsupported",
-            "this browser engine does not support viewport emulation",
-          );
-        }
         await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
           width: action.width,
           height: action.height,
@@ -5389,18 +5410,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
           };
         }
-        // Let the page lay out and present one frame at the new size, so the
-        // next read or capture sees it. Bounded: a throttled page never blocks.
-        await this.sendTarget(
-          state,
-          "Runtime.evaluate",
-          {
-            expression: NEXT_PRESENTED_FRAME_EXPRESSION,
-            awaitPromise: true,
-            returnByValue: true,
-          },
-          { timeoutMs: 1_000 },
-        ).catch(() => undefined);
+        await this.presentFrame(state);
+        return;
+      case "viewport_reset":
+        this.assertViewportEmulation();
+        for (const stream of state.screencasts.values()) stream.captureScale = null;
+        await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
+        await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+          enabled: false,
+        });
+        state.emulatedViewport = undefined;
+        // Neither this tab, when attached again, nor tabs that open from now
+        // on get the size the agent set before.
+        this.targetViewports.delete(state.targetId);
+        this.sessionViewport = null;
+        await this.presentFrame(state);
         return;
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);

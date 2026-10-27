@@ -11881,7 +11881,7 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=wait\"]",
+        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=viewport_reset\",\"type=wait\"]",
         "$|type=navigate": "object",
         "$|type=navigate.type": "const!=[\"\\\"navigate\\\"\"]",
         "$|type=navigate.url": "string!",
@@ -11896,6 +11896,8 @@
         "$|type=viewport.mobile": "boolean!",
         "$|type=viewport.type": "const!=[\"\\\"viewport\\\"\"]",
         "$|type=viewport.width": "integer!",
+        "$|type=viewport_reset": "object",
+        "$|type=viewport_reset.type": "const!=[\"\\\"viewport_reset\\\"\"]",
         "$|type=click": "object",
         "$|type=click.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
         "$|type=click.locator": "ref(BrowserLocator)!",

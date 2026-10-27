@@ -902,6 +902,7 @@ export type BrowserAction =
       mobile: boolean;
       deviceScaleFactor?: number | undefined;
     }
+  | { type: "viewport_reset" }
   | {
       type: "click";
       locator: BrowserLocator;

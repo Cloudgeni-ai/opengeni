@@ -2359,6 +2359,8 @@ const browserActionVariants = [
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
     })
     .strict(),
+  /** Ends viewport emulation: the tab returns to the window's own size and scale. */
+  z.object({ type: z.literal("viewport_reset") }).strict(),
   z
     .object({
       type: z.literal("click"),
