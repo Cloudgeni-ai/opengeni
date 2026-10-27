@@ -1,5 +1,10 @@
 import { useState } from "react";
-import type { ClientConfig, OrganizationInferenceResidency, Workspace } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type ClientConfig,
+  type OrganizationInferenceResidency,
+  type Workspace,
+} from "@opengeni/sdk";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
 import { AgentCapabilityPicker } from "@opengeni/react/app/components/agent/agent-capability-picker";
 import { VoiceInputPreferences } from "@opengeni/react/app/components/transcription-settings";
@@ -34,8 +39,14 @@ function residency(euOnly: boolean, canTurnOff: boolean): OrganizationInferenceR
   };
 }
 
-/** An in-memory setting: changes apply, as the API would answer a browser admin. */
-function residencyClient(initial: OrganizationInferenceResidency) {
+/**
+ * An in-memory setting: changes apply, as the API would answer a browser
+ * admin. With `needsSignIn`, turning off is refused until "signed in again".
+ */
+function residencyClient(
+  initial: OrganizationInferenceResidency,
+  needsSignIn: { current: boolean },
+) {
   let state = initial;
   return {
     getOrganizationInferenceResidency: async () => state,
@@ -43,6 +54,17 @@ function residencyClient(initial: OrganizationInferenceResidency) {
       _organizationId: string,
       request: { euOnly: boolean; expectedVersion: number },
     ) => {
+      if (!request.euOnly && needsSignIn.current) {
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({
+            code: "forbidden",
+            message: "Sign in again to turn EU-only off.",
+            details: { code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" },
+          }),
+          { mutation: true },
+        );
+      }
       state = residency(request.euOnly, request.euOnly && initial.canTurnOff);
       state = { ...state, version: request.expectedVersion + 1 };
       return state;
@@ -64,13 +86,17 @@ function ResidencyCell({
   initial,
   canTurnOn,
   subject,
+  needsSignIn = false,
 }: {
   label: string;
   initial: OrganizationInferenceResidency;
   canTurnOn: boolean;
   subject: string;
+  /** Turning off answers "Sign in again" until the sample sign-in finishes. */
+  needsSignIn?: boolean;
 }) {
-  const [client] = useState(() => residencyClient(initial));
+  const [signIn] = useState(() => ({ current: needsSignIn }));
+  const [client] = useState(() => residencyClient(initial, signIn));
   return (
     <StateCell label={label} align="stretch" span="full">
       <div data-preview={subject} className="w-full">
@@ -79,6 +105,13 @@ function ResidencyCell({
             client={client}
             identity={identity(subject)}
             canTurnOn={canTurnOn}
+            signInAgain={(onSignedIn) => {
+              // Stands in for the sign-in window.
+              window.setTimeout(() => {
+                signIn.current = false;
+                onSignedIn();
+              }, 400);
+            }}
           />
         </Section>
       </div>
@@ -158,6 +191,13 @@ export default function EuOnlySection() {
           initial={residency(true, true)}
           canTurnOn
           subject="admin-on"
+        />
+        <ResidencyCell
+          label="On, turning it off needs a recent sign-in (switch it off)"
+          initial={residency(true, true)}
+          canTurnOn
+          subject="admin-sign-in"
+          needsSignIn
         />
         <ResidencyCell
           label="On, can't turn it off (an agent, an API key, or a member)"

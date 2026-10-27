@@ -17,8 +17,10 @@ import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
+import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
+  apiErrorFacts,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
@@ -43,6 +45,11 @@ import type {
 } from "@opengeni/react/app/types";
 
 import { useOrganizationDirectory } from "./organization-directory";
+import {
+  useBrowserAccountSignInAgain,
+  useSignOutSignInAgain,
+  type SignInAgain,
+} from "./sign-in-again";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Security & data: EU-only inference, Only me chats and
@@ -62,7 +69,7 @@ export function OrganizationSecurityPage() {
       {managedPeople ? (
         // Every member sees it: it decides which models and features they can use.
         <Section title="Data residency">
-          <InferenceResidencyRow
+          <ResidencyRowForThisBrowser
             client={client}
             identity={directory.identity}
             canTurnOn={administrator}
@@ -195,29 +202,64 @@ function RowLoadFailure({
 
 const RESIDENCY_DESCRIPTION = "Models and features run only in the EU. Others are switched off.";
 
-/**
- * EU-only inference, organization-wide. Any member sees it; owners and admins
- * turn it on; it is offered off only when the server says so (`canTurnOff`:
- * an owner or admin in a browser), behind a confirmation.
- */
-export function InferenceResidencyRow({
-  client,
-  identity,
-  canTurnOn,
-}: {
+type ResidencyRowProps = {
   client: Pick<
     OpenGeniBrowserClient,
     "getOrganizationInferenceResidency" | "updateOrganizationInferenceResidency"
   >;
   identity: OrganizationAdminIdentity;
-  /** An owner or admin. Turning off is the server's answer, `canTurnOff`. */
   canTurnOn: boolean;
+};
+
+/** The row with this browser's way of signing in again (browser accounts or sign-out). */
+function ResidencyRowForThisBrowser(props: ResidencyRowProps) {
+  return useOptionalBrowserAccounts() ? (
+    <BrowserAccountResidencyRow {...props} />
+  ) : (
+    <SignOutResidencyRow {...props} />
+  );
+}
+
+function BrowserAccountResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useBrowserAccountSignInAgain()} />;
+}
+
+function SignOutResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useSignOutSignInAgain()} />;
+}
+
+/** Turning EU-only off needs a sign-in from the last few minutes. */
+function reauthenticationRequired(error: unknown): boolean {
+  const details = (error as { details?: { code?: unknown } } | null)?.details;
+  return (
+    apiErrorFacts(error).status === 403 &&
+    details?.code === "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED"
+  );
+}
+
+/**
+ * EU-only inference, organization-wide. Any member sees it; owners and admins
+ * turn it on; it is offered off only when the server says so (`canTurnOff`:
+ * an owner or admin in a browser), behind a confirmation. Without a recent
+ * sign-in the confirmation says so and offers signing in again.
+ */
+export function InferenceResidencyRow({
+  client,
+  identity,
+  canTurnOn,
+  signInAgain,
+}: ResidencyRowProps & {
+  /** Signs in again when turning off needs a recent sign-in. */
+  signInAgain: SignInAgain;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "inference-residency");
   const [value, setValue] = useState<OrganizationInferenceResidency | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [pending, setPending] = useState<boolean | null>(null);
   const [confirmOff, setConfirmOff] = useState(false);
+  /** The server's reason when turning off needs a recent sign-in, shown in the confirmation. */
+  const [signInNeeded, setSignInNeeded] = useState<string | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const operation = claim("read");
@@ -235,9 +277,15 @@ export function InferenceResidencyRow({
     void load();
   }, [load]);
 
-  /** Resolves false when the change didn't happen; the toast says why. */
+  /**
+   * "saved", "failed" (the toast says why) or "sign_in" (turning off needs a
+   * recent sign-in; the confirmation says so).
+   */
   const save = useCallback(
-    async (current: OrganizationInferenceResidency, euOnly: boolean): Promise<boolean> => {
+    async (
+      current: OrganizationInferenceResidency,
+      euOnly: boolean,
+    ): Promise<"saved" | "failed" | "sign_in"> => {
       const operation = claim("mutation");
       setPending(euOnly);
       try {
@@ -246,18 +294,24 @@ export function InferenceResidencyRow({
           expectedVersion: current.version,
           operationId: crypto.randomUUID(),
         });
-        if (!owns(operation)) return false;
+        if (!owns(operation)) return "failed";
         setValue(saved);
         toast.success(euOnly ? "EU-only inference is on" : "EU-only inference is off");
-        return true;
+        return "saved";
       } catch (saveError) {
-        if (!owns(operation)) return false;
+        if (!owns(operation)) return "failed";
+        if (reauthenticationRequired(saveError)) {
+          setSignInNeeded(
+            apiErrorFacts(saveError).serverMessage ?? "Sign in again to turn EU-only off.",
+          );
+          return "sign_in";
+        }
         // Stale version, or a mode where it can't change: show what's true now.
         if (isOrganizationConflict(saveError)) await load();
         toast.error("Couldn't change EU-only inference", {
           description: residencyChangeErrorText(saveError),
         });
-        return false;
+        return "failed";
       } finally {
         if (owns(operation)) setPending(null);
       }
@@ -296,7 +350,11 @@ export function InferenceResidencyRow({
             }
             onCheckedChange={(next) => {
               if (next) void save(value, true);
-              else setConfirmOff(true);
+              else {
+                setSignInNeeded(null);
+                setSignInError(null);
+                setConfirmOff(true);
+              }
             }}
           />
         }
@@ -307,12 +365,23 @@ export function InferenceResidencyRow({
         size="sm"
         title="Turn off EU-only inference?"
         description="Models and features outside the EU become available again."
-        submitLabel="Turn off"
+        error={signInError ?? signInNeeded ?? undefined}
+        submitLabel={signInNeeded ? "Sign in again" : "Turn off"}
         pendingLabel="Turning off…"
-        tone="destructive"
+        tone={signInNeeded ? "default" : "destructive"}
         initialFocus="cancel"
         onSubmit={async () => {
-          await save(value, false);
+          if (signInNeeded) {
+            // From the click itself, so the sign-in window may open. Once
+            // signed in, Turn off is offered again.
+            setSignInError(null);
+            signInAgain(
+              () => setSignInNeeded(null),
+              (message) => setSignInError(message),
+            );
+            return false;
+          }
+          return (await save(value, false)) !== "sign_in";
         }}
         onSubmitted={() => setConfirmOff(false)}
       />

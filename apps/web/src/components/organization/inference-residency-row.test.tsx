@@ -76,6 +76,7 @@ const client = {
   getOrganizationInferenceResidency: getResidency,
   updateOrganizationInferenceResidency: updateResidency,
 };
+const signInAgain = mock((_onSignedIn: () => void, _onError: (message: string) => void) => {});
 
 beforeEach(() => {
   document.body.replaceChildren();
@@ -83,6 +84,7 @@ beforeEach(() => {
   updateResidency.mockClear();
   toastSuccess.mockClear();
   toastError.mockClear();
+  signInAgain.mockClear();
   failWith = null;
   failLoad = null;
   residency = state(false, 3, false);
@@ -96,7 +98,12 @@ async function render(canTurnOn: boolean) {
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <InferenceResidencyRow client={client} identity={identity} canTurnOn={canTurnOn} />,
+      <InferenceResidencyRow
+        client={client}
+        identity={identity}
+        canTurnOn={canTurnOn}
+        signInAgain={signInAgain}
+      />,
     );
     await settle();
   });
@@ -231,5 +238,68 @@ test("a failed load offers Try again", async () => {
   )!;
   await click(retry);
   expect(residencySwitch(container).getAttribute("aria-checked")).toBe("false");
+  await act(async () => root.unmount());
+});
+
+test("turning off without a recent sign-in offers Sign in again, then Turn off", async () => {
+  residency = state(true, 4, true);
+  const { container, root } = await render(true);
+  failWith = new OpenGeniApiError(
+    403,
+    JSON.stringify({
+      code: "forbidden",
+      message: "Sign in again to turn EU-only off.",
+      details: { code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" },
+    }),
+    { mutation: true },
+  );
+  await click(residencySwitch(container));
+  await click(dialogButton("Turn off")!);
+  // The confirmation stays open with the server's reason and one action.
+  const dialog = document.body.querySelector('[role="dialog"]')!;
+  expect(dialog.textContent).toContain("Sign in again to turn EU-only off.");
+  expect(dialogButton("Turn off")).toBeUndefined();
+  expect(toastError).not.toHaveBeenCalled();
+  expect(residencySwitch(container).getAttribute("aria-checked")).toBe("true");
+
+  await click(dialogButton("Sign in again")!);
+  expect(signInAgain).toHaveBeenCalledTimes(1);
+  expect(updateResidency).toHaveBeenCalledTimes(1);
+
+  // Signed in: Turn off is offered again and now goes through.
+  failWith = null;
+  await act(async () => {
+    signInAgain.mock.calls[0]![0]();
+    await settle();
+  });
+  expect(dialog.textContent).not.toContain("Sign in again to turn EU-only off.");
+  await click(dialogButton("Turn off")!);
+  expect(updateResidency).toHaveBeenCalledTimes(2);
+  expect(residencySwitch(container).getAttribute("aria-checked")).toBe("false");
+  expect(toastSuccess).toHaveBeenCalledWith("EU-only inference is off");
+  await act(async () => root.unmount());
+});
+
+test("a sign-in that can't start says why in the confirmation", async () => {
+  residency = state(true, 4, true);
+  signInAgain.mockImplementationOnce((_onSignedIn, onError) =>
+    onError("Couldn't open sign-in. Allow popups for Opengeni and try again."),
+  );
+  const { container, root } = await render(true);
+  failWith = new OpenGeniApiError(
+    403,
+    JSON.stringify({
+      message: "Sign in again to turn EU-only off.",
+      details: { code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" },
+    }),
+    { mutation: true },
+  );
+  await click(residencySwitch(container));
+  await click(dialogButton("Turn off")!);
+  await click(dialogButton("Sign in again")!);
+  expect(document.body.querySelector('[role="dialog"]')!.textContent).toContain(
+    "Couldn't open sign-in. Allow popups for Opengeni and try again.",
+  );
+  expect(dialogButton("Sign in again")).toBeDefined();
   await act(async () => root.unmount());
 });

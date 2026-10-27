@@ -7,7 +7,8 @@
 Show EU-only inference in the app. Organization settings > Security & data has
 an EU-only inference switch: members see it, owners and admins turn it on, and
 turning it off is offered only when the API answers `canTurnOff`, after a
-confirmation. In an EU-only workspace, models and features the server switched
+confirmation; without a recent sign-in it offers "Sign in again" first. In an
+EU-only workspace, models and features the server switched
 off (reason `region_restricted`) show "Not supported in EU" and can't be chosen
 or turned on. New SDK methods `getOrganizationInferenceResidency` and
 `updateOrganizationInferenceResidency`, `ClientConfig.inferenceFeatures` and

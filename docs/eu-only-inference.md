@@ -279,6 +279,10 @@ session's effective tools omit them.
   when the API answers `canTurnOff` (an owner or admin in a browser) and asks
   for confirmation first. A stale version (`409`) reloads the setting; while
   the deployment does not take changes yet (`503`) the app says so.
+  Turning it off needs a recent sign-in: on `403` with
+  `SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED` the confirmation shows the
+  server's message and offers **Sign in again** (the browser-account sign-in
+  window, or sign out and back in), then **Turn off** again.
 - Every model picker shows a model whose availability reason is
   `region_restricted` as **Not supported in EU** and does not let it be chosen.
 - A feature reported with `region_restricted` (from `inferenceFeatures`, agent
