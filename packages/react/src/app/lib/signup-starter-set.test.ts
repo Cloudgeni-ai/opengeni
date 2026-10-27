@@ -38,3 +38,14 @@ test("keeps the newest twenty organizations", () => {
     20,
   );
 });
+
+test("the server's current answer wins on any device", () => {
+  // A fresh browser: nothing stored here, the server knows the answer.
+  expect(signupStarterSet("ada@example.test", "org-a", "embed")).toBe("product");
+  expect(signupStarterSet(null, "org-a", "embed")).toBe("product");
+  // Back, then another answer on another device: the server's answer wins.
+  rememberSignupUseCase({ account: "ada@example.test", organizationId: "org-a", useCase: "embed" });
+  expect(signupStarterSet("ada@example.test", "org-a", "everyday")).toBe("general");
+  // Without a server answer (an older server or organization) this browser decides.
+  expect(signupStarterSet("ada@example.test", "org-a", undefined)).toBe("product");
+});

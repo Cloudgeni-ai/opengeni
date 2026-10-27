@@ -109,7 +109,6 @@
     "provenance": true
   },
   "scripts": {
-    "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
     "migrate:plan": "bun src/migrate.ts --plan",
     "provision-roles": "bun src/provision-roles.ts",
@@ -134,7 +133,6 @@
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
-    "drizzle-kit": "^0.31.8",
     "oxc-parser": "0.142.0",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"

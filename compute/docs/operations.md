@@ -171,11 +171,17 @@ enabling it changes no session's backend.
    to the release's OCI images, normally the Opengeni sandbox and desktop
    images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
    the deployment. When a release names an OCI image no stored image was
-   built from, the service has a live host build it (a few minutes, one
-   at a time per host; the host's log says `built and stored a sandbox
-   image`), records it, and new creates of that name start from it; until
-   then they start from the image the name had before. Existing sandboxes
-   keep theirs. A host builds into its state directory's `prepare/`
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from
@@ -1129,6 +1135,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   to start the nested profile without a pool. On cgroup v2 without the
   `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
   its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent

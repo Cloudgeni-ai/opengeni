@@ -14472,6 +14472,7 @@
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
         "$.offScreen": "const?=[\"true\"]",
+        "$.personInputSecondsAgo": "integer?",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"
@@ -20943,6 +20944,7 @@
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
         "$.personalWorkspacesEnabled": "boolean?",
+        "$.signupUseCase": "enum?=[\"\\\"cloud\\\"\",\"\\\"embed\\\"\",\"\\\"everyday\\\"\"]",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },
@@ -36008,6 +36010,7 @@
       "RecorderPlatform": "type",
       "RecorderSnapshot": "type",
       "RecorderState": "type",
+      "RECORDING_AUDIO_UPLOAD_PIECE_BYTES": "value",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
       "RecordingTransport": "type",
@@ -36020,7 +36023,9 @@
       "StoredRecordingChunk": "type",
       "SystemAudioCapture": "type",
       "SystemAudioKind": "type",
-      "SystemAudioSource": "type"
+      "SystemAudioSource": "type",
+      "uploadRecordingAudio": "value",
+      "UploadRecordingAudioOptions": "type"
     },
     "@opengeni/sdk/secret-use-approval": {
       "SECRET_USE_APPROVAL_QUESTION_PREFIX": "value",
@@ -37697,6 +37702,21 @@
       "useDesktopStream": "value",
       "UseDesktopStreamOptions": "type",
       "UseDesktopStreamResult": "type"
+    },
+    "@opengeni/react/desktop-dictation": {
+      "acceleratorFromKey": "value",
+      "DesktopDictationClient": "type",
+      "DesktopDictationHost": "value",
+      "DesktopDictationHostProps": "type",
+      "DesktopDictationSettings": "value",
+      "DesktopDictationSettingsProps": "type",
+      "desktopShortcutLabel": "value",
+      "dictationErrorMessage": "value",
+      "modifierName": "value",
+      "profileName": "value",
+      "sameDesktopShortcut": "value",
+      "useDesktopDictation": "value",
+      "UseDesktopDictationResult": "type"
     },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",

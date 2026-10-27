@@ -7,8 +7,7 @@
  * rename, allocator, activate, rotation, reconnect, disconnect, the access
  * policy).
  *
- * X3 ships SuperGrok's registry entry; this historical fixture withholds its
- * migration and then inserts the receipt explicitly. Run this file in
+ * The migrations register SuperGrok and record its receipt. Run this file in
  * its own process: the registration replaces module bindings process-wide.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
@@ -110,12 +109,7 @@ const xaiFetch: typeof fetch = (async (input: string | URL | Request) => {
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("api-supergrok-core-routes", {
-    withheldMigrations: [
-      "0747_subscription_core_xai_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("api-supergrok-core-routes");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = opengeniDb.createDb(shared.appUrl);
   // An organization administrator in a shared workspace: on the core only
@@ -502,16 +496,6 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
   }
 
   test("after the receipt, without an enabled switch row, every route fails closed", async () => {
-    // A fresh install ships SuperGrok's registry row and cutover receipt.
-    await shared!.admin`
-      insert into opengeni_private.subscription_core_providers (provider, extra_credits,
-        primary_setting_column)
-      values ('xai', false, 'xai_primary_connection_id') on conflict do nothing`;
-    await shared!.admin`
-      insert into opengeni_private.subscription_provider_cutover_receipts (
-        provider, migration, committed_at, seed_rotation
-      ) values ('xai', '0721_subscription_core_xai_cutover.sql', clock_timestamp(),
-        '{"mode":"spread"}') on conflict do nothing`;
     // The organization's switch row is disabled: the maintenance state.
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
@@ -720,7 +704,11 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
   );
 
   test("organization routes: maintenance fails closed, then they answer from core connections", async () => {
-    // The receipt exists (above); this organization has no switch row.
+    // The receipt exists; this organization's switch row is disabled.
+    await shared!.admin`
+      insert into subscription_provider_cutovers (account_id, provider, enabled)
+      values (${organizationId}::uuid, 'xai', false)
+      on conflict (account_id, provider) do update set enabled = false`;
     const someId = crypto.randomUUID();
     for (const [path, method, body] of [
       ["/accounts", "GET", undefined],
@@ -742,8 +730,8 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     }
 
     await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'xai', true)`;
+      update subscription_provider_cutovers set enabled = true
+      where account_id = ${organizationId}::uuid and provider = 'xai'`;
     const first = await connectOrganizationAccount("xai-core-org-first");
     const second = await connectOrganizationAccount("xai-core-org-second");
     expect(first).not.toBe(second);

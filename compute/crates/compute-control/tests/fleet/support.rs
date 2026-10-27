@@ -431,6 +431,14 @@ impl Fleet {
         host
     }
 
+    /// As [`Self::host`], for a host that builds images with the guest
+    /// programs of digest `guest` (see [`FakeHost::builds_with`]).
+    pub async fn host_building_with(&self, name: &str, guest: &str) -> FakeHost {
+        let host = FakeHost::start_building_with(self, name, roomy(), &[], Some(guest)).await;
+        self.sees(&host).await;
+        host
+    }
+
     /// Waits until this replica's view has `host` under its current
     /// registration.
     pub async fn sees(&self, host: &FakeHost) {
@@ -452,6 +460,7 @@ impl Fleet {
 #[must_use]
 pub fn roomy() -> Capacity {
     Capacity {
+        guest: None,
         memory_free_mib: 64 * 1024,
         memory_reclaimable_mib: 0,
         cpu_millis: 64_000,
@@ -571,6 +580,18 @@ impl FakeHost {
         capacity: Capacity,
         offers: &[&str],
     ) -> Self {
+        Self::start_building_with(fleet, name, capacity, offers, None).await
+    }
+
+    /// As [`Self::start_offering`], for a host that builds images with
+    /// the guest programs of digest `guest`, if it says.
+    pub async fn start_building_with(
+        fleet: &Fleet,
+        name: &str,
+        capacity: Capacity,
+        offers: &[&str],
+        guest: Option<&str>,
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let http = reqwest::Client::builder()
@@ -586,7 +607,10 @@ impl FakeHost {
             archive: fleet.archive.clone(),
             hosts_url: format!("https://{}", fleet.running.hosts),
             http,
-            capacity: Mutex::new(capacity),
+            capacity: Mutex::new(Capacity {
+                guest: guest.map(str::to_owned),
+                ..capacity
+            }),
             id: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             seq: AtomicU64::new(0),
@@ -638,6 +662,15 @@ impl FakeHost {
     #[must_use]
     pub fn boot(&self) -> Boot {
         self.inner.boot.lock().unwrap().clone()
+    }
+
+    /// Has it build images with the guest programs of digest `guest`, as
+    /// an agent upgraded in place to a bundle with them would, telling so
+    /// with what it can take on from its next renewal: the image it builds
+    /// from a source is [`built_with`] the two.
+    pub fn builds_with(&self, guest: Option<&str>) {
+        self.inner.capacity.lock().unwrap().guest = guest.map(str::to_owned);
+        self.inner.prepares.lock().unwrap().clear();
     }
 
     /// Has its machine restart, as far as the boot it names goes: it
@@ -1080,7 +1113,18 @@ fn status(inner: &HostInner) -> Reply {
 /// The stored image an ordinary host builds from the OCI image `source`.
 #[must_use]
 pub fn built_from(source: &str) -> ImageId {
-    ImageId(*blake3::hash(source.as_bytes()).as_bytes())
+    built_with(source, None)
+}
+
+/// The stored image an ordinary host builds from the OCI image `source`
+/// with the guest programs of digest `guest`, if it says.
+#[must_use]
+pub fn built_with(source: &str, guest: Option<&str>) -> ImageId {
+    let built = match guest {
+        Some(guest) => format!("{source} with {guest}"),
+        None => source.to_owned(),
+    };
+    ImageId(*blake3::hash(built.as_bytes()).as_bytes())
 }
 
 /// The stored image an ordinary host captures sandbox `id` as.
@@ -1133,12 +1177,14 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             if *asked == 1 {
                 Reply::Preparing
             } else {
+                let guest = inner.capacity.lock().unwrap().guest.clone();
                 Reply::Prepared {
-                    image: built_from(image),
+                    image: built_with(image, guest.as_deref()),
                     digest: image
                         .split_once('@')
                         .map_or("", |(_, digest)| digest)
                         .to_owned(),
+                    guest,
                 }
             }
         }
