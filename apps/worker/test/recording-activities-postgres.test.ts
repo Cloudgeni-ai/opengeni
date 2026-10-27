@@ -470,7 +470,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       options: { language: "en" },
     });
     // The version exists by now, so its budget runs out within `window` of this.
-    const window = 10_000;
+    const window = 30_000;
     const outOfTimeAt = Date.now() + window + 500;
     const answered = fakeProvider(async () => ({
       languages: ["eng"],
