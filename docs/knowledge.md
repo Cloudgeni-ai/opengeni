@@ -420,7 +420,7 @@ and shared Knowledge still cannot point at private evidence. The one deletion
 exception is work the verified owner started in their own Personal workspace
 (their chats and scheduled tasks): that workspace has no other member, so it
 may also permanently remove the workspace's Skills under its own Skills mode
-(migration 0988).
+(migration 1004).
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,
