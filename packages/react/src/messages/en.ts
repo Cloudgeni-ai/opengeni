@@ -1780,7 +1780,6 @@ export const englishMessages = {
   "humanInputForm.thisClientCannotPreviewSkill":
     "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
-  "humanInputForm.typeAValue": "Type a value…",
   "humanInputForm.typeYourAnswer": "Type your answer…",
   "humanInputModel.apiKey": "API key",
   "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
