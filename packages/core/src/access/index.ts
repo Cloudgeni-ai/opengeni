@@ -60,6 +60,7 @@ import {
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -2096,11 +2097,4 @@ function configuredSubject(c: Context): string {
 function bearerToken(c: Context): string | null {
   const authorization = c.req.header("authorization");
   return authorization?.startsWith(bearerPrefix) ? authorization.slice(bearerPrefix.length) : null;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

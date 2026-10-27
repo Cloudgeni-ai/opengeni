@@ -14,6 +14,7 @@ import {
   NativeEditableArtifactKernelAdapter,
   collectExact,
 } from "./editable-artifact-native-kernel";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type VerifyInput = Parameters<
   IsolatedEditableArtifactSnapshotKernelPort["verifyAndReconstruct"]
@@ -162,7 +163,7 @@ export function serveEditableArtifactKernelThread(
           ok: false,
           error: {
             name: error instanceof Error ? error.name : "Error",
-            message: error instanceof Error ? error.message : String(error),
+            message: errorMessage(error),
           },
         };
       }

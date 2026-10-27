@@ -6,6 +6,7 @@ import { buildTimeline, groupTimeline } from "../src/timeline";
 import { serializeTimeline } from "./golden/serialize";
 import type { SerializedTimeline } from "./golden/serialize";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const englishText = createOpenGeniText();
 
@@ -37,10 +38,9 @@ describe("golden event grammar", () => {
       try {
         expect(actual).toEqual(expected);
       } catch (error) {
-        throw new Error(
-          `${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`,
-          { cause: error },
-        );
+        throw new Error(`${CONTRACT_CHANGED}\nFixture: ${file}\n${errorMessage(error)}`, {
+          cause: error,
+        });
       }
     });
   }
@@ -54,7 +54,7 @@ describe("golden event grammar", () => {
       expect(compact).toEqual(raw);
     } catch (error) {
       throw new Error(
-        `${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`,
+        `${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${errorMessage(error)}`,
         { cause: error },
       );
     }

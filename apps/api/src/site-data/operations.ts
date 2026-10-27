@@ -41,6 +41,7 @@ import {
   type SiteDataSurface,
   type SiteDataValidationMeter,
 } from "./service";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** Shared Site Data operations for HTTP routes, the Site bridge and agent tools. */
 
@@ -164,7 +165,7 @@ async function settleValidation(
       siteId: access.caller.siteId,
       reservedMs: reservation.reservedMs,
       validationMs: meter.ms,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -189,7 +190,7 @@ async function meteredWrite<T>(
 function logCleanupFailure(what: string, objectKey: string, error: unknown): void {
   console.warn(`[site-data] ${what} left an unreachable object`, {
     objectKey,
-    error: error instanceof Error ? error.message : String(error),
+    error: errorMessage(error),
   });
 }
 

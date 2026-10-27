@@ -6,6 +6,7 @@
  * false-resumption breaker of core waiters reads this through
  * `agent.model.request` `meaningfulOutput`.
  */
+import { isRecord } from "@opengeni/contracts/values";
 export function sdkResponseHasMeaningfulOutput(event: unknown): boolean {
   const output = responseDoneOutput(event);
   if (!output) return false;
@@ -37,8 +38,4 @@ function responseDoneOutput(event: unknown): unknown[] | null {
   const data = event.data;
   if (!isRecord(data) || data.type !== "response_done" || !isRecord(data.response)) return null;
   return Array.isArray(data.response.output) ? data.response.output : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

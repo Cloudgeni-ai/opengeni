@@ -3,6 +3,7 @@ import {
   INTERACTION_MAX_SEMANTIC_NODES,
   type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
+import { isRecord } from "@opengeni/contracts/values";
 
 type CdpAxValue = {
   value?: unknown;
@@ -492,8 +493,4 @@ function childIds(node: CdpAxNode): string[] {
 
 function finitePositiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

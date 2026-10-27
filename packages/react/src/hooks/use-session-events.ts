@@ -34,6 +34,7 @@ import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { isToolOutputPreviewEvent, useToolOutputReads } from "./tool-output-reads";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -1139,10 +1140,7 @@ export function useSessionEvents(
         // Not a read failure: end the stream visibly instead of letting the
         // SDK retry it forever.
         if (!isRetryableStreamError(cause)) throw cause;
-        throw new Error(
-          `rejoining the live session failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          { cause },
-        );
+        throw new Error(`rejoining the live session failed: ${errorMessage(cause)}`, { cause });
       }
       if (!isCurrent()) throw abortError();
       if (typeof result === "object") {

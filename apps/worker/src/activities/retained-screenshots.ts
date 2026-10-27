@@ -33,6 +33,7 @@ import {
 import { createHash } from "node:crypto";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 const PNG_ALLOWED_CRITICAL_CHUNKS = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
@@ -779,7 +780,7 @@ export async function retainSessionScreenshot(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
     return unavailable(identity.artifactId, "storage_write_failed");
   }
@@ -820,7 +821,7 @@ export async function retainSessionScreenshot(input: {
         workspaceId: input.workspaceId,
         artifactId: identity.artifactId,
         settlementKey: identity.settlementKey,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }).catch(() => undefined);
     }
     return unavailable(identity.artifactId, "pending");

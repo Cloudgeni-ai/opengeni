@@ -26,6 +26,7 @@ import {
   fixedChunks,
   readSnapshotObjectBytes,
 } from "./editable-artifact-native-kernel";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const DEFAULT_EDITABLE_ARTIFACT_KERNEL_THREADS = 2;
 const DEFAULT_IDLE_MS = 5 * 60_000;
@@ -285,14 +286,7 @@ export class OffThreadEditableArtifactKernel
       if (slot.job) {
         const job = slot.job;
         slot.job = undefined;
-        settle(
-          job,
-          new Error(
-            `Editable artifact kernel thread stopped: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
-          ),
-        );
+        settle(job, new Error(`Editable artifact kernel thread stopped: ${errorMessage(cause)}`));
       }
       void worker.terminate();
       this.#pump();

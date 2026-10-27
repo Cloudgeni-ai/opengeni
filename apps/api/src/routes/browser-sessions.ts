@@ -305,6 +305,7 @@ import {
   type InteractionSecretsPort,
 } from "../interaction-secrets";
 import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -4448,7 +4449,7 @@ export function registerBrowserSessionRoutes(
         workspaceId,
         browserSessionId,
         downloadId: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }

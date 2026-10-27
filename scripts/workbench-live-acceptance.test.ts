@@ -39,6 +39,7 @@ import {
   waitForWarm,
   type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("workbench live acceptance preflight", () => {
   test("accepts only a marker from a still-running agent command", () => {
@@ -844,7 +845,7 @@ describe("workbench live acceptance preflight", () => {
       expect(JSON.stringify(result)).not.toContain(request.cookieHeader);
       const failureMessage = await runCaptureApiRegionalProbe(failure, request).then(
         () => "unexpected success",
-        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        (error: unknown) => errorMessage(error),
       );
       expect(failureMessage).toContain("exit code 7: [masked]");
       expect(failureMessage).not.toContain(request.cookieHeader);

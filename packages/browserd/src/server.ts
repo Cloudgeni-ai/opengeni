@@ -83,6 +83,7 @@ import {
   type BrowserSupervisorSessionOptions,
 } from "./supervisor";
 import { RfbClientFilter } from "./rfb-client-filter";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -2066,7 +2067,7 @@ export class BrowserControlServer {
           event: "browser.frame.socket.failed",
           browserSessionId: data.reference.browserSessionId,
           targetId: data.targetId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
           at: new Date().toISOString(),
         }),
       );
@@ -3170,10 +3171,6 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
   if (Object.keys(value).some((key) => !allowedSet.has(key))) {
     throw new ProtocolError("invalid_action", "request contains unknown fields", 400);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeOrigin(value: string): string {

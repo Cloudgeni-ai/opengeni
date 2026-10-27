@@ -61,6 +61,7 @@ import {
   type CapabilityInstallation,
   type SessionEvent,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API helpers", () => {
   test("rejects embedded query setup transport without the edge-sanitization proof", () => {
@@ -1689,7 +1690,7 @@ describe("API helpers", () => {
         );
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
 
     expect(message).toContain("the workspace could not initialize configured.example");
