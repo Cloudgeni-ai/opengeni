@@ -96,7 +96,9 @@ struct Serve {
     #[arg(long)]
     compute_ca: Option<PathBuf>,
 
-    /// Keep a warm template of this repository (`owner/repo`).
+    /// Keep a warm template of this repository (`owner/repo`). Its names
+    /// begin with the pool's name and its scale set's id, which together
+    /// may then be at most 40 long.
     #[arg(long)]
     warm_repo: Option<String>,
     /// The branch it follows; the repository's default when not given.
@@ -202,6 +204,26 @@ async fn run(serve: Serve) -> Result<()> {
     let (leading_tx, leading) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
 
+    let group = github.runner_group(&serve.runner_group).await?;
+    let mut labels = vec![serve.name.clone()];
+    labels.extend(
+        serve
+            .labels
+            .iter()
+            .filter(|label| !label.is_empty())
+            .cloned(),
+    );
+    let set = github.ensure_scale_set(group, &serve.name, &labels).await?;
+    tracing::info!(set = set.id, name = %set.name, ?labels, "the pool's scale set");
+    let key = pool::key(&serve.name, set.id);
+    if serve.warm_repo.is_some() && !warm::fits(&key) {
+        bail!(
+            "--name {:?} with scale set {}: too long for warm templates' names",
+            serve.name,
+            set.id
+        );
+    }
+
     let mut env: BTreeMap<String, String> = serve.env.iter().cloned().collect();
     let mut app = axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }));
     if let Some(store) = &serve.cache_store {
@@ -210,7 +232,7 @@ async fn run(serve: Serve) -> Result<()> {
         let kept = Duration::from_secs(u64::from(serve.cache_days) * 86_400);
         let cache = Arc::new(Cache::new(
             store,
-            prefix.child(serve.name.as_str()),
+            prefix.child(key.as_str()),
             token.clone(),
             kept,
         ));
@@ -219,7 +241,7 @@ async fn run(serve: Serve) -> Result<()> {
             serve.cache_url.clone().unwrap_or_default(),
         );
         env.insert("TURBO_TOKEN".into(), token);
-        env.insert("TURBO_TEAM".into(), serve.name.clone());
+        env.insert("TURBO_TEAM".into(), key.clone());
         app = app.merge(Arc::clone(&cache).router());
         tasks.spawn(sweep(cache, leading.clone(), stop.clone()));
     }
@@ -235,22 +257,10 @@ async fn run(serve: Serve) -> Result<()> {
         }
     });
 
-    let group = github.runner_group(&serve.runner_group).await?;
-    let mut labels = vec![serve.name.clone()];
-    labels.extend(
-        serve
-            .labels
-            .iter()
-            .filter(|label| !label.is_empty())
-            .cloned(),
-    );
-    let set = github.ensure_scale_set(group, &serve.name, &labels).await?;
-    tracing::info!(set = set.id, name = %set.name, ?labels, "the pool's scale set");
-
     let (template_tx, template) = watch::channel(serve.template.clone());
     if let Some(repo) = &serve.warm_repo {
         tasks.spawn(warm::keep(
-            warm_settings(&serve, repo),
+            warm_settings(&serve, &key, repo),
             Arc::clone(&github),
             compute.clone(),
             template_tx,
@@ -278,9 +288,9 @@ async fn run(serve: Serve) -> Result<()> {
     result
 }
 
-fn warm_settings(serve: &Serve, repo: &str) -> warm::Settings {
+fn warm_settings(serve: &Serve, key: &str, repo: &str) -> warm::Settings {
     warm::Settings {
-        pool: serve.name.clone(),
+        pool: key.into(),
         base: serve.template.clone(),
         repo: repo.into(),
         branch: serve.warm_branch.clone(),

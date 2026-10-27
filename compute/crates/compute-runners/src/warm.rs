@@ -4,11 +4,13 @@
 //! A refresh starts a sandbox from the base template, clones the
 //! repository at the branch's head where `actions/checkout` will look for
 //! it, runs the prepare command there as the runner's user, and saves the
-//! sandbox as a template named `<pool>-<seconds>-<commit>`. New runners
-//! start from the newest; the pool's older templates are deleted (their
-//! images stay while sandboxes use them). A failed refresh leaves the last
-//! good template in use. The clone's token is given to that one command in
-//! its environment, never written to the disk the template keeps.
+//! sandbox as a template named `<pool>-<seconds>-<commit>`, where `<pool>`
+//! is the pool's key ([`crate::pool::key`]): its name and scale set. New
+//! runners start from the newest; the pool's older templates are deleted
+//! (their images stay while sandboxes use them). A failed refresh leaves
+//! the last good template in use. The clone's token is given to that one
+//! command in its environment, never written to the disk the template
+//! keeps.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,17 +25,30 @@ use tokio_util::sync::CancellationToken;
 use crate::compute::{Compute, Created, NewSandbox, Snapshot};
 use crate::github::Github;
 
-/// The metadata key a template builder's sandbox carries, naming its pool.
+/// The metadata key a template builder's sandbox carries, naming its
+/// pool's key.
 pub const BUILDER_KEY: &str = "runner-pool-builder";
 /// How often the branch's head is read.
 pub const LOOK_EVERY: Duration = Duration::from_secs(60);
 /// How many hex digits of the commit a template's name keeps.
 const COMMIT_DIGITS: usize = 12;
+/// How many digits of the seconds a template's name keeps, until 2286.
+const SECONDS_DIGITS: usize = 10;
+/// The longest name compute gives a template.
+const NAME_MAX: usize = 64;
+
+/// Whether the names of the templates of the pool whose key is `pool`
+/// fit in compute's.
+#[must_use]
+pub fn fits(pool: &str) -> bool {
+    pool.len() + 1 + SECONDS_DIGITS + 1 + COMMIT_DIGITS <= NAME_MAX
+}
 
 /// What to keep warm.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// The pool, whose name begins its templates'.
+    /// The pool's key ([`crate::pool::key`]), which begins its templates'
+    /// names and names its builders.
     pub pool: String,
     /// The template refreshes start from.
     pub base: String,
@@ -401,6 +416,15 @@ mod tests {
         assert_eq!(found[1].commit, "0123456789ab");
         assert_eq!(found[1].at, 200);
         assert_eq!(ours("ci-gpu", &all).len(), 1);
+    }
+
+    #[test]
+    fn template_names_fit_while_the_pools_key_is_at_most_40_long() {
+        assert!(fits(&"a".repeat(40)));
+        assert!(!fits(&"a".repeat(41)));
+        let latest: u64 = 9_999_999_999;
+        let name = format!("{}-{latest}-{}", "a".repeat(40), "b".repeat(COMMIT_DIGITS));
+        assert_eq!(name.len(), NAME_MAX);
     }
 
     #[test]

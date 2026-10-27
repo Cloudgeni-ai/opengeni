@@ -16,7 +16,8 @@ use crate::compute::{Compute, NewSandbox};
 use crate::github::wire::{Message, Session};
 use crate::github::{Github, Polled, Removed, SessionError};
 
-/// The metadata keys a runner's sandbox carries.
+/// The metadata keys a runner's sandbox carries: its pool's [`key`], and
+/// its runner's name, id and start.
 pub const POOL_KEY: &str = "runner-pool";
 pub const NAME_KEY: &str = "runner-name";
 pub const ID_KEY: &str = "runner-id";
@@ -77,6 +78,8 @@ pub struct Pool {
     github: Arc<Github>,
     compute: Compute,
     set: u64,
+    /// The pool's [`key`].
+    key: String,
     settings: Settings,
     /// The template new runners start from.
     template: watch::Receiver<String>,
@@ -89,6 +92,14 @@ fn now_s() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+/// What the pool named `name`, of scale set `set`, finds its sandboxes,
+/// templates and cache by. Pools of one name in different runner groups
+/// are different scale sets, and may share a compute team and a bucket.
+#[must_use]
+pub fn key(name: &str, set: u64) -> String {
+    format!("{name}-{set}")
 }
 
 /// Whether `name` is one this pool gives its runners: `<pool>-` and
@@ -117,6 +128,7 @@ impl Pool {
             github,
             compute,
             set,
+            key: key(&settings.name, set),
             settings,
             template,
             runners: BTreeMap::new(),
@@ -225,7 +237,7 @@ impl Pool {
             template: self.template.borrow().clone(),
             timeout_s: self.settings.timeout_s,
             metadata: BTreeMap::from([
-                (POOL_KEY.into(), self.settings.name.clone()),
+                (POOL_KEY.into(), self.key.clone()),
                 (NAME_KEY.into(), name.clone()),
                 (ID_KEY.into(), jit.runner.id.to_string()),
                 (BORN_KEY.into(), born.to_string()),
@@ -272,10 +284,7 @@ impl Pool {
     /// A runner whose removal fails is kept, and asked about again next
     /// time.
     pub async fn reconcile(&mut self) -> Result<()> {
-        let listed = self
-            .compute
-            .list(&[(POOL_KEY, &self.settings.name)])
-            .await?;
+        let listed = self.compute.list(&[(POOL_KEY, &self.key)]).await?;
         let mut seen = BTreeSet::new();
         for sandbox in &listed {
             let name = sandbox.metadata.get(NAME_KEY);

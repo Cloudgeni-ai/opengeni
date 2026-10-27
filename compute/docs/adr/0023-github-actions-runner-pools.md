@@ -43,7 +43,11 @@ delivery can be late or missed.
   up and opened again.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
-  in its environment and its runner's name and id in its metadata. The
+  in its environment and its runner's name and id in its metadata, with
+  the pool's key: its name and its scale set's id. Pools of one name in
+  different runner groups are different scale sets and may share a
+  compute team and a bucket, so the pool finds its sandboxes, templates
+  and cache by the key, never by its name alone. The
   image's command starts the runner; the reference image is
   `docker/github-runner.Dockerfile`, released as
   `opengeni-compute-github-runner`. Its start command counts the runner as
@@ -73,15 +77,18 @@ delivery can be late or missed.
   at most every `--warm-every`), it starts a sandbox from the base template,
   clones the repository at that commit where `actions/checkout` puts it,
   runs the prepare command there (install dependencies, build once to fill
-  caches), and saves the sandbox as a template (ADR 22). New runners start
-  from the newest; older templates of the pool are deleted, and an image
-  stays while a sandbox still uses it. A failed refresh leaves the last
-  good template in use. The clone's token is given to that one command,
-  never written to the disk the template keeps.
+  caches), and saves the sandbox as a template (ADR 22) named by the
+  pool's key, the time and the commit, which fit compute's 64 characters
+  while the key is at most 40 long (the service refuses to start
+  otherwise). New runners start from the newest; older templates of the
+  pool are deleted, and an image stays while a sandbox still uses it. A
+  failed refresh leaves the last good template in use. The clone's token
+  is given to that one command, never written to the disk the template
+  keeps.
   `actions/checkout` cleans untracked files by default, which would delete
   the prepared dependencies: warm workflows check out with `clean: false`.
 - **A build cache in object storage.** The service serves Turborepo's
-  remote cache API, keeping artifacts in a bucket under the pool's name,
+  remote cache API, keeping artifacts in a bucket under the pool's key,
   and gives runners its address and a per-pool token in their
   environment, so `turbo` shares task results between jobs and runs with
   no change to workflows. Artifacts expire after `--cache-days` without a

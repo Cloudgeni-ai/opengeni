@@ -32,9 +32,14 @@ fn github(fake: &Fake) -> Arc<Github> {
 }
 
 async fn pool(fake: &Fake, min_idle: u32) -> Pool {
+    pool_in(fake, 1, min_idle).await
+}
+
+/// A pool named `ci` in runner group `group`.
+async fn pool_in(fake: &Fake, group: u64, min_idle: u32) -> Pool {
     let github = github(fake);
     let set = github
-        .ensure_scale_set(1, "ci", &["ci".into()])
+        .ensure_scale_set(group, "ci", &["ci".into()])
         .await
         .unwrap();
     let settings = pool::Settings {
@@ -49,6 +54,11 @@ async fn pool(fake: &Fake, min_idle: u32) -> Pool {
     let (_, template) = watch::channel("runner-base".to_owned());
     let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
     Pool::new(github, compute, set.id, settings, template)
+}
+
+/// The key of the first pool made: `ci` and its scale set.
+fn key(fake: &Fake) -> String {
+    pool::key("ci", fake.world().sets[0]["id"].as_u64().unwrap())
 }
 
 async fn listening(fake: Fake, min_idle: u32) -> Running {
@@ -109,7 +119,7 @@ async fn a_job_runs_in_a_fresh_sandbox_that_ends_with_it() {
         env,
     } = started;
     assert_eq!(template, "runner-base");
-    assert_eq!(metadata[POOL_KEY], "ci");
+    assert_eq!(metadata[POOL_KEY], key(&fake));
     let name = metadata[NAME_KEY].clone();
     let id: u64 = metadata[ID_KEY].parse().unwrap();
     assert!(name.starts_with("ci-"), "{name}");
@@ -181,10 +191,11 @@ async fn idle_runners_are_kept_and_replaced() {
 async fn what_runs_is_read_back_and_set_right() {
     let fake = Fake::start().await;
     let mut pool = pool(&fake, 1).await;
+    let ours = key(&fake);
     let old = |name: &str, id: u64| Sandbox {
         template: "runner-base".into(),
         metadata: BTreeMap::from([
-            (POOL_KEY.into(), "ci".into()),
+            (POOL_KEY.into(), ours.clone()),
             (NAME_KEY.into(), name.into()),
             (ID_KEY.into(), id.to_string()),
             (BORN_KEY.into(), "1000".into()),
@@ -235,7 +246,7 @@ async fn what_runs_is_read_back_and_set_right() {
     let fresh: Vec<&Sandbox> = world
         .sandboxes
         .values()
-        .filter(|sandbox| sandbox.metadata[POOL_KEY] == "ci")
+        .filter(|sandbox| sandbox.metadata[POOL_KEY] == ours)
         .collect();
     assert_eq!(fresh.len(), 1);
     assert_ne!(fresh[0].metadata[NAME_KEY], "ci-kept");
@@ -332,6 +343,7 @@ async fn a_message_whose_jobs_were_not_acquired_is_offered_again() {
 async fn registrations_without_a_sandbox_go() {
     let fake = Fake::start().await;
     let mut pool = pool(&fake, 1).await;
+    let ours = key(&fake);
     {
         let mut world = fake.world();
         let set = world.sets[0]["id"].as_u64().unwrap();
@@ -358,7 +370,7 @@ async fn registrations_without_a_sandbox_go() {
             Sandbox {
                 template: "runner-base".into(),
                 metadata: BTreeMap::from([
-                    (POOL_KEY.into(), "ci".into()),
+                    (POOL_KEY.into(), ours),
                     (NAME_KEY.into(), "ci-bbbbbbbbbbbb".into()),
                     (ID_KEY.into(), "54".into()),
                     (BORN_KEY.into(), "1000".into()),
@@ -376,10 +388,33 @@ async fn registrations_without_a_sandbox_go() {
     assert_eq!(world.sandboxes.len(), 1, "the kept runner is the idle one");
 }
 
+/// Pools of one name in different runner groups are different scale
+/// sets: sharing one compute team, each keeps to its own runners.
+#[tokio::test]
+async fn a_pool_leaves_the_runners_of_its_namesake_in_another_group() {
+    let fake = Fake::start().await;
+    let mut first = pool_in(&fake, 1, 0).await;
+    let mut second = pool_in(&fake, 2, 1).await;
+    second.reconcile().await.unwrap();
+    {
+        let mut world = fake.world();
+        assert_eq!((world.runners.len(), world.sandboxes.len()), (1, 1));
+        // Settled long ago, so a pool that took it on could remove it.
+        for sandbox in world.sandboxes.values_mut() {
+            sandbox.metadata.insert(BORN_KEY.into(), "1000".into());
+        }
+    }
+    first.reconcile().await.unwrap();
+    let world = fake.world();
+    assert_eq!((world.runners.len(), world.sandboxes.len()), (1, 1));
+    assert_eq!(world.killed, Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn a_runner_github_refuses_to_remove_is_asked_about_again() {
     let fake = Fake::start().await;
     let mut pool = pool(&fake, 1).await;
+    let ours = key(&fake);
     {
         let mut world = fake.world();
         world.runners.insert(7, ("ci-cccccccccccc".into(), false));
@@ -388,7 +423,7 @@ async fn a_runner_github_refuses_to_remove_is_asked_about_again() {
             Sandbox {
                 template: "runner-base".into(),
                 metadata: BTreeMap::from([
-                    (POOL_KEY.into(), "ci".into()),
+                    (POOL_KEY.into(), ours),
                     (NAME_KEY.into(), "ci-cccccccccccc".into()),
                     (ID_KEY.into(), "7".into()),
                     (BORN_KEY.into(), "1000".into()),
