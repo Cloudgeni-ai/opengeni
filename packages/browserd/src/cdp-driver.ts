@@ -712,6 +712,27 @@ type TargetState = {
   /** Device size this controller emulates on the page, in CSS pixels. A
    * viewport screenshot of it is exactly this size times its scale factor. */
   emulatedViewport?: { width: number; height: number; deviceScaleFactor: number } | undefined;
+  /** How the tab measured before this controller first emulated a size on
+   * it, so a reset can check that it really returned there. */
+  ownViewport?: MeasuredViewport | undefined;
+  /** Set while a viewport change is applied. Frame captures wait for it: a
+   * clipped Page.captureScreenshot changes the page's emulation for the
+   * capture and puts back what it saw when it began, which would undo a
+   * change that landed in between. */
+  framesPaused?: Promise<void> | undefined;
+  /** Clipped captures of this tab Chromium has not answered yet. */
+  capturesRunning: Set<Promise<void>>;
+};
+
+/** The page's size, screen and scale as it reports them, in CSS pixels, and
+ * the browser window's bounds when the browser reports them. */
+type MeasuredViewport = {
+  width: number;
+  height: number;
+  screenWidth: number;
+  screenHeight: number;
+  deviceScaleFactor: number;
+  window: { width: number; height: number } | null;
 };
 
 /** A page size the agent set with the viewport action. */
@@ -3694,6 +3715,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       navigationSequence: 0,
       navigationPending: false,
       screencasts: new Map(),
+      capturesRunning: new Set(),
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
@@ -4395,6 +4417,191 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       { enabled: viewport.mobile, ...(viewport.mobile ? { maxTouchPoints: 1 } : {}) },
       { sessionId },
     );
+  }
+
+  /** Viewport emulation needs a browser this driver controls: Lightpanda has
+   * none, and the person's own Chrome keeps its tabs at the window's size
+   * (the extension does not admit Emulation commands). */
+  private assertViewportEmulation(): void {
+    if (this.engine === "chromium") return;
+    throw new InteractionDefiniteDriverError(
+      "unsupported",
+      "this browser engine does not support viewport emulation",
+    );
+  }
+
+  /** Lets the page lay out and present one frame at its new size, so the next
+   * read or capture sees it. Bounded: a throttled page never blocks. */
+  private async presentFrame(state: TargetState): Promise<void> {
+    await this.sendTarget(
+      state,
+      "Runtime.evaluate",
+      {
+        expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      { timeoutMs: 1_000 },
+    ).catch(() => undefined);
+  }
+
+  /** Applies a viewport change with this tab's frame sampling held off: it
+   * waits for a capture already running, and later captures wait for the
+   * change, so none can put the earlier emulation back over it. */
+  private async withFramesPaused<T>(state: TargetState, change: () => Promise<T>): Promise<T> {
+    let resume = () => {};
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    state.framesPaused = paused;
+    try {
+      await Promise.all(
+        [...state.screencasts.values()].map(
+          async (stream) => await stream.capturePromise?.catch(() => undefined),
+        ),
+      );
+      await this.capturesSettled(state);
+      for (const stream of state.screencasts.values()) stream.captureScale = null;
+      return await change();
+    } finally {
+      if (state.framesPaused === paused) state.framesPaused = undefined;
+      resume();
+    }
+  }
+
+  /** The page's size, screen and scale now, read where page scripts cannot
+   * change what it reports, or null when it cannot be read (between
+   * documents, or a window not laid out yet). */
+  private async measureViewport(state: TargetState): Promise<MeasuredViewport | null> {
+    const response = await (async () => {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { timeoutMs: 1_000 },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) return null;
+      return await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: MEASURE_VIEWPORT_EXPRESSION,
+          returnByValue: true,
+        },
+        { timeoutMs: 1_000 },
+      );
+    })().catch(() => null);
+    const value = response && isRecord(response.result) ? response.result.value : null;
+    if (!response || response.exceptionDetails || !isRecord(value)) return null;
+    const page: Partial<Record<Exclude<keyof MeasuredViewport, "window">, number>> = {};
+    for (const key of [
+      "width",
+      "height",
+      "screenWidth",
+      "screenHeight",
+      "deviceScaleFactor",
+    ] as const) {
+      const entry = value[key];
+      if (typeof entry !== "number" || !Number.isFinite(entry) || entry <= 0) return null;
+      page[key] = entry;
+    }
+    // A background tab reports no outer size of its own; the window it is in
+    // still has one.
+    const bounds = await (
+      await this.ensureConnection()
+    )
+      .send<{ bounds?: unknown }>("Browser.getWindowForTarget", { targetId: state.targetId })
+      .then((result) => (isRecord(result.bounds) ? result.bounds : null))
+      .catch(() => null);
+    const window =
+      bounds &&
+      typeof bounds.width === "number" &&
+      typeof bounds.height === "number" &&
+      bounds.width > 0 &&
+      bounds.height > 0
+        ? { width: bounds.width, height: bounds.height }
+        : null;
+    return { ...(page as Omit<MeasuredViewport, "window">), window };
+  }
+
+  /** Makes the tab draw itself at its current size. A background tab does not
+   * lay out again when its emulation is cleared until it is shown; a capture
+   * of it has it draw without showing it or taking focus. */
+  private async redrawTab(state: TargetState): Promise<void> {
+    const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS).catch(() => null);
+    if (!metrics) return;
+    await this.sendCapture(
+      state,
+      {
+        format: "jpeg",
+        quality: 1,
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
+      },
+      FRAME_CAPTURE_TIMEOUT_MS,
+    ).catch(() => undefined);
+  }
+
+  /** Sends a clipped Page.captureScreenshot. Chromium changes the page's
+   * emulation while such a capture runs and puts back what it saw when it
+   * began, so the capture counts as running until Chromium answers it, even
+   * after the caller stops waiting or its frame stream closes. */
+  private async sendCapture<T>(
+    state: TargetState,
+    params: Readonly<Record<string, unknown>>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const answered = this.sendTarget<T>(state, "Page.captureScreenshot", params, {
+      timeoutMs: SCREENSHOT_CAPTURE_TIMEOUT_MS,
+    });
+    const running = answered.then(
+      () => undefined,
+      () => undefined,
+    );
+    state.capturesRunning.add(running);
+    void running.then(() => state.capturesRunning.delete(running));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        answered,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Resolves once no capture of this tab is running in the browser. */
+  private async capturesSettled(state: TargetState): Promise<void> {
+    while (state.capturesRunning.size > 0) await Promise.all([...state.capturesRunning]);
+  }
+
+  /** Sends a viewport change and checks that the page took it, sending it
+   * once more when it did not. The change is already sent when this fails,
+   * so the tab's size is then unknown rather than unchanged. */
+  private async applyViewportChange(
+    state: TargetState,
+    send: () => Promise<void>,
+    took: (measured: MeasuredViewport) => boolean,
+    failure: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await send();
+      await this.presentFrame(state);
+      // An unreadable page does not confirm the change either.
+      const measured = await this.measureViewport(state);
+      if (measured && took(measured)) return;
+      // A capture still running would put its emulation back over a resend.
+      await this.capturesSettled(state);
+    }
+    throw new InteractionOutcomeUnknownDriverError("outcome_unknown", failure);
   }
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
@@ -5498,6 +5705,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async captureFallbackFrame(targetId: string, expected: TargetScreencast): Promise<void> {
+    // Waiting here, outside the shared capture, lets a viewport change wait
+    // for the capture already running without that capture waiting for it.
+    for (
+      let paused = this.states.get(targetId)?.framesPaused;
+      paused;
+      paused = this.states.get(targetId)?.framesPaused
+    ) {
+      await paused;
+    }
     if (expected.capturePromise) return await expected.capturePromise;
     const capture = (async () => {
       // Frame sampling is deliberately outside TargetState.tail. Media is
@@ -5523,9 +5739,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
       let dimensions = { width: 0, height: 0 };
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const response = await this.sendTarget<{ data?: unknown }>(
+        // A stream closed meanwhile no longer holds off viewport changes.
+        if (state.screencasts.get(expected.key) !== expected) return;
+        const response = await this.sendCapture<{ data?: unknown }>(
           state,
-          "Page.captureScreenshot",
           {
             format: expected.options.format,
             ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
@@ -5539,7 +5756,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               scale,
             },
           },
-          { timeoutMs: FRAME_CAPTURE_TIMEOUT_MS },
+          FRAME_CAPTURE_TIMEOUT_MS,
         );
         data = decodeBoundedBase64Image(response.data);
         dimensions = imageDimensions(data, expected.options.format);
@@ -5744,52 +5961,95 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         this.frontTargetId = state.targetId;
         return;
-      case "viewport":
-        for (const stream of state.screencasts.values()) stream.captureScale = null;
-        if (this.engine === "lightpanda") {
-          throw new InteractionDefiniteDriverError(
-            "unsupported",
-            "this browser engine does not support viewport emulation",
-          );
-        }
-        await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
+      case "viewport": {
+        this.assertViewportEmulation();
+        const viewport = {
           width: action.width,
           height: action.height,
           deviceScaleFactor: action.deviceScaleFactor ?? 1,
           mobile: action.mobile,
-          screenWidth: action.width,
-          screenHeight: action.height,
-        });
-        await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
-          enabled: action.mobile,
-          ...(action.mobile ? { maxTouchPoints: 1 } : {}),
-        });
-        state.emulatedViewport = {
-          width: action.width,
-          height: action.height,
-          deviceScaleFactor: action.deviceScaleFactor ?? 1,
         };
-        {
-          const viewport = { ...state.emulatedViewport, mobile: action.mobile };
-          this.targetViewports.set(state.targetId, viewport);
-          this.sessionViewport = {
-            viewport,
-            preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
-          };
-        }
-        // Let the page lay out and present one frame at the new size, so the
-        // next read or capture sees it. Bounded: a throttled page never blocks.
-        await this.sendTarget(
-          state,
-          "Runtime.evaluate",
-          {
-            expression: NEXT_PRESENTED_FRAME_EXPRESSION,
-            awaitPromise: true,
-            returnByValue: true,
-          },
-          { timeoutMs: 1_000 },
-        ).catch(() => undefined);
+        await this.withFramesPaused(state, async () => {
+          if (!state.emulatedViewport) {
+            state.ownViewport = (await this.measureViewport(state)) ?? undefined;
+          }
+          await this.applyViewportChange(
+            state,
+            async () => {
+              await this.sendActionTarget(state, "Emulation.setDeviceMetricsOverride", {
+                width: viewport.width,
+                height: viewport.height,
+                deviceScaleFactor: viewport.deviceScaleFactor,
+                mobile: viewport.mobile,
+                screenWidth: viewport.width,
+                screenHeight: viewport.height,
+              });
+              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                enabled: viewport.mobile,
+                ...(viewport.mobile ? { maxTouchPoints: 1 } : {}),
+              });
+              state.emulatedViewport = {
+                width: viewport.width,
+                height: viewport.height,
+                deviceScaleFactor: viewport.deviceScaleFactor,
+              };
+              this.targetViewports.set(state.targetId, viewport);
+              this.sessionViewport = {
+                viewport,
+                preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
+              };
+            },
+            // The screen is exactly the size set. The layout size can be a
+            // pixel more under a fractional display scale, and the reported
+            // scale includes the browser's zoom, so neither is compared.
+            (measured) =>
+              measured.screenWidth === viewport.width && measured.screenHeight === viewport.height,
+            VIEWPORT_NOT_TAKEN_MESSAGE,
+          );
+        });
         return;
+      }
+      case "viewport_reset": {
+        this.assertViewportEmulation();
+        const emulated = state.emulatedViewport;
+        await this.withFramesPaused(state, async () => {
+          const own = state.ownViewport;
+          await this.applyViewportChange(
+            state,
+            async () => {
+              await this.sendActionTarget(state, "Emulation.clearDeviceMetricsOverride", {});
+              await this.sendActionTarget(state, "Emulation.setTouchEmulationEnabled", {
+                enabled: false,
+              });
+              await this.redrawTab(state);
+              state.emulatedViewport = undefined;
+              // Neither this tab, when attached again, nor tabs that open from
+              // now on get the size the agent set before.
+              this.targetViewports.delete(state.targetId);
+              this.sessionViewport = null;
+            },
+            (measured) =>
+              own
+                ? sameScale(measured, own) &&
+                  measured.screenWidth === own.screenWidth &&
+                  measured.screenHeight === own.screenHeight &&
+                  // A window resized since then has a new size of its own.
+                  ((measured.window !== null &&
+                    own.window !== null &&
+                    (measured.window.width !== own.window.width ||
+                      measured.window.height !== own.window.height)) ||
+                    (measured.width === own.width && measured.height === own.height))
+                : !emulated ||
+                  !(
+                    sameScale(measured, emulated) &&
+                    measured.screenWidth === emulated.width &&
+                    measured.screenHeight === emulated.height
+                  ),
+            VIEWPORT_RESET_NOT_TAKEN_MESSAGE,
+          );
+        });
+        return;
+      }
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);
         if ((action.button ?? "left") === "left" && (await this.chooseDropdownOption(state, node)))
@@ -10155,6 +10415,23 @@ const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
   }
   return true;
 })()`;
+
+/** What a page reports for its size, screen and scale, read to check that a
+ * viewport change took. */
+const MEASURE_VIEWPORT_EXPRESSION =
+  "({width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height,deviceScaleFactor:devicePixelRatio})";
+
+const VIEWPORT_NOT_TAKEN_MESSAGE =
+  "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.";
+const VIEWPORT_RESET_NOT_TAKEN_MESSAGE =
+  "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.";
+
+function sameScale(
+  measured: { deviceScaleFactor: number },
+  expected: { deviceScaleFactor: number },
+): boolean {
+  return Math.abs(measured.deviceScaleFactor - expected.deviceScaleFactor) < 0.01;
+}
 
 /** Resolves after the page has produced the next frame (two animation frames:
  * the first may already be in flight at the old size), or after 300 ms when

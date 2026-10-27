@@ -18,6 +18,8 @@ const fixture = (lines: string[]) => `data:text/html,${encodeURIComponent(lines.
 // rows, and the file list beside it. Long rows run past the panel's edge, so
 // their centers lie over the file list, which the panel's clip leaves on top
 // there. Every row still shows its start, which is where a person clicks.
+// Rows are letter-spaced so their width, and so where their centers lie, does
+// not hinge on how wide the machine's sans-serif font happens to be.
 const FIXTURE = fixture([
   "<!doctype html><title>Folders</title>",
   "<style>",
@@ -25,9 +27,9 @@ const FIXTURE = fixture([
   "#split{display:flex;height:100vh}",
   "#side{flex:0 0 260px;overflow:hidden}",
   "#scroller{height:100%;overflow-x:hidden;overflow-y:auto}",
-  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;cursor:pointer}",
+  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;letter-spacing:3px;cursor:pointer}",
   "#files{flex:1;background:#f4f4f4}",
-  "#menu{position:fixed;left:0;top:0;width:280px;height:100vh;background:#fff}",
+  "#menu{position:fixed;left:0;top:0;width:260px;height:100vh;background:#fff}",
   "</style>",
   // Above the tree, a pinned row in a strip that clips without scrolling,
   // indented wholly past the panel's edge.
@@ -159,16 +161,16 @@ e2e(
       );
 
       // A menu over the panel covers the part of the row that shows: that is
-      // a real cover, so the click is refused, naming the menu.
+      // a real cover, so the click is refused, naming the menu. The row's
+      // center lies past the menu, over the file list, so nothing is scrolled
+      // to look for a way past the menu and the refusal is definite.
       await evaluate(
         'document.body.insertAdjacentHTML("beforeend", \'<div id="menu" role="menu" aria-label="Folder actions"></div>\')',
       );
       const covered = await click({ type: "click", locator: treeitem(LONG) });
-      // Scrolling the row back into view moved the tree, so the refusal is an
-      // unknown outcome that carries the reason.
-      expect(covered.state).toBe("outcome_unknown");
-      expect(covered.error?.message).toContain(
-        '(invalid_action: browser element is covered by menu "Folder actions" where it shows)',
+      expect(covered.state).toBe("failed");
+      expect(covered.error?.message).toBe(
+        'browser element is covered by menu "Folder actions" where it shows',
       );
       expect(await evaluate("log")).toEqual(["handoff", "handoff", "exports", "year"]);
     });
@@ -285,7 +287,7 @@ e2e(
 const SPLIT_STYLE = [
   ".split{display:flex;height:100px;width:900px}",
   ".side{flex:0 0 260px;overflow:hidden}",
-  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;padding-left:8px}",
+  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;letter-spacing:3px;padding-left:8px}",
   ".files{flex:1;background:#f4f4f4}",
 ].join("");
 const split = (id: string, label: string) =>

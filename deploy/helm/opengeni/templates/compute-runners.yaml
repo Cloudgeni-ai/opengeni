@@ -239,6 +239,9 @@ spec:
       port: {{ int64 ($service.port | default 8080) }}
       targetPort: http
       protocol: TCP
+      {{- if and (eq ($service.type | default "ClusterIP") "NodePort") $service.nodePort }}
+      nodePort: {{ int64 $service.nodePort }}
+      {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" $root | nindent 4 }}
     app.kubernetes.io/component: compute-runners

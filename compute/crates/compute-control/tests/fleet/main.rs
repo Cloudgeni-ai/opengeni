@@ -13,3 +13,4 @@ mod moves;
 mod native;
 mod reach;
 mod support;
+mod templates;
