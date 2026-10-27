@@ -86,6 +86,7 @@ export {
 } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
+  DISPLAY_TITLE_META_KEY,
   IntegrationInvocationError,
   isLocalMcpBridgeServer,
   type LocalMcpBridgeAdapter,
@@ -8568,6 +8569,14 @@ function legacyMcpToolDigest(registryId: string, toolName: string): string {
     .digest("hex");
 }
 
+/** A listed tool's person-facing title from `_meta` (API integrations set one), bounded. */
+function displayTitleFromMeta(tool: object): string | undefined {
+  const meta = (tool as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const title = (meta as Record<string, unknown>)[DISPLAY_TITLE_META_KEY];
+  return typeof title === "string" && title.trim() ? title.trim().slice(0, 256) : undefined;
+}
+
 /** Read only already-prepared display facts; never trigger deferred connections
  * merely to render an unrelated intrinsic tool event. */
 export function mcpToolDisplayMetadata(
@@ -8931,6 +8940,12 @@ export class PrefixedMcpServer implements MCPServer {
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
+  /**
+   * Person-facing titles from tool `_meta` for tools without an MCP title,
+   * keyed by unprefixed name. Approval cards and activity rows read them;
+   * the model never sees them.
+   */
+  private readonly displayTitles = new Map<string, string>();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9154,9 +9169,10 @@ export class PrefixedMcpServer implements MCPServer {
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
     const bridge = this.inner as MCPServer & { reviewContext?: ToolReviewReader };
-    return typeof bridge.reviewContext === "function"
-      ? await bridge.reviewContext(toolName, args)
-      : {};
+    const extra =
+      typeof bridge.reviewContext === "function" ? await bridge.reviewContext(toolName, args) : {};
+    const title = this.displayTitles.get(toolName);
+    return title ? { title, ...extra } : extra;
   }
 
   /** True when the wrapped local bridge supplies its own model-visible result copy. */
@@ -9208,9 +9224,11 @@ export class PrefixedMcpServer implements MCPServer {
           if (prior !== undefined && prior !== tool.name)
             throw new Error("MCP model tool identity collision");
           this.originalToolNames.set(name, tool.name);
+          const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
+          if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
-            ...(tool.title ? { title: tool.title } : {}),
+            ...(tool.title ? { title: tool.title } : metaTitle ? { title: metaTitle } : {}),
             ...(this.accountLabel
               ? {
                   connector: this.accountLabel.connector,

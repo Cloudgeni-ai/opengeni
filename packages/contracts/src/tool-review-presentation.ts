@@ -314,6 +314,8 @@ export function toolReviewFields(
       moreFields: original.moreFields + Math.max(0, fields.length - 16),
     };
   }
+  const api = apiEnvelopeReviewFields(args, context);
+  if (api) return api;
   return {
     moreFields: Math.max(0, entries.length - 16),
     fields: entries.slice(0, 16).map(([key, value], index) => {
@@ -361,6 +363,212 @@ export function toolReviewFields(
 
 /** The tool that runs an app action as the person (see @opengeni/contracts/app-actions). */
 const APP_ACTION_REVIEW_TOOL = "admin_action_call";
+
+/* ---- API integration requests ------------------------------------------- */
+
+// An API integration tool's arguments are its HTTP request: `path`, `query`,
+// `header` and `cookie` parameters plus a `body`. That envelope is transport.
+// A person approving "Save a draft email" wants the recipients, subject and
+// text, so the card lifts the request's own fields and reads common shapes
+// (recipients, rich text, date and time, named places) as one plain value.
+// The exact structure stays one click away in Details.
+const API_ENVELOPE_KEYS = new Set(["path", "query", "header", "cookie", "body", "contentType"]);
+const API_LEADING_LABELS: Readonly<Record<string, string>> = {
+  toRecipients: "To",
+  ccRecipients: "Cc",
+  bccRecipients: "Bcc",
+  from: "From",
+  replyTo: "Reply to",
+  subject: "Subject",
+  body: "Message",
+  comment: "Message",
+  attendees: "Attendees",
+  start: "Starts",
+  end: "Ends",
+  location: "Location",
+};
+const API_FIELD_ORDER = Object.keys(API_LEADING_LABELS);
+/** Longer than other previews: the text of a message is what a person checks. */
+const API_TEXT_PREVIEW = 1000;
+
+type ApiEntry = { key: string; value: unknown; path: string; parameter: boolean };
+
+const plainObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+function apiEnvelopeEntries(args: Record<string, unknown>): ApiEntry[] | null {
+  const keys = Object.keys(args);
+  if (keys.length === 0 || !keys.every((key) => API_ENVELOPE_KEYS.has(key))) return null;
+  if (!keys.some((key) => key === "path" || key === "query" || key === "body")) return null;
+  for (const key of ["path", "query", "header", "cookie"])
+    if (args[key] !== undefined && !plainObject(args[key])) return null;
+  const children = (parent: string, parameter: boolean): ApiEntry[] =>
+    plainObject(args[parent])
+      ? Object.entries(args[parent]).map(([key, value]) => ({
+          key,
+          value,
+          path: `${pointer(parent)}${pointer(key)}`,
+          parameter,
+        }))
+      : [];
+  // A message wrapped in the body ({ message: {...}, comment }) reads as the message itself.
+  const body: ApiEntry[] = plainObject(args.body)
+    ? children("body", false).flatMap((entry) =>
+        entry.key === "message" && plainObject(entry.value)
+          ? Object.entries(entry.value).map(([key, value]) => ({
+              key,
+              value,
+              path: `${entry.path}${pointer(key)}`,
+              parameter: false,
+            }))
+          : [entry],
+      )
+    : args.body === undefined
+      ? []
+      : [{ key: "content", value: args.body, path: "/body", parameter: false }];
+  const entries = [...body, ...children("path", true), ...children("query", true)];
+  return entries.every((entry) => entry.path.length <= 1024) ? entries : null;
+}
+
+function plainText(content: string, contentType: unknown): string {
+  if (typeof contentType !== "string" || contentType.toLowerCase() !== "html") return content;
+  return content
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** "Anna Berg <anna@example.com>" for a recipient-like value, else undefined. */
+function recipientText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.includes("@") ? value : undefined;
+  if (!plainObject(value)) return undefined;
+  const inner = plainObject(value.emailAddress) ? value.emailAddress : value;
+  const address = [inner.address, inner.email].find(
+    (entry): entry is string => typeof entry === "string" && entry.includes("@"),
+  );
+  if (!address) return undefined;
+  const name = [inner.name, inner.displayName].find(
+    (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
+  );
+  return name && name !== address ? `${name} <${address}>` : address;
+}
+
+/** One plain reading of a structured value, or undefined to fall back to its size. */
+function apiValueText(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined;
+    const recipients = value.map(recipientText);
+    return recipients.every((entry) => entry !== undefined) ? recipients.join(", ") : undefined;
+  }
+  if (!plainObject(value)) return undefined;
+  const recipient = recipientText(value);
+  if (recipient) return recipient;
+  const keys = Object.keys(value);
+  if (
+    typeof value.content === "string" &&
+    keys.every((key) => ["content", "contentType"].includes(key))
+  )
+    return plainText(value.content, value.contentType);
+  if (
+    typeof value.dateTime === "string" &&
+    keys.every((key) => ["dateTime", "timeZone"].includes(key))
+  )
+    return typeof value.timeZone === "string" && value.timeZone
+      ? `${value.dateTime.replace("T", " ").replace(/:00(\.0+)?$/, "")} (${value.timeZone})`
+      : value.dateTime.replace("T", " ").replace(/:00(\.0+)?$/, "");
+  if (typeof value.displayName === "string" && value.displayName.trim()) return value.displayName;
+  return undefined;
+}
+
+function apiEnvelopeReviewFields(
+  args: Record<string, unknown>,
+  context: ToolReviewContext | undefined,
+): { fields: ToolActionReview["fields"]; moreFields: number } | null {
+  if (context?.protectedFields?.includes("*")) return null;
+  const entries = apiEnvelopeEntries(args);
+  if (!entries) return null;
+  const rank = (entry: ApiEntry) => {
+    const index = API_FIELD_ORDER.indexOf(entry.key);
+    return entry.parameter
+      ? API_FIELD_ORDER.length + 1
+      : index < 0
+        ? API_FIELD_ORDER.length
+        : index;
+  };
+  // An empty list or object says nothing at a glance; Details still lists it.
+  const empty = (value: unknown) =>
+    (Array.isArray(value) && value.length === 0) ||
+    (plainObject(value) && Object.keys(value).length === 0);
+  const ordered = entries
+    .filter((entry) => !empty(entry.value))
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index)
+    .map(({ entry }) => entry);
+  const used = new Set<string>();
+  const fields = ordered.map((entry): ToolActionReview["fields"][number] => {
+    const segments = entry.path.slice(1).split("/");
+    const hidden = segments.some((segment) =>
+      protectedReviewField(
+        segment.replaceAll("~1", "/").replaceAll("~0", "~"),
+        context?.protectedFields,
+      ),
+    );
+    const leading =
+      Object.hasOwn(API_LEADING_LABELS, entry.key) && !entry.parameter
+        ? API_LEADING_LABELS[entry.key]
+        : undefined;
+    const label = leading && !used.has(leading) ? leading : toolReviewFieldLabel(entry.key);
+    used.add(label);
+    if (hidden)
+      return {
+        path: entry.path,
+        label,
+        preview: "[Protected value]",
+        truncated: false,
+        protected: true,
+      };
+    const { value } = entry;
+    const structured = value !== null && typeof value === "object";
+    const read = structured ? apiValueText(value) : undefined;
+    const count = Array.isArray(value) ? value.length : undefined;
+    const compactList =
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.length <= 4 &&
+      value.every((item) => ["string", "number", "boolean"].includes(typeof item))
+        ? value.map(valueText).join(", ")
+        : undefined;
+    const text =
+      read ??
+      compactList ??
+      (count !== undefined
+        ? `${count.toLocaleString("en-US")} item${count === 1 ? "" : "s"}`
+        : structured
+          ? `${Object.keys(value).length} field${Object.keys(value).length === 1 ? "" : "s"}`
+          : valueText(value));
+    const limit = read !== undefined || typeof value === "string" ? API_TEXT_PREVIEW : 240;
+    return {
+      path: entry.path,
+      label: bound(label, 256),
+      preview: bound(text, limit),
+      ...(count !== undefined ? { count } : {}),
+      // A plain reading is the value a person checks, shown as text; its exact
+      // structure stays in Details. A bare size ("3 fields") opens it here.
+      truncated:
+        text.length > limit || (structured && read === undefined && compactList === undefined),
+    };
+  });
+  return { fields: fields.slice(0, 16), moreFields: Math.max(0, fields.length - 16) };
+}
 // Bookkeeping and opaque identifiers say nothing a person can check.
 const APP_ACTION_UNREADABLE_KEY =
   /^(id|operationId|idempotencyKey|expiresAt|expectedVersion|expectedRevision|expectedEtag)$|Ids?$/;

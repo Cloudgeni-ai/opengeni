@@ -12,6 +12,7 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
+import { displayTitleMeta } from "./operation-titles";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -317,6 +318,7 @@ export class OpenApiMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
+            ...displayTitleMeta(tool.operationKey),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,
