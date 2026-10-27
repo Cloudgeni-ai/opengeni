@@ -39,6 +39,9 @@ struct Inner {
     rate_limit_drops: AtomicU64,
     /// Frames dropped because a ring buffer was full (slow-peer backpressure shed).
     buffer_drops: AtomicU64,
+    /// Messages dropped because the sender's token does not authorize them
+    /// (input on a view token, a foreign `channel_id`, an unknown mode).
+    unauthorized_drops: AtomicU64,
     /// The high-water mark of buffered frames across any single channel direction.
     buffer_high_water: AtomicU64,
     /// Currently-live channels (paired or half-open). A gauge, not a counter.
@@ -84,6 +87,12 @@ impl RelayMetrics {
 
     pub(crate) fn record_buffer_drop(&self) {
         self.inner.buffer_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_unauthorized_drop(&self) {
+        self.inner
+            .unauthorized_drops
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Update the buffer high-water mark to `depth` if it exceeds the current max.
@@ -133,6 +142,13 @@ impl RelayMetrics {
     #[must_use]
     pub fn reconnects(&self) -> u64 {
         self.inner.reconnects.load(Ordering::Relaxed)
+    }
+
+    /// Messages dropped as unauthorized by the sender's token (for tests / the
+    /// dashboard).
+    #[must_use]
+    pub fn unauthorized_drops(&self) -> u64 {
+        self.inner.unauthorized_drops.load(Ordering::Relaxed)
     }
 
     /// Render the metrics as a Prometheus-style text exposition.
@@ -205,6 +221,13 @@ impl RelayMetrics {
         );
         line(
             &mut out,
+            "opengeni_relay_unauthorized_drops_total",
+            "Messages dropped because the sender's token does not authorize them.",
+            "counter",
+            u(&i.unauthorized_drops),
+        );
+        line(
+            &mut out,
             "opengeni_relay_buffer_high_water",
             "Max buffered frames on any single channel direction.",
             "gauge",
@@ -234,6 +257,7 @@ mod tests {
         m.record_open_rejected();
         m.record_reconnect();
         m.record_rate_limit_drop();
+        m.record_unauthorized_drop();
         m.observe_buffer_depth(7);
         m.observe_buffer_depth(3); // does not lower the high-water
         m.channel_opened();
@@ -241,8 +265,10 @@ mod tests {
         assert_eq!(m.opens_rejected(), 1);
         assert_eq!(m.rate_limit_drops(), 1);
         assert_eq!(m.reconnects(), 1);
+        assert_eq!(m.unauthorized_drops(), 1);
         let text = m.render_prometheus();
         assert!(text.contains("opengeni_relay_bytes_agent_to_viewer_total 10"));
+        assert!(text.contains("opengeni_relay_unauthorized_drops_total 1"));
         assert!(text.contains("opengeni_relay_buffer_high_water 7"));
         assert!(text.contains("opengeni_relay_live_channels 1"));
         m.channel_closed();

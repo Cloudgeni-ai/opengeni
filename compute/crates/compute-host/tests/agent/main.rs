@@ -287,6 +287,10 @@ struct Work {
     /// Until when the guest takes no connection, as one far behind on a
     /// busy host.
     stalled_until: Option<Instant>,
+    /// Whether its console's last words are its kernel saying it halted,
+    /// as a real guest's are once it halts or powers off. This VM
+    /// process's console: a restored one starts a new one.
+    said_halted: bool,
 }
 
 /// Time a fake VM spent on one kind of work.
@@ -459,10 +463,13 @@ impl Fake {
 /// notice this VM process was given, if any, as well as the latest one its
 /// memory has applied (`applied`, which images carry).
 ///
-/// After `halt` it has stopped, as a real guest that powers off does: its
-/// VM runs on, but its kernel takes no connection. That is in its memory
-/// ([`STOPPED`]), so every image saved since carries the stopped guest;
-/// only a boot from its disk starts it again.
+/// After `halt` it has stopped without a word, as a guest whose kernel
+/// hangs: its VM runs on, but its kernel takes no connection. That is in
+/// its memory ([`STOPPED`]), so every image saved since carries the
+/// stopped guest; only a boot from its disk starts it again. After
+/// `poweroff` it has stopped the same way and said it halted, as a real
+/// guest that halts or powers off does on x86 Firecracker; `say-halted`
+/// only says it, and the guest runs on.
 async fn guest(listener: UnixListener, state: GuestState) {
     while let Ok((stream, _)) = listener.accept().await {
         let state = state.clone();
@@ -604,6 +611,15 @@ impl GuestState {
             ("disk", _) => std::fs::read_to_string(disk).unwrap_or_default(),
             ("halt", _) => {
                 STOPPED.clone_into(&mut memory.lock().unwrap());
+                "ok".into()
+            }
+            ("poweroff", _) => {
+                STOPPED.clone_into(&mut memory.lock().unwrap());
+                work.lock().unwrap().said_halted = true;
+                "ok".into()
+            }
+            ("say-halted", _) => {
+                work.lock().unwrap().said_halted = true;
                 "ok".into()
             }
             ("stall", millis) => {
@@ -1045,6 +1061,14 @@ impl Engine for Fake {
             ));
         }
         Ok(vm.work.lock().unwrap().cpu.total())
+    }
+
+    fn halted(
+        &self,
+        vm: &FakeVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        let work = Arc::clone(&vm.work);
+        async move { Ok(work.lock().unwrap().said_halted) }
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {

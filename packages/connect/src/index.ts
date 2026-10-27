@@ -51,6 +51,8 @@ export class ConnectController {
     providerId: string;
     ownership: ConnectOwnership;
     returnUrl: string;
+    /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+    finishInPopup?: true;
     idempotencyKey: string;
     reconnectAccountId?: string;
     installationTarget?: import("./types").ConnectInstallationTarget;
@@ -61,7 +63,18 @@ export class ConnectController {
     if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
       throw new Error("Connect return URL must be an HTTP(S) destination without credentials");
     }
-    return this.run((signal) => this.transport.begin(this.workspaceId, input, { signal }), true);
+    return this.run(async (signal) => {
+      try {
+        return await this.transport.begin(this.workspaceId, input, { signal });
+      } catch (error) {
+        // A server from before popup endings refuses the unknown field by name
+        // and nothing was created; begin again the earlier way, so sign-in
+        // returns to the host page as it used to.
+        if (!input.finishInPopup || !rejectsFinishInPopupField(error)) throw error;
+        const { finishInPopup: _unsupported, ...earlier } = input;
+        return await this.transport.begin(this.workspaceId, earlier, { signal });
+      }
+    }, true);
   }
 
   recover(attemptId: string): Promise<ConnectAttempt> {
@@ -209,6 +222,20 @@ export class ConnectController {
       if (generation === this.generation) this.request = null;
     }
   }
+}
+
+/** A request validation failure that names `finishInPopup` (an older server's
+ * strict request schema). Duck-typed so any transport's HTTP error works. */
+function rejectsFinishInPopupField(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { status, message, body } = error as {
+    status?: unknown;
+    message?: unknown;
+    body?: unknown;
+  };
+  if (status !== 400 && status !== 422) return false;
+  const text = `${typeof message === "string" ? message : ""}\n${typeof body === "string" ? body : ""}`;
+  return /\bfinishInPopup\b/.test(text);
 }
 
 function freezeTree<T>(value: T): T {

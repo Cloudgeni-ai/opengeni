@@ -17,8 +17,9 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, Collector, HostRow, Inserted, LifecycleRow, Linked, RequestRow,
-    Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
+    Admission, Admits, AgentRef, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked,
+    RequestRow, Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write,
+    admits, rule,
 };
 
 mod connect;
@@ -602,18 +603,26 @@ impl Store for PostgresStore {
         rows.iter().map(host_row).collect()
     }
 
-    async fn renewals(&self) -> Result<Vec<(HostId, u64)>> {
+    async fn renewals(&self) -> Result<Vec<Counted>> {
         let rows = self
             .client()
             .await?
             .query(
-                "select id, renewals from compute_hosts where state <> 'lost'",
+                "select id, renewals, info->'boot' as boot from compute_hosts \
+                 where state <> 'lost'",
                 &[],
             )
             .await
             .map_err(database)?;
         rows.iter()
-            .map(|row| Ok((HostId(small(row.get(0))?), small(row.get(1))?)))
+            .map(|row| {
+                let boot: Option<Json<Value>> = row.try_get("boot").map_err(corrupt)?;
+                Ok(Counted {
+                    host: HostId(small(row.get(0))?),
+                    renewals: small(row.get(1))?,
+                    boot: boot.and_then(|Json(boot)| serde_json::from_value(boot).ok()),
+                })
+            })
             .collect()
     }
 

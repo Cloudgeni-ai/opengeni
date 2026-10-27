@@ -415,15 +415,9 @@ enum Event<V> {
         step: Step,
         stays: bool,
     },
-    /// A check of whether VM process `incarnation` of `id`'s guest still
-    /// takes connections ended (see [`check`]). `unfrozen`: the host has
-    /// no guard, or its guard says it did not freeze the VMs meanwhile.
-    Checked {
-        id: Id,
-        incarnation: u64,
-        reach: crate::restore_notice::Reach,
-        unfrozen: bool,
-    },
+    /// A check of whether a guest still takes connections ended (see
+    /// [`check`]).
+    Checked(check::Checked),
     /// The check of a template found on disk ended.
     TemplateChecked {
         shape: Shape,

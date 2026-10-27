@@ -399,8 +399,11 @@ Operations:
     keeps working, uncapped.
   - **Unavailable agents** return 403 `not_available_for_viewer` with
     `feature: "agent"` and a `reason` of `agent_disabled`,
-    `public_agents_disabled`, `guest_agents_disabled` or
-    `usage_limits_disabled`.
+    `public_agents_disabled`, `guest_agents_disabled`,
+    `usage_limits_disabled`, or, for people outside the workspace when the
+    workspace can't pay for their turn, `no_credits` (no credits for the
+    model) or `allowance_exhausted` (its usage allowance is used up), with
+    the message "This Site's assistant isn't available right now".
   - **Platform brake.** While the Opengeni-wide platform brake is engaged,
     guest and `user` starts and messages return 503
     `site_platform_brake_engaged`.
@@ -442,8 +445,9 @@ Profiles:
 `GET /site/config` also returns the viewer's `capabilities`
 (`SiteViewerCapabilities`: `agent`, `workspaceTools`, `siteData`,
 `sqlQueryAudiences`, `viewAs`), computed from the same checks the routes
-enforce (the agent also reflects the platform brake and whether a
-credit-billed model exists for people outside the workspace, and answers a
+enforce (the agent also reflects the platform brake and, for people outside
+the workspace, whether a credit-billed model exists and the workspace can pay
+for it, an answer reused for up to 30 seconds; it answers a
 member without `sessions:create` as the outside visitor the agent serves them
 as, or `false` on a members-only Site, where `models.list` is empty and
 `sessions.*` answer 403 `not_available_for_viewer`; such a member's

@@ -33,7 +33,15 @@ import {
 } from "../src/site-publishing/limits";
 import { publicationAnswer } from "../src/mcp/site-publication-tools";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
-import { siteClientAddressKey } from "../src/site-publishing/runtime";
+import { siteClientAddressKey, siteOutsiderUnfundedRefusal } from "../src/site-publishing/runtime";
+import {
+  clearSiteOutsideFundingMemo,
+  rememberSiteOutsideFunding,
+  SITE_OUTSIDE_FUNDING_MEMO_MS,
+  siteUnfundedReason,
+} from "../src/site-publishing/agent-model";
+import { insufficientCreditsHttpError } from "../src/http/api-error";
+import { HTTPException } from "hono/http-exception";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
@@ -141,9 +149,11 @@ describe("gateway signature", () => {
       reason: "bad_timestamp",
     });
     const header = signed()[SITE_GATEWAY_SIGNATURE_HEADER]!;
-    expect(
-      verify({ ...signed(), [SITE_GATEWAY_SIGNATURE_HEADER]: `${header.slice(0, -2)}AA` }),
-    ).toMatchObject({ reason: "bad_signature" });
+    // About 1 in 1,024 signatures already end in "AA"; always change the tail.
+    const tampered = `${header.slice(0, -2)}${header.endsWith("AA") ? "BB" : "AA"}`;
+    expect(verify({ ...signed(), [SITE_GATEWAY_SIGNATURE_HEADER]: tampered })).toMatchObject({
+      reason: "bad_signature",
+    });
     expect(verify(signed(), { secrets: [undefined, undefined] })).toEqual({
       ok: false,
       reason: "not_configured",
@@ -511,6 +521,202 @@ describe("readiness", () => {
       outsideModel: { kind: "unavailable" },
     });
     expect(none.map((warning) => warning.code)).toEqual(["agent_model_outside_unavailable"]);
+  });
+
+  test("an outside model the workspace can't pay for warns the owner", () => {
+    const unfunded = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "same", model: "gpt-6-luna" },
+      outsideModelUnfunded: "no_credits",
+    });
+    expect(unfunded.map((warning) => warning.code)).toEqual(["agent_model_outside_no_credits"]);
+    expect(unfunded[0]!.message).toContain("no credits for gpt-6-luna");
+    // A used-up allowance is not a credits problem: adding credits won't help.
+    const allowance = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "same", model: "gpt-6-luna" },
+      outsideModelUnfunded: "allowance_exhausted",
+    });
+    expect(allowance.map((warning) => warning.code)).toEqual([
+      "agent_model_outside_allowance_used",
+    ]);
+    expect(allowance[0]!.message).toContain("usage allowance is used up");
+    expect(allowance[0]!.suggestion).not.toContain("credits");
+    // No assistant, or a funded one: nothing to say.
+    expect(
+      siteReadinessWarnings({
+        ...base,
+        page: null,
+        agent: { enabled: false, tools: null },
+        outsideModel: { kind: "same", model: "gpt-6-luna" },
+        outsideModelUnfunded: "no_credits",
+      }),
+    ).toEqual([]);
+    expect(
+      siteReadinessWarnings({
+        ...base,
+        page: null,
+        agent: { enabled: true, tools: null },
+        outsideModel: { kind: "fallback", model: "gpt-6" },
+        outsideModelUnfunded: null,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("a turn the workspace can't pay for, seen from outside the workspace", () => {
+  const refusal = (body: unknown, status = 402) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const noCredits = {
+    error: {
+      status: 402,
+      code: "payment_required",
+      message:
+        "No credits available for this model. Choose a model covered by your promotional credits or add credits.",
+      details: { code: "insufficient_credits" },
+    },
+  };
+
+  test("becomes the assistant's plain refusal for guests and signed-in outsiders", async () => {
+    for (const kind of ["guest", "user", "invited"] as const) {
+      const translated = await siteOutsiderUnfundedRefusal({ kind }, refusal(noCredits));
+      expect(translated?.status).toBe(403);
+      expect(translated!.message).toBe("This Site's assistant isn't available right now");
+      expect(translated!.details).toMatchObject({
+        code: "not_available_for_viewer",
+        feature: "agent",
+        reason: "no_credits",
+      });
+    }
+    const allowance = await siteOutsiderUnfundedRefusal(
+      { kind: "guest" },
+      refusal({ error: { code: "allowance_exhausted", message: "Allowance used up" } }),
+    );
+    expect(allowance?.status).toBe(403);
+    expect(allowance!.details).toMatchObject({ reason: "allowance_exhausted" });
+  });
+
+  test("a translated refusal consumes the body; a passed-through one leaves it readable", async () => {
+    const passed = refusal({ error: { code: "payment_required", message: "Other" } });
+    expect(await siteOutsiderUnfundedRefusal({ kind: "guest" }, passed)).toBeNull();
+    expect(await passed.json()).toEqual({ error: { code: "payment_required", message: "Other" } });
+    const translated = refusal(noCredits);
+    expect(await siteOutsiderUnfundedRefusal({ kind: "guest" }, translated)).not.toBeNull();
+    expect(translated.bodyUsed || translated.body?.locked).toBeTruthy();
+  });
+
+  test("only credit and allowance refusals count as the workspace being unable to pay", () => {
+    expect(siteUnfundedReason({ allowed: true })).toBeNull();
+    expect(siteUnfundedReason({ allowed: false, code: "insufficient_credits", message: "x" })).toBe(
+      "no_credits",
+    );
+    expect(siteUnfundedReason({ allowed: false, code: "allowance_exhausted", message: "x" })).toBe(
+      "allowance_exhausted",
+    );
+    expect(
+      siteUnfundedReason({
+        allowed: false,
+        code: "max_monthly_cost_micros_per_account",
+        message: "monthly model cost limit reached",
+      }),
+    ).toBeNull();
+  });
+
+  test("site.config reuses a funding answer briefly, shares one in flight, forgets failures", async () => {
+    clearSiteOutsideFundingMemo();
+    let calls = 0;
+    const check = (answer: "no_credits" | null) => async () => {
+      calls += 1;
+      return answer;
+    };
+    const t0 = 1_000_000;
+    // Concurrent callers share one check.
+    const [a, b] = await Promise.all([
+      rememberSiteOutsideFunding("k", t0, check("no_credits")),
+      rememberSiteOutsideFunding("k", t0, check(null)),
+    ]);
+    expect([a, b, calls]).toEqual(["no_credits", "no_credits", 1]);
+    // Within the window the answer is reused; other keys are separate.
+    expect(await rememberSiteOutsideFunding("k", t0 + 29_999, check(null))).toBe("no_credits");
+    expect(await rememberSiteOutsideFunding("other", t0, check(null))).toBeNull();
+    expect(calls).toBe(2);
+    // Once it lapses, the next caller checks again.
+    expect(
+      await rememberSiteOutsideFunding("k", t0 + SITE_OUTSIDE_FUNDING_MEMO_MS, check(null)),
+    ).toBeNull();
+    expect(calls).toBe(3);
+    // A failed check is not remembered.
+    await expect(
+      rememberSiteOutsideFunding("bad", t0, async () => {
+        throw new Error("db down");
+      }),
+    ).rejects.toThrow("db down");
+    expect(await rememberSiteOutsideFunding("bad", t0, check("no_credits"))).toBe("no_credits");
+    clearSiteOutsideFundingMemo();
+  });
+
+  test("core's no-credits refusal carries a stable details.code", () => {
+    const decision = { allowed: false, code: "insufficient_credits", message: "No credits" };
+    const mapped = insufficientCreditsHttpError(
+      new HTTPException(402, { message: "No credits", cause: decision }),
+    );
+    expect(mapped?.status).toBe(402);
+    expect(mapped?.code).toBe("payment_required");
+    expect(mapped?.details).toEqual({ code: "insufficient_credits" });
+    expect(mapped?.message).toBe("No credits");
+    for (const other of [
+      new HTTPException(402, { message: "x", cause: { ...decision, code: "allowance_exhausted" } }),
+      new HTTPException(429, { message: "x", cause: decision }),
+      new HTTPException(402, { message: "x" }),
+      new Error("x"),
+    ])
+      expect(insufficientCreditsHttpError(other)).toBeNull();
+  });
+
+  test("members, other refusals and the Site's own budgets pass through unchanged", async () => {
+    expect(await siteOutsiderUnfundedRefusal({ kind: "member" }, refusal(noCredits))).toBeNull();
+    // Only a 402 that says why: an unexplained payment_required is not
+    // assumed to be the workspace's credits.
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({ error: { code: "payment_required", message: "Something else" } }),
+      ),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({
+          error: {
+            code: "payment_required",
+            message: "Site usage",
+            details: { code: "site_platform_quota_exhausted" },
+          },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({ error: { code: "session_usage_limit_reached", message: "Budget" } }),
+      ),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal({ kind: "guest" }, refusal(noCredits, 429)),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        new Response("not json", { status: 402 }),
+      ),
+    ).toBeNull();
   });
 });
 

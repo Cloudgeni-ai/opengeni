@@ -43,8 +43,12 @@ use crate::error::{PlatformError, PlatformResult};
 
 #[path = "linux_input_route.rs"]
 mod input_route;
+#[path = "linux_keysym_layout.rs"]
+mod keysym_layout;
 #[path = "linux_keysyms.rs"]
 mod keysyms;
+
+pub use keysym_layout::{CompositorKey, CompositorLayout, KeymapNames};
 
 /// The OS family this build targets.
 #[must_use]
@@ -1864,14 +1868,6 @@ impl X11KeyboardMapping {
         keysyms::character_keysyms(character).find_map(|keysym| self.resolve(keysym))
     }
 
-    /// Whether any group and level of any keycode carries `keysym`. Unlike
-    /// [`Self::resolve`] (the first group's two shift levels, which XTEST can
-    /// press), this is what a compositor resolving keysyms itself across
-    /// groups and levels could deliver.
-    fn contains(&self, keysym: u32) -> bool {
-        keysym != 0 && self.keysyms.contains(&keysym)
-    }
-
     fn row(&self, keycode: u8) -> Option<&[u32]> {
         let start = usize::from(keycode.checked_sub(self.min_keycode)?) * self.keysyms_per_keycode;
         self.keysyms.get(start..start + self.keysyms_per_keycode)
@@ -2177,59 +2173,107 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
     parse_named_key_chord(name).map(|_| ())
 }
 
-/// The keysyms of one named key or chord, modifiers first, for compositors
-/// that accept keysym input directly but silently drop keysyms the layout
+/// The keys of one named key or chord, modifiers first, for compositors that
+/// take keysym input but silently drop a keysym their active layout group
 /// lacks (GNOME Wayland remote desktop).
 ///
 /// `layout_display` names an X display that mirrors the compositor's layout
-/// (Xwayland). When it is reachable, a keysym that no group and no level of
-/// that keymap carries is refused, since it can never be delivered. Anything
-/// some group or level carries is passed on: the compositor picks the keycode
-/// in its active group and applies the level modifier itself (a Latin
-/// shortcut on a non-Latin first layout, an AltGr character). Without the
-/// display the keysyms are returned unchecked.
+/// (Xwayland), and `layout` what the compositor reports about it, as for
+/// [`linux_layout_text_keysyms`]. A key the compositor types from its active
+/// group (from every group when that is unknown) is sent as its keysym. A key
+/// only another group has is sent as the physical key that gives it there,
+/// with Shift when it is that group's Shift level, the way a person presses a
+/// Latin shortcut on a non-Latin layout: applications match shortcuts by
+/// keycode across groups. A key no group has at its base or Shift level is
+/// refused. Without the display the keysyms are returned unchecked.
+///
+/// A chord of keys that are not characters (Enter, Escape, arrows, function
+/// keys, modifiers) does not depend on the layout, so it uses the display's
+/// keymap as it is, without waiting for the compositor's keymap names.
 ///
 /// # Errors
 ///
 /// The same unsupported-input failures as [`validate_linux_named_key_chord`],
-/// and one naming the first keysym the layout lacks.
-pub fn linux_named_key_chord_keysyms(
+/// one naming the first keysym the layout cannot give, and the timeout of
+/// [`linux_layout_text_keysyms`] while the display's keymap is not the
+/// compositor's yet, for a chord whose key is a character.
+pub fn linux_named_key_chord_keys(
     layout_display: Option<&str>,
+    layout: &CompositorLayout,
     name: &str,
-) -> PlatformResult<Vec<u32>> {
+) -> PlatformResult<Vec<CompositorKey>> {
     let keysyms = parse_named_key_chord(name)?;
-    layout_named_keysyms(layout_mapping(layout_display).as_ref(), keysyms)
+    let expected = if keysyms.iter().all(|&keysym| layout_independent(keysym)) {
+        None
+    } else {
+        layout.keymap.as_ref()
+    };
+    let keymap = match layout_connection(layout_display) {
+        Some(conn) => synced_layout_keymap(&conn, expected)?,
+        None => None,
+    };
+    layout_chord_keys(keymap.as_ref(), layout.active_group, &keysyms)
 }
 
-fn layout_named_keysyms(
-    mapping: Option<&X11KeyboardMapping>,
-    keysyms: Vec<u32>,
-) -> PlatformResult<Vec<u32>> {
-    if let Some(missing) =
-        mapping.and_then(|mapping| keysyms.iter().find(|&&keysym| !mapping.contains(keysym)))
-    {
-        return Err(PlatformError::Unsupported(format!(
-            "X11 keymap does not expose named key/chord component {missing:#x}"
-        )));
-    }
-    Ok(keysyms)
+/// Whether a keysym names a key that is not a character: the function,
+/// cursor, editing and modifier keys (keysyms 0xff00-0xffff), which every
+/// layout keeps in the same place.
+fn layout_independent(keysym: u32) -> bool {
+    (0xff00..=0xffff).contains(&keysym)
 }
 
-/// The keymap of a layout display (Xwayland), or `None` when it is absent or
-/// unreachable.
-fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
-    layout_display
-        .and_then(|display| {
-            // Xwayland runs as the user; its socket file and server are
-            // checked like any other display before the cookie is sent.
-            X11Display {
-                server: XServerCheck::AgentUser,
-                ..X11Display::named(display)
+fn layout_chord_keys(
+    keymap: Option<&keysym_layout::LayoutKeymap>,
+    active_layout: Option<u32>,
+    keysyms: &[u32],
+) -> PlatformResult<Vec<CompositorKey>> {
+    let Some(keymap) = keymap else {
+        return Ok(keysyms.iter().copied().map(CompositorKey::Keysym).collect());
+    };
+    let missing = |keysym: u32| {
+        PlatformError::Unsupported(format!(
+            "X11 keymap does not expose named key/chord component {keysym:#x}"
+        ))
+    };
+    // X11 keycodes are Linux evdev keycodes plus 8.
+    let evdev = |keycode: u8| CompositorKey::Keycode(u32::from(keycode).saturating_sub(8));
+    let mut keys = Vec::with_capacity(keysyms.len() + 1);
+    for &keysym in keysyms {
+        if keymap.types(keysym, active_layout) {
+            keys.push(CompositorKey::Keysym(keysym));
+            continue;
+        }
+        match keymap.physical_key(keysym) {
+            Some((keycode, 0)) => keys.push(evdev(keycode)),
+            Some((keycode, _shift_level)) => {
+                if !keysyms.contains(&keysym_layout::SHIFT_L) {
+                    let (shift, _) = keymap
+                        .physical_key(keysym_layout::SHIFT_L)
+                        .ok_or_else(|| missing(keysym))?;
+                    keys.push(evdev(shift));
+                }
+                keys.push(evdev(keycode));
             }
-            .connect()
-            .ok()
-        })
-        .and_then(|(conn, _)| keyboard_mapping(&conn))
+            None => return Err(missing(keysym)),
+        }
+    }
+    Ok(keys)
+}
+
+fn layout_connection(
+    layout_display: Option<&str>,
+) -> Option<x11rb::rust_connection::RustConnection> {
+    layout_display.and_then(|display| {
+        // Xwayland runs as the user; its socket file and server are checked
+        // like any other display before the cookie is sent.
+        X11Display {
+            server: XServerCheck::AgentUser,
+            ..X11Display::named(display)
+        }
+        .connect()
+        .ok()
+        .map(|(conn, _)| conn)
+    })
 }
 
 /// The keysym that types each character of `text` in the active keyboard
@@ -2237,25 +2281,71 @@ fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
 /// keysyms the layout lacks.
 ///
 /// `layout_display` names an X display that mirrors the compositor's layout
-/// (Xwayland). When it is reachable every character is checked against that
-/// layout; otherwise each character maps to its canonical keysym unchecked.
+/// (Xwayland). When it is reachable every character is checked the way the
+/// compositor resolves it (see [`keysym_layout`]): in the compositor's active
+/// layout group, or in every group when that is unknown. Otherwise each
+/// character maps to its canonical keysym unchecked. When `layout` names the
+/// compositor's keymap, the display's keymap is used only once it carries
+/// those names.
 ///
 /// # Errors
 ///
 /// Returns an unsupported-input failure naming the first character the layout
-/// cannot type.
+/// cannot type, or a timeout when the display has not taken the compositor's
+/// keymap within [`LAYOUT_SYNC_WAIT`].
 pub fn linux_layout_text_keysyms(
     layout_display: Option<&str>,
+    layout: &CompositorLayout,
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
-    let mapping = layout_mapping(layout_display);
+    let keymap = match layout_connection(layout_display) {
+        Some(conn) => synced_layout_keymap(&conn, layout.keymap.as_ref())?,
+        None => None,
+    };
+    layout_text_keysyms(keymap.as_ref(), layout.active_group, text)
+}
+
+/// How long a layout display may take to show the compositor's keymap.
+/// Xwayland started on demand has a default keymap for its first moments.
+const LAYOUT_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const LAYOUT_SYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The layout display's keymap once it carries `expected` names. `None` when
+/// the display has no XKB keymap to read.
+fn synced_layout_keymap(
+    conn: &x11rb::rust_connection::RustConnection,
+    expected: Option<&KeymapNames>,
+) -> PlatformResult<Option<keysym_layout::LayoutKeymap>> {
+    let deadline = std::time::Instant::now() + LAYOUT_SYNC_WAIT;
+    loop {
+        let Some(keymap) = keysym_layout::LayoutKeymap::read(conn) else {
+            return Ok(None);
+        };
+        match expected {
+            Some(expected) if !expected.is_empty() && keymap.names() != expected => {}
+            _ => return Ok(Some(keymap)),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(PlatformError::Timeout(
+                "the keyboard layout is not ready yet; retry, or use clipboard paste".to_string(),
+            ));
+        }
+        std::thread::sleep(LAYOUT_SYNC_POLL);
+    }
+}
+
+fn layout_text_keysyms(
+    keymap: Option<&keysym_layout::LayoutKeymap>,
+    active_layout: Option<u32>,
+    text: &str,
+) -> PlatformResult<Vec<u32>> {
     text.chars()
-        .map(|character| match &mapping {
+        .map(|character| match keymap {
             None => Ok(keysyms::text_keysym(character)),
-            Some(mapping) => match character {
+            Some(keymap) => match character {
                 '\n' | '\r' | '\t' => Ok(keysyms::text_keysym(character)),
                 _ => keysyms::character_keysyms(character)
-                    .find(|&keysym| mapping.resolve(keysym).is_some())
+                    .find(|&keysym| keymap.types(keysym, active_layout))
                     .ok_or_else(|| {
                         PlatformError::Unsupported(format!(
                             "the active keyboard layout cannot type U+{:04X}; use clipboard paste",
@@ -3090,8 +3180,8 @@ mod tests {
             vec![0xffe9, 0xffbf]
         );
         assert_eq!(
-            linux_named_key_chord_keysyms(None, "Shift+F10").unwrap(),
-            vec![0xffe1, 0xffc7]
+            linux_named_key_chord_keys(None, &CompositorLayout::default(), "Shift+F10").unwrap(),
+            vec![CompositorKey::Keysym(0xffe1), CompositorKey::Keysym(0xffc7)]
         );
     }
 
@@ -3106,82 +3196,11 @@ mod tests {
             assert!(!accepted.contains("NumLock"), "{error}");
             assert!(accepted.contains("ScrollLock"), "{error}");
             assert!(
-                linux_named_key_chord_keysyms(None, chord).is_err(),
+                linux_named_key_chord_keys(None, &CompositorLayout::default(), chord).is_err(),
                 "{chord}"
             );
             assert!(validate_linux_named_key_chord(chord).is_err(), "{chord}");
         }
-    }
-
-    #[test]
-    fn keysym_input_refuses_named_keys_the_layout_lacks() {
-        // A compositor taking keysyms drops one its layout lacks while
-        // reporting success, so a chord is checked as a whole first.
-        let mapping = spare_keymap();
-        assert_eq!(
-            layout_named_keysyms(Some(&mapping), vec![0xffe1, 0xff0d]).unwrap(),
-            [0xffe1, 0xff0d]
-        );
-        for keysyms in [vec![0xffca], vec![0xffe1, 0xffd1], vec![0xffe3, 0x61]] {
-            let error = layout_named_keysyms(Some(&mapping), keysyms.clone())
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("X11 keymap does not expose named key/chord component"),
-                "{keysyms:?}: {error}"
-            );
-        }
-        // No layout display: unchecked, as for text.
-        assert_eq!(layout_named_keysyms(None, vec![0xffca]).unwrap(), [0xffca]);
-    }
-
-    /// A core keymap as an XKB server reports it: per keycode, group 1 levels
-    /// 1-2, group 2 levels 1-2, then group 1 levels 3-4.
-    fn core_keymap(rows: &[[u32; 6]]) -> X11KeyboardMapping {
-        X11KeyboardMapping {
-            min_keycode: 8,
-            keysyms_per_keycode: 6,
-            keysyms: rows.iter().flatten().copied().collect(),
-            modifier_keycodes: BTreeSet::new(),
-        }
-    }
-
-    #[test]
-    fn keysym_input_accepts_keys_on_any_group_or_level() {
-        let chord = |mapping: &X11KeyboardMapping, name: &str| {
-            layout_named_keysyms(Some(mapping), parse_named_key_chord(name).unwrap())
-        };
-        let control = [0xffe3, 0, 0xffe3, 0, 0, 0];
-        let shift = [0xffe1, 0, 0xffe1, 0, 0, 0];
-        // ru,us: Latin letters are only in the second group.
-        let ru_us = core_keymap(&[
-            control,
-            shift,
-            [0x6d3, 0x6f3, 0x63, 0x43, 0, 0], // Cyrillic_es / c
-            [0x6c5, 0x6e5, 0x74, 0x54, 0, 0], // Cyrillic_ie / t
-            [0x6cd, 0x6ed, 0x76, 0x56, 0, 0], // Cyrillic_em / v
-        ]);
-        for name in ["Ctrl+c", "Ctrl+v", "Ctrl+Shift+t", "c"] {
-            assert!(chord(&ru_us, name).is_ok(), "ru,us {name}");
-        }
-        // de: `@` is AltGr+q, the first group's third level.
-        let de = core_keymap(&[control, [0x71, 0x51, 0x71, 0x51, 0x40, 0x7d9]]);
-        assert_eq!(chord(&de, "@").unwrap(), [0x40]);
-        // us: F13 is on no group or level, so it could never be delivered.
-        let us = core_keymap(&[
-            control,
-            [0x63, 0x43, 0x63, 0x43, 0, 0],
-            [0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf],
-        ]);
-        assert!(chord(&us, "Ctrl+c").is_ok());
-        assert!(chord(&us, "F2").is_ok());
-        let error = chord(&us, "F13").unwrap_err().to_string();
-        assert!(
-            error.contains("X11 keymap does not expose named key/chord component 0xffca"),
-            "{error}"
-        );
-        // NoSymbol is never a key.
-        assert!(!us.contains(0));
     }
 
     #[test]
@@ -3191,12 +3210,185 @@ mod tests {
         }
         assert_eq!(parse_named_key_chord("Super").unwrap(), vec![0xffeb]);
         assert_eq!(
-            linux_named_key_chord_keysyms(None, "Meta").unwrap(),
-            vec![0xffeb]
+            linux_named_key_chord_keys(None, &CompositorLayout::default(), "Meta").unwrap(),
+            vec![CompositorKey::Keysym(0xffeb)]
         );
         // Two modifiers still need a key, and a repeat is still refused.
         assert!(parse_named_key_chord("Ctrl+Alt").is_err());
         assert!(parse_named_key_chord("Super+Super").is_err());
+    }
+
+    const SHIFT_KEY: (u8, &[&[u32]]) = (50, &[&[0xffe1]]);
+    const ALTGR_KEY: (u8, &[&[u32]]) = (92, &[&[0xfe03]]);
+
+    fn layout_text(
+        keymap: &keysym_layout::LayoutKeymap,
+        active: Option<u32>,
+        text: &str,
+    ) -> Result<Vec<u32>, String> {
+        layout_text_keysyms(Some(keymap), active, text).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn layout_text_types_altgr_characters() {
+        // de: `@` is AltGr+q, `¿` is AltGr+Shift+ß (a fourth level, which the
+        // compositor would send unshifted as `ß`).
+        let de = keysym_layout::tests::keymap(&[
+            (24, &[&[0x71, 0x51, 0x40, 0x7d9]]),
+            (20, &[&[0xdf, 0x3f, 0x5c, 0xbf]]),
+            (38, &[&[0x61, 0x41, 0xe6, 0xc6]]),
+            (56, &[&[0x62, 0x42]]),
+            SHIFT_KEY,
+            ALTGR_KEY,
+        ]);
+        assert_eq!(layout_text(&de, None, "a@b"), Ok(vec![0x61, 0x40, 0x62]));
+        assert_eq!(layout_text(&de, Some(0), "A\\"), Ok(vec![0x41, 0x5c]));
+        let error = layout_text(&de, None, "¿").unwrap_err();
+        assert!(
+            error.contains("the active keyboard layout cannot type U+00BF; use clipboard paste"),
+            "{error}"
+        );
+        // Without an AltGr key in the layout the third level is out of reach.
+        let no_altgr = keysym_layout::tests::keymap(&[(24, &[&[0x71, 0x51, 0x40]]), SHIFT_KEY]);
+        assert!(layout_text(&no_altgr, None, "@").is_err());
+        assert_eq!(layout_text(&no_altgr, None, "Q"), Ok(vec![0x51]));
+    }
+
+    #[test]
+    fn layout_text_follows_the_active_group() {
+        // ru,us: Latin letters only in the second group; digits and space in
+        // both.
+        let ru_us = keysym_layout::tests::keymap(&[
+            (43, &[&[0x6d2, 0x6f2], &[0x68, 0x48]]), // Cyrillic_er / h
+            (26, &[&[0x6d5, 0x6f5], &[0x65, 0x45]]), // Cyrillic_u / e
+            (46, &[&[0x6c4, 0x6e4], &[0x6c, 0x4c]]), // Cyrillic_de / l
+            (32, &[&[0x6dd, 0x6fd], &[0x6f, 0x4f]]), // Cyrillic_shcha / o
+            (10, &[&[0x31, 0x21], &[0x31, 0x21]]),
+            (65, &[&[0x20]]),
+            (50, &[&[0xffe1], &[0xffe1]]),
+        ]);
+        assert_eq!(
+            layout_text(&ru_us, Some(1), "Hello 1"),
+            Ok(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x31])
+        );
+        // In the Russian group Latin would be dropped, and when the active
+        // group is unknown only what every group types is accepted.
+        for active in [Some(0), None, Some(7)] {
+            let error = layout_text(&ru_us, active, "hello").unwrap_err();
+            assert!(error.contains("cannot type U+0068"), "{active:?}: {error}");
+            assert_eq!(
+                layout_text(&ru_us, active, "1 !"),
+                Ok(vec![0x31, 0x20, 0x21])
+            );
+        }
+        assert_eq!(layout_text(&ru_us, Some(0), "ру"), Ok(vec![0x6d2, 0x6d5]));
+        // Line breaks and tabs are keys, not text.
+        assert_eq!(layout_text(&ru_us, None, "\n"), Ok(vec![0xff0d]));
+        // No layout display: unchecked.
+        assert_eq!(
+            layout_text_keysyms(None, None, "hé").unwrap(),
+            vec![0x68, 0xe9]
+        );
+    }
+
+    fn chord(
+        keymap: Option<&keysym_layout::LayoutKeymap>,
+        active: Option<u32>,
+        name: &str,
+    ) -> Result<Vec<CompositorKey>, String> {
+        layout_chord_keys(keymap, active, &parse_named_key_chord(name).unwrap())
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn chords_follow_the_active_group_or_press_the_physical_key() {
+        use CompositorKey::{Keycode, Keysym};
+        const CONTROL: u32 = 0xffe3;
+        const SHIFT: u32 = 0xffe1;
+        // ru,us: Latin letters only in the second group; modifiers and
+        // function keys have one group, which serves every group.
+        let ru_us = keysym_layout::tests::keymap(&[
+            (37, &[&[CONTROL]]),
+            (50, &[&[SHIFT]]),
+            (64, &[&[0xffe9]]),
+            (68, &[&[0xffbf]]),
+            (54, &[&[0x6d3, 0x6f3], &[0x63, 0x43]]), // Cyrillic_es / c
+            (28, &[&[0x6c5, 0x6e5], &[0x74, 0x54]]), // Cyrillic_ie / t
+            (24, &[&[0x6ca, 0x6ea], &[0x71, 0x51, 0x40]]), // Cyrillic_shorti / q, @ third level
+        ]);
+        let ru = Some(0);
+        // With Russian active, Mutter has no `c` to resolve and would drop it;
+        // the physical C key (evdev 46) gives Ctrl+C the way a person's does.
+        assert_eq!(
+            chord(Some(&ru_us), ru, "Ctrl+c"),
+            Ok(vec![Keysym(CONTROL), Keycode(46)])
+        );
+        assert_eq!(
+            chord(Some(&ru_us), ru, "Ctrl+Shift+t"),
+            Ok(vec![Keysym(CONTROL), Keysym(SHIFT), Keycode(20)])
+        );
+        // A Shift-level key presses the physical Shift too, unless the chord
+        // already holds it.
+        assert_eq!(
+            chord(Some(&ru_us), ru, "Ctrl+C"),
+            Ok(vec![Keysym(CONTROL), Keycode(42), Keycode(46)])
+        );
+        assert_eq!(
+            chord(Some(&ru_us), ru, "Ctrl+Shift+C"),
+            Ok(vec![Keysym(CONTROL), Keysym(SHIFT), Keycode(46)])
+        );
+        assert_eq!(
+            chord(Some(&ru_us), ru, "Alt+F2"),
+            Ok(vec![Keysym(0xffe9), Keysym(0xffbf)])
+        );
+        // With US active the keysyms resolve as they are.
+        assert_eq!(
+            chord(Some(&ru_us), Some(1), "Ctrl+c"),
+            Ok(vec![Keysym(CONTROL), Keysym(0x63)])
+        );
+        // Group unknown: like text, a keysym is sent only when every group
+        // types it; otherwise the physical key, which is right in any group.
+        assert_eq!(
+            chord(Some(&ru_us), None, "Ctrl+c"),
+            Ok(vec![Keysym(CONTROL), Keycode(46)])
+        );
+        assert_eq!(chord(Some(&ru_us), None, "F2"), Ok(vec![Keysym(0xffbf)]));
+        // Refused: a key no group has (F13), and one only another group's
+        // AltGr level gives, which no physical key reaches with the active
+        // group's AltGr.
+        for (name, keysym) in [("F13", "0xffca"), ("Ctrl+@", "0x40")] {
+            let error = chord(Some(&ru_us), ru, name).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "X11 keymap does not expose named key/chord component {keysym}"
+                )),
+                "{name}: {error}"
+            );
+        }
+        // No layout display: unchecked.
+        assert_eq!(chord(None, None, "F13"), Ok(vec![Keysym(0xffca)]));
+    }
+
+    #[test]
+    fn chords_with_altgr_keys_in_the_active_group_are_keysyms() {
+        // de: `@` is AltGr+q, the third level, which Mutter presses itself.
+        let de = keysym_layout::tests::keymap(&[
+            (37, &[&[0xffe3]]),
+            (24, &[&[0x71, 0x51, 0x40, 0x7d9]]),
+            SHIFT_KEY,
+            ALTGR_KEY,
+        ]);
+        assert_eq!(
+            chord(Some(&de), Some(0), "Ctrl+@"),
+            Ok(vec![
+                CompositorKey::Keysym(0xffe3),
+                CompositorKey::Keysym(0x40)
+            ])
+        );
+        assert_eq!(
+            chord(Some(&de), None, "@"),
+            Ok(vec![CompositorKey::Keysym(0x40)])
+        );
     }
 
     #[test]

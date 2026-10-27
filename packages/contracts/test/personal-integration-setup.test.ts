@@ -5,6 +5,7 @@ import {
 } from "../src/organization-access";
 import {
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  inChatCapabilitySetup,
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
   personalIntegrationSetupAccess,
@@ -110,5 +111,48 @@ describe("personal integration setup", () => {
     });
     expect(saved.preset).toBe("full");
     expect(saved.permissions).toContain("connections:personal");
+  });
+
+  test("in-chat setup: what the agent's card can offer this person", () => {
+    const chat = ["workspace:read", "sessions:read", "sessions:control"];
+    const personal = [...chat, "connections:personal"];
+    const definition = "api:integration:microsoft-outlook-mail";
+    expect(inChatCapabilitySetup({ permissions: chat }, definition, undefined)).toEqual({
+      kind: "unavailable",
+    });
+    expect(inChatCapabilitySetup({ permissions: personal }, definition, undefined)).toEqual({
+      kind: "integration",
+    });
+    expect(
+      inChatCapabilitySetup({ permissions: ["connections:personal"] }, definition, undefined),
+    ).toEqual({ kind: "unavailable" });
+
+    const gmail = "mcp:gmail";
+    expect(inChatCapabilitySetup({ permissions: chat }, gmail, reviewed)).toEqual({
+      kind: "unavailable",
+    });
+    expect(inChatCapabilitySetup({ permissions: personal }, gmail, reviewed)).toEqual({
+      kind: "card",
+      personalOnly: true,
+    });
+    expect(inChatCapabilitySetup({ permissions: ["workspace:admin"] }, gmail, reviewed)).toEqual({
+      kind: "card",
+      personalOnly: false,
+    });
+    // A workspace's shared account needs only read access to use it here.
+    const shared = { ...reviewed, enabled: true, connectionRef: { subjectScope: "workspace" } };
+    expect(
+      inChatCapabilitySetup({ permissions: [...chat, "connections:read"] }, gmail, shared),
+    ).toEqual({ kind: "card", personalOnly: false });
+    expect(inChatCapabilitySetup({ permissions: personal }, gmail, shared)).toEqual({
+      kind: "unavailable",
+    });
+    // Other kinds of setup are not decided here.
+    expect(inChatCapabilitySetup({ permissions: chat }, "api:github-app", undefined)).toEqual({
+      kind: "default",
+    });
+    expect(
+      inChatCapabilitySetup({ permissions: chat }, gmail, { ...reviewed, authKind: "api_key" }),
+    ).toEqual({ kind: "default" });
   });
 });
