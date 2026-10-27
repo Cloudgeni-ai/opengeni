@@ -495,8 +495,7 @@ downloads and entry/history reads retain their ordinary permission checks.
 
 - Contracts: `packages/contracts/src/knowledge-entries.ts`, `agent-learning.ts`,
   `agent-instruction-changes.ts`.
-- Persistence and lifecycle: `packages/db/drizzle/0461_unified_knowledge.sql`,
-  `packages/db/src/knowledge-entries.ts`, `knowledge-migration.ts`,
+- Persistence and lifecycle: `packages/db/src/knowledge-entries.ts`,
   `knowledge-document-preparation.ts`, `knowledge-indexing.ts`.
 - Host authority, source preparation and search: `packages/core/src/domain/knowledge*.ts`
   and `file-owner.ts`.

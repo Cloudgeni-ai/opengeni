@@ -11,8 +11,8 @@ Canonical implementation:
 - contracts: `packages/contracts/src/scoped-knowledge.ts`
 - Drizzle declarations: `packages/db/src/scoped-knowledge-schema.ts`
 - repository/domain API: `packages/db/src/scoped-knowledge.ts`
-- migration and PostgreSQL invariants:
-  `packages/db/drizzle/0154_scoped_knowledge_foundation.sql`
+- PostgreSQL invariants: the `opengeni_private.scoped_knowledge_scope_*`
+  functions in the migration baseline
 
 ## Authority boundaries
 

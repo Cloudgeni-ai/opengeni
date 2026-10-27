@@ -738,7 +738,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
 async function capturedDictation(
   storage: ReturnType<typeof memoryStorage>,
   seconds = 3,
-  options: { language?: string } = {},
+  options: { language?: string; keyterms?: string[] } = {},
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -898,10 +898,13 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
   });
 
-  test("a dictation started in a language is heard in it", async () => {
+  test("a dictation started in a language is heard in it, listening for the vocabulary", async () => {
     if (!client) return;
     const storage = memoryStorage();
-    const dictation = await capturedDictation(storage, 3, { language: "nb" });
+    const dictation = await capturedDictation(storage, 3, {
+      language: "nb",
+      keyterms: ["Kubernetes"],
+    });
     const calls: TranscriptionRequest[] = [];
     const run = dictationActivities(storage, async (request) => {
       calls.push(request);
@@ -918,6 +921,7 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       outcome: "complete",
     });
     expect(calls.map((call) => call.language)).toEqual(["nb"]);
+    expect(calls.map((call) => call.keyterms)).toEqual([["Kubernetes"]]);
   });
 
   test("a retried dictation asks afresh and is still billed once per piece", async () => {
