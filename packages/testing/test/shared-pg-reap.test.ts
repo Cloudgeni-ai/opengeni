@@ -25,6 +25,7 @@ import {
   type DatabaseOwner,
   databaseOwnerComment,
   isPerTestDatabaseName,
+  isScratchTestRoleName,
   isTemplateDatabaseName,
   ownerStatus,
   parseDatabaseOwnerComment,
@@ -34,6 +35,8 @@ import {
   quoteIdent,
   quoteLiteral,
   reapOrphanedTestDatabases,
+  scratchRolePattern,
+  scrubScratchRoleGrants,
   templateSourceFiles,
   templateStampComment,
 } from "../src/shared-pg";
@@ -109,6 +112,19 @@ describe("naming scheme", () => {
   });
 
   test("templates are recognised by their fingerprinted names", () => {
+    expect(isScratchTestRoleName(`opengeni_bypass_${"a".repeat(32)}`)).toBe(true);
+    expect(isScratchTestRoleName(`migration_0138_${"a".repeat(32)}`)).toBe(true);
+    for (const name of [
+      "opengeni_app",
+      "opengeni_bypass_",
+      `migration_138_${"a".repeat(32)}`,
+      `opengeni_bypass_${"a".repeat(31)}`,
+      `opengeni_bypass_${"A".repeat(32)}`,
+      `xopengeni_bypass_${"a".repeat(32)}`,
+      "postgres",
+    ]) {
+      expect(isScratchTestRoleName(name)).toBe(false);
+    }
     expect(isTemplateDatabaseName("og_test_template_0123456789ab")).toBe(true);
     expect(isTemplateDatabaseName("og_test_template_0123456789ab_w01234567")).toBe(true);
     expect(isTemplateDatabaseName("og_test_template_x")).toBe(false);
@@ -512,6 +528,139 @@ describe("reaping a real cluster", () => {
       const second = await reap(options);
       expect(second.templatesDropped).toEqual([idle]);
       for (const kept of [newest, settling, legacyInUse]) expect(await exists(kept)).toBe(true);
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "drops a dead owner's scratch role with its memberships and keeps live, connected and unproven ones",
+    async () => {
+      if (!admin) return;
+      const { sub, reap } = subScope("r");
+      const rolePrefix = `${sub}bypass_`;
+      const hex32 = () => crypto.randomUUID().replace(/-/g, "");
+      const roleExists = async (name: string) =>
+        (await admin!`SELECT 1 FROM pg_roles WHERE rolname = ${name}`).length > 0;
+      const createRole = async (comment?: string, login = "") => {
+        const name = `${rolePrefix}${hex32()}`;
+        await admin!.unsafe(`CREATE ROLE ${quoteIdent(name)} ${login || "NOLOGIN"}`);
+        if (comment !== undefined) {
+          await admin!.unsafe(`COMMENT ON ROLE ${quoteIdent(name)} IS ${quoteLiteral(comment)}`);
+        }
+        return name;
+      };
+      const dead = await createRole(databaseOwnerComment(deadOwner));
+      // A kept database and a template that carry grants to it, the way a
+      // template built while the role existed would.
+      const kept = await createDatabase(`${sub}keep_${hex12()}`, DB_RETAINED_COMMENT);
+      const template = await createDatabase(
+        `${sub}template_${hex12()}`,
+        templateStampComment(Date.now()),
+      );
+      for (const name of [kept, template]) {
+        const target = postgres(databaseUrl(name), { max: 1, onnotice: () => undefined });
+        try {
+          await target.unsafe(`CREATE TABLE probe (id int)`);
+          await target.unsafe(`GRANT SELECT ON probe TO ${quoteIdent(dead)}`);
+        } finally {
+          await target.end();
+        }
+      }
+      await admin`UPDATE pg_database SET datistemplate = true WHERE datname = ${template}`;
+      // Memberships in both directions, like `grant opengeni_app to <bypass>`.
+      const group = `${sub}group`;
+      const member = `${sub}member`;
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(group)} NOLOGIN`);
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(member)} NOLOGIN`);
+      await admin.unsafe(`GRANT ${quoteIdent(group)} TO ${quoteIdent(dead)}`);
+      await admin.unsafe(`GRANT ${quoteIdent(dead)} TO ${quoteIdent(member)}`);
+      const password = hex32();
+      const connected = await createRole(
+        databaseOwnerComment(deadOwner),
+        `LOGIN PASSWORD ${quoteLiteral(password)}`,
+      );
+      const live = await createRole(databaseOwnerComment(liveOwner));
+      const foreign = await createRole(databaseOwnerComment(currentDatabaseOwner()));
+      const annotated = await createRole("kept by hand");
+      const unowned = await createRole();
+      const offScheme = `${rolePrefix}notours`;
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(offScheme)} NOLOGIN`);
+      await admin.unsafe(
+        `COMMENT ON ROLE ${quoteIdent(offScheme)} IS ${quoteLiteral(databaseOwnerComment(deadOwner))}`,
+      );
+
+      const url = new URL(adminUrl);
+      url.username = connected;
+      url.password = password;
+      const holder = postgres(url.toString(), { max: 1 });
+      try {
+        await holder`SELECT 1`;
+        const clock = { now: () => Date.now(), pruneTemplates: false, rolePrefix };
+        const first = await reap(clock);
+        expect(first.errors).toEqual([]);
+        expect(first.rolesDropped).toEqual([dead]);
+        expect(await roleExists(dead)).toBe(false);
+        const memberships = await admin`
+          SELECT 1 FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member
+           WHERE g.rolname IN (${group}, ${member}) OR r.rolname IN (${group}, ${member})`;
+        expect(memberships).toHaveLength(0);
+        // Its grants were revoked where they lived; both databases remain.
+        const grants = await admin`
+          SELECT 1 FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid
+           WHERE d.datname IN (${kept}, ${template}) AND s.deptype = 'a'`;
+        expect(grants).toHaveLength(0);
+        for (const name of [kept, template]) expect(await exists(name)).toBe(true);
+        // An unowned role goes only after staying unused across the window;
+        // a foreign owner's waits out its longer window.
+        const later = await reap({ ...clock, now: () => Date.now() + 16 * 60_000 });
+        expect(later.errors).toEqual([]);
+        expect(later.rolesDropped).toEqual([unowned]);
+        for (const name of [connected, live, foreign, annotated, offScheme]) {
+          expect(await roleExists(name)).toBe(true);
+        }
+      } finally {
+        await holder.end();
+      }
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "scrubbing a database removes scratch role grants and nothing else",
+    async () => {
+      if (!admin) return;
+      const { sub } = subScope("s");
+      const scratch = `${sub}bypass_${crypto.randomUUID().replace(/-/g, "")}`;
+      const other = `${sub}other`;
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(scratch)} NOLOGIN`);
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(other)} NOLOGIN`);
+      const database = await createDatabase(`${sub}db_${hex12()}`, DB_RETAINED_COMMENT);
+      const target = postgres(databaseUrl(database), { max: 1, onnotice: () => undefined });
+      try {
+        await target.unsafe(`CREATE TABLE probe (id int)`);
+        await target.unsafe(`CREATE FUNCTION probe_fn() RETURNS int LANGUAGE sql AS 'SELECT 1'`);
+        await target.unsafe(
+          `GRANT SELECT ON probe TO ${quoteIdent(scratch)}, ${quoteIdent(other)}`,
+        );
+        await target.unsafe(`GRANT EXECUTE ON FUNCTION probe_fn() TO ${quoteIdent(scratch)}`);
+        await target.unsafe(
+          `ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO ${quoteIdent(scratch)}`,
+        );
+        const scrubbed = await scrubScratchRoleGrants(target, {
+          pattern: scratchRolePattern(`${sub}bypass_`),
+        });
+        expect(scrubbed).toEqual([scratch]);
+        const [privileges] = await target<{ scratch: boolean; other: boolean }[]>`
+          SELECT has_table_privilege(${scratch}, 'probe', 'SELECT') AS scratch,
+                 has_table_privilege(${other}, 'probe', 'SELECT') AS other`;
+        expect(privileges).toEqual({ scratch: false, other: true });
+        // Nothing left in this database holds the role.
+        await target.unsafe(`REVOKE ALL ON probe FROM ${quoteIdent(other)}`);
+      } finally {
+        await target.end();
+      }
+      await admin.unsafe(`DROP ROLE ${quoteIdent(scratch)}`);
     },
     DB_TEST_TIMEOUT_MS,
   );

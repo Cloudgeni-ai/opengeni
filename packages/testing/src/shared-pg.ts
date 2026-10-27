@@ -718,6 +718,22 @@ async function ensureTemplateBuilt(withheld: readonly string[] = []): Promise<vo
     rlsStrategy: "force",
   });
 
+  // Some migrations copy grants to every role that already holds certain
+  // privileges, including another test's live scratch role (a member of
+  // opengeni_app). Keep those out of the template: every clone would inherit
+  // them, and the scratch role could then never be dropped. Best effort.
+  const scrubber = postgres(templateUrl, { max: 1, onnotice: () => undefined });
+  try {
+    const scrubbed = await scrubScratchRoleGrants(scrubber);
+    if (scrubbed.length > 0) {
+      void reaperNote(`removed scratch role grants from ${TEMPLATE_DB}: ${scrubbed.join(" ")}`);
+    }
+  } catch (error) {
+    void reaperNote(`could not scrub scratch role grants from ${TEMPLATE_DB}: ${String(error)}`);
+  } finally {
+    await scrubber.end().catch(() => undefined);
+  }
+
   // Flip the ready sentinel. This must run with NO open connections to the
   // template; the migrate + grant pools above are already closed. Marking it a
   // template also lets the subsequent `CREATE DATABASE ... TEMPLATE` proceed.
@@ -1133,22 +1149,24 @@ export async function reapSharedTestDatabases(
   const scoped = scope && /^og_[a-z0-9_]+$/u.test(scope) ? scope : undefined;
   const result = await reapOrphanedTestDatabases({
     ...options,
-    ...(scoped ? { scopePrefix: scoped, templatePrefix: `${scoped}template_` } : {}),
+    ...(scoped
+      ? {
+          scopePrefix: scoped,
+          templatePrefix: `${scoped}template_`,
+          rolePrefix: `${scoped}bypass_`,
+        }
+      : {}),
     adminUrl: ADMIN_URL,
     observationsPath: REAPER_OBSERVATIONS_FILE,
     protectedTemplates: [await templateDbName().catch(() => "")],
     // Never queue behind a long template build: skip pruning this pass instead.
     withTemplateLock: (fn) => withLock(fn, 30_000),
   });
-  if (
-    !options.dryRun &&
-    (result.dropped.length > 0 || result.templatesDropped.length > 0 || result.errors.length > 0)
-  ) {
+  const removed = [...result.dropped, ...result.templatesDropped, ...result.rolesDropped];
+  if (!options.dryRun && (removed.length > 0 || result.errors.length > 0)) {
     await reaperNote(
-      `reaped ${result.dropped.length} database(s) and ${result.templatesDropped.length} template(s), kept ${result.kept}` +
-        (result.dropped.length + result.templatesDropped.length > 0
-          ? ` [${[...result.dropped, ...result.templatesDropped].slice(0, 20).join(" ")}]`
-          : "") +
+      `reaped ${result.dropped.length} database(s), ${result.templatesDropped.length} template(s) and ${result.rolesDropped.length} role(s), kept ${result.kept}` +
+        (removed.length > 0 ? ` [${removed.slice(0, 20).join(" ")}]` : "") +
         (result.errors.length > 0
           ? `; ${result.errors.length} note(s): ${result.errors.slice(0, 5).join("; ")}`
           : ""),
@@ -1555,6 +1573,14 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   `maxTemplateDrops` go per pass, never the templates this checkout uses. A
 //   clone whose template vanished rebuilds it (cloneFromTemplate), and the
 //   template build is lock-guarded.
+// - Scratch login roles named `opengeni_bypass_<32 hex>` or
+//   `migration_<4 digits>_<32 hex>` (a test records its owner with
+//   recordTestRoleOwner()) follow the database owner and idle rules; one with
+//   a current connection is never dropped. Before DROP ROLE, which also
+//   removes their memberships, privileges they hold in any database are
+//   revoked there (templates under the container lock). Template builds also
+//   strip grants to scratch roles that some migrations copy to every
+//   privileged role, so templates never carry them (scrubScratchRoleGrants).
 // Every failure is reported in the result and never thrown.
 // ---------------------------------------------------------------------------
 
@@ -1725,6 +1751,74 @@ export function isPerTestDatabaseName(
   return /^og_[a-z0-9_]{0,24}_[0-9a-f]{12}$/u.test(name);
 }
 
+/**
+ * Scratch login roles tests create on the shared cluster:
+ * `opengeni_bypass_<32 hex>` and `migration_<4 digits>_<32 hex>`. A PostgreSQL
+ * regular expression (also valid in JavaScript).
+ */
+export const SCRATCH_ROLE_PATTERN = "^(opengeni_bypass_|migration_[0-9]{4}_)[0-9a-f]{32}$";
+
+/** The scratch-role pattern, or `<rolePrefix><32 hex>` for a scoped prefix. */
+export function scratchRolePattern(rolePrefix?: string): string {
+  return rolePrefix ? `^${escapeRegExp(rolePrefix)}[0-9a-f]{32}$` : SCRATCH_ROLE_PATTERN;
+}
+
+export function isScratchTestRoleName(name: string, rolePrefix?: string): boolean {
+  return new RegExp(scratchRolePattern(rolePrefix), "u").test(name);
+}
+
+/**
+ * In the database `sql` is connected to, revoke every privilege held by
+ * scratch roles matching `pattern` (or only `onlyRole`), with DROP OWNED BY.
+ * Some migrations copy grants to every existing role that already has certain
+ * privileges, so a template built while a test's scratch role exists would
+ * otherwise carry grants to it into every clone, and the role could then
+ * never be dropped. A role that owns objects here is left alone, since DROP
+ * OWNED BY would drop them. Returns the roles scrubbed.
+ */
+export async function scrubScratchRoleGrants(
+  sql: postgres.Sql,
+  options: { pattern?: string; onlyRole?: string } = {},
+): Promise<string[]> {
+  const roles = await sql<{ rolname: string }[]>`
+    SELECT r.rolname
+      FROM pg_roles r
+     WHERE r.rolname ~ ${options.pattern ?? SCRATCH_ROLE_PATTERN}
+       AND (${options.onlyRole ?? null}::text IS NULL OR r.rolname = ${options.onlyRole ?? null})
+       AND EXISTS (
+             SELECT 1 FROM pg_shdepend s
+              WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = r.oid
+                AND s.deptype = 'a'
+                AND s.dbid IN (0, (SELECT oid FROM pg_database WHERE datname = current_database())))
+       AND NOT EXISTS (
+             SELECT 1 FROM pg_shdepend s
+              WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = r.oid
+                AND s.deptype = 'o'
+                AND s.dbid IN (0, (SELECT oid FROM pg_database WHERE datname = current_database())))
+     ORDER BY r.rolname`;
+  const scrubbed: string[] = [];
+  for (const { rolname } of roles) {
+    await sql.unsafe(`DROP OWNED BY ${quoteIdent(rolname)}`);
+    scrubbed.push(rolname);
+  }
+  return scrubbed;
+}
+
+/**
+ * Record this process as the owner of a scratch role a test just created on
+ * the shared cluster (named to match SCRATCH_ROLE_PATTERN), so the reaper can
+ * drop it, with its memberships, if the test dies before dropping it. Best
+ * effort: without the record the reaper falls back to its idle-window rule.
+ */
+export async function recordTestRoleOwner(sql: postgres.Sql, roleName: string): Promise<void> {
+  await sql
+    .unsafe(`COMMENT ON ROLE ${quoteIdent(roleName)} IS ${quoteLiteral(databaseOwnerComment())}`)
+    .catch(
+      (error: unknown) =>
+        void reaperNote(`could not record owner of ${roleName}: ${String(error)}`),
+    );
+}
+
 export function isTemplateDatabaseName(
   name: string,
   templatePrefix = "og_test_template_",
@@ -1735,29 +1829,35 @@ export function isTemplateDatabaseName(
 }
 
 type Observation = { oid: string; sessions: string; since: number };
-type ObservationState = { databases: Record<string, Observation> };
+type ObservationState = {
+  databases: Record<string, Observation>;
+  /** Scratch login roles; `sessions` is unused ("0"). */
+  roles: Record<string, Observation>;
+};
 
 async function readObservations(path: string): Promise<ObservationState> {
+  const valid = (entries: unknown): Record<string, Observation> => {
+    const kept: Record<string, Observation> = {};
+    if (!entries || typeof entries !== "object") return kept;
+    for (const [name, entry] of Object.entries(entries as Record<string, Partial<Observation>>)) {
+      if (
+        entry &&
+        typeof entry.oid === "string" &&
+        typeof entry.sessions === "string" &&
+        typeof entry.since === "number"
+      ) {
+        kept[name] = entry as Observation;
+      }
+    }
+    return kept;
+  };
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<ObservationState>;
-    if (parsed.databases && typeof parsed.databases === "object") {
-      const databases: Record<string, Observation> = {};
-      for (const [name, entry] of Object.entries(parsed.databases)) {
-        if (
-          entry &&
-          typeof entry.oid === "string" &&
-          typeof entry.sessions === "string" &&
-          typeof entry.since === "number"
-        ) {
-          databases[name] = entry;
-        }
-      }
-      return { databases };
-    }
+    return { databases: valid(parsed.databases), roles: valid(parsed.roles) };
   } catch {
     // missing or unreadable: start over (only delays legacy reaping)
   }
-  return { databases: {} };
+  return { databases: {}, roles: {} };
 }
 
 async function writeObservations(path: string, state: ObservationState): Promise<void> {
@@ -1779,6 +1879,8 @@ export type ReapOptions = {
   /** Only databases whose names start with this (and match the scheme). */
   scopePrefix?: string;
   templatePrefix?: string;
+  /** Scratch roles considered: `<rolePrefix><32 hex>`. */
+  rolePrefix?: string;
   /** Templates never pruned (this checkout's). */
   protectedTemplates?: readonly string[];
   /** Run template pruning under the harness's container lock. */
@@ -1820,6 +1922,8 @@ export type ReapResult = {
   dropped: string[];
   kept: number;
   templatesDropped: string[];
+  /** Scratch test roles dropped (or, in a dry run, would drop). */
+  rolesDropped: string[];
   errors: string[];
 };
 
@@ -1853,7 +1957,13 @@ function short(error: unknown): string {
  * drop, lock timeout, missing privilege) is recorded in `errors`.
  */
 export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<ReapResult> {
-  const result: ReapResult = { dropped: [], kept: 0, templatesDropped: [], errors: [] };
+  const result: ReapResult = {
+    dropped: [],
+    kept: 0,
+    templatesDropped: [],
+    rolesDropped: [],
+    errors: [],
+  };
   const now = options.now ?? Date.now;
   const started = now();
   const scopePrefix = options.scopePrefix ?? "og_";
@@ -1886,7 +1996,7 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     `) as unknown as DatabaseRow[];
 
     const observations = await readObservations(options.observationsPath);
-    const nextObservations: ObservationState = { databases: {} };
+    const nextObservations: ObservationState = { databases: {}, roles: {} };
     const candidates: DatabaseRow[] = [];
     for (const row of rows) {
       if (row.datistemplate) continue;
@@ -1974,6 +2084,23 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       }
     }
 
+    await reapScratchRoles(sql, {
+      rolePrefix: options.rolePrefix,
+      adminUrl: options.adminUrl,
+      withTemplateLock: options.withTemplateLock ?? ((fn) => fn()),
+      observations,
+      nextObservations,
+      idleWindowMs,
+      foreignIdleWindowMs,
+      maxDrops,
+      deadline,
+      dryRun: options.dryRun === true,
+      here,
+      probe: options.probe,
+      now,
+      result,
+    });
+
     try {
       if (!options.dryRun) await writeObservations(options.observationsPath, nextObservations);
     } catch (error) {
@@ -2009,6 +2136,186 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     await sql?.end({ timeout: 5 }).catch(() => undefined);
   }
   return result;
+}
+
+/**
+ * Drop scratch login roles (see SCRATCH_ROLE_PATTERN) that tests left behind,
+ * with the same rules as databases: a provably dead owner, or, without a
+ * checkable owner, no connection at any pass across the idle window. A role
+ * with a live owner, a current connection or any other comment is kept.
+ * Privileges it still holds in any database (for example grants a template
+ * build copied to it) are revoked there first, a template only under the
+ * container lock; a role that owns objects anywhere is kept and noted. DROP
+ * ROLE also removes the role's memberships in both directions.
+ */
+async function reapScratchRoles(
+  sql: postgres.Sql,
+  context: {
+    rolePrefix: string | undefined;
+    adminUrl: string;
+    withTemplateLock: <T>(fn: () => Promise<T>) => Promise<T>;
+    observations: ObservationState;
+    nextObservations: ObservationState;
+    idleWindowMs: number;
+    foreignIdleWindowMs: number;
+    maxDrops: number;
+    deadline: number;
+    dryRun: boolean;
+    here: ProcessIdentity;
+    probe: ReapOptions["probe"];
+    now: () => number;
+    result: ReapResult;
+  },
+): Promise<void> {
+  const { result, now } = context;
+  const pattern = scratchRolePattern(context.rolePrefix);
+  let roles: { oid: string; rolname: string; comment: string | null; connections: number }[];
+  try {
+    roles = (await sql`
+      SELECT r.oid::text AS oid, r.rolname,
+             shobj_description(r.oid, 'pg_authid') AS comment,
+             (SELECT count(*)::int FROM pg_stat_activity a WHERE a.usesysid = r.oid) AS connections
+        FROM pg_roles r
+       WHERE r.rolname ~ ${pattern}
+    `) as unknown as typeof roles;
+  } catch (error) {
+    result.errors.push(`roles: ${short(error)}`);
+    return;
+  }
+  for (const role of roles) {
+    if (!isScratchTestRoleName(role.rolname, context.rolePrefix)) continue;
+    if (role.connections > 0) {
+      result.kept += 1;
+      continue;
+    }
+    const owner = parseDatabaseOwnerComment(role.comment);
+    if (!owner && role.comment) {
+      result.kept += 1; // annotated by someone: leave it
+      continue;
+    }
+    const status = owner ? ownerStatus(owner, context.here, context.probe) : "unknown";
+    if (status === "alive") {
+      result.kept += 1;
+      continue;
+    }
+    if (status !== "dead") {
+      const window = owner ? context.foreignIdleWindowMs : context.idleWindowMs;
+      const previous = context.observations.roles[role.rolname];
+      const since = previous && previous.oid === role.oid ? previous.since : now();
+      context.nextObservations.roles[role.rolname] = { oid: role.oid, sessions: "0", since };
+      if (now() - since < window) {
+        result.kept += 1;
+        continue;
+      }
+    }
+    if (result.rolesDropped.length >= context.maxDrops || now() > context.deadline) {
+      result.kept += 1;
+      continue;
+    }
+    if (context.dryRun) {
+      result.rolesDropped.push(role.rolname);
+      continue;
+    }
+    try {
+      // Re-check right before dropping: DROP ROLE does not wait for sessions.
+      const [busy] = await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity WHERE usesysid = ${role.oid}::oid`;
+      if ((busy?.n as number) > 0) {
+        result.kept += 1;
+        continue;
+      }
+      if (!(await revokeScratchRoleEverywhere(sql, role, context))) {
+        result.kept += 1;
+        continue;
+      }
+      await sql.unsafe(`DROP ROLE ${quoteIdent(role.rolname)}`);
+      result.rolesDropped.push(role.rolname);
+      delete context.nextObservations.roles[role.rolname];
+    } catch (error) {
+      // Already gone: its test or another reaper dropped it.
+      if ((error as { code?: unknown })?.code === "42704") {
+        delete context.nextObservations.roles[role.rolname];
+        continue;
+      }
+      result.kept += 1;
+      result.errors.push(`${role.rolname}: ${short(error)}`);
+    }
+  }
+}
+
+/**
+ * Revoke a dead scratch role's privileges in every database that records any
+ * (pg_shdepend), so DROP ROLE can succeed. Returns false (with a note) when
+ * it cannot: the role owns objects, a database refuses connections, or a
+ * revoke fails. A template is changed only under the container lock, so no
+ * build or prune runs meanwhile; a concurrent clone retries until this short
+ * connection ends.
+ */
+async function revokeScratchRoleEverywhere(
+  sql: postgres.Sql,
+  role: { oid: string; rolname: string },
+  context: {
+    rolePrefix: string | undefined;
+    adminUrl: string;
+    withTemplateLock: <T>(fn: () => Promise<T>) => Promise<T>;
+    deadline: number;
+    now: () => number;
+    result: ReapResult;
+  },
+): Promise<boolean> {
+  const databases = await sql<
+    { datname: string; datistemplate: boolean; datallowconn: boolean; owns: boolean }[]
+  >`
+    SELECT d.datname, d.datistemplate, d.datallowconn, bool_or(s.deptype = 'o') AS owns
+      FROM pg_shdepend s
+      JOIN pg_database d ON d.oid = s.dbid
+     WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = ${role.oid}::oid
+     GROUP BY d.datname, d.datistemplate, d.datallowconn
+     ORDER BY d.datname`;
+  const owned = databases.filter((database) => database.owns).map((database) => database.datname);
+  if (owned.length > 0) {
+    context.result.errors.push(`${role.rolname}: owns objects in ${owned.slice(0, 3).join(", ")}`);
+    return false;
+  }
+  for (const database of databases) {
+    if (context.now() > context.deadline) return false;
+    if (!database.datallowconn) {
+      context.result.errors.push(`${role.rolname}: ${database.datname} refuses connections`);
+      return false;
+    }
+    const revoke = async () => {
+      const url = new URL(context.adminUrl);
+      url.pathname = `/${database.datname}`;
+      const target = postgres(url.toString(), {
+        max: 1,
+        connect_timeout: 10,
+        onnotice: () => undefined,
+        connection: {
+          lock_timeout: 2000,
+          statement_timeout: 60_000,
+          application_name: "og-reaper",
+        },
+      });
+      try {
+        await scrubScratchRoleGrants(target, {
+          pattern: scratchRolePattern(context.rolePrefix),
+          onlyRole: role.rolname,
+        });
+      } finally {
+        await target.end({ timeout: 5 }).catch(() => undefined);
+      }
+    };
+    try {
+      if (database.datistemplate) await context.withTemplateLock(revoke);
+      else await revoke();
+    } catch (error) {
+      // Dropped meanwhile: nothing left to revoke there.
+      if ((error as { code?: unknown })?.code === "3D000") continue;
+      context.result.errors.push(`${role.rolname} in ${database.datname}: ${short(error)}`);
+      return false;
+    }
+  }
+  return true;
 }
 
 async function pruneStaleTemplates(

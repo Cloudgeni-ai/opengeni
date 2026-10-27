@@ -786,7 +786,12 @@ unowned ones, that stayed idle with no connections for 15 minutes) and migrated
 templates idle for 6 hours beyond the 10 most recently used (1 hour once there
 are more than 20 templates), never with FORCE
 and never failing a test. Call `retainTestDatabase` for a database you keep on
-purpose. Template names depend only on the contents of the migrations and the
+purpose. Scratch login roles a test creates on the shared cluster must be named
+`opengeni_bypass_<32 hex>` or `migration_<4 digits>_<32 hex>` and recorded with
+`recordTestRoleOwner`; the reaper revokes their grants and drops them (and
+their memberships) the same way once their test is gone, and template builds
+strip grants to them that migrations copy to every privileged role.
+Template names depend only on the contents of the migrations and the
 files the migration runner and role provisioning load, so worktrees with the
 same inputs share one. Notes
 go to `reaper.log` beside the harness lock state; `OPENGENI_TEST_PG_REAP=0`

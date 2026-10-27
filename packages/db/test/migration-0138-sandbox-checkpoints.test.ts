@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireBlankTestDatabase,
+  type BlankTestDatabase,
+  recordTestRoleOwner,
+} from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -258,6 +262,8 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       await sql.unsafe(
         `CREATE ROLE ${quoteIdentifier(migrationRole)} LOGIN BYPASSRLS PASSWORD '${migrationPassword.replaceAll("'", "''")}'`,
       );
+      // If this run dies before the finally below, the harness reaper drops it.
+      await recordTestRoleOwner(sql, migrationRole);
       await sql.unsafe(
         `GRANT ${quoteIdentifier(identity!.currentUser)} TO ${quoteIdentifier(migrationRole)}`,
       );

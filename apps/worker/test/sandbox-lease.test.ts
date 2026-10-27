@@ -95,7 +95,11 @@ import {
 import { createObservability } from "@opengeni/observability";
 import { RoutingSandboxSession } from "@opengeni/runtime";
 import { workspaceArchiveObjectKey } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  recordTestRoleOwner,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
@@ -5304,6 +5308,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
+      // If this run dies before the finally below, the harness reaper drops it.
+      await recordTestRoleOwner(admin, bypassRole);
       await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
