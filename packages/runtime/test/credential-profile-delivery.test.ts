@@ -28,6 +28,7 @@ import {
 } from "../src/sandbox/turn-tool-cancellation";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
+import { secretArgumentMode } from "../src/secret-argument-resolution";
 import {
   CREDENTIAL_PROFILE_GIT_HELPER,
   createCredentialEnvironment,
@@ -329,6 +330,16 @@ describe("createCredentialEnvironment", () => {
       exitCode: 0,
     });
     expect(withCredentialProfileNotes("out", undefined)).toBe("out");
+  });
+});
+
+describe("the profile tools", () => {
+  test("keep the references they store: the gateway never resolves their arguments", () => {
+    for (const toolName of ["secret_profile_get", "secret_profile_set"]) {
+      expect(
+        secretArgumentMode({ source: "opengeni", identity: { serverId: "opengeni", toolName } }),
+      ).toBe("preserve");
+    }
   });
 });
 

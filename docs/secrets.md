@@ -191,10 +191,8 @@ under the person's own access, not the session's task vault or vault policy;
 it needs full access, which already acts as the person.
 
 Stored content is otherwise kept exact. The 5 August 2026 decision against
-heuristic redaction still holds. Two exceptions were approved on 26 October
-2026 and are planned, not yet implemented: masking known secret values before
-storage and before the model sees them, and masking narrow, high-precision
-secret-shaped strings in tool output.
+heuristic redaction still holds, with two approved exceptions that are not yet
+implemented; see [Masking decision](#masking-decision).
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
