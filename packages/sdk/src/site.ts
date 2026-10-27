@@ -151,7 +151,11 @@ export function resolveOpenGeniSiteLocation(
     return null;
   }
   if (origin === "null" || url.origin !== origin) return null;
-  return { path: openGeniSitePath(url.pathname), search: url.search, hash: url.hash };
+  const resolved = { path: openGeniSitePath(url.pathname), search: url.search, hash: url.hash };
+  // Percent-encoding can make the address much longer than what was asked for.
+  return openGeniSiteLocationHref(resolved).length > OPENGENI_SITE_LOCATION_MAX_LENGTH
+    ? null
+    : resolved;
 }
 
 /** The longest address `navigate` accepts, as for sign-in return paths. */

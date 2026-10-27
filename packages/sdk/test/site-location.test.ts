@@ -153,6 +153,8 @@ describe("Site location", () => {
       resolveOpenGeniSiteLocation({ path: "//evil.test/a", search: "", hash: "" }, "b"),
     ).toEqual({ path: "/evil.test/b", search: "", hash: "" });
     expect(resolveOpenGeniSiteLocation(at, `/${"a".repeat(2048)}`)).toBeNull();
+    // The limit applies to the encoded address too.
+    expect(resolveOpenGeniSiteLocation(at, `/${"é".repeat(400)}`)).toBeNull();
     expect(openGeniSitePath("///x//y")).toBe("/x//y");
     for (const reserved of ["/_og", "/_og/auth/login", "/__opengeni/site-tools/client.js"])
       expect(isOpenGeniReservedSitePath(reserved)).toBe(true);

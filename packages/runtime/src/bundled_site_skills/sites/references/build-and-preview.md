@@ -147,7 +147,8 @@ await site.navigate("/admin?tab=2"); // { replace: true } adds no history entry
 - Ordinary links to the Site's own pages (`<a href="/admin">`, `?tab=2`)
   move the Site without reloading it; links to other sites, `target`,
   `download` and `#section` links behave as usual. Pass
-  `createOpenGeniSiteClient({ links: false })` to handle links yourself.
+  `createOpenGeniSiteClient({ links: false })` to handle links yourself,
+  for example with a router that listens for clicks on `window`.
 - `navigate` refuses other origins, `/_og/...` and `/__opengeni/...` with
   `invalid_location`; open other addresses with a normal link.
 - Create one client per page and keep it: each client listens for links and
