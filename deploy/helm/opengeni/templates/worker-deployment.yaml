@@ -85,13 +85,16 @@ spec:
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
             {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.env" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
           {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
-          {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumeMounts $computeTrusted }}
+          {{- $databasePasswordFiles := include "opengeni.databasePasswordFiles.enabled" . }}
+          {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumeMounts $computeTrusted $databasePasswordFiles }}
           volumeMounts:
             {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.volumeMount" . }}{{ . | nindent 12 }}{{- end }}
             {{- if $opensandboxKubernetesInventoryEnabled }}
             - name: opensandbox-kubernetes-inventory
               mountPath: /var/run/secrets/opengeni.io/opensandbox-kubernetes-inventory
@@ -113,9 +116,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumes (include "opengeni.computeControl.trusted" .) }}
+      {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumes (include "opengeni.computeControl.trusted" .) $databasePasswordFiles }}
       volumes:
         {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with include "opengeni.databasePasswordFiles.volume" . }}{{ . | nindent 8 }}{{- end }}
         {{- if $opensandboxKubernetesInventoryEnabled }}
         - name: opensandbox-kubernetes-inventory
           projected:

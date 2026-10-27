@@ -141,9 +141,11 @@ describe("gateway signature", () => {
       reason: "bad_timestamp",
     });
     const header = signed()[SITE_GATEWAY_SIGNATURE_HEADER]!;
-    expect(
-      verify({ ...signed(), [SITE_GATEWAY_SIGNATURE_HEADER]: `${header.slice(0, -2)}AA` }),
-    ).toMatchObject({ reason: "bad_signature" });
+    // About 1 in 1,024 signatures already end in "AA"; always change the tail.
+    const tampered = `${header.slice(0, -2)}${header.endsWith("AA") ? "BB" : "AA"}`;
+    expect(verify({ ...signed(), [SITE_GATEWAY_SIGNATURE_HEADER]: tampered })).toMatchObject({
+      reason: "bad_signature",
+    });
     expect(verify(signed(), { secrets: [undefined, undefined] })).toEqual({
       ok: false,
       reason: "not_configured",

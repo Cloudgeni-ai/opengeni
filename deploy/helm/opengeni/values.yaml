@@ -169,6 +169,18 @@ config:
 desktop:
   imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805"
 
+# Rotate the runtime database login's password without restarting pods. When
+# enabled, the api, worker-control and worker-turns pods mount the optional keys
+# OPENGENI_DATABASE_PASSWORD and OPENGENI_DATABASE_PREVIOUS_PASSWORD of the
+# runtime Secret (or secretName) as files under /var/run/opengeni/database and
+# read the password from them on every new connection. While the keys are
+# absent the pods use the password in OPENGENI_DATABASE_URL, as before. See
+# docs/deployment.md, "Rotating the runtime database password".
+runtimeDatabasePasswordFiles:
+  enabled: false
+  # Defaults to the runtime Secret (secret.existingSecret or the chart's Secret).
+  secretName: ""
+
 secret:
   create: false
   existingSecret: opengeni-runtime

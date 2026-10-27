@@ -19,7 +19,7 @@ use std::future::Future;
 
 use compute_fleet::{Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Verdict};
 use compute_protocol::fleet::Verdict as Wire;
-use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
+use compute_protocol::fleet::{Boot, Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,21 @@ pub enum StoreError {
 
 /// A result of the store.
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// A host's renewal count, which the leader watches, read with the boot of
+/// its machine its registration named: both from the same row at once, so
+/// the boot is the one of the registration the count was reached under.
+/// Every registration and renewal raises the count, so once the host is
+/// given up on at this count ([`Store::give_up`]), it is this registration
+/// that is given up on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counted {
+    pub host: HostId,
+    pub renewals: u64,
+    /// `None` if the registration named none, or one that cannot be read:
+    /// either proves nothing of a restart.
+    pub boot: Option<Boot>,
+}
 
 /// A host as the store holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,8 +297,9 @@ pub trait Store: Send + Sync + 'static {
     /// The host rows changed after `after`, oldest change first.
     fn hosts_changed(&self, after: u64) -> impl Future<Output = Result<Vec<HostRow>>> + Send;
 
-    /// The renewal count of every host not given up on.
-    fn renewals(&self) -> impl Future<Output = Result<Vec<(HostId, u64)>>> + Send;
+    /// The renewal count of every host not given up on, with the boot its
+    /// registration named.
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send;
 
     /// Gives up on `host` if its renewal count is still `renewals`, and in
     /// the same transaction leaves each of its sandboxes without an owner

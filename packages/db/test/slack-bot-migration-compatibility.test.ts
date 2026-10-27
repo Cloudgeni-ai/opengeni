@@ -252,6 +252,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the shared unbilled allowance counter (0976).
       "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
+      // Nor the managed passkey mutation (0998).
+      "target-schema runtime capability mutate_managed_passkey(text, text, jsonb) is missing or ambiguous",
       // Nor the machine-owner lookup for personal-machine chats (0978).
       "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the connected-command re-arm (0984).
@@ -338,6 +340,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       // administration also stays owner-only; the old evaluator reports each
       // missing EXECUTE grant and those denials must remain intact.
       "runtime role lacks EXECUTE on private routine evaluate_promotion_abuse(uuid)",
+      "runtime role lacks EXECUTE on private routine list_agent_held_browser_sessions(integer, bigint)",
       "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
       "runtime role lacks EXECUTE on private routine session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "runtime role lacks EXECUTE on private routine set_promotion_decision(uuid, text, text, text, jsonb, text, bigint)",

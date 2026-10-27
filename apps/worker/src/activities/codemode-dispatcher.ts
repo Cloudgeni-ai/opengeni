@@ -47,6 +47,7 @@ import {
   publishDurableSessionEvents,
   type EventBus,
 } from "@opengeni/events";
+import { OpenGeniApiError } from "@opengeni/sdk";
 
 export type CodemodeDispatcherScope = {
   accountId: string;
@@ -515,7 +516,7 @@ export class CodemodeAttemptDispatcher {
         state: knownPreExecution ? "failed" : "outcome_unknown",
         errorCode: errorCode(error, signal, true),
         errorMessage: !knownPreExecution
-          ? "Tool execution ended without a durable result. Its side-effect outcome is unknown; inspect actual state before retrying."
+          ? outcomeUnknownMessage(error, signal)
           : safeErrorMessage(error),
       });
     }
@@ -729,6 +730,41 @@ function errorCode(error: unknown, signal: AbortSignal, executionStarted: boolea
 
 /** Codemode journal error messages are bounded (CodemodeOperation.errorMessage). */
 const CODEMODE_ERROR_MESSAGE_MAX = 4_096;
+
+const OUTCOME_UNKNOWN_MESSAGE =
+  "Tool execution ended without a durable result. Its side-effect outcome is unknown; inspect actual state before retrying.";
+const API_FAILURE_OUTCOME_UNKNOWN_PREFIX =
+  "The tool failed after it started, so its side-effect outcome is unknown; inspect actual state before retrying. Error: ";
+
+/**
+ * A call that threw after execution started stays outcome_unknown, but an
+ * error the Opengeni API answered (or the SDK's own transport error) carries a
+ * public message and reference that a direct call shows to the model too. Keep
+ * it, so a Code Mode failure says what went wrong. Other thrown errors are not
+ * public and keep the generic text.
+ */
+function outcomeUnknownMessage(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted) return OUTCOME_UNKNOWN_MESSAGE;
+  try {
+    if (!(error instanceof OpenGeniApiError)) return OUTCOME_UNKNOWN_MESSAGE;
+    const detail = error.message.trim();
+    if (!detail) return OUTCOME_UNKNOWN_MESSAGE;
+    return boundedUtf16(
+      `${API_FAILURE_OUTCOME_UNKNOWN_PREFIX}${detail}`,
+      CODEMODE_ERROR_MESSAGE_MAX,
+    );
+  } catch {
+    return OUTCOME_UNKNOWN_MESSAGE;
+  }
+}
+
+/** Cut to at most `max` UTF-16 units without splitting a surrogate pair. */
+function boundedUtf16(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const cut = value.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
 
 function safeErrorMessage(error: unknown): string {
   if (isSecretReferenceError(error)) {
