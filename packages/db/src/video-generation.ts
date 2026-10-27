@@ -45,7 +45,11 @@ export class VideoGenerationConflictError extends Error {
 }
 
 export class VideoGenerationCapacityError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Too many videos in progress at once, or no storage left for another. */
+    readonly limit: "concurrency" | "storage",
+  ) {
     super(message);
     this.name = "VideoGenerationCapacityError";
   }
@@ -237,7 +241,10 @@ export async function admitVideoGenerationOperation(
           )
           .for("update");
         if (active.length >= input.maxConcurrentPerWorkspace) {
-          throw new VideoGenerationCapacityError("Workspace video generation limit reached");
+          throw new VideoGenerationCapacityError(
+            "Workspace video generation limit reached",
+            "concurrency",
+          );
         }
         await tx
           .insert(schema.workspaceVideoGenerationQuotas)
@@ -256,7 +263,10 @@ export async function admitVideoGenerationOperation(
           .limit(1);
         if (!quota) throw new Error("Video generation quota row disappeared");
         if (quota.reservedBytes + quota.readyBytes + reservedBytes > input.workspaceQuotaBytes) {
-          throw new VideoGenerationCapacityError("Workspace video storage quota reached");
+          throw new VideoGenerationCapacityError(
+            "Workspace video storage quota reached",
+            "storage",
+          );
         }
         const [operation] = await tx
           .insert(schema.videoGenerationOperations)

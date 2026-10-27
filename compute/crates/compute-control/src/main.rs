@@ -2,7 +2,7 @@
 //! and the hosts' authority: making one and issuing a host's first
 //! certificate where Google Cloud's identity tokens cannot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -199,6 +199,12 @@ struct Serve {
     /// A team's agent gateway, as `team=wss://...`; repeat for more.
     #[arg(long = "team-link", value_parser = parse_team_link)]
     team_links: Vec<(String, String)>,
+    /// What a team's sandboxes may ask to reach of what hosts offer
+    /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
+    /// given none may ask for none. Taking one away refuses new sandboxes
+    /// that ask for it; those made before keep it.
+    #[arg(long = "team-reach", value_parser = parse_team_reach)]
+    team_reach: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
     /// `projects/P/zones/Z/instanceGroupManagers/N`.
     #[arg(long)]
@@ -257,8 +263,9 @@ struct Serve {
     #[arg(long, requires = "e2b_tls_cert")]
     e2b_tls_key: Option<PathBuf>,
     /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
-    /// `base=base:2x1024`; repeat for more. Without any, `base` is the
-    /// default image at 2x1024.
+    /// `base=base:2x1024`, or `id=image:VCPUSxMEMORY_MIBxDISK_MIB` for
+    /// sandboxes with a disk of at least `DISK_MIB` (`ci=runner:4x8192x65536`);
+    /// repeat for more. Without any, `base` is the default image at 2x1024.
     #[arg(long = "e2b-template", value_parser = parse_template)]
     e2b_templates: Vec<(String, e2b::Template)>,
 }
@@ -292,17 +299,48 @@ fn parse_team_link(text: &str) -> Result<(String, String), String> {
     Ok((team.to_owned(), url.to_owned()))
 }
 
+fn parse_team_reach(text: &str) -> Result<(String, String), String> {
+    let (team, offer) = text
+        .split_once('=')
+        .ok_or("a team's reach is `team=offer`")?;
+    if !compute_protocol::host::is_offer_name(offer) {
+        return Err(format!(
+            "{offer:?} is not an offer's name: 1 to 63 lowercase letters, digits and inner hyphens"
+        ));
+    }
+    Ok((team.to_owned(), offer.to_owned()))
+}
+
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
-    let shape = "a template is `id=image:VCPUSxMEMORY_MIB`";
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB` or `id=image:VCPUSxMEMORY_MIBxDISK_MIB`";
     let (id, rest) = text.split_once('=').ok_or(shape)?;
     let (image, size) = rest.rsplit_once(':').ok_or(shape)?;
-    let (vcpus, memory) = size.split_once('x').ok_or(shape)?;
+    let mut parts = size.split('x');
+    let (Some(vcpus), Some(memory), disk, None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(shape.into());
+    };
+    let disk = disk
+        .map(|disk| {
+            disk.parse::<u32>()
+                .ok()
+                .filter(|disk| (1..=compute_protocol::host::MAX_DISK_MIB).contains(disk))
+                .ok_or_else(|| {
+                    format!(
+                        "{text:?}: DISK_MIB must be between 1 and {}",
+                        compute_protocol::host::MAX_DISK_MIB
+                    )
+                })
+        })
+        .transpose()?;
     Ok((
         id.to_owned(),
         e2b::Template {
             image: image.to_owned(),
             vcpus: vcpus.parse().map_err(|_| shape)?,
             memory_mib: memory.parse().map_err(|_| shape)?,
+            disk,
             disk_mib: 0,
         },
     ))
@@ -405,7 +443,10 @@ impl Serve {
                 .iter()
                 .map(|(id, template)| {
                     let mut template = template.clone();
-                    template.disk_mib = self.disk_mib;
+                    // Each sandbox is booked for the longer of the two.
+                    template.disk_mib = template
+                        .disk
+                        .map_or(self.disk_mib, |disk| self.disk_mib.max(u64::from(disk)));
                     (id.clone(), template)
                 })
                 .collect();
@@ -519,6 +560,16 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
                     .collect::<BTreeMap<_, _>>(),
             ),
             links: args.links()?,
+            reach: args
+                .team_reach
+                .iter()
+                .fold(BTreeMap::new(), |mut reach, (team, offer)| {
+                    reach
+                        .entry(team.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(offer.clone());
+                    reach
+                }),
             ..Settings::default()
         },
         operator: args.operator_team.clone(),
@@ -775,5 +826,26 @@ mod tests {
             config.get_password(),
             Some(&b"two words \\ and ' quote"[..])
         );
+    }
+
+    #[test]
+    fn a_template_may_name_the_disk_its_sandboxes_get() {
+        let (id, template) = parse_template("base=base:2x1024").unwrap();
+        assert_eq!((id.as_str(), template.disk), ("base", None));
+        let (id, template) = parse_template("ci=runner:4x8192x65536").unwrap();
+        assert_eq!(id, "ci");
+        assert_eq!(
+            (template.image.as_str(), template.vcpus, template.memory_mib),
+            ("runner", 4, 8192)
+        );
+        assert_eq!(template.disk, Some(65536));
+        for wrong in [
+            "ci=runner:4x8192x0",
+            "ci=runner:4x8192x99999999",
+            "ci=runner:4x8192x1x2",
+            "ci=runner:4",
+        ] {
+            assert!(parse_template(wrong).is_err(), "{wrong}");
+        }
     }
 }

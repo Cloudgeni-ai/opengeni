@@ -172,6 +172,8 @@ impl Sandbox {
     /// Inserts the sandbox's record and applies `change` to it.
     async fn record(&self, change: Change) -> Record {
         let config = SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,

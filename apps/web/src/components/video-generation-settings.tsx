@@ -82,10 +82,11 @@ export function VideoGenerationPreferenceRow({
     if (!settings || !canManage || saving || (!enabled && !available)) return;
     try {
       await updatePolicy(selectedFundingSource, !enabled);
+      // Chats read the policy live, so open chats follow from their next message.
       toast.success(
         enabled
-          ? "Video generation is off for new sessions"
-          : "Video generation is on for new sessions",
+          ? "Video generation is off for all chats, from their next message"
+          : "Video generation is on for all chats, from their next message",
       );
     } catch (error) {
       toast.error("Couldn't update video generation", { description: userErrorText(error) });

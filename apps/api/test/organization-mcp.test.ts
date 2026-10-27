@@ -941,6 +941,24 @@ describe("organization MCP action inputs", () => {
     ).toBeUndefined();
   });
 
+  test("a workspace settings route needs workspace:admin, so it isn't offered to someone without it", () => {
+    const gate = (...sources: string[]) => routeInputs(sources).permission;
+    expect(
+      gate(`async (c) => {
+        const workspaceId = c.req.param("workspaceId");
+        const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+        return c.json(await save(grant));
+      }`),
+    ).toBe("workspace:admin");
+    expect(
+      gate(`async (c) => {
+        if (c.req.query("dry")) return c.json({});
+        await requireWorkspaceSettingsGrant(c, deps, c.req.param("workspaceId"));
+      }`),
+    ).toBeUndefined();
+    expect(byId("updateVideoGenerationPolicy").permission).toBe("workspace:admin");
+  });
+
   test("every hand-named request schema is still needed", () => {
     for (const rule of ACTION_REQUEST_SCHEMAS) {
       const routes = registeredApiRoutes().filter((route) => rule.pattern.test(routeKey(route)));
