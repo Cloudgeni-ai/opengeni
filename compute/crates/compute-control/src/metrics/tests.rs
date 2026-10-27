@@ -24,6 +24,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             cpu_millis: 7_000,
             disk_mib: 100_000,
             offers: Vec::new(),
+            boot: None,
         },
         state,
         capacity: Reported {

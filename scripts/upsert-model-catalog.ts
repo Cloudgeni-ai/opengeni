@@ -3,6 +3,7 @@ import {
   applyModelCatalogDocument,
   dbSearchPath,
   getSettings,
+  modelCatalogResidencyProblems,
   parseModelCatalogDocument,
   validateModelCatalogSettings,
   type ModelCatalogDocument,
@@ -56,7 +57,13 @@ export function preflightModelCatalogDocument(
     ...env,
     OPENGENI_MODEL_CATALOG_SOURCE: "database",
   };
-  const settings = applyModelCatalogDocument(getSettings(databaseRuntimeEnv), document);
+  const hostSettings = getSettings(databaseRuntimeEnv);
+  // At runtime these only make the affected routes unknown; refuse them here.
+  const residencyProblems = modelCatalogResidencyProblems(hostSettings, document);
+  if (residencyProblems.length > 0) {
+    throw new Error(`model catalog residency is invalid: ${residencyProblems.join("; ")}`);
+  }
+  const settings = applyModelCatalogDocument(hostSettings, document);
   validateModelCatalogSettings(settings, databaseRuntimeEnv);
   return document;
 }

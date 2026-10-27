@@ -94,13 +94,16 @@ spec:
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
             {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.env" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
           {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
-          {{- if or .Values.worker.extraVolumeMounts $computeTrusted }}
+          {{- $databasePasswordFiles := include "opengeni.databasePasswordFiles.enabled" . }}
+          {{- if or .Values.worker.extraVolumeMounts $computeTrusted $databasePasswordFiles }}
           volumeMounts:
             {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.volumeMount" . }}{{ . | nindent 12 }}{{- end }}
             {{- with .Values.worker.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,9 +120,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if or .Values.worker.extraVolumes $computeTrusted }}
+      {{- if or .Values.worker.extraVolumes $computeTrusted $databasePasswordFiles }}
       volumes:
         {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with include "opengeni.databasePasswordFiles.volume" . }}{{ . | nindent 8 }}{{- end }}
         {{- with .Values.worker.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

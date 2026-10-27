@@ -78,6 +78,7 @@ async fn a_host_registers_only_under_a_name_its_certificate_carries() {
             cpu_millis: 64_000,
             disk_mib: 1024,
             offers: Vec::new(),
+            boot: None,
         },
         capacity: roomy(),
         held: Vec::new(),

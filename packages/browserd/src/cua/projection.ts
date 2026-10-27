@@ -163,6 +163,25 @@ export function opensOnInvoke(element: { readonly actions: readonly string[] }):
 }
 
 /**
+ * The roles of a page's controls. Chromium performs AXPress on any node of a
+ * page, but with the accessibility mode CUA turns on it lists AXPress on
+ * none of them (a button lists only AXShowMenu and AXScrollToVisible), so a
+ * web control is invoked by its role rather than its listed actions where
+ * CUA reports that the app takes the press. A select is not here: CUA
+ * refuses to open its menu in the background and points to set_value.
+ */
+const WEB_PRESS_ROLES: ReadonlySet<string> = new Set([
+  "AXButton",
+  "AXLink",
+  "AXCheckBox",
+  "AXRadioButton",
+  "AXMenuItem",
+  "AXMenuButton",
+  "AXDisclosureTriangle",
+  "AXTab",
+]);
+
+/**
  * Whether a macOS element is a number field that takes a value: an
  * AXIncrementor (Chrome's `<input type=number>`, a native stepper) that is
  * not one part of a date or time field. A part takes neither the focus nor
@@ -485,6 +504,7 @@ export function projectElements(
   allElements: CuaElement[],
   platform: Platform = "macos",
   childTexts: ReadonlyMap<number, readonly string[]> = new Map(),
+  webContentTakesPress = false,
 ): InteractionSemanticNodeValue[] {
   const byIndex = new Map(allElements.map((element) => [element.element_index, element]));
   const elements =
@@ -512,7 +532,11 @@ export function projectElements(
           ? element.actions.some((action) => ["click", "press", "activate"].includes(action))
           : platform === "windows"
             ? element.actions.includes("invoke")
-            : element.actions.includes("AXPress") || opensOnInvoke(element)
+            : element.actions.includes("AXPress") ||
+              opensOnInvoke(element) ||
+              (webContentTakesPress &&
+                webContent.has(element.element_index) &&
+                WEB_PRESS_ROLES.has(element.role))
       )
         actions.push("invoke");
       if (

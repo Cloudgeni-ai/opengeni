@@ -12,6 +12,7 @@ mod balloon;
 mod drives;
 mod holder;
 mod jail;
+mod logs;
 mod pager;
 mod process;
 mod runtime;
@@ -448,6 +449,7 @@ impl Firecracker {
             jail: jail.clone(),
             memory_low: AtomicU64::new(u64::from(spec.memory_request_mib) << 20),
             runtime: recorded_runtime(jail),
+            console: spec.logs.join(logs::CONSOLE_LOG),
         })
     }
 
@@ -590,7 +592,7 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
 /// Readies the jail for a launch and opens the VMM's console and log.
 fn prepare(
     jail: &Jail,
-    logs: &Path,
+    dir: &Path,
     owned: &[(PathBuf, Owned)],
     uid: u32,
     gid: u32,
@@ -601,23 +603,7 @@ fn prepare(
     for (path, kind) in owned {
         crate::confined::hand_over(path, *kind, uid, gid)?;
     }
-    fs::create_dir_all(logs)?;
-    Ok((
-        fresh_log(&logs.join("console.log"))?,
-        fresh_log(&logs.join("vmm.log"))?,
-    ))
-}
-
-/// A new, empty file at `path` for a launch's log. A new file rather than
-/// the old one emptied: the host trims long logs from their start while
-/// VMs run, and a trim measured on the old file must never punch out what
-/// the new launch writes into the same file.
-fn fresh_log(path: &Path) -> io::Result<File> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    File::options().write(true).create_new(true).open(path)
+    logs::open(dir)
 }
 
 /// Removes what one launch leaves in the jail: the jailer's copy of the
@@ -653,6 +639,8 @@ pub struct FirecrackerVm {
     balloon: Balloon,
     /// See [`Engine::vm_runtime`].
     runtime: String,
+    /// Its guest's serial console, written by this VM process alone.
+    console: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -1179,6 +1167,13 @@ impl Engine for Firecracker {
         vm.cgroup
             .memory_stats()
             .map_err(|error| EngineError::io("memory_stats", error))
+    }
+
+    fn halted(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        logs::halted(vm.console.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

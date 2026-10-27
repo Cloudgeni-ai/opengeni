@@ -120,6 +120,7 @@ impl FleetArgs {
                 cpu_millis: host.cpu_millis,
                 disk_mib: stat.f_blocks.saturating_mul(stat.f_frsize) >> 20,
                 offers: host.offers.clone(),
+                boot: None,
             },
             image: self.image.clone(),
             listen: self.listen,
@@ -132,6 +133,10 @@ impl FleetArgs {
             guard_lock: self.guard_lock.clone(),
             terms: LeaseTerms::RECOMMENDED,
             agent_link_ca: self.agent_link_ca.clone(),
+            boot: compute_host::fleet::boot_id().map(|id| compute_host::fleet::Telling {
+                id,
+                metadata: compute_host::fleet::METADATA.to_owned(),
+            }),
         }))
     }
 }

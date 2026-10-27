@@ -17,7 +17,13 @@ import "./styles.css";
  * lightbox are the real components; the image renderer stands in for the
  * console's retained-artifact image (same 360px slot, click to expand, and a
  * gallery entry that resolves the image only when it is shown).
+ * `?theme=light` switches from the default dark theme; `?small=1` makes the
+ * images 640 x 400, so the lightbox enlarges them to fit (a click shrinks).
  */
+
+const params = new URLSearchParams(window.location.search);
+if (params.get("theme") === "light") document.documentElement.dataset.ogTheme = "light";
+const [imageWidth, imageHeight] = params.get("small") === "1" ? [640, 400] : [960, 600];
 
 const SCREENS: Record<string, { title: string; rows: string[] }> = {
   overview: {
@@ -56,7 +62,7 @@ function screenSvg(key: string): string {
     )
     .join("");
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${imageWidth}" height="${imageHeight}" viewBox="0 0 960 600">` +
     `<rect width="960" height="600" fill="#f5f5f5"/>` +
     `<text x="64" y="80" font-family="sans-serif" font-size="30" font-weight="600" fill="#111">${screen.title}</text>` +
     `<g font-family="sans-serif">${rows}</g></svg>`;

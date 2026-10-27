@@ -848,10 +848,6 @@
     container-type: inline-size;
     container-name: titlebar;
   }
-:where(.og-root).\@container\/titlegroup,:where(.og-root) .\@container\/titlegroup {
-    container-type: inline-size;
-    container-name: titlegroup;
-  }
 :where(.og-root).\@container\/toolbar,:where(.og-root) .\@container\/toolbar {
     container-type: inline-size;
     container-name: toolbar;
@@ -2711,17 +2707,17 @@
 :where(.og-root).grid-cols-\[minmax\(0\,1fr\)_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[minmax\(0\,1fr\)_minmax\(0\,1fr\)\] {
     grid-template-columns: minmax(0,1fr) minmax(0,1fr);
   }
-:where(.og-root).grid-cols-\[minmax\(0\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(0\,max-content\)\] {
-    grid-template-columns: minmax(0,max-content);
-  }
 :where(.og-root).grid-cols-\[minmax\(0\,max-content\)_minmax\(4rem\,1fr\)\],:where(.og-root) .grid-cols-\[minmax\(0\,max-content\)_minmax\(4rem\,1fr\)\] {
     grid-template-columns: minmax(0,max-content) minmax(4rem,1fr);
   }
-:where(.og-root).grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(0\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(0\,max-content\)\] {
-    grid-template-columns: minmax(1.5rem,max-content) minmax(0,max-content);
+:where(.og-root).grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(auto\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(auto\,max-content\)\] {
+    grid-template-columns: minmax(1.5rem,max-content) minmax(auto,max-content);
   }
 :where(.og-root).grid-cols-\[minmax\(2\.25rem\,auto\)_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[minmax\(2\.25rem\,auto\)_minmax\(0\,1fr\)\] {
     grid-template-columns: minmax(2.25rem,auto) minmax(0,1fr);
+  }
+:where(.og-root).grid-cols-\[minmax\(auto\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(auto\,max-content\)\] {
+    grid-template-columns: minmax(auto,max-content);
   }
 :where(.og-root).grid-cols-subgrid,:where(.og-root) .grid-cols-subgrid {
     grid-template-columns: subgrid;
@@ -5861,6 +5857,15 @@
     --og-component-font-size: var(--og-font-size-xs);
     --og-component-line-height: var(--og-line-height-xs);
   }
+:where(.og-root).\[-webkit-app-region\:no-drag\],:where(.og-root) .\[-webkit-app-region\:no-drag\] {
+    -webkit-app-region: no-drag;
+  }
+:where(.og-root).\[-webkit-touch-callout\:none\],:where(.og-root) .\[-webkit-touch-callout\:none\] {
+    -webkit-touch-callout: none;
+  }
+:where(.og-root).\[app-region\:no-drag\],:where(.og-root) .\[app-region\:no-drag\] {
+    app-region: no-drag;
+  }
 :where(.og-root).\[overflow-anchor\:auto\],:where(.og-root) .\[overflow-anchor\:auto\] {
     overflow-anchor: auto;
   }
@@ -7509,6 +7514,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-white\/15,:where(.og-root) .hover\:bg-white\/15 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: color-mix(in srgb, #fff 15%, transparent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--color-white) 15%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-white\/20,:where(.og-root) .hover\:bg-white\/20 {
     &:hover {
       @media (hover: hover) {
@@ -8101,6 +8116,27 @@
 :where(.og-root).active\:cursor-grabbing,:where(.og-root) .active\:cursor-grabbing {
     &:active {
       cursor: grabbing;
+    }
+  }
+:where(.og-root).active\:border-white\/40,:where(.og-root) .active\:border-white\/40 {
+    &:active {
+      border-color: color-mix(in srgb, #fff 40%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--color-white) 40%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:bg-white\/25,:where(.og-root) .active\:bg-white\/25 {
+    &:active {
+      background-color: color-mix(in srgb, #fff 25%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--color-white) 25%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:text-white,:where(.og-root) .active\:text-white {
+    &:active {
+      color: var(--color-white);
     }
   }
 :where(.og-root).enabled\:hover\:bg-surface-2,:where(.og-root) .enabled\:hover\:bg-surface-2 {
@@ -10227,9 +10263,19 @@
       display: inline-flex !important;
     }
   }
+:where(.og-root).\@max-\[34rem\]\/titlebar\:min-w-8,:where(.og-root) .\@max-\[34rem\]\/titlebar\:min-w-8 {
+    @container titlebar (width < 34rem) {
+      min-width: calc(var(--spacing) * 8);
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:min-w-8\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:min-w-8\! {
     @container titlebar (width < 34rem) {
       min-width: calc(var(--spacing) * 8) !important;
+    }
+  }
+:where(.og-root).\@max-\[34rem\]\/titlebar\:min-w-min,:where(.og-root) .\@max-\[34rem\]\/titlebar\:min-w-min {
+    @container titlebar (width < 34rem) {
+      min-width: min-content;
     }
   }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:justify-center,:where(.og-root) .\@max-\[34rem\]\/titlebar\:justify-center {
@@ -10333,19 +10379,14 @@
       display: none;
     }
   }
-:where(.og-root).\@max-\[20rem\]\/titlegroup\:hidden\!,:where(.og-root) .\@max-\[20rem\]\/titlegroup\:hidden\! {
-    @container titlegroup (width < 20rem) {
-      display: none !important;
-    }
-  }
-:where(.og-root).\@max-\[20rem\]\/titlegroup\:inline-flex\!,:where(.og-root) .\@max-\[20rem\]\/titlegroup\:inline-flex\! {
-    @container titlegroup (width < 20rem) {
-      display: inline-flex !important;
-    }
-  }
 :where(.og-root).\@max-\[14rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[14rem\]\/model-controls\:hidden {
     @container model-controls (width < 14rem) {
       display: none;
+    }
+  }
+:where(.og-root).\@max-\[14rem\]\/titlebar\:flex-wrap,:where(.og-root) .\@max-\[14rem\]\/titlebar\:flex-wrap {
+    @container titlebar (width < 14rem) {
+      flex-wrap: wrap;
     }
   }
 :where(.og-root).\@max-\[8rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[8rem\]\/model-controls\:hidden {
@@ -11089,9 +11130,9 @@
       min-width: 44px;
     }
   }
-:where(.og-root).pointer-coarse\:grid-cols-\[minmax\(2\.75rem\,max-content\)_minmax\(0\,max-content\)\],:where(.og-root) .pointer-coarse\:grid-cols-\[minmax\(2\.75rem\,max-content\)_minmax\(0\,max-content\)\] {
+:where(.og-root).pointer-coarse\:grid-cols-\[minmax\(2\.75rem\,max-content\)_minmax\(auto\,max-content\)\],:where(.og-root) .pointer-coarse\:grid-cols-\[minmax\(2\.75rem\,max-content\)_minmax\(auto\,max-content\)\] {
     @media (pointer: coarse) {
-      grid-template-columns: minmax(2.75rem,max-content) minmax(0,max-content);
+      grid-template-columns: minmax(2.75rem,max-content) minmax(auto,max-content);
     }
   }
 :where(.og-root).pointer-coarse\:p-1\.5,:where(.og-root) .pointer-coarse\:p-1\.5 {

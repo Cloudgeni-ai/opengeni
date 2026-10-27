@@ -563,6 +563,7 @@ mod tests {
                 cpu_millis: 8000,
                 disk_mib: 100 * 1024,
                 offers: Vec::new(),
+                boot: None,
             },
             epoch: HostEpoch(1),
             state: HostState::Live,

@@ -60,6 +60,7 @@ fn register(name: &str, attempt: u64, held: Vec<Held>) -> Register {
             cpu_millis: 4000,
             disk_mib: 4096,
             offers: Vec::new(),
+            boot: None,
         },
         capacity: capacity(),
         held,
@@ -115,7 +116,7 @@ async fn renewals<S: Store>(store: &S, host: HostId) -> Option<u64> {
         .await
         .unwrap()
         .into_iter()
-        .find_map(|(counted, renewals)| (counted == host).then_some(renewals))
+        .find_map(|counted| (counted.host == host).then_some(counted.renewals))
 }
 
 /// Runs a check against every store at hand: `memory` and `postgres` are

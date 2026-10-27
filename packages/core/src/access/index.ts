@@ -917,16 +917,23 @@ export function requireResolvedAccessGrantAuthorization(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): AccessGrant {
-  const { grant } = authorization;
-  if (
-    !resolvedAccessGrantAuthorizations.has(authorization) ||
-    !authorization.contextIntegrity ||
-    authorization.authenticatedSubjectId !== grant.subjectId ||
-    grant.workspaceId !== workspaceId
-  ) {
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) {
     throw new HTTPException(403, { message: "workspace access authorization is invalid" });
   }
-  return grant;
+  return authorization.grant;
+}
+
+function isResolvedAccessGrantAuthorization(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): boolean {
+  const { grant } = authorization;
+  return (
+    resolvedAccessGrantAuthorizations.has(authorization) &&
+    authorization.contextIntegrity &&
+    authorization.authenticatedSubjectId === grant.subjectId &&
+    grant.workspaceId === workspaceId
+  );
 }
 
 /**
@@ -989,13 +996,32 @@ export async function requireWorkspaceSettingsGrant(
 ): Promise<AccessGrant> {
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
-  if (hasPermission(grant.permissions, "workspace:admin")) return grant;
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
+  throw new HTTPException(403, {
+    message: "workspace settings require a workspace administrator or Personal workspace owner",
+  });
+}
+
+/**
+ * Whether this request may change `workspaceId`'s settings, the one decision
+ * {@link requireWorkspaceSettingsGrant} enforces. An accepted message records
+ * the same answer with its turn's app-action access, so the person's own
+ * confirmed chat can change what their own request could, and nothing more.
+ */
+export async function workspaceSettingsAuthorized(
+  deps: Pick<AccessDeps, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<boolean> {
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) return false;
+  const { grant } = authorization;
+  if (hasPermission(grant.permissions, "workspace:admin")) return true;
   const delegatedHuman = verifiedDelegatedHumanAuthorizations.get(authorization);
   const ownerSettingsCeiling =
     authorization.canonicalManagedHumanSession ||
     verifiedExternalAuthorizations.get(authorization)?.workspaceSettingsCeiling === true ||
     (delegatedHuman !== undefined && delegatedHuman.proof.permissions.includes("workspace:admin"));
-  if (
+  return (
     hasVerifiedOwningUserAuthorization(authorization) &&
     ownerSettingsCeiling &&
     hasPermission(grant.permissions, "workspace:read") &&
@@ -1003,13 +1029,8 @@ export async function requireWorkspaceSettingsGrant(
       accountId: grant.accountId,
       workspaceId,
       subjectId: authorization.authenticatedSubjectId,
-    }))
-  ) {
-    return grant;
-  }
-  throw new HTTPException(403, {
-    message: "workspace settings require a workspace administrator or Personal workspace owner",
-  });
+    })) !== null
+  );
 }
 
 /**
