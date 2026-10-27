@@ -617,6 +617,10 @@ export const browserSessions = pgTable(
     }).notNull(),
     engineVersion: text("engine_version"),
     headless: boolean("headless").notNull(),
+    /** How the controller last launched this headed browser: "window" or
+     * "offscreen". Null before migration 1001, for headless, remote and
+     * attached browsers, and from controllers that do not report it. */
+    display: text("display"),
     identityId: uuid("identity_id"),
     baseRevisionId: uuid("base_revision_id"),
     linkedComputerSessionId: uuid("linked_computer_session_id"),
@@ -677,6 +681,12 @@ export const browserSessions = pgTable(
       "browser_sessions_device_workspace_check",
       sql`${table.deviceWorkspaceId} is null or ${table.deviceId} is not null`,
     ),
+    // Migration 1003: running browsers by last use, scanned every few minutes
+    // by list_agent_held_browser_sessions to renew the holds of the ones agent
+    // sessions hold.
+    activeLastUsed: index("browser_sessions_active_last_used_idx")
+      .on(table.lastUsedAt, table.id)
+      .where(sql`${table.lifecycle} = 'active' and ${table.controllerGeneration} is not null`),
     // Migration 0705: saved browsers still bound to a controller (cleanup
     // pending), scanned by list_orphaned_idle_browser_checkpoints.
     suspendedController: index("browser_sessions_suspended_controller_idx")

@@ -1,5 +1,55 @@
 # Modular prompt changelog
 
+Settings that block a tool are changed in the chat. When the app-action tools
+may exist (capability `workspaceAdmin` on and neither `admin_actions_search`
+nor `admin_action_call` proven absent), the Autonomy and persistence rule for
+user-fixable blockers adds "setting" to its examples and a middle step: make
+the change with those tools when an app action makes it, which the user
+confirms in the chat unless the session has full access. Before, the prompt
+never mentioned app actions, so an agent whose Site could not send email
+because the integration's tool was set to Ask told the person which settings
+page to open (staging session 12f7f50d, 2026-10-26 09:05 UTC). It reached the
+same app action only after the person asked for something in the chat. The
+`admin_actions_search` description now names integration tool approvals among
+the settings it reaches, and the `sites` Skill says a tool set to Ask can't run
+from a Site's own tool calls, so the agent offers to set it to Allow in the
+chat. The tool approval confirmation names the tools and the approval, for
+example "Let send_message run without asking in this workspace?". The legacy
+prompt is unchanged.
+
+When the agent mentions another session to the user in chat, it now links it
+as `[its title](session:<sessionId>)`, and is told these links work only in
+the chat, never in email, Slack, GitHub or other messages sent elsewhere.
+Before, agents either named a session by its raw id or pasted a full console
+URL, which only works on one deployment and, in the desktop app, opened a
+separate browser tab. Each app now opens a `session:` link its own way: the web
+console navigates to the chat in place (⌘/Ctrl-click opens a new tab), the
+desktop app opens it in the app (⌘-click opens the external browser), and the
+phone app opens its chat screen. The one sentence follows the session-management
+paragraph in Session coordination and renders only for the Opengeni renderer;
+the plain-Markdown renderer module adds `session:` to the links it forbids. Both
+compositions change identically; legacy prompt digests are refreshed for this
+reviewed change.
+
+Secret references in hand-off tools. One sentence of the always-on Secrets
+block changes (119 bytes longer). Opengeni's own tools that store or send text
+now keep references as text instead of receiving values, so the prompt asks
+for the escape only in shell commands and scripts (including `ogtool call`),
+where the value is put in before any tool runs. It also says that Opengeni's
+built-in Slack and social posting tools send the reference text, never the
+value. The sentence list of the "Secrets" entry below is updated to the new
+sentences; before and after:
+
+```text
+- A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
++ A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
+```
+
+The bundled `secrets` Skill says the same, and its Codemode page adds that an
+`ogtool call` inside a shell command still needs the escape, because the shell
+resolves the reference before the tool sees it. Before, writing an unescaped
+reference into `session_create` stored the real value in the new session.
+
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
 example Gmail and Outlook Mail) that serve the same need, the first
@@ -324,6 +374,15 @@ Headings that moved or were added (layout only, not diffed):
 
 ## Sentence edits (modular "all" vs legacy)
 
+Settings in the chat. The blocked-tool rule offers the app action that makes a
+blocking setting change, confirmed in the chat, before giving a next step (see
+the first entry above).
+
+```diff
+- When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed.
+```
+
 Tool discovery and media. Deferred schemas must remain behind the existing
 search router, while modular agents need to distinguish missing disclosure
 from missing execution authority. Runtime mechanics explains ranked discovery
@@ -486,8 +545,9 @@ so "never request credentials in chat" comes with the supported alternative.
 
 ```diff
 + Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
-+ A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call.
-+ To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
++ A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls.
++ Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
++ In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
 + Never ask for passwords, keys or codes in chat or in a plain text question.
@@ -583,6 +643,9 @@ When a named tool is proven absent, only the clauses naming it change:
   an inline image source."
 - Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
   their tools.
+- Autonomy and persistence: the blocked-tool rule names `admin_actions_search`
+  and `admin_action_call` only with `workspaceAdmin` on and neither tool
+  proven absent; otherwise it keeps the legacy sentence.
 - Secrets: the `secret_search` sentence and the Skill pointer need
   `secret_search`; the 2FA-enrollment and account-creation rungs of the login
   ladder need `secret_save`; the push-approval and hardware-key handoff line

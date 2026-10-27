@@ -5,6 +5,8 @@
  *
  * - `artifact:<file uuid>` — a retained workspace file (exports, published files, images).
  * - `sandbox:<path>[:<line>]` — a file in the session's sandbox or Connected Machine.
+ * - `session:<session uuid>` — another chat in the same workspace. Each host opens it
+ *   its own way (an in-app route, the phone app's chat screen) on its own deployment.
  * - `/workspaces/<ws>/artifacts/editable/<32-hex id>` — a live editable document,
  *   workbook, or presentation.
  * - `/workspaces/<ws>/artifacts/<uuid>` — a saved Site / published HTML artifact.
@@ -19,7 +21,8 @@ export type OpenGeniLinkTarget =
   | { kind: "file"; fileId: string; workspaceId: string | null; fromSession?: string }
   | { kind: "editable-artifact"; artifactId: string; workspaceId: string; fromSession?: string }
   | { kind: "site"; artifactId: string; workspaceId: string; fromSession?: string }
-  | { kind: "sandbox-file"; path: string; line: number | null };
+  | { kind: "sandbox-file"; path: string; line: number | null }
+  | { kind: "session"; sessionId: string; workspaceId: string | null };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
@@ -31,9 +34,11 @@ const TRAILING_INVALID_LINE = /:-(?:[0-9]+)$|:[0-9]+-[0-9]+$/u;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
 /** Application scheme names are case-insensitive, unlike their payloads. */
-export function openGeniLinkScheme(href: string | undefined): "artifact" | "sandbox" | null {
+export function openGeniLinkScheme(
+  href: string | undefined,
+): "artifact" | "sandbox" | "session" | null {
   const scheme = /^([a-z]+):/iu.exec(href ?? "")?.[1]?.toLowerCase();
-  return scheme === "artifact" || scheme === "sandbox" ? scheme : null;
+  return scheme === "artifact" || scheme === "sandbox" || scheme === "session" ? scheme : null;
 }
 
 /** Reserved references must never fall back to navigation on a host origin. */
@@ -88,6 +93,13 @@ export function parseRetainedFileReference(href: string | undefined): string | n
   return UUID.test(id) ? id.toLowerCase() : null;
 }
 
+/** Return the session id of an exact `session:<uuid>` reference. */
+export function parseSessionReference(href: string | undefined): string | null {
+  if (openGeniLinkScheme(href) !== "session" || !href) return null;
+  const id = href.slice("session:".length);
+  return UUID.test(id) ? id.toLowerCase() : null;
+}
+
 /**
  * Classify an agent-authored Markdown href. Returns `null` for ordinary links
  * (`https://…`, `mailto:`, relative host links), which render as-is.
@@ -100,6 +112,8 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
   if (!href) return null;
   const fileId = parseRetainedFileReference(href);
   if (fileId) return { kind: "file", fileId, workspaceId: null };
+  const sessionId = parseSessionReference(href);
+  if (sessionId) return { kind: "session", sessionId, workspaceId: null };
   if (openGeniLinkScheme(href) === "sandbox" || href.startsWith(LEGACY_WORKSPACE_PREFIX)) {
     const location = parseSandboxLink(href);
     return location ? { kind: "sandbox-file", ...location } : null;
@@ -155,6 +169,9 @@ export function openGeniConsolePath(
   const workspace = encodeURIComponent(
     target.kind === "sandbox-file" ? workspaceId : (target.workspaceId ?? workspaceId),
   );
+  if (target.kind === "session") {
+    return `/workspaces/${workspace}/sessions/${encodeURIComponent(target.sessionId)}`;
+  }
   const search =
     target.kind !== "sandbox-file" && target.fromSession && UUID.test(target.fromSession)
       ? `?fromSession=${encodeURIComponent(target.fromSession)}`

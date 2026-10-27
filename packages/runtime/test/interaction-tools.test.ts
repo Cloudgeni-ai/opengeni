@@ -253,6 +253,88 @@ describe("interaction attempt tools", () => {
     expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
   });
 
+  test("browser_act reads the browser's receipt when the action's answer was lost", async () => {
+    const target = browserTarget();
+    // What the SDK raises when a POST was sent but its answer never came.
+    const lost = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      mutation: true,
+    });
+    let dispatches = 0;
+    const reads: string[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async () => {
+          dispatches += 1;
+          throw lost;
+        },
+        getBrowserActionReceipt: async (_workspaceId, _browserSessionId, operationId) => {
+          reads.push(operationId);
+          // Still running on the first read, settled on the second.
+          return reads.length === 1
+            ? {
+                ...browserReceipt(operationId, browserObservation(target)),
+                state: "dispatched" as const,
+              }
+            : browserReceipt(operationId, browserObservation(target));
+        },
+      }),
+    });
+    const operationId = randomUUID();
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/next" },
+      },
+      { operationId, caller: { kind: "model" as const, subjectId: "model:test" } },
+    );
+    expect(dispatches).toBe(1);
+    expect(reads).toEqual([operationId, operationId]);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", targetId: target.id });
+    expect(JSON.stringify(result)).not.toContain("network_error");
+  });
+
+  test("browser_act keeps a lost answer's error when the browser recorded nothing", async () => {
+    const target = browserTarget();
+    const lost = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      mutation: true,
+    });
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async () => {
+          throw lost;
+        },
+        getBrowserActionReceipt: noRecordedReceipt,
+      }),
+    });
+    // An uncertain mutation keeps its own failure path, as before.
+    await expect(
+      definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          action: { type: "navigate", url: "https://example.test/next" },
+        },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      ),
+    ).rejects.toBe(lost);
+  });
+
   test("browser_act says when the actions completed but the page after them was not read", async () => {
     const target = browserTarget();
     const note = {
@@ -1839,6 +1921,160 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  /** A session in the person's own Chrome that the server marked lost when
+   * that Chrome reconnected with a new extension generation. */
+  const reconnectedAttachedBrowser = (deviceId: string) => {
+    const lost = discoveredBrowserSession(browserSessionId, sessionId);
+    lost.lifecycle = "lost";
+    lost.failureCode = "controller_transition_expired";
+    lost.placement = { kind: "attached_device", deviceId };
+    lost.driverId = "opengeni.cdp.v1";
+    lost.engine = "chrome";
+    return lost;
+  };
+  /** The resume route's answer for every browser that is neither suspended
+   * nor holding a working copy, which an attached Chrome session never has. */
+  const onlySuspendedResumes = () =>
+    new OpenGeniApiError(
+      409,
+      JSON.stringify({
+        error: {
+          code: "conflict",
+          message: "Only a suspended BrowserSession can be resumed",
+          retryable: false,
+        },
+      }),
+    );
+
+  test.each([
+    ["browser_observe", {}],
+    ["browser_observe", { targetId: "tab-1" }],
+    ["browser_act", { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } }],
+    ["browser_tabs", { operation: "list" }],
+  ] as const)(
+    "%s on a session in the person's Chrome that ended when Chrome reconnected says how to continue, never resuming it",
+    async (tool, args) => {
+      const resumes: string[] = [];
+      const notActive = () => new OpenGeniApiError(409, "BrowserSession is not active");
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => reconnectedAttachedBrowser(randomUUID()),
+          resumeBrowserSession: async (_workspaceId, resumedId) => {
+            resumes.push(resumedId);
+            throw onlySuspendedResumes();
+          },
+          listBrowserTargets: async () => {
+            throw notActive();
+          },
+          observeBrowserTarget: async () => {
+            throw notActive();
+          },
+          actInBrowser: async () => {
+            throw notActive();
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { browserSessionId, ...args },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(resumes).toEqual([]);
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "attached_browser_reconnected", retryable: false } },
+      });
+      const message = (result.structuredContent as { error: { message: string } }).error.message;
+      expect(message).not.toContain("Only a suspended BrowserSession can be resumed");
+      expect(message).toContain(
+        `BrowserSession ${browserSessionId} ended when the person's Chrome reconnected (Chrome or its extension restarted). Call browser_open with this browserSessionId to continue in the same Chrome profile.`,
+      );
+    },
+  );
+
+  test.each([
+    ["reuses this chat's live session on that profile", true],
+    ["opens a session on that profile", false],
+  ] as const)(
+    "browser_open naming a session that ended when the person's Chrome reconnected %s",
+    async (_label, live) => {
+      const deviceId = randomUUID();
+      const replacementId = randomUUID();
+      const replacement = discoveredBrowserSession(replacementId, sessionId);
+      replacement.lifecycle = "active";
+      replacement.placement = { kind: "attached_device", deviceId };
+      replacement.controller = {
+        controllerId: "opengeni-browserd",
+        controllerGeneration: "controller-2",
+        placementInstanceId: "chrome-generation-2",
+      };
+      // Another profile's live session is never taken instead.
+      const elsewhere = discoveredBrowserSession(randomUUID(), sessionId);
+      elsewhere.lifecycle = "active";
+      elsewhere.placement = { kind: "attached_device", deviceId: randomUUID() };
+      const target = { ...browserTarget(), browserSessionId: replacementId };
+      const resumes: string[] = [];
+      const creates: Array<Record<string, unknown>> = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async (_workspaceId, id) =>
+            id === browserSessionId ? reconnectedAttachedBrowser(deviceId) : replacement,
+          resumeBrowserSession: async (_workspaceId, resumedId) => {
+            resumes.push(resumedId);
+            throw onlySuspendedResumes();
+          },
+          listBrowserSessions: async () => ({
+            revision: 1,
+            sessions: live ? [elsewhere, replacement] : [elsewhere],
+          }),
+          createBrowserSession: async (_workspaceId, request) => {
+            creates.push(request as unknown as Record<string, unknown>);
+            return { session: replacement } as never;
+          },
+          listBrowserTargets: async () => ({
+            browserSessionId: replacementId,
+            controllerGeneration: "controller-2",
+            targets: [target],
+          }),
+          observeBrowserTarget: async () => browserObservation(target),
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { browserSessionId },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(resumes).toEqual([]);
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        session: { id: replacementId, lifecycle: "active" },
+      });
+      expect(creates).toEqual(
+        live
+          ? []
+          : [
+              expect.objectContaining({
+                sessionId,
+                headless: false,
+                placement: { kind: "attached_device", deviceId },
+              }),
+            ],
+      );
+      const text = result.content
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join("\n");
+      expect(text).toContain(
+        `BrowserSession ${browserSessionId} ended when the person's Chrome reconnected; this continues in the same Chrome profile as BrowserSession ${replacementId}. Use the new ID from now on.`,
+      );
+    },
+  );
+
   test.each([
     ["browser_observe", { targetId: "tab-1" }],
     ["browser_act", { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } }],
@@ -1958,7 +2194,7 @@ describe("interaction attempt tools", () => {
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
     );
     expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
-      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended or restarted. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
     );
   });
 
@@ -2049,6 +2285,74 @@ describe("interaction attempt tools", () => {
     expect(message).toBe(
       `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
     );
+  });
+
+  describe("a computerSessionId near an open one", () => {
+    const openId = "44867760-0b48-4b43-aa93-91eb19c94f64";
+    const observeWith = async (
+      sentId: string,
+      open: ReadonlyArray<{ id: string; name: string; lastUsedAt?: string }>,
+    ) => {
+      const sessions = open.map((entry) => {
+        const computer = discoveredComputerSession(entry.id, sessionId);
+        computer.lifecycle = "active";
+        computer.name = entry.name;
+        if (entry.lastUsedAt) computer.lastUsedAt = entry.lastUsedAt;
+        return computer;
+      });
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listComputerSessions: async () => ({ revision: 1, sessions }) as never,
+          observeComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+          captureComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_observe"],
+        permissions: ["sessions:read"],
+      });
+      const result = await definitions[0]!.execute(
+        { computerSessionId: sentId, targetId: "window-1" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test("is named as not that session", async () => {
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f65";
+      expect(await observeWith(sent, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("is named up to 8 differing characters, not at 9", async () => {
+      const eight = "44867760-0b48-4b43-aa93-91eb00000000";
+      const nine = "44867760-0b48-4b43-aa93-91e000000000";
+      expect(await observeWith(eight, [{ id: openId, name: "Desktop" }])).toContain(
+        `The computerSessionId you sent, ${eight}, is not ${openId}: they differ in 8 characters.`,
+      );
+      expect(await observeWith(nine, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("names the closest of two near sessions", async () => {
+      // Three characters off the sent id's target, and listed first.
+      const fartherId = "44867760-0b48-4b43-aa93-91eb19c94000";
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f6a";
+      const message = await observeWith(sent, [
+        { id: fartherId, name: "Newer", lastUsedAt: new Date().toISOString() },
+        { id: openId, name: "Older", lastUsedAt: new Date(Date.now() - 60_000).toISOString() },
+      ]);
+      expect(message).toContain(
+        `The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character.`,
+      );
+      expect(message).not.toContain(`is not ${fartherId}`);
+    });
   });
 
   describe("tools that name a session directly give the same hint", () => {
@@ -2176,6 +2480,46 @@ describe("interaction attempt tools", () => {
       expect(message).toBe(
         `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Lab: BrowserSession not found". Use one of these ids.`,
       );
+    });
+
+    test("browser_open naming a missing linked computer is answered from the API's own refusal", async () => {
+      const browser = openBrowser();
+      const computer = openComputer();
+      // The body the API sends when the linked ComputerSession does not exist.
+      const linkedMissing = () =>
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            error: {
+              status: 404,
+              code: "not_found",
+              message: "Linked ComputerSession not found",
+              retryable: false,
+              requestId: "request-1",
+            },
+          }),
+        );
+      for (const args of [
+        { linkedComputerSessionId: randomUUID() },
+        { browserSessionId: browser.id, linkedComputerSessionId: randomUUID() },
+      ]) {
+        const message = await run("browser_open", args, {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: [computer] }) as never,
+          getBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          createBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          openBrowserSession: async () => {
+            throw linkedMissing();
+          },
+        });
+        expect(message).toBe(
+          `API 404: Linked ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Desktop". Use one of these ids. Reference: request-1.`,
+        );
+      }
     });
 
     test("a missing session is recognised from the API's JSON refusal, flat or nested", async () => {
@@ -3960,6 +4304,68 @@ describe("interaction attempt tools", () => {
     expect(second).not.toContain("Style");
     // And an action that changed nothing says so.
     expect(await act()).toContain("No element changed since");
+  });
+
+  test("a Computer click or key press the driver could not confirm that changed no element says it may not have taken effect", async () => {
+    const target = computerTarget();
+    const reading = {
+      ...computerObservation(target),
+      semantic: {
+        kind: "snapshot" as const,
+        roots: Array.from({ length: 8 }, (_, index) => ({
+          ref: `e${index + 1}`,
+          role: "button",
+          name: `Button ${index}`,
+          states: [],
+          actions: ["invoke"],
+        })),
+        nodeCount: 8,
+      },
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        // The driver reports raw input it could not confirm, as CUA does for
+        // a click or key press it only sent.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+          ...computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+          ...(value.action.type === "pointer" ||
+          (value.action.type === "keyboard" && value.action.value !== "pagedown")
+            ? { unconfirmedInput: true as const }
+            : {}),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async (action: Record<string, unknown>) => {
+      const result = await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          expectedTargetGeneration: target.targetGeneration,
+          expectedObservationId: "fenced",
+          action,
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return (result.content[0] as { text: string }).text;
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    const invoke = { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" };
+    // The first reading in this attempt is shown whole.
+    expect(await act(invoke)).not.toContain(line);
+    const click = await act({ type: "pointer", action: "click", x: 10, y: 10, frameId: "f_1" });
+    expect(click.split("\n")[1]).toBe(line);
+    expect(await act({ type: "keyboard", action: "press", value: "cmd+w" })).toContain(line);
+    // A key press the driver did not report as unconfirmed reads as before.
+    expect(await act({ type: "keyboard", action: "press", value: "pagedown" })).not.toContain(line);
+    // A semantic action that changed nothing reads as before.
+    const unchanged = await act(invoke);
+    expect(unchanged).toContain("No element changed since");
+    expect(unchanged).not.toContain(line);
   });
 
   test("a browser action's outline shows only what changed since the outline the model last saw", async () => {
@@ -7024,6 +7430,7 @@ describe("interaction attempt tools", () => {
             scrollY: 0,
             capturedAt: now,
             data: image,
+            inexactScrollbars: true,
           };
         },
       }),
@@ -7044,6 +7451,7 @@ describe("interaction attempt tools", () => {
       mediaType: "image/jpeg",
       width: 120,
       height: 200,
+      note: "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
     });
     expect(result.content[1]).toEqual({
       type: "image",

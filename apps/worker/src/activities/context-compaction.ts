@@ -18,8 +18,8 @@ import {
   AnthropicSizeRecoveryExhaustedError,
   type AnthropicRequestSize,
   omitOpaqueArtifactsFromPortableCompactionHistory,
-  buildCompactionReplacementHistory,
-  buildRemoteV2ReplacementHistory,
+  buildCompactionReplacement,
+  buildRemoteV2Replacement,
   compactionAttachmentFileIds,
   compactionThresholdTokens,
   compactionReplacementFingerprint,
@@ -221,7 +221,16 @@ export async function maybeCompactContext(
     };
   }
 
-  const canonicalItems = projectRejectedProviderArtifacts(active) as CompactionItem[];
+  // Keep the turn that wrote each row beside its projected item, so a retained
+  // request is paired only with its own turn's reply and keeps its turn.
+  const canonicalItems: CompactionItem[] = [];
+  const canonicalTurnIds: (string | null)[] = [];
+  for (const row of active) {
+    for (const item of projectRejectedProviderArtifacts([row])) {
+      canonicalItems.push(item as CompactionItem);
+      canonicalTurnIds.push(row.turnId ?? null);
+    }
+  }
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
     const materialized = options.materializeHistory
       ? await options.materializeHistory(input)
@@ -279,6 +288,7 @@ export async function maybeCompactContext(
       settings,
       scope,
       canonicalItems,
+      canonicalTurnIds,
       items,
       decision,
       { ...options, inputRecoveryPayload: recoveryPayload },
@@ -292,6 +302,7 @@ export async function maybeCompactContext(
     settings,
     scope,
     canonicalItems,
+    canonicalTurnIds,
     items,
     decision,
     summarize,
@@ -437,6 +448,7 @@ async function compactContextRemoteV2(
     attemptId: string;
   },
   canonicalItems: CompactionItem[],
+  canonicalTurnIds: readonly (string | null)[],
   items: CompactionItem[],
   decision: { signalTokens: number; thresholdTokens: number },
   options: {
@@ -475,12 +487,14 @@ async function compactContextRemoteV2(
     compactionItem = await options.requestRemoteCompactionV2(settings, retry.input);
   }
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
-  const replacementHistory = buildRemoteV2ReplacementHistory(
+  const replacement = buildRemoteV2Replacement(
     canonicalItems,
     compactionItem,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
     await attachmentUploadTimes(db, scope.workspaceId, canonicalItems),
+    { itemTurnIds: canonicalTurnIds, activeTurnId: scope.turnId },
   );
+  const replacementHistory = replacement.history;
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const summaryIndex =
@@ -501,6 +515,7 @@ async function compactContextRemoteV2(
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, summaryIndex),
+    replacementTurnIds: replacement.turnIds.slice(0, summaryIndex),
     ...(replacementHistory.length > summaryIndex + 1
       ? { trailingItems: replacementHistory.slice(summaryIndex + 1) }
       : {}),
@@ -573,6 +588,7 @@ async function compactContextPortable(
     attemptId: string;
   },
   canonicalItems: CompactionItem[],
+  canonicalTurnIds: readonly (string | null)[],
   items: CompactionItem[],
   decision: { signalTokens: number; thresholdTokens: number },
   summarize: CompactionSummarizer,
@@ -647,13 +663,18 @@ async function compactContextPortable(
   const summaryBody = summarized.summaryBody;
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
   const summaryTokens = estimateTokens([buildSummaryItem(summaryBody)]);
-  const replacementHistory = buildCompactionReplacementHistory(
+  const replacement = buildCompactionReplacement(
     summarizedItems,
     summaryBody,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
     Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
     await attachmentUploadTimes(db, scope.workspaceId, summarizedItems),
+    {
+      itemTurnIds: canonicalTurnIds.slice(0, summarizedItems.length),
+      activeTurnId: scope.turnId,
+    },
   );
+  const replacementHistory = replacement.history;
   const estimatedTokensAfter = estimateTokens(
     await projectForWire([...replacementHistory, ...deferredItems]),
   );
@@ -690,6 +711,7 @@ async function compactContextPortable(
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, summaryIndex),
+    replacementTurnIds: replacement.turnIds.slice(0, summaryIndex),
     ...(replacementHistory.length > summaryIndex + 1 || deferredItems.length > 0
       ? { trailingItems: [...replacementHistory.slice(summaryIndex + 1), ...deferredItems] }
       : {}),

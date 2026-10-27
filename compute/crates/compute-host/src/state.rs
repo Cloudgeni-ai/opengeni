@@ -244,6 +244,23 @@ impl Record {
     }
 }
 
+/// What a create makes of the ready sandbox it claims (see
+/// [`Records::claim`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Claim {
+    /// The new sandbox's id.
+    pub id: Id,
+    /// What the create asked for.
+    pub config: SandboxConfig,
+    /// The ownership the create is for.
+    pub owner: OwnerEpoch,
+    /// Until when its first wake stays booked (see
+    /// [`Record::first_wake_by_ms`]).
+    pub first_wake_by_ms: u64,
+    /// Its disk's length, where the claim lengthened it.
+    pub disk_bytes: Option<u64>,
+}
+
 /// Which version of a record an operation was issued against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Fence {
@@ -901,10 +918,9 @@ impl Records {
     }
 
     /// Gives the ready sandbox `ready`, still at `expected`, to a create:
-    /// one write makes it sandbox `id` with `config`, held under owner
-    /// epoch `owner`, no longer ready, and
-    /// with a guest that has yet to learn which sandbox it is. Its
-    /// directory keeps its name, which the record keeps as its host name.
+    /// one write makes it the sandbox `claim` names, no longer ready, with
+    /// a guest that has yet to learn which sandbox it is. Its directory
+    /// keeps its name, which the record keeps as its host name.
     /// Like a new record it takes a generation no earlier record used, so
     /// one `id` had before never comes back with it. Returns the record now
     /// committed.
@@ -916,11 +932,15 @@ impl Records {
         &self,
         ready: Id,
         expected: Fence,
-        id: Id,
-        config: SandboxConfig,
-        owner: OwnerEpoch,
-        first_wake_by_ms: u64,
+        claim: Claim,
     ) -> Result<Record, StateError> {
+        let Claim {
+            id,
+            config,
+            owner,
+            first_wake_by_ms,
+            disk_bytes,
+        } = claim;
         let entry = {
             let mut entries = locked(&self.entries);
             if entries.contains_key(&id.0) {
@@ -952,6 +972,10 @@ impl Records {
                     ready: false,
                     config,
                     identity: Identity::Pending,
+                    allocation: Allocation {
+                        disk_bytes: disk_bytes.or(current.allocation.disk_bytes),
+                        ..current.allocation
+                    },
                     generation: generations.unused().max(current.generation),
                     revision: current.revision + 1,
                     // Its idle time starts at the claim, not at the fill, so

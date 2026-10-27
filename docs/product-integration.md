@@ -135,7 +135,10 @@ workspace: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective
 grant there) and `GET /v1/config/client`. The user's own inbox also passes:
 `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved
 workspace's items, and `GET`/`PUT /v1/inbox/settings` (keep settings
-read-only with `authorizeMutation` if your product owns them). Everything
+read-only with `authorizeMutation` if your product owns them). So does
+`GET /v1/billing/checkout/{id}`, read for the resolved workspace's
+organization only and only if the user may read its billing, so a credits
+payment page opened in the chat confirms there once paid. Everything
 else is a 404. An external user has an inbox like an Opengeni member: their
 sessions' questions, approvals, paused goals and agent notifications land
 there, and the stock app shows it, so a product needs no notification

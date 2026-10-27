@@ -13,6 +13,7 @@ import {
   usePreparedMcpSetupAttempt,
   useChatConnectionsAllowed,
   useConnect,
+  showsMcpServerLabel,
   type ConnectAttempt,
   type ConnectAttemptHints,
   type ConnectController,
@@ -77,6 +78,12 @@ export interface NativeInChatConnectOptions {
    * storage), so setup picks up again after the app was closed mid-sign-in.
    */
   attemptHints?: ConnectAttemptHints | undefined;
+  /**
+   * Share a link to this conversation (for example through the system share
+   * sheet). A computer connects from the computer itself, so with this a
+   * request to connect one says so and offers the link to open there.
+   */
+  shareConversation?: (() => void) | undefined;
 }
 
 function requireHttps(url: string): void {
@@ -169,6 +176,9 @@ export function useNativeInChatConnect({
   return useCallback(
     (item: AuthNeededItem) => {
       const host = latest.current;
+      // A computer connects from the computer itself, never from this phone.
+      if (item.capability?.id === "api:connected-machine")
+        return <NativeAuthNeededRow item={item} onShareConversation={host?.shareConversation} />;
       if (!client || !host || !chatConnections) return <NativeAuthNeededRow item={item} />;
       const key = `${workspaceId}:${sessionId}:${item.id}`;
       // A failed read says nothing about this person's access: offer to try
@@ -413,7 +423,7 @@ function CapabilityFrame({
           </View>
           {complete ? (
             <Icon name="check" size={18} color={c.accent} />
-          ) : (
+          ) : !typeLabel ? null : (
             <View
               style={{
                 borderRadius: theme.radius.full,
@@ -1141,7 +1151,7 @@ export function NativeMcpCapabilityCard({
     <CapabilityFrame
       name={title}
       subtitle={item?.providerDomain ?? ""}
-      typeLabel={t("sessionMcpCapabilityCard.mcpServer")}
+      typeLabel={showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : ""}
       description={item?.description || rationale}
       complete={flow.complete}
       note={t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")}
@@ -1407,10 +1417,13 @@ export function NativeAuthNeededRow({
   item,
   setupUnavailable = false,
   openUrl,
+  onShareConversation,
 }: {
   item: AuthNeededItem;
   setupUnavailable?: boolean | undefined;
   openUrl?: ((url: string) => void) | undefined;
+  /** For a computer request: share this chat's link to open on that computer. */
+  onShareConversation?: (() => void) | undefined;
 }) {
   const t = useOpenGeniText();
   const text = useText();
@@ -1425,11 +1438,26 @@ export function NativeAuthNeededRow({
           borderColor: c.border,
           backgroundColor: c["surface-1"],
           padding: 14,
-          gap: 4,
+          gap: onShareConversation ? 10 : 4,
         }}
       >
-        <Text style={text.label}>{t("thisComputer.card.name")}</Text>
-        <Line>{t("thisComputer.card.hostSetupUnavailable")}</Line>
+        <View style={{ gap: 4 }}>
+          <Text style={text.label}>{t("thisComputer.card.name")}</Text>
+          <Line>
+            {onShareConversation
+              ? t("thisComputer.card.connectOnThatComputer")
+              : t("thisComputer.card.hostSetupUnavailable")}
+          </Line>
+        </View>
+        {onShareConversation ? (
+          <Button
+            icon="share-2"
+            variant="secondary"
+            label={t("thisComputer.card.shareConversation")}
+            onPress={onShareConversation}
+            style={{ alignSelf: "flex-start" }}
+          />
+        ) : null}
       </View>
     );
   }

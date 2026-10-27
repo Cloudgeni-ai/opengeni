@@ -69,6 +69,7 @@ import {
   getOrganizationAdministrationOverview,
   getOrganizationInvitationForAdministration,
   getOrganizationPrivacyPreferences,
+  readOrganizationSignupUseCase,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -93,6 +94,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { agentActingAsPerson, organizationSettingsPermission } from "../http/acting-person";
 
 import {
@@ -324,7 +326,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
             trialCreditModelIds: signupCreditModelIds(deps.settings),
             trialCreditsEnabled:
@@ -347,7 +349,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateAdditionalOrganizationResponse.parse(
           await createAdditionalManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
           }),
         ),
@@ -359,7 +361,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organization-memberships", async (context) => {
-    const { session } = await requireManagedHuman(context, deps);
+    const { session, subjectId } = await requireManagedHuman(context, deps);
     try {
       const result = await ensureManagedAccessForUserWithOrganizationMemberships(deps.db, {
         userId: session.user.id,
@@ -371,14 +373,30 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
           // Each organization says whether its people keep a Personal
-          // workspace to see and work in, so the app can hide it when off.
+          // workspace to see and work in, so the app can hide it when off,
+          // and how this person said they want to use Opengeni there, so
+          // the new-chat page leads with matching suggestions on any device.
           memberships: await Promise.all(
-            result.organizationMemberships.map(async (membership) => ({
-              ...membership,
-              personalWorkspacesEnabled: (
-                await getOrganizationPrivacyPreferences(deps.db, membership.organizationId)
-              ).personalWorkspacesEnabled,
-            })),
+            result.organizationMemberships.map(async (membership) => {
+              const [privacy, signupUseCase] = await Promise.all([
+                getOrganizationPrivacyPreferences(deps.db, membership.organizationId),
+                readOrganizationSignupUseCase(deps.db, {
+                  organizationId: membership.organizationId,
+                  subjectId,
+                }).catch((error: unknown) => {
+                  // Only suggestions depend on it: the general ones show instead.
+                  console.warn("[api] could not read the signup use case", {
+                    sqlState: nestedPostgresSqlState(error) ?? null,
+                  });
+                  return undefined;
+                }),
+              ]);
+              return {
+                ...membership,
+                personalWorkspacesEnabled: privacy.personalWorkspacesEnabled,
+                ...(signupUseCase ? { signupUseCase } : {}),
+              };
+            }),
           ),
         }),
       );
@@ -785,6 +803,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
+    // placeholder of an account without an email address.
+    if (payload.email.trim().toLowerCase().endsWith(".invalid")) {
+      throw new HTTPException(422, { message: "That email address can't receive invitations" });
+    }
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {

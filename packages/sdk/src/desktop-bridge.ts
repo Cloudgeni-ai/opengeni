@@ -42,7 +42,9 @@ export type DesktopCapability =
   /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
   | "computerCapabilities"
   /** A still of the window's page, taken without a prompt (for feedback reports). */
-  | "captureWindow";
+  | "captureWindow"
+  /** A shortcut dictates anywhere: the text lands where the person is typing. */
+  | "dictation";
 
 export type DesktopSystemAudioErrorCode =
   /** This computer, its OS version or this app build can't record other apps' audio. */
@@ -73,14 +75,39 @@ export interface DesktopMeetingDetectionStatus {
 }
 
 /**
- * What the person chose on one of the app's meeting notifications: record the
- * call an app just started, or stop recording because the call ended. `app`
- * is the call app's name ("Zoom", "Google Chrome"); `title` suggests a name
- * for the meeting.
+ * What the person chose on the app's meeting card: record the call an app
+ * just started, or stop recording because the call ended. `app` is the call
+ * app's name ("Zoom", "Google Chrome"); `title` suggests a name for the
+ * meeting.
  */
 export type DesktopMeetingRequest =
   | { kind: "record"; app: string; title: string }
   | { kind: "stop"; app: string };
+
+/**
+ * Call detection. While on, the app shows a card in the top corner of the
+ * screen when a call app (Zoom, Teams, Slack, Meet in a browser) starts using
+ * the microphone, and another when the call it is recording ends. Part of the
+ * desktop bridge, or on its own as `window.opengeniMeetingDetection` in any
+ * app that hosts Opengeni pages (see {@link getDesktopMeetingDetection}).
+ */
+export interface DesktopMeetingDetection {
+  status(): Promise<DesktopMeetingDetectionStatus>;
+  update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+  /**
+   * Tell the app whether this page is recording a meeting, so it doesn't
+   * offer to record another and can offer to stop when the call ends.
+   */
+  setRecording(recording: boolean): void;
+  /**
+   * The person chose Record or Stop on the card. The window comes to the
+   * front first. Only the page's newest listener receives them; the app
+   * holds a choice briefly for a page that isn't listening yet.
+   */
+  onRequest(listener: (request: DesktopMeetingRequest) => void): Unsubscribe;
+  /** The switch or its state changed. */
+  onChange(listener: () => void): Unsubscribe;
+}
 
 /**
  * The app's own updates as the web app shows them. `downloading` means a new
@@ -233,6 +260,223 @@ export type DesktopAppShotResult =
       /** A plain English sentence. */
       message: string;
     };
+
+/** A modifier key a dictation shortcut can hold; `fn` is the Fn (Globe) key on a Mac. */
+export type DesktopDictationModifier = DesktopAppShotModifier | "fn";
+
+/**
+ * What starts and stops a dictation: both keys of a modifier pair (both
+ * Option keys), modifier keys alone held together (Control and Fn on a Mac),
+ * or an ordinary key combination in Electron's accelerator syntax.
+ */
+export type DesktopDictationShortcut =
+  | { kind: "modifierPair"; modifier: DesktopAppShotModifier }
+  | { kind: "modifierChord"; modifiers: DesktopDictationModifier[] }
+  | { kind: "accelerator"; accelerator: string };
+
+/** One dictation shortcut and the language it listens for. */
+export interface DesktopDictationProfile {
+  id: string;
+  /** What the person calls it ("Norwegian"). */
+  name: string;
+  shortcut: DesktopDictationShortcut;
+  /** An ISO 639-1 or 639-3 code ("nb", "en"); null detects the language. */
+  language: string | null;
+}
+
+/**
+ * Where the text goes: typed where the cursor is (the clipboard is put back
+ * afterwards), only copied, or typed and left on the clipboard too.
+ */
+export type DesktopDictationOutput = "paste" | "copy" | "pasteAndCopy";
+
+/** Press once to start and again to stop, or hold the shortcut while speaking. */
+export type DesktopDictationMode = "toggle" | "hold";
+
+/** An ordinary key combination, in Electron's accelerator syntax ("Control+Shift+2"). */
+export type DesktopDictationKeys = { kind: "accelerator"; accelerator: string };
+
+export interface DesktopDictationSettings {
+  /** Off until the person turns it on. */
+  enabled: boolean;
+  /** At least one; most people keep the one shortcut. */
+  profiles: DesktopDictationProfile[];
+  output: DesktopDictationOutput;
+  mode: DesktopDictationMode;
+  /**
+   * Names and words to listen for, such as people's and products' names: at
+   * most 100, each up to 50 characters. Absent from apps that don't offer it.
+   */
+  vocabulary?: string[];
+  /**
+   * Transcribes the last dictation again and types it: one that failed, or
+   * else the newest one kept on this computer. Null: none.
+   */
+  retryShortcut?: DesktopDictationKeys | null;
+  /** Throws away the dictation under way, as Escape does. Null: none. */
+  cancelShortcut?: DesktopDictationKeys | null;
+}
+
+/** A shortcut that acts on dictations rather than starting one. */
+export type DesktopDictationAction = "retry" | "cancel";
+
+/** The system permissions dictation needs, where the system asks for them. */
+export type DesktopDictationPermissionId = "accessibility";
+
+/** Why text can't be typed into other apps on this computer, so it is only copied. */
+export type DesktopDictationPasteBlocker =
+  /** macOS: Accessibility isn't allowed for the app. */
+  | "accessibility"
+  /** Linux on X11: xdotool isn't installed. */
+  | "xdotool"
+  /** Linux on Wayland: neither wtype nor ydotool is installed. */
+  | "wtype"
+  /** This system has no way to. */
+  | "unsupported";
+
+/** Why a shortcut that is on doesn't work. */
+export type DesktopDictationShortcutProblem =
+  /** Another app owns the key combination, or the system refuses it. */
+  | "taken"
+  /** This computer can't watch those keys on their own. */
+  | "unsupported"
+  /** It stopped working; turning dictation off and on again sets it up again. */
+  | "stopped"
+  /** It couldn't be set up. */
+  | "failed";
+
+export interface DesktopDictationStatus {
+  settings: DesktopDictationSettings;
+  /** Dictation works in this app on this computer. */
+  supported: boolean;
+  platform: DesktopPlatform;
+  /** The modifier pairs this computer can watch for. */
+  modifierPairs: DesktopAppShotModifier[];
+  /** Modifier keys alone (Control and Fn) can be a shortcut here. */
+  modifierChords: boolean;
+  /** Where the system asks (macOS): whether each permission is allowed. */
+  permissions: { id: DesktopDictationPermissionId; granted: boolean }[];
+  /** Each shortcut that is on but could not be set up (another app owns it). */
+  shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[];
+  /** The retry or cancel shortcut, when it is on but could not be set up. */
+  actionShortcutErrors?: {
+    action: DesktopDictationAction;
+    problem: DesktopDictationShortcutProblem;
+  }[];
+  /** Whether text can be typed into other apps here; otherwise it is only copied. */
+  paste: { available: boolean; blocker: DesktopDictationPasteBlocker | null };
+  /** A signed-in page is ready to record; dictation waits for one. */
+  ready: boolean;
+}
+
+/** A dictation's speech, kept on this computer beside its text. */
+export interface DesktopDictationAudio {
+  /** As recorded, such as "audio/webm;codecs=opus". */
+  mimeType: string;
+  bytes: Uint8Array;
+  durationMilliseconds: number;
+}
+
+/** What the app asks the page that records to do. */
+export type DesktopDictationRequest =
+  | {
+      kind: "start";
+      dictationId: string;
+      profileId: string;
+      language: string | null;
+      /** Names and words to listen for; absent from apps that don't offer it. */
+      vocabulary?: string[];
+    }
+  /** Transcribe speech kept on this computer as a new dictation, and report it as one. */
+  | {
+      kind: "transcribe";
+      dictationId: string;
+      profileId: string;
+      language: string | null;
+      vocabulary: string[];
+      audio: DesktopDictationAudio;
+    }
+  | { kind: "stop"; dictationId: string }
+  /**
+   * Stop without typing anything. A start of a few seconds is deleted; longer
+   * speech stays saved, as the composer's Escape keeps it, for the composer to offer.
+   */
+  | { kind: "cancel"; dictationId: string }
+  /** Let a failed dictation go without deleting it: the composer offers it later. */
+  | { kind: "dismiss"; dictationId: string }
+  /** Transcribe a failed dictation again. */
+  | { kind: "retry"; dictationId: string };
+
+/** How a dictation is going, reported by the page that records it. */
+export type DesktopDictationReport =
+  | {
+      dictationId: string;
+      phase: "recording";
+      /** Epoch milliseconds. */
+      startedAt: number;
+      /** The microphone's level from 0 to 1, when it is metered. */
+      level: number | null;
+    }
+  | { dictationId: string; phase: "transcribing" }
+  | {
+      dictationId: string;
+      phase: "done";
+      text: string;
+      /** The speech that was recorded, for the app to keep with the text. */
+      audio?: DesktopDictationAudio;
+    }
+  | {
+      dictationId: string;
+      phase: "failed";
+      /** A plain sentence for people. */
+      message: string;
+      /** The speech is kept and can be transcribed again. */
+      retryable: boolean;
+    }
+  /** Nothing was recorded, or it was thrown away. */
+  | { dictationId: string; phase: "cancelled" };
+
+/** A finished dictation, kept on this computer so its text can be copied again. */
+export interface DesktopDictationHistoryEntry {
+  id: string;
+  text: string;
+  /** ISO timestamp. */
+  at: string;
+  profileName: string;
+  language: string | null;
+  /** Its speech is kept too, to play or transcribe again; absent or null when it isn't. */
+  audio?: { mimeType: string; durationMilliseconds: number } | null;
+}
+
+/**
+ * Dictation from anywhere. The app owns the shortcuts, the small window that
+ * shows a dictation's progress and where the text goes; the page records and
+ * transcribes with the signed-in account (`DesktopDictationHost`).
+ */
+export interface DesktopDictation {
+  status(): Promise<DesktopDictationStatus>;
+  /** Change the settings; the shortcuts follow at once. */
+  update(settings: Partial<DesktopDictationSettings>): Promise<DesktopDictationStatus>;
+  requestPermission(id: DesktopDictationPermissionId): Promise<void>;
+  history(): Promise<DesktopDictationHistoryEntry[]>;
+  clearHistory(): Promise<void>;
+  /** A kept dictation's speech, to play; null once it is gone. Absent from apps that don't keep it. */
+  historyAudio?(id: string): Promise<DesktopDictationAudio | null>;
+  /**
+   * Transcribe a kept dictation's speech again, with the shortcut's current
+   * language and vocabulary; the new text replaces the old in the history.
+   * The dictation window shows how it goes.
+   */
+  transcribeAgain?(id: string): Promise<void>;
+  /**
+   * Record for the shortcuts. Only the newest listener receives requests;
+   * until one listens, a shortcut shows that dictation isn't ready.
+   */
+  onRequest(listener: (request: DesktopDictationRequest) => void): Unsubscribe;
+  report(report: DesktopDictationReport): void;
+  /** Settings, permissions or a shortcut's state changed. */
+  onChange(listener: () => void): Unsubscribe;
+}
 
 /**
  * What the person lets Opengeni do on this computer, kept by the desktop app
@@ -405,28 +649,8 @@ export interface DesktopBridge {
    * capability. The app leaves its own sounds out.
    */
   readonly systemAudio?: DesktopSystemAudio;
-  /**
-   * Call detection. With the `meetingDetection` capability. While on, the
-   * app shows a notification when a call app (Zoom, Teams, Slack, Meet in a
-   * browser) starts using the microphone, and another when the call it is
-   * recording ends.
-   */
-  readonly meetingDetection?: {
-    status(): Promise<DesktopMeetingDetectionStatus>;
-    update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
-    /**
-     * Tell the app whether this page is recording a meeting, so it doesn't
-     * offer to record another and can offer to stop when the call ends.
-     */
-    setRecording(recording: boolean): void;
-    /**
-     * The person chose a notification's action. The window comes to the
-     * front first. Only the newest listener receives them.
-     */
-    onRequest(listener: (request: DesktopMeetingRequest) => void): Unsubscribe;
-    /** The switch or its state changed. */
-    onChange(listener: () => void): Unsubscribe;
-  };
+  /** Call detection. With the `meetingDetection` capability. */
+  readonly meetingDetection?: DesktopMeetingDetection;
   /** What Opengeni may do on this computer. With the `computerCapabilities` capability. */
   readonly computerCapabilities?: {
     status(): Promise<DesktopComputerCapabilities>;
@@ -440,6 +664,8 @@ export interface DesktopBridge {
     /** Switches or the system's answers changed. */
     onChange(listener: () => void): Unsubscribe;
   };
+  /** Dictation from anywhere. With the `dictation` capability. */
+  readonly dictation?: DesktopDictation;
 }
 
 /**
@@ -449,6 +675,29 @@ export interface DesktopBridge {
  * main-process side and the preload helper that defines it.
  */
 export const DESKTOP_SYSTEM_AUDIO_GLOBAL = "opengeniSystemAudio";
+
+/**
+ * The global an app's preload defines for dictation from anywhere when it
+ * isn't an Opengeni desktop shell: `exposeDictation()` from
+ * `@opengeni/desktop/preload/dictation`, answered in the main process by
+ * `handleDictationIpc()` from `@opengeni/desktop/dictation`.
+ */
+export const DESKTOP_DICTATION_GLOBAL = "opengeniDictation";
+
+/** Dictation from the app this page runs in, or null outside one that offers it. */
+export function getDesktopDictation(
+  bridge: DesktopBridge | null = getDesktopBridge(),
+): DesktopDictation | null {
+  if (bridge?.capabilities.includes("dictation") && bridge.dictation) return bridge.dictation;
+  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_DICTATION_GLOBAL];
+  if (!candidate || typeof candidate !== "object") return null;
+  const dictation = candidate as Partial<DesktopDictation>;
+  return typeof dictation.status === "function" &&
+    typeof dictation.onRequest === "function" &&
+    typeof dictation.report === "function"
+    ? (dictation as DesktopDictation)
+    : null;
+}
 
 /** Other apps' audio from the app this page runs in, or null outside one that can record it. */
 export function getDesktopSystemAudio(
@@ -463,6 +712,33 @@ export function getDesktopSystemAudio(
     typeof audio.onSamples === "function" &&
     typeof audio.onEnded === "function"
     ? (audio as DesktopSystemAudio)
+    : null;
+}
+
+/**
+ * The global an app's preload defines when it offers to record calls for the
+ * Opengeni pages it shows, without being an Opengeni desktop shell.
+ * `@opengeni/desktop` has the main-process side and the preload helper that
+ * defines it.
+ */
+export const DESKTOP_MEETING_DETECTION_GLOBAL = "opengeniMeetingDetection";
+
+/** Call detection from the app this page runs in, or null outside one that offers it. */
+export function getDesktopMeetingDetection(
+  bridge: DesktopBridge | null = getDesktopBridge(),
+): DesktopMeetingDetection | null {
+  if (bridge?.capabilities.includes("meetingDetection") && bridge.meetingDetection) {
+    return bridge.meetingDetection;
+  }
+  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_MEETING_DETECTION_GLOBAL];
+  if (!candidate || typeof candidate !== "object") return null;
+  const detection = candidate as Partial<DesktopMeetingDetection>;
+  return typeof detection.status === "function" &&
+    typeof detection.update === "function" &&
+    typeof detection.setRecording === "function" &&
+    typeof detection.onRequest === "function" &&
+    typeof detection.onChange === "function"
+    ? (detection as DesktopMeetingDetection)
     : null;
 }
 
@@ -518,12 +794,25 @@ export const DESKTOP_IPC = {
   meetingDetectionStatus: "og:meeting-detection:status",
   meetingDetectionUpdate: "og:meeting-detection:update",
   meetingDetectionRecording: "og:meeting-detection:recording",
+  meetingDetectionListen: "og:meeting-detection:listen",
   meetingDetectionRequest: "og:meeting-detection:request",
   meetingDetectionChanged: "og:meeting-detection:changed",
   capabilitiesStatus: "og:capabilities:status",
   capabilitiesUpdate: "og:capabilities:update",
   capabilitiesRequestMicrophone: "og:capabilities:request-microphone",
   capabilitiesChanged: "og:capabilities:changed",
+  dictationStatus: "og:dictation:status",
+  dictationUpdate: "og:dictation:update",
+  dictationRequestPermission: "og:dictation:request-permission",
+  dictationHistory: "og:dictation:history",
+  dictationClearHistory: "og:dictation:clear-history",
+  dictationHistoryAudio: "og:dictation:history-audio",
+  dictationTranscribeAgain: "og:dictation:transcribe-again",
+  /** The page starts (true) or stops (false) recording for the shortcuts. */
+  dictationListen: "og:dictation:listen",
+  dictationRequest: "og:dictation:request",
+  dictationReport: "og:dictation:report",
+  dictationChanged: "og:dictation:changed",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",

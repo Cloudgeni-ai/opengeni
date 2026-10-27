@@ -23,9 +23,12 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             memory_mib: 30_000,
             cpu_millis: 7_000,
             disk_mib: 100_000,
+            offers: Vec::new(),
+            boot: None,
         },
         state,
         capacity: Reported {
+            guest: None,
             memory_free_mib: 29_000,
             memory_reclaimable_mib: 3_000,
             cpu_millis: 6_500,

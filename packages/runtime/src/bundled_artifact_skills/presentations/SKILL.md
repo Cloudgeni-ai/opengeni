@@ -11,7 +11,8 @@ mutable PPTX shadow or publish a sandbox deck over user edits.
 The exception is a file the user sends to be changed, or a requested file
 format the artifact cannot export; see "Requested PowerPoint files" below.
 
-Read [references/api.md](references/api.md) before editing.
+Read [references/api.md](references/api.md) before editing a presentation
+artifact; a sent or requested file (below) does not need it.
 When using `skill_read`, request that relative path from this Skill; reading
 does not materialize a local folder. Use an existing local copy only when the
 Skill was installed or explicitly checked out to the filesystem.
@@ -33,18 +34,34 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested PowerPoint files
 
 When the user sends a PowerPoint file to be changed and returned, or asks for a
-new PowerPoint file while `opengeni__editable_artifact_export` is unavailable or
-does not list that format, the file itself is the deliverable:
+new PowerPoint file, the file itself is the deliverable. Making the file is one
+reply of work: do not set a goal for it, explore the sandbox, or search for
+tools other than `sandbox_file_publish`.
+Presentation artifacts are not exported to PPTX (unless an export tool already
+in your context lists that format), so do not load artifact tools just to check:
 
-1. Make or edit it in the sandbox with ordinary tools (`python-pptx`;
-   LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Managed
-   sandboxes already include python-pptx, so do not check for it first; run
-   `pip install <package>` only if an import fails.
+1. Make or edit it in the sandbox with `python-pptx`. Managed sandboxes already
+   include python-pptx and no slide renderer, so do not check for tools or
+   install one for a routine deck; run `pip install <package>` only if an
+   import fails. Keep the layout simple enough to trust without a render. The
+   default template's layouts are drawn for 4:3, so for a new 16:9 deck
+   (`Inches(13.333)` by `Inches(7.5)`) build every slide on the blank layout
+   (`slide_layouts[6]`) with your own text boxes, 12.1 in wide at 0.6 in from
+   the left, word wrap on. Text fits without a render when the title is one
+   line of at most 45 characters at 36 pt and the body is at most six lines of
+   at most 60 characters at 28 pt; put the talking points in speaker notes.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
-3. Read the result back to check the content.
-4. Publish the file and reply with a short summary and its link. Do not also
-   build a native artifact of the same content.
+3. Read the result back to check the content: each slide's text and notes, and
+   that no shape extends past the slide. Render only when the user asks how it
+   looks or the deck depends on hand-placed images or charts:
+   `apt-get install -y --no-install-recommends libreoffice-impress
+   fonts-crosextra-carlito poppler-utils` (about a minute), `soffice --headless
+   --convert-to pdf`, then `pdftoppm -png -r 50`.
+4. Publish the file with `sandbox_file_publish` and reply with a short summary
+   and its link. If that tool is not loaded yet, load it with `tool_search` in
+   the same batch as your first command. Do not also build a native artifact of
+   the same content.
 
 ## Edit and verify
 
@@ -84,6 +101,9 @@ does not list that format, the file itself is the deliverable:
 - For a read-only question, inspect and answer without mutating or exporting.
 
 ## Completion gate
+
+This gate applies to native deck work, not to a PowerPoint file made under the
+procedure above.
 
 - The requested result exists in the durable artifact, not merely a local file.
 - Every affected slide scene and its notes/inheritance were inspected after the

@@ -134,7 +134,8 @@
       "method": "GET",
       "path": "/v1/billing/checkout/:checkoutSessionId",
       "sdk": [
-        "OpenGeniClient.getBillingCheckout"
+        "OpenGeniClient.getBillingCheckout",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
@@ -11881,7 +11882,7 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=wait\"]",
+        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=viewport_reset\",\"type=wait\"]",
         "$|type=navigate": "object",
         "$|type=navigate.type": "const!=[\"\\\"navigate\\\"\"]",
         "$|type=navigate.url": "string!",
@@ -11896,6 +11897,8 @@
         "$|type=viewport.mobile": "boolean!",
         "$|type=viewport.type": "const!=[\"\\\"viewport\\\"\"]",
         "$|type=viewport.width": "integer!",
+        "$|type=viewport_reset": "object",
+        "$|type=viewport_reset.type": "const!=[\"\\\"viewport_reset\\\"\"]",
         "$|type=click": "object",
         "$|type=click.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
         "$|type=click.locator": "ref(BrowserLocator)!",
@@ -12610,6 +12613,7 @@
         "$.controller": "ref(InteractionControllerBinding)! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
+        "$.display": "enum?=[\"\\\"offscreen\\\"\",\"\\\"window\\\"\"]",
         "$.driverId": "string!",
         "$.engine": "enum!=[\"\\\"chrome\\\"\",\"\\\"chromium\\\"\",\"\\\"external\\\"\",\"\\\"firefox\\\"\",\"\\\"lightpanda\\\"\",\"\\\"webkit\\\"\"]",
         "$.engineVersion": "string! null",
@@ -13412,6 +13416,8 @@
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
+        "$.auth|mode=managedSession.passkeySignIn": "boolean!",
+        "$.auth|mode=managedSession.passkeySignUp": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
         "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",
@@ -13511,9 +13517,24 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
+      }
+    },
+    "ClientModelResidencyV1": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deploymentType": "ref(ModelDeploymentType)!",
+        "$.eu": "boolean!",
+        "$.evidenceSource": "ref(ModelResidencyEvidenceSource)!",
+        "$.geography": "ref(ModelProcessingGeography)!",
+        "$.regions": "array!",
+        "$.regions[]": "string"
       }
     },
     "ClientResumableVoiceInputConfig": {
@@ -14058,7 +14079,8 @@
         "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.unconfirmedInput": "const?=[\"true\"]"
       }
     },
     "ComputerActionRequest": {
@@ -14450,6 +14472,7 @@
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
         "$.offScreen": "const?=[\"true\"]",
+        "$.personInputSecondsAgo": "integer?",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"
@@ -15455,6 +15478,7 @@
         "$.metadata{}|3[]": "ref(__schema0)",
         "$.metadata{}|4": "object",
         "$.metadata{}|4{}": "ref(__schema0)",
+        "$.ownerName": "string?",
         "$.purpose": "ref(RecordingCapturePurpose)?",
         "$.recordingId": "string!",
         "$.startedAt": "string?",
@@ -20008,6 +20032,7 @@
         "$.excerpts[].text": "string!",
         "$.id": "string!",
         "$.indexStatus": "ref(KnowledgeIndexStatus)?",
+        "$.lastChangedAt": "string?",
         "$.latestRevisionId": "string!",
         "$.publishedRevisionId": "string! null",
         "$.revision": "object!",
@@ -20490,6 +20515,7 @@
         "$.dictationDefault.model": "string!",
         "$.dictationDefault.providerId": "string!",
         "$.language": "string? null",
+        "$.liveTranscript": "boolean?",
         "$.models": "array!",
         "$.models[]": "ref(RecordingTranscriptionModel)",
         "$.pinned": "boolean!"
@@ -20918,6 +20944,7 @@
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
         "$.personalWorkspacesEnabled": "boolean?",
+        "$.signupUseCase": "enum?=[\"\\\"cloud\\\"\",\"\\\"embed\\\"\",\"\\\"everyday\\\"\"]",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },
@@ -21697,6 +21724,14 @@
         "$|kind=organization_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]"
       }
     },
+    "ModelDeploymentType": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"azure_data_zone\\\"\",\"\\\"azure_global\\\"\",\"\\\"azure_regional\\\"\",\"\\\"bedrock_geo_profile\\\"\",\"\\\"bedrock_global_profile\\\"\",\"\\\"bedrock_regional\\\"\",\"\\\"gateway\\\"\",\"\\\"provider_default\\\"\",\"\\\"self_hosted\\\"\",\"\\\"subscription\\\"\",\"\\\"unknown\\\"\"]"
+      }
+    },
     "ModelPricingScheduleV1": {
       "io": [
         "output"
@@ -21721,6 +21756,22 @@
         "$.inputMicrosPerMillionTokens": "integer!",
         "$.marginBps": "integer?",
         "$.outputMicrosPerMillionTokens": "integer!"
+      }
+    },
+    "ModelProcessingGeography": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"eu\\\"\",\"\\\"global\\\"\",\"\\\"other\\\"\",\"\\\"unknown\\\"\",\"\\\"us\\\"\"]"
+      }
+    },
+    "ModelResidencyEvidenceSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admin_declaration\\\"\",\"\\\"built_in_rule\\\"\",\"\\\"none\\\"\",\"\\\"operator_declaration\\\"\",\"\\\"provider_api\\\"\",\"\\\"provider_documentation\\\"\"]"
       }
     },
     "MoveDocumentRequest": {
@@ -24052,6 +24103,14 @@
         "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
       }
     },
+    "RecordingLiveProtocol": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"elevenlabs.scribe_realtime\\\"\",\"\\\"openai.realtime\\\"\"]"
+      }
+    },
     "RecordingLiveSegment": {
       "io": [
         "output"
@@ -24077,9 +24136,11 @@
         "$.audio.sampleRate": "integer!",
         "$.expiresAt": "string!",
         "$.model": "string!",
-        "$.protocol": "enum!=[\"\\\"elevenlabs.scribe_realtime\\\"\"]",
+        "$.protocol": "ref(RecordingLiveProtocol)!",
         "$.providerId": "string!",
-        "$.url": "string!"
+        "$.token": "string?",
+        "$.url": "string!",
+        "$.webrtcUrl": "string?"
       }
     },
     "RecordingMode": {
@@ -32456,6 +32517,7 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
@@ -32915,6 +32977,7 @@
         "$.members[]": "ref(MemberAllowanceUsage)",
         "$.nextCursor": "string! null",
         "$.period": "ref(UsageAllowanceWindow)!",
+        "$.unit": "const?=[\"\\\"usd_micros\\\"\"]",
         "$.workspace": "ref(WorkspaceAllowanceUsage)!"
       }
     },
@@ -33754,6 +33817,7 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isPresentedSessionToolCall": "value",
       "isPresentedSessionToolName": "value",
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
@@ -34087,6 +34151,7 @@
       "parseRetainedWorkspaceFileReference": "value",
       "parseSandboxFileArtifactReceipt": "value",
       "parseSandboxLink": "value",
+      "parseSessionReference": "value",
       "parseSseStream": "value",
       "parseToolDisplayMetadata": "value",
       "parseWorkspaceLiveEvent": "value",
@@ -35919,6 +35984,10 @@
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
       "displaySystemAudioSource": "value",
+      "LiveFetch": "type",
+      "LiveMediaTrack": "type",
+      "LivePeerConnection": "type",
+      "LivePeerConnectionConstructor": "type",
       "LiveTranscriber": "type",
       "LiveTranscriberOptions": "type",
       "LiveTranscriptSegment": "type",
@@ -35937,6 +36006,7 @@
       "RecorderPlatform": "type",
       "RecorderSnapshot": "type",
       "RecorderState": "type",
+      "RECORDING_AUDIO_UPLOAD_PIECE_BYTES": "value",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
       "RecordingTransport": "type",
@@ -35949,7 +36019,9 @@
       "StoredRecordingChunk": "type",
       "SystemAudioCapture": "type",
       "SystemAudioKind": "type",
-      "SystemAudioSource": "type"
+      "SystemAudioSource": "type",
+      "uploadRecordingAudio": "value",
+      "UploadRecordingAudioOptions": "type"
     },
     "@opengeni/sdk/secret-use-approval": {
       "SECRET_USE_APPROVAL_QUESTION_PREFIX": "value",
@@ -36323,6 +36395,7 @@
       "ComposerTranscriptionControl": "value",
       "ComposerTranscriptionControlProps": "type",
       "ComposerTranscriptionMessages": "type",
+      "ComposerVoiceInputOptions": "type",
       "composeSendInput": "value",
       "ConfirmState": "type",
       "CONNECTION_STATUS_META": "value",
@@ -36609,6 +36682,8 @@
       "PasswordStrengthLike": "type",
       "payerSummaryForModel": "value",
       "PayloadBlock": "value",
+      "PaymentPageActivity": "type",
+      "PaymentPageActivityProvider": "value",
       "PendingApproval": "type",
       "PendingHumanInputRequest": "type",
       "PendingPrompt": "type",
@@ -37490,6 +37565,7 @@
       "ComposerTranscriptionControl": "value",
       "ComposerTranscriptionControlProps": "type",
       "ComposerTranscriptionMessages": "type",
+      "ComposerVoiceInputOptions": "type",
       "Confirmation": "value",
       "Controls": "value",
       "createVoiceRecordingManifest": "value",
@@ -37509,6 +37585,7 @@
       "ModelPolicyPickerProps": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "PauseButton": "value",
+      "PauseButtonSlot": "value",
       "PausedState": "value",
       "PersistVoiceRecordingChunkInput": "type",
       "PersistVoiceRecordingChunkResult": "type",
@@ -37622,6 +37699,21 @@
       "UseDesktopStreamOptions": "type",
       "UseDesktopStreamResult": "type"
     },
+    "@opengeni/react/desktop-dictation": {
+      "acceleratorFromKey": "value",
+      "DesktopDictationClient": "type",
+      "DesktopDictationHost": "value",
+      "DesktopDictationHostProps": "type",
+      "DesktopDictationSettings": "value",
+      "DesktopDictationSettingsProps": "type",
+      "desktopShortcutLabel": "value",
+      "dictationErrorMessage": "value",
+      "modifierName": "value",
+      "profileName": "value",
+      "sameDesktopShortcut": "value",
+      "useDesktopDictation": "value",
+      "UseDesktopDictationResult": "type"
+    },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",
       "PierreDiffsLoader": "type",
@@ -37663,6 +37755,7 @@
       "McpCapabilityConnectInput": "type",
       "providerLabel": "value",
       "reconnectCandidate": "value",
+      "showsMcpServerLabel": "value",
       "useChatConnectionsAllowed": "value",
       "useConnect": "value",
       "useConnectSetupFlow": "value",
@@ -38004,10 +38097,12 @@
       "CodexRealtimeControl": "value",
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
+      "MicrophoneAccess": "type",
       "NewSessionRealtimeControl": "value",
       "prestartSessionRealtime": "value",
       "realtimeAppLanguage": "value",
       "realtimeConversationLanguage": "value",
+      "RealtimeLoadState": "type",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",
@@ -38038,6 +38133,7 @@
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
       "meetingTitle": "value",
+      "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",
@@ -38073,7 +38169,8 @@
       "UseVoiceInputResult": "type",
       "versionSummary": "value",
       "VoiceInputRecordingsClient": "type",
-      "VoiceInputStatus": "type"
+      "VoiceInputStatus": "type",
+      "withoutLiveMicrophoneEchoes": "value"
     },
     "@opengeni/react/responsive.css": {
       "default": "value"
@@ -38402,6 +38499,8 @@
       "OpenGeniProviderProps": "type",
       "OpenGeniViewerTarget": "type",
       "parseOpenGeniLink": "value",
+      "PaymentPageActivity": "type",
+      "PaymentPageActivityProvider": "value",
       "PendingPrompt": "type",
       "PersonalMachineExplanation": "value",
       "QueueSurface": "value",
@@ -43126,7 +43225,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -45649,7 +45748,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47966,7 +48065,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50437,7 +50536,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52726,7 +52825,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

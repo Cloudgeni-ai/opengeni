@@ -10,6 +10,7 @@ import {
   type LogoAssetValidation,
 } from "@opengeni/capabilities";
 import vendoredManifestDocument from "../data/catalog/logos/manifest.json";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The acceptance rule itself lives in @opengeni/capabilities so the API applies
 // the same rule to connected MCP server icons.
@@ -250,7 +251,7 @@ export async function fetchLogoAsset(
   } catch (error) {
     return {
       ok: false,
-      reason: `fetch_failed:${error instanceof Error ? error.message : String(error)}`,
+      reason: `fetch_failed:${errorMessage(error)}`,
     };
   }
   if (!response.ok) {
@@ -280,7 +281,7 @@ export async function readVendoredLogoAsset(
   } catch (error) {
     return {
       ok: false,
-      reason: `vendored_logo_unreadable:${error instanceof Error ? error.message : String(error)}`,
+      reason: `vendored_logo_unreadable:${errorMessage(error)}`,
     };
   }
   const validated = validateLogoAsset({ contentType: entry.contentType, bytes });

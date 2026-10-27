@@ -61,6 +61,12 @@ export type RealtimeModelOption = {
   organizationDefault?: boolean | undefined;
 };
 
+/**
+ * Whether the voice model catalog has loaded: `loading` until it arrives,
+ * `failed` when it could not load, `ready` once the models are known.
+ */
+export type RealtimeLoadState = "loading" | "ready" | "failed";
+
 export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
   id: "gpt-live-1-boulder-alpha",
   label: t("realtime.sessionRealtime.codexLive"),
@@ -749,10 +755,12 @@ export function useRealtimeModelSelection(options: {
     source: initialCachedCatalog ? ("cache" as const) : ("fallback" as const),
   });
   // Set when no real catalog will come (no loader, or loading failed): the
-  // fallback is then the catalog.
+  // fallback is then the catalog. `failed` tells a failed load from a host
+  // without a catalog, whose only voice model is Codex Live.
   const [fallbackFinal, setFallbackFinal] = useState<{
     client: unknown;
     workspaceId: string;
+    failed: boolean;
   } | null>(null);
   // A pick made here, for when browser storage can't keep it.
   const pickedRef = useRef<{ workspaceId: string; model: SessionRealtimeModel } | null>(null);
@@ -798,7 +806,7 @@ export function useRealtimeModelSelection(options: {
     }
     const loading = loadRealtimeModelCatalog(client, workspaceId, requestAbort.signal);
     if (!loading) {
-      setFallbackFinal({ client, workspaceId });
+      setFallbackFinal({ client, workspaceId, failed: false });
       return;
     }
     void loading
@@ -807,7 +815,7 @@ export function useRealtimeModelSelection(options: {
         applyCatalog(models);
       })
       .catch(() => {
-        if (!disposed) setFallbackFinal({ client, workspaceId });
+        if (!disposed) setFallbackFinal({ client, workspaceId, failed: true });
       });
     return () => {
       disposed = true;
@@ -875,14 +883,26 @@ export function useRealtimeModelSelection(options: {
   // (a call from outside the app) waits for the real one, or the selection
   // would change under the starting connection.
   const scope = catalogScopeRef.current;
-  const catalogReady =
-    (scope.source === "cache" && scope.client === client && scope.workspaceId === workspaceId) ||
-    (fallbackFinal?.client === client && fallbackFinal.workspaceId === workspaceId);
+  const realCatalog =
+    scope.source === "cache" && scope.client === client && scope.workspaceId === workspaceId;
+  const fallbackIsFinal =
+    fallbackFinal?.client === client && fallbackFinal.workspaceId === workspaceId;
+  const catalogReady = realCatalog || fallbackIsFinal;
+  // The placeholder's "Connect Codex" is not a reason while the real catalog is
+  // on its way, nor after it failed to load; the voice control says so instead.
+  const loadState: RealtimeLoadState = realCatalog
+    ? "ready"
+    : !fallbackIsFinal
+      ? "loading"
+      : fallbackFinal?.failed
+        ? "failed"
+        : "ready";
   return {
     models: catalog,
     selectedModel,
     selectModel,
     catalogReady,
+    loadState,
     languageFor,
     voiceSettingsFor,
   };

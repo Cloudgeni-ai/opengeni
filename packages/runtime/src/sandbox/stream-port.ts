@@ -20,6 +20,7 @@
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 import { mintStreamToken, STREAM_TOKEN_DEFAULT_TTL_SECONDS } from "./stream-token";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The provider-resolved endpoint for an exposed port. Mirrors the SDK's
  *  `ExposedPortEndpoint` (host/port/tls/query/...) WITHOUT importing the
@@ -77,6 +78,9 @@ export type ExposeStreamPortInput = {
   resolution?: [number, number];
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** Input authority the API route granted this viewer. `view` (the default)
+   *  only watches; `control` lets the relay forward the viewer's input. */
+  mode?: "view" | "control";
   /** The authenticated viewer subject the token is minted for (0281). */
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
@@ -303,7 +307,7 @@ export async function exposeStreamPort(
     endpoint = await s.resolveExposedPort(port);
   } catch (error) {
     throw new StreamPortUnavailableError(
-      `provider failed to resolve the stream port ${port}: ${error instanceof Error ? error.message : String(error)}`,
+      `provider failed to resolve the stream port ${port}: ${errorMessage(error)}`,
       error,
     );
   }
@@ -316,7 +320,7 @@ export async function exposeStreamPort(
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
-    mode: "view",
+    mode: input.mode ?? "view",
     port,
     ttlSeconds,
     nowSeconds,

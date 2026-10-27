@@ -526,7 +526,7 @@ describe("Modal native V2 passive correlation contracts", () => {
       );
     }
     for (const command of [
-      { ...input.command, kind: "modal-control-v1" },
+      { ...input.command, kind: "unknown-kind" },
       { ...input.command, pty: true },
       { ...input.command, taskId: "" },
       {

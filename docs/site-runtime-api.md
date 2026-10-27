@@ -284,26 +284,28 @@ Operations:
     Site/viewer audience enforced by native authorization and RLS. No fabricated
     workspace membership or shared fallback is used. Disabled private-session
     policy explicitly refuses a new conversation.
-    - It uses `agentAccess: "session"`, the publication's model,
-      instructions and MCP servers, memory off and no sandbox
+    - A workspace member's conversation is an ordinary private chat:
+      ordinary chat defaults (or an existing chat's own saved selections),
+      within the member's live permissions, decide its tools, memory and
+      compute, and the publication adds only its model and instructions.
+    - For people outside the workspace it uses `agentAccess: "session"`, the
+      publication's model and instructions, memory off and no sandbox
       (`sandboxBackend: "none"`; a publication has no sandbox setting).
-    - Its only first-party tools are the Site's own data tools, pinned on
+    - Their only first-party tools are the Site's own data tools, pinned on
       the server to this Site and acting as the conversation's viewer (the
       same audience checks and row binding as the page): `site_data_query`
-      and `site_data_write`, `site_sql_run` when Site SQL is on, and the
-      read-only `site_sql_query` for members when Site SQL is on. A call for
-      another Site, or any Site management tool, is refused. Platform
-      instructions tell the agent whom it is talking with and, for people
-      outside the workspace, that it can only use this Site's own data.
+      and `site_data_write`, plus `site_sql_run` when Site SQL is on. A call
+      for another Site, or any Site management tool, is refused. Platform
+      instructions tell the agent whom it is talking with and that it can
+      only use this Site's own data.
     - The viewer is the end-user label. The Site, its title and the served
       version are recorded as the session's origin and on every turn
       (`SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
-    - Its workspace tools are the publication's `agent.tools` for workspace
-      members who may use connections (`mcp_servers:attach` or admins).
-      Invited, `user` and guest viewers never get workspace tools. They are
-      optional references, so an unknown connection is skipped.
+    - Members use their normal native tools and connections; the historical
+      `agent.tools` field does not narrow them. Invited, `user` and guest
+      viewers never get workspace tools.
     - Its default model is the publication's model; members may select an allowed
       model with their normal personal access/subscriptions. For everyone else a
       subscription-billed model is replaced by the workspace's default
@@ -399,8 +401,11 @@ Operations:
     keeps working, uncapped.
   - **Unavailable agents** return 403 `not_available_for_viewer` with
     `feature: "agent"` and a `reason` of `agent_disabled`,
-    `public_agents_disabled`, `guest_agents_disabled` or
-    `usage_limits_disabled`.
+    `public_agents_disabled`, `guest_agents_disabled`,
+    `usage_limits_disabled`, or, for people outside the workspace when the
+    workspace can't pay for their turn, `no_credits` (no credits for the
+    model) or `allowance_exhausted` (its usage allowance is used up), with
+    the message "This Site's assistant isn't available right now".
   - **Platform brake.** While the Opengeni-wide platform brake is engaged,
     guest and `user` starts and messages return 503
     `site_platform_brake_engaged`.
@@ -442,8 +447,9 @@ Profiles:
 `GET /site/config` also returns the viewer's `capabilities`
 (`SiteViewerCapabilities`: `agent`, `workspaceTools`, `siteData`,
 `sqlQueryAudiences`, `viewAs`), computed from the same checks the routes
-enforce (the agent also reflects the platform brake and whether a
-credit-billed model exists for people outside the workspace, and answers a
+enforce (the agent also reflects the platform brake and, for people outside
+the workspace, whether a credit-billed model exists and the workspace can pay
+for it, an answer reused for up to 30 seconds; it answers a
 member without `sessions:create` as the outside visitor the agent serves them
 as, or `false` on a members-only Site, where `models.list` is empty and
 `sessions.*` answer 403 `not_available_for_viewer`; such a member's

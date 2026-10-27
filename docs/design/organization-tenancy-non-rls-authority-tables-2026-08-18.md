@@ -395,6 +395,29 @@ runtime DML on this table was granted (migration `0937` withholds it):
 The exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
 `packages/db/test/non-rls-authority-tables.test.ts`.
 
+### 2026-10-26 addendum: managed passkey credentials
+
+`auth_passkeys` (migration `0998_managed_auth_passkeys.sql`) is a credential
+store with the same shape as `auth_identities`: each row belongs to an auth
+user, not to an organization or workspace. A passkey sign-in looks the row up
+by its WebAuthn credential id before anyone is signed in, so no organization
+or workspace GUC exists yet and an RLS predicate would be circular, exactly as
+for the identity store.
+
+Each row holds the credential id, the public key, the signature counter and
+display metadata (transports, device type, backup flag, AAGUID, a name, the
+relying-party id and timestamps). No private key material is stored, and a
+public key alone cannot sign in. Adding and removing passkeys go through the
+`mutate_managed_passkey` SECURITY DEFINER routine behind the same authority as
+the other sign-in method changes.
+
+Runtime DML on the table and EXECUTE on the routine are withheld in the
+release that creates them (runtime-posture `RUNTIME_DEFERRED_FULL_DML_TABLES`
+and `DEFERRED_RUNTIME_TARGET_ROUTINES`), because the previous release's
+readiness check rejects them; a later migration grants them. The exemption is
+pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
 ## What would change the verdict
 
 The `workspaces` and `workspace_memberships` exemptions are consequences of one

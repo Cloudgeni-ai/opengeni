@@ -146,7 +146,6 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         captureProcessOutput: async () => {},
         providerCommandPersistence: () => ({
           load: async () => command,
-          acknowledge: async (value) => value,
           reserveInput: async () => 1,
         }),
         // Represents the exact durable row settled by the independent reaper.

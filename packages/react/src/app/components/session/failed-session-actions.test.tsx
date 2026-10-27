@@ -200,7 +200,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a subscription", "Retry"]);
   expect(row().querySelector("details p")!.textContent).toBe(detail);
 
   // A deployment without subscriptions never names them or links to them.
@@ -210,12 +210,12 @@ test("the free model's daily limit names it and offers credits, a subscription a
   expect(headline()).toBe(
     "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
   );
-  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect a model", "Retry"]);
   await act(async () =>
     root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
   );
   expect(headline()).toContain("connect ChatGPT, or pick another model");
-  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+  expect(labels()).toEqual(["Add credits", "Connect ChatGPT", "Retry"]);
 
   // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
   await act(async () =>
@@ -766,8 +766,8 @@ test("safety refusal preserves draft and has no recovery action", async () => {
 test("billing offers at most one authorized action and never Retry", async () => {
   const container = await render(null);
   for (const [canBuyCredits, canConnectModel, expected] of [
-    [true, true, "Buy credits"],
-    [false, true, "Connect a model"],
+    [true, true, "Add credits"],
+    [false, true, "Use your own provider account"],
     [false, false, null],
   ] as const) {
     await act(async () =>
@@ -823,7 +823,7 @@ test("free credit for other models offers a covered model before buying credits"
   expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
   const switchButton = container.querySelector("button")!;
   expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
-  expect(container.querySelector("a")!.textContent).toBe("Buy credits");
+  expect(container.querySelector("a")!.textContent).toBe("Add credits");
   await act(async () => switchButton.click());
   expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
 

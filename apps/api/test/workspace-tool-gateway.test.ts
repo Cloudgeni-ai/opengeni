@@ -900,6 +900,21 @@ describe("workspace tool gateway adapters", () => {
       }),
     ).toBe(false);
     expect(
+      workspaceToolGatewayDefinitionFilter(
+        { allowedFirstPartyMcpTools: [] },
+        undefined,
+        () => "allow",
+      )({
+        identity: { serverId: "inventory", toolName: "write" },
+        modelName: "inventory__write",
+        inputSchema: { type: "object" },
+        source: "mcp",
+        approval: "human",
+        requiresProviderPreflight: true,
+        execute: async () => ({ content: [] }),
+      }),
+    ).toBe(true);
+    expect(
       workspaceToolGatewayDefinitionFilter({ allowedFirstPartyMcpTools: [] })({
         identity: { serverId: "inventory", toolName: "write" },
         modelName: "inventory__write",

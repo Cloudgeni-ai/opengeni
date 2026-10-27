@@ -1775,7 +1775,7 @@ export function stackPlanFor(
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
-    notes: planNotes(contract, env),
+    notes: planNotes(contract),
   };
 }
 
@@ -1952,106 +1952,6 @@ const HELM_APPLICATION_DRAIN_ARGS = [
   "--set migrations.enabled=false",
 ].join(" ");
 
-export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
-export const SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER = "0394_session_selected_skill_activation";
-export const SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER =
-  "0402_session_input_wait_and_background_command_results";
-export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0404_mcp_oauth_authorization_server";
-export const CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER =
-  "0403_codex_unconditional_credential_leasing";
-export const PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER =
-  "0422_personal_workspace_organization_codex_inheritance";
-
-const MAINTENANCE_CUTOVERS = {
-  "0435_skill_chat_confirmation": { migrationSummary: "migration 0435" },
-  "0433_unified_skill_lifecycle": { migrationSummary: "migration 0433" },
-  [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0389" },
-  [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0394" },
-  [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0402" },
-  [CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER]: {
-    migrationSummary: "migration 0403",
-  },
-  [MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER]: {
-    migrationSummary: "migrations 0404 and 0405",
-  },
-  [PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0422" },
-} as const;
-
-type MaintenanceCutover = keyof typeof MAINTENANCE_CUTOVERS;
-
-const MAINTENANCE_IMAGE_DIGEST_ENV = {
-  api: "OPENGENI_API_IMAGE_DIGEST",
-  worker: "OPENGENI_WORKER_IMAGE_DIGEST",
-  web: "OPENGENI_WEB_IMAGE_DIGEST",
-  migrations: "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
-} as const;
-
-function validatedImageDigests(
-  env: Record<string, string | undefined>,
-  purpose: string,
-): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
-  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
-  const digests = Object.fromEntries(
-    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
-      const digest = env[name]?.trim() ?? "";
-      if (!exactSha256Digest.test(digest)) {
-        throw new Error(`${name} must be an exact sha256 digest for ${purpose}`);
-      }
-      return [component, digest];
-    }),
-  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
-  if (digests.migrations !== digests.api) {
-    throw new Error(
-      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
-    );
-  }
-  return digests;
-}
-
-function maintenanceImageDigestHelmArgs(
-  contract: DeploymentContract,
-  terraformRoot: string | null,
-  env: Record<string, string | undefined>,
-): string {
-  const cutover = requestedMaintenanceCutover(env);
-  if (!cutover) return "";
-  // Managed plans resolve registry digests after publishing the exact images
-  // and inject them through helm-values.generated.yaml.
-  if (terraformRoot) return "";
-  if (contract.runtime.platform !== "kubernetes") {
-    throw new Error(
-      `${cutover} requires a non-local Kubernetes deployment with immutable image artifacts`,
-    );
-  }
-  // Local Kubernetes derives one content identity from the freshly built
-  // Docker image IDs and binds both Helm revisions to that persisted tag.
-  if (contract.runtime.cloud === "local") return "";
-  const digests = validatedImageDigests(env, "a maintenance cutover");
-  return Object.entries(digests)
-    .map(([component, digest]) => ` --set-string ${component}.image.digest=${digest}`)
-    .join("");
-}
-
-function requestedMaintenanceCutover(
-  env: Record<string, string | undefined>,
-): MaintenanceCutover | null {
-  const requested = env.OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER?.trim();
-  if (!requested) return null;
-  if (!Object.hasOwn(MAINTENANCE_CUTOVERS, requested)) {
-    throw new Error(`unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: ${requested}`);
-  }
-  if (env.OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED !== "true") {
-    throw new Error(
-      "OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true is required for a maintenance cutover",
-    );
-  }
-  return requested as MaintenanceCutover;
-}
-
-function maintenanceFinalUpgradeSafetyArgs(env: Record<string, string | undefined>): string {
-  return requestedMaintenanceCutover(env) ? " --atomic --cleanup-on-fail" : "";
-}
-
 function helmApplicationDrainWaitCommand(namespace: string, release: string): string {
   const selector =
     `app.kubernetes.io/instance=${release},` +
@@ -2067,9 +1967,6 @@ function helmApplicationDrainCommands(input: {
   env: Record<string, string | undefined>;
 }): string[] {
   const wait = helmApplicationDrainWaitCommand(input.namespace, input.release);
-  if (requestedMaintenanceCutover(input.env)) {
-    return [input.drainUpgradeCommand, wait];
-  }
   const needsBootstrapRevision =
     input.contract.database.mode === "inCluster" ||
     input.contract.temporal.mode === "inCluster" ||
@@ -2089,8 +1986,6 @@ function deployCommands(
   productOverlay: ProductOverlayId,
   env: Record<string, string | undefined>,
 ): string[] {
-  const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
-  const maintenanceFinalUpgradeArgs = maintenanceFinalUpgradeSafetyArgs(env);
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
@@ -2107,7 +2002,7 @@ function deployCommands(
       : "";
     const drainUpgradeCommand =
       `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 10m`;
+      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
     return [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
@@ -2123,11 +2018,10 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
-    const maintenanceCutover = requestedMaintenanceCutover(env) !== null;
     const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
     const sandboxSecretArgs = opensandbox
       ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
@@ -2138,35 +2032,15 @@ function deployCommands(
     const namespace = contract.runtime.namespace ?? "opengeni-local";
     const release = contract.runtime.releaseName;
     const values = helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
-    const maintenanceImageEnvFile = ".agent/generated/local-kubernetes/maintenance-image-tag.env";
-    const maintenanceImageEnvPrefix = maintenanceCutover
-      ? `set -a && . ${maintenanceImageEnvFile} && set +a && `
-      : "";
-    const localImageTag = maintenanceCutover ? "$OPENGENI_LOCAL_K8S_IMAGE_TAG" : "local-k8s";
-    const maintenanceImageTagHelmArgs = maintenanceCutover
-      ? ["api", "worker", "web", "migrations"]
-          .map(
-            (component) => ` --set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-          )
-          .join("")
-      : "";
     const drainUpgradeCommand =
-      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageTagHelmArgs} --wait --timeout 10m`;
-    const localImageCommands = maintenanceCutover
-      ? [
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s-maintenance-candidate .",
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s-maintenance-candidate .",
-          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-$(git rev-parse HEAD)} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s-maintenance-candidate .",
-          `mkdir -p .agent/generated/local-kubernetes && OPENGENI_LOCAL_K8S_IMAGE_TAG="maintenance-$(printf '%s\\n' "$(docker image inspect --format '{{.Id}}' opengeni-api:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-worker:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-web:local-k8s-maintenance-candidate)" | git hash-object --stdin)" && printf 'OPENGENI_LOCAL_K8S_IMAGE_TAG=%s\\n' "$OPENGENI_LOCAL_K8S_IMAGE_TAG" > ${maintenanceImageEnvFile} && docker tag opengeni-api:local-k8s-maintenance-candidate "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-worker:local-k8s-maintenance-candidate "opengeni-worker:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-web:local-k8s-maintenance-candidate "opengeni-web:$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-          `${maintenanceImageEnvPrefix}kind load docker-image "opengeni-api:${localImageTag}" "opengeni-worker:${localImageTag}" "opengeni-web:${localImageTag}" --name \${KIND_CLUSTER_NAME:-opengeni-local}`,
-        ]
-      : [
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
-          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
-          "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
-        ];
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
+      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
+    const localImageCommands = [
+      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
+      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
+      "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
+      "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
+    ];
     return [
       ...localImageCommands,
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
@@ -2179,7 +2053,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
     ];
   }
   const commands: string[] = [
@@ -2213,7 +2087,7 @@ function deployCommands(
   const namespace = contract.runtime.namespace ?? "opengeni";
   const drainUpgradeCommand =
     `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} ` +
-    `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 15m`;
+    `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 15m`;
   commands.push(
     ...helmApplicationDrainCommands({
       contract,
@@ -2222,7 +2096,7 @@ function deployCommands(
       drainUpgradeCommand,
       env,
     }),
-    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} --wait --timeout 15m`,
   );
   return commands;
 }
@@ -2525,10 +2399,7 @@ function usesOfficialPlatformChart(
   );
 }
 
-function planNotes(
-  contract: DeploymentContract,
-  env: Record<string, string | undefined>,
-): string[] {
+function planNotes(contract: DeploymentContract): string[] {
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
     "Use the generated destroy commands as the baseline cleanup path for environments created from this plan.",
@@ -2558,12 +2429,6 @@ function planNotes(
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
       "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
-    );
-  }
-  const maintenanceCutover = requestedMaintenanceCutover(env);
-  if (maintenanceCutover) {
-    notes.push(
-      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until ${MAINTENANCE_CUTOVERS[maintenanceCutover].migrationSummary} and the final exact-digest upgrade succeed. If that final upgrade fails, Helm restores only the preceding exact-image, applications-disabled revision so recovery remains drained and forward-only.`,
     );
   }
   return notes;

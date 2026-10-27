@@ -18,6 +18,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { BASELINE_MIGRATIONS, SQUASHED_MIGRATIONS } from "../packages/db/src/migration-baseline";
 import {
   MIGRATIONS_DIR,
   findProtectedOrdinalCollisions,
@@ -26,6 +27,7 @@ import {
   parseLsTree,
   type MigrationName,
 } from "./migration-ordinals";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function git(root: string, ...command: string[]) {
   const child = Bun.spawn(["git", ...command], { cwd: root, stdout: "pipe", stderr: "pipe" });
@@ -82,7 +84,10 @@ async function main(): Promise<void> {
   }
 
   const headLedger = listMigrationFiles(root);
-  const { collisions, duplicates } = findProtectedOrdinalCollisions(headLedger, ledgers);
+  const { collisions, duplicates } = findProtectedOrdinalCollisions(headLedger, ledgers, {
+    parts: BASELINE_MIGRATIONS,
+    replaces: SQUASHED_MIGRATIONS,
+  });
   if (collisions.length === 0 && duplicates.length === 0) {
     const highest = nextFreeOrdinal(headLedger, ...ledgers.map((ledger) => ledger.files));
     console.log(
@@ -108,6 +113,6 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

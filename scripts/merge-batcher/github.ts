@@ -1005,7 +1005,14 @@ export class GitHubReader {
     // nonterminal snapshots when a historical scan is deferred: stale queued
     // work must continue reserving capacity, never become an invented success.
     if (cached && archived && cached.every((r) => r.status === "completed")) return cached;
-    if (!allowRefresh) return (await this.cache.get<Run[]>(key)) ?? [];
+    if (!allowRefresh) {
+      const retained = await this.cache.get<Run[]>(key);
+      // A batch invalidated while its Batch CI ran keeps that running snapshot.
+      // Re-read it every pass (only runs last seen in flight, so the scan stays
+      // bounded) so its slot frees when the run finishes, not when the
+      // round-robin sample next reaches the ref.
+      if (!retained?.some((r) => r.status !== "completed")) return retained ?? [];
+    }
     const runs = await this.runs(manifest, branch);
     await this.cache.set(key, runs);
     return runs;

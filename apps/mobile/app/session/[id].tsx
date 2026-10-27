@@ -29,7 +29,7 @@ import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Linking, Pressable, Text, View } from "react-native";
+import { Alert, Linking, Platform, Pressable, Share, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
@@ -49,6 +49,7 @@ import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-acc
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
+import { appSessionPath } from "@/app-links";
 import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
@@ -196,6 +197,12 @@ function inChatConnectOptions(
     returnUrl: desktopAppReturnUrl(conversation, origin),
     openUrl: (url) => void Linking.openURL(url),
     attemptHints: connectAttemptHints,
+    // A computer connects from the computer itself: send this chat there.
+    // iOS shares a URL as a link; Android shares text.
+    shareConversation: () =>
+      void Share.share(
+        Platform.OS === "ios" ? { url: conversation } : { message: conversation },
+      ).catch(() => {}),
   };
 }
 
@@ -240,6 +247,13 @@ function LiveSession(props: {
   // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
   const renderMarkdown = useMemo(() => {
     const openLink = (target: OpenGeniLinkTarget) => {
+      // Another chat opens here in the app, in the workspace the link names (or this one).
+      if (target.kind === "session") {
+        router.push(
+          appSessionPath(target.sessionId, target.workspaceId ?? props.workspaceId, null),
+        );
+        return;
+      }
       if (!webBaseUrl) return;
       const workspace = encodeURIComponent(props.workspaceId);
       if (target.kind === "site")

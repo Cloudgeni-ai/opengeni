@@ -2577,7 +2577,14 @@ describe("connections routes", () => {
             body: JSON.stringify(body),
           });
         const approval = await post("approvals", call);
-        expect(approval.status).toBe(422);
+        if (kind === "external_user") {
+          // The external actor reaches the approval logic: this tool needs none.
+          expect(approval.status).toBe(422);
+        } else {
+          // An organization key acting as itself has no person to approve.
+          expect(approval.status).toBe(403);
+          expect(await approval.text()).toContain("tool approval requires a person");
+        }
         expect(mcp.calls).toHaveLength(0);
         expect((await post("calls", call)).status).toBe(200);
         expect(mcp.calls).toEqual([{ tool: "search_documents", args: call.arguments }]);

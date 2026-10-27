@@ -1141,8 +1141,11 @@ restore) and authors, installs and reviews workspace Skills
 (`documents:manage`). Settings-class powers stay Admin-only:
 `workspace:admin` (workspace settings, instructions, Insights, automations),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
-App), `variable-sets:manage`, `enrollments:manage` (enrolling and sharing
-machines), `capabilities:manage` (integration and plugin install, workspace
+App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
+workspace and organization machines; a signed-in Member connects and changes
+their own Only me machine with `enrollments:read`, see
+[Connected Machines](connected-machines.md#connect-a-machine)),
+`capabilities:manage` (integration and plugin install, workspace
 tool policy) and `secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
@@ -1569,7 +1572,7 @@ connection and MCP authority revalidate live membership on every use. Do not
 add a membership lock, or a write whose trigger takes one, to the claim.
 `packages/db/test/claim-organization-membership-fence.test.ts` pins this.
 
-`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+`packages/db/test/organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
 not move (so an application-level `40P01` replay cannot mask a regression), and
@@ -2331,7 +2334,7 @@ this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
 `FOR SELECT` leaves a row-locking lookup blind. See
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
 production-posture regression harness
-`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`.
+`packages/db/test/owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>

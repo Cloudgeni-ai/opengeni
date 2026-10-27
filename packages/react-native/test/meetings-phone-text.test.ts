@@ -87,7 +87,7 @@ describe("phone recorder wording", () => {
     expect(phoneLiveStatus(msg, [{ state: "connecting" }], false)).toBe("Connecting…");
     expect(phoneLiveStatus(msg, [{ state: "streaming" }], false)).toBe(null);
     expect(liveCostHint(msg, 0.36)).toBe("It adds about $0.36 per hour of audio.");
-    expect(liveCostHint(msg, null)).toBe("It uses extra transcription credit.");
+    expect(liveCostHint(msg, null)).toBe("");
   });
 
   test("dates read as today, yesterday or the date, in the host's words", () => {

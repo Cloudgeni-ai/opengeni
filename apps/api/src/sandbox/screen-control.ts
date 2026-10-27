@@ -102,11 +102,7 @@ const pending = (
 const ACTIVE = { status: "active", reason: null, message: null } as const;
 
 /** Agent failure codes that no retry fixes: the connection must be redone. */
-const PERMANENT_RENEW_FAILURES = new Set([
-  "connection_missing",
-  "legacy_origin",
-  "local_state_unavailable",
-]);
+const PERMANENT_RENEW_FAILURES = new Set(["connection_missing", "local_state_unavailable"]);
 
 /** The enrollment was revoked or removed between lookup and update. */
 export class MachineNotActiveError extends Error {
@@ -125,9 +121,9 @@ export type ScreenControlActor = {
 
 /**
  * Turn screen control on for one enrolled machine, in place. The caller has
- * already authorized the actor for this enrollment (enrollments:manage, plus
- * account:admin for an organization machine, plus personal-machine admission
- * for an agent attempt). Safe to repeat: a retry re-requests the renewal.
+ * already authorized the actor for this enrollment (the machine scope rule in
+ * ./machine-authority.ts, plus personal-machine admission for an agent
+ * attempt). Safe to repeat: a retry re-requests the renewal.
  */
 export async function enableMachineScreenControl(
   services: Services,

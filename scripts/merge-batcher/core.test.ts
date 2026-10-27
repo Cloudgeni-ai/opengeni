@@ -35,7 +35,13 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { fifo, plan, infrastructureRetryReason } from "./planner";
+import {
+  fifo,
+  plan,
+  infrastructureRetryReason,
+  settledCiFinished,
+  unseenRunHoldsSlot,
+} from "./planner";
 import { classifyExit, verifyResult } from "./result";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { ObservationJournal, latencySummary } from "./journal";
@@ -495,6 +501,51 @@ describe("readiness and deterministic planning", () => {
     if (next.kind === "build") expect(next.publish).toBe(false);
     expect(child.runs[0]!.status).toBe("in_progress");
   });
+  test("settled batches with a recorded finish never hold the Batch slot when their history is unloaded", () => {
+    const stage = (batchId: string) => ({
+      batchId,
+      readyAt: NOW,
+      readyBindings: [],
+      builtAt: NOW,
+      publishedAt: NOW,
+      ciStartedAt: NOW,
+      ciCompletedAt: null as string | null,
+      landedAt: null as string | null,
+      observedAt: NOW,
+    });
+    const landed = candidate([pull(1)]);
+    const dropped = candidate([pull(2)]);
+    const unknown = candidate([pull(3)]);
+    const o = observation([pull(4)], [landed, dropped, unknown]);
+    o.ledger.landed = [landed.manifest.batchId];
+    o.ledger.invalidated = [dropped.manifest.batchId, unknown.manifest.batchId];
+    o.ledger.stages = {
+      [landed.manifest.batchId]: { ...stage(landed.manifest.batchId), landedAt: NOW },
+      [dropped.manifest.batchId]: { ...stage(dropped.manifest.batchId), ciCompletedAt: NOW },
+      // Invalidated while its CI was still running: no recorded finish.
+      [unknown.manifest.batchId]: stage(unknown.manifest.batchId),
+    };
+    expect(settledCiFinished(o.ledger, landed.manifest.batchId)).toBe(true);
+    expect(settledCiFinished(o.ledger, dropped.manifest.batchId)).toBe(true);
+    expect(unseenRunHoldsSlot(landed, o.ledger, cfg)).toBe(false);
+    expect(unseenRunHoldsSlot(dropped, o.ledger, cfg)).toBe(false);
+    expect(unseenRunHoldsSlot(unknown, o.ledger, cfg)).toBe(true);
+    // Only the batch whose CI may still be running holds a slot.
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: false });
+    o.ledger.stages[unknown.manifest.batchId]!.ciCompletedAt = NOW;
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: true });
+
+    // A retry requested after the recorded finish may be running again.
+    o.ledger.retries[dropped.manifest.batchId] = {
+      runId: 100,
+      fromAttempt: 1,
+      requestedAt: new Date(Date.parse(NOW) + 60_000).toISOString(),
+    };
+    expect(settledCiFinished(o.ledger, dropped.manifest.batchId)).toBe(false);
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: false });
+    // A live batch is never settled, whatever its stage says.
+    expect(settledCiFinished(o.ledger, candidate([pull(5)]).manifest.batchId)).toBe(false);
+  });
   test("multiple innocent singleton failures park without inventing a shared fingerprint", () => {
     const ready = [pull(5436), pull(5439), pull(5440), pull(5500)];
     const o = observation(ready, []);
@@ -638,6 +689,47 @@ describe("real temporary bare Git", () => {
       expect(e).toBeInstanceOf(MergeConflict);
       expect((e as MergeConflict).number).toBe(2);
     }
+  });
+  test("a Version PR conflicts when main changed one of its files after it was generated", async () => {
+    const f = await fixture();
+    const lines = (first: string, last: string) => `${first}\nb\nc\nd\ne\nf\n${last}\n`;
+    const generated = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "g") },
+      [f.base],
+    );
+    // Main edits the top of the file; the Version head edits the bottom.
+    const main = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("A", "g") },
+      [generated],
+    );
+    const head = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "G") },
+      [generated],
+    );
+    const version = (sha: string) => ({ ...pull(1, sha), headRef: "changeset-release/main" });
+    // The edits merge cleanly, so an ordinary PR still lands combined...
+    const ordinary = await f.git.build(spec([pull(1, head)], main));
+    expect(await f.git.exec(["show", `${ordinary.tipSha}:package.json`])).toBe(
+      lines("A", "G").trim(),
+    );
+    // ...but a Version landing would no longer be its exact reviewed delta.
+    await expect(f.git.build(spec([version(head)], main))).rejects.toBeInstanceOf(MergeConflict);
+    // Disjoint files, or a head generated on current main, still land.
+    const disjoint = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "g"), "CHANGELOG.md": "1.0.1\n" },
+      [generated],
+    );
+    await expect(f.git.build(spec([version(disjoint)], main))).resolves.toBeDefined();
+    const fresh = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("A", "G") },
+      [main],
+    );
+    await expect(f.git.build(spec([version(fresh)], main))).resolves.toBeDefined();
   });
   test("tampered tree, parents and missing manifest rejected", async () => {
     const f = await fixture(),
@@ -2220,7 +2312,8 @@ describe("review regressions: observation, admission and telemetry", () => {
     for (let i = 0; i < 7; i++) {
       const start = lists;
       const o = await make().observe();
-      expect(lists - start).toBeLessThanOrEqual(9);
+      // Once its queued snapshot is cached, the late ref is re-read every pass.
+      expect(lists - start).toBeLessThanOrEqual(detected ? 10 : 9);
       if (
         o.candidates
           .find((c) => c.branch === historical[0]!.branch)
@@ -2243,6 +2336,36 @@ describe("review regressions: observation, admission and telemetry", () => {
     const action = plan(o, settings);
     expect(action.kind).toBe("build");
     if (action.kind === "build") expect(action.publish).toBe(false);
+  });
+  test("a settled batch last seen running is re-read every pass and frees its slot when its run ends", async () => {
+    const root = await mkdtemp(join(tmpdir(), "merge-batcher-settled-running-"));
+    roots.push(root);
+    const settings = { ...cfg, mode: "active" as const, outputDir: root };
+    const old = candidate([pull(1)]);
+    let status: Run["status"] = "in_progress";
+    let reads = 0;
+    class Reader extends GitHubReader {
+      override async runs() {
+        reads++;
+        return [{ ...run(old, "code_failure"), status }];
+      }
+    }
+    const reader = new Reader(settings, new GitHubAuth({}));
+    // Observed while live: the run was still going when the batch was invalidated.
+    await reader.observedRuns(old.manifest, old.branch, false);
+    status = "completed";
+    // Not in this pass's historical sample, yet the running snapshot is re-read.
+    const runs = await reader.observedRuns(old.manifest, old.branch, true, false);
+    expect(runs.map((r) => r.status)).toEqual(["completed"]);
+    expect(reads).toBe(2);
+    // A terminal snapshot backs off again.
+    await reader.observedRuns(old.manifest, old.branch, true, false);
+    expect(reads).toBe(2);
+    const o = observation([pull(2)], [{ ...old, runs }]);
+    o.ledger.invalidated.push(old.manifest.batchId);
+    const action = plan(o, settings);
+    expect(action.kind).toBe("build");
+    if (action.kind === "build") expect(action.publish).toBe(true);
   });
   test("landed unknown history ages across restart, needs explicit recovery, and late runs reserve again", async () => {
     const root = await mkdtemp(join(tmpdir(), "merge-batcher-landed-history-"));

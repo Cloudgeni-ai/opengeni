@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
+import { GROK_IMAGINE_VIDEO_1_5_MODEL_ID } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { buildOpenGeniAgent, prepareAgentTools, type BuildAgentOptions } from "@opengeni/runtime";
@@ -14,6 +15,8 @@ afterEach(() => {
 });
 
 const LEGACY_REACHED = "legacy SuperGrok credential read";
+// Every live check of whether this turn can change the workspace's settings.
+const settingsChecks: unknown[] = [];
 
 // Execute the production builder for a SuperGrok turn with SuperGrok-funded
 // video and a connected image credential, and capture the media options it
@@ -24,9 +27,11 @@ async function buildSuperGrokTurn(
   core: boolean,
   videoFunding: "supergrok_subscription" | "opengeni_credits" = "supergrok_subscription",
   route: "legacy" | "core" = core ? "core" : "legacy",
+  sandboxBackend: "none" | "selfhosted" = "none",
+  policyEnabled = true,
 ) {
   const settings: Settings = testSettings({
-    sandboxBackend: "none",
+    sandboxBackend,
     webSearchEnabled: false,
     environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
     supergrokSubscriptionEnabled: true,
@@ -75,13 +80,27 @@ async function buildSuperGrokTurn(
     } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
     ...legacyReaders,
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
-    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
-      schemaVersion: 1,
-      revision: 0,
-      fundingSource: videoFunding,
-      enabledModelIds: ["xai/grok-imagine-video"],
-      defaultModelId: "xai/grok-imagine-video",
+    spyOn(db, "turnCanChangeWorkspaceSettings").mockImplementation(async (_db, input) => {
+      settingsChecks.push(input);
+      return false;
     }),
+    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue(
+      policyEnabled
+        ? {
+            schemaVersion: 1,
+            revision: 0,
+            fundingSource: videoFunding,
+            enabledModelIds: [GROK_IMAGINE_VIDEO_1_5_MODEL_ID],
+            defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+          }
+        : {
+            schemaVersion: 1,
+            revision: 3,
+            fundingSource: "workspace_gateway",
+            enabledModelIds: [],
+            defaultModelId: null,
+          },
+    ),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
       async (_db, input) => input.governance,
@@ -179,24 +198,37 @@ async function buildSuperGrokTurn(
 }
 
 test("a core-placed SuperGrok turn gets the core image tool and core video funding, and reads no legacy credential", async () => {
-  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(true);
+  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
+    true,
+    "supergrok_subscription",
+    "core",
+    "selfhosted",
+  );
   await built;
   expect(options).toHaveLength(1);
   // The core image path (an `image` operation lease on the placed connection).
   expect(options[0]?.imageGeneration).toMatchObject({ kind: "provider_adapter" });
-  // Video is funded by a shared candidate on the `core` route (no sandbox here,
-  // so the tool itself is not offered).
+  // Video funding is read when the tool is called, not when the turn starts.
+  expect(coreFundingCalls).toEqual([]);
+  const capabilities = await options[0]!.videoGeneration!.capabilities();
+  // Funded by a shared candidate on the `core` route.
   expect(coreFundingCalls[0]).toBe("candidates");
+  expect(capabilities).toMatchObject({ defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID });
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
 
 test("a core-placed SuperGrok turn never reaches the legacy video credential, whatever the route reads", async () => {
-  const { built, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
+  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
     true,
     "supergrok_subscription",
     "legacy",
+    "selfhosted",
   );
   await built;
+  await expect(options[0]!.videoGeneration!.capabilities()).resolves.toMatchObject({
+    status: "unavailable",
+    code: "video_generation_unfunded",
+  });
   expect(coreFundingCalls).toEqual([]);
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
 });
@@ -209,9 +241,57 @@ test("an unplaced SuperGrok turn cannot regain a retired connected image tool", 
 });
 
 test("an unplaced SuperGrok turn cannot regain the retired video credential route", async () => {
-  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(false);
+  const { built, options, legacyReaders, coreFundingCalls } = await buildSuperGrokTurn(
+    false,
+    "supergrok_subscription",
+    "legacy",
+    "selfhosted",
+  );
   await built;
-  expect(options[0]?.videoGeneration).toBeUndefined();
+  await expect(
+    options[0]!.videoGeneration!.execute({ prompt: "a beach" }, { toolCallId: "call-video" }),
+  ).resolves.toMatchObject({ status: "unavailable", code: "video_generation_unfunded" });
   expect(coreFundingCalls).toEqual([]);
   for (const reader of legacyReaders) expect(reader).not.toHaveBeenCalled();
+});
+
+test("a turn without a sandbox gets no video tools", async () => {
+  const { built, options } = await buildSuperGrokTurn(true);
+  await built;
+  expect(options[0]?.videoGeneration).toBeUndefined();
+});
+
+test("a workspace with video off keeps both video tools, which answer that it is off", async () => {
+  const { built, options, coreFundingCalls } = await buildSuperGrokTurn(
+    true,
+    "supergrok_subscription",
+    "core",
+    "selfhosted",
+    false,
+  );
+  await built;
+  const adapter = options[0]?.videoGeneration;
+  expect(adapter).toBeDefined();
+  settingsChecks.length = 0;
+  const off = await adapter!.capabilities();
+  expect(off).toMatchObject({
+    schemaVersion: 1,
+    status: "unavailable",
+    code: "video_generation_off",
+    operationCreated: false,
+  });
+  expect(off).not.toHaveProperty("turnOn");
+  await expect(
+    adapter!.execute({ prompt: "a beach" }, { toolCallId: "call-video" }),
+  ).resolves.toEqual(off);
+  // Who can turn it on is decided live, on each call, for this turn.
+  expect(settingsChecks).toHaveLength(2);
+  expect(settingsChecks[0]).toEqual({
+    accountId: "account",
+    workspaceId: "workspace",
+    sessionId: "session",
+    turnId: expect.any(String),
+  });
+  // An off policy reads no credential.
+  expect(coreFundingCalls).toEqual([]);
 });

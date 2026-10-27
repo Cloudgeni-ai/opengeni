@@ -294,7 +294,7 @@ available independently when a provider is ready.
 | Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
-| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
+| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/src/transcription-recordings.ts` |
 | Deprecated API routes and the ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
 | Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |
@@ -323,6 +323,12 @@ restricts dictation to the pinned model, with no fallback.
   Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
   and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
   the underlying model for pricing when the deployment has a custom name.
+  Without a key or token, the deployment's own Microsoft Entra identity
+  (`AZURE_TENANT_ID` and `AZURE_CLIENT_ID` with a federated token or secret)
+  signs in to the endpoint named here. A gpt-4o-transcribe or
+  gpt-4o-mini-transcribe deployment also streams the live transcript preview
+  over the Realtime API (see `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` in
+  `docs/recordings.md`).
 - `azure-speech` (formerly `azure-mai`, which is still accepted) uses Azure
   Speech's fast transcription API with MAI-Transcribe-2. It is the same
   provider meetings use: with `OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT` set

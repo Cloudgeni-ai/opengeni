@@ -18,12 +18,13 @@
 //! which must list everything the host holds, waits.
 
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use compute_core::At;
 use compute_fleet::{HostEpoch, HostLease, LeaseTerms, Renewal};
 use compute_protocol::fleet::{
-    Answered, Capacity, Held, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, ReadyClones,
+    Answered, Boot, Capacity, Held, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, ReadyClones,
     Register, Registered, Renew, Renewed, Report, Terms,
 };
 use compute_protocol::host::HostStatus;
@@ -53,9 +54,14 @@ pub(crate) struct Renewer {
     pub(crate) gate: LeaseGate,
     pub(crate) agent: Agent,
     pub(crate) info: HostInfo,
+    /// The boot of its machine its cloud took, once telling it ended: a
+    /// registration names it, and none is sent before then.
+    pub(crate) told: Arc<OnceLock<Option<Boot>>>,
     /// The name the fleet gives the image this host's sandboxes start
     /// from.
     pub(crate) image: String,
+    /// The digest of the guest programs the host builds images with.
+    pub(crate) guest: Option<String>,
 }
 
 /// The renewer's state while it runs.
@@ -119,9 +125,7 @@ impl Running {
                 host: renewer.host.unwrap_or_default(),
                 epoch: epoch.0,
                 seq: renewal.seq,
-                capacity: status
-                    .as_ref()
-                    .map(|status| capacity(status, &renewer.image)),
+                capacity: status.as_ref().map(|status| capacity(status, renewer)),
             };
             self.post(RENEW_PATH, &body, timeout, renewal, Answer::Renewed);
             return Ok(());
@@ -134,6 +138,18 @@ impl Running {
             return Ok(());
         };
         if renewer.lease.attempt_started(renewal) || self.attempt.is_none() {
+            // A registration names the machine's boot only once the cloud
+            // took it, so that a restart since is seen as one; telling it
+            // ends within seconds of the agent starting.
+            let Some(boot) = renewer.told.get() else {
+                tracing::debug!("registering once the cloud is told of this boot");
+                self.attempt = None;
+                return Ok(());
+            };
+            let info = HostInfo {
+                boot: boot.clone(),
+                ..renewer.info.clone()
+            };
             // What the host lists must be all it holds: a create, adopt or
             // change of owner still under way could land after the list
             // and run unruled. None can start now, with no registration
@@ -160,8 +176,8 @@ impl Running {
             self.attempt = Some(Register {
                 host: renewer.host,
                 attempt: renewal.attempt,
-                info: renewer.info.clone(),
-                capacity: capacity(&status, &renewer.image),
+                info,
+                capacity: capacity(&status, renewer),
                 held: status
                     .sandboxes
                     .iter()
@@ -329,7 +345,7 @@ impl Running {
         let Ok(status) = handle.status().await else {
             return;
         };
-        let capacity = capacity(&status, &renewer.image);
+        let capacity = capacity(&status, renewer);
         if self.reported.as_ref() == Some(&capacity) {
             return;
         }
@@ -356,8 +372,9 @@ impl Running {
 }
 
 /// What the host can take on, from its status; its ready clones all start
-/// from `image`.
-fn capacity(status: &HostStatus, image: &str) -> Capacity {
+/// from `renewer`'s image, and it builds images with `renewer`'s guest
+/// programs.
+fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
@@ -373,7 +390,7 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
             .iter()
             .filter(|template| template.ready > 0)
             .map(|template| ReadyClones {
-                image: image.to_owned(),
+                image: renewer.image.clone(),
                 vcpus: u32::from(template.vcpus),
                 memory_mib: template.memory_mib,
                 count: template.ready,
@@ -381,6 +398,7 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
             .collect(),
         awake: status.capacity.as_ref().map_or(0, |held| held.awake),
         sandboxes: u32::try_from(status.sandboxes.len()).unwrap_or(u32::MAX),
+        guest: renewer.guest.clone(),
     }
 }
 

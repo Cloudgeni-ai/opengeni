@@ -546,8 +546,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // These reads only feed the Skill index. Disabled Skills need neither the
   // descriptors nor bundled files; agent build still rechecks live video policy.
   // Enabled reads remain independent and finish before executable preparation.
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  // A policy cannot affect the bundled index when this Skill was explicitly omitted.
+  // Agent build still performs its independent live policy read and validation.
+  const videoSkillSelected =
+    bundledSkillIds === undefined || bundledSkillIds.includes("builtin:video-generation");
   const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    toolFamilies.skills === false
+    toolFamilies.skills === false || !videoSkillSelected
       ? Promise.resolve(null)
       : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
     toolFamilies.skills === false
@@ -564,10 +572,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : loadConfiguredBundledSkills({
           // Rows that could not freeze the "none" default at create (scheduled
           // generated sessions, pre-existing rows) get the same rule here.
-          bundledSkillIds: bundledSkillSelectionForAgentConfig(
-            session.bundledSkillIds,
-            session.agent,
-          ),
+          bundledSkillIds,
           firstPartyTools: selectedFirstPartyMcpTools,
           videoGenerationEnabled:
             skillConfiguration !== null &&

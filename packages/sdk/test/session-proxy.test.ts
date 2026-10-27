@@ -2010,6 +2010,37 @@ describe("createSessionProxyHandler pass-through", () => {
     expect(upstream.requests).toHaveLength(4);
   });
 
+  test("a credits checkout reads as the user, for the workspace's own organization only", async () => {
+    const { handler, upstream } = setup();
+    // The browser can't pick the organization: the workspace's own is read.
+    const response = await send(handler, `${mount}/billing/checkout/cs_test_a1?accountId=acct-2`);
+    expect(response.status).toBe(200);
+    const read = upstream.requests.at(-1)!;
+    expect(read.method).toBe("GET");
+    expect(read.url.pathname).toBe("/v1/billing/checkout/cs_test_a1");
+    expect([...read.url.searchParams]).toEqual([["accountId", "acct-1"]]);
+    expect(read.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    // Nothing else under billing answers: no other id, method or route.
+    const before = upstream.requests.length;
+    for (const [path, method] of [
+      ["/billing/checkout/not-a-checkout", "GET"],
+      ["/billing/checkout/cs_test_a1/extra", "GET"],
+      ["/billing/checkout", "GET"],
+      ["/billing", "GET"],
+      ["/billing/portal", "GET"],
+      ["/billing/checkout/cs_test_a1", "POST"],
+    ] as const) {
+      const refused = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "POST"
+          ? { headers: { "Content-Type": "application/json" }, body: "{}" }
+          : {}),
+      });
+      expect([403, 404]).toContain(refused.status);
+    }
+    expect(upstream.requests).toHaveLength(before);
+  });
+
   test("relays keys and subject ids in paths re-encoded, and refuses unsafe segments", async () => {
     const { handler, upstream } = setup();
     const relayed = await send(

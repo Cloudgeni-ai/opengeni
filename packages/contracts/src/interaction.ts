@@ -268,6 +268,12 @@ export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
       headless: primitives.boolean,
+      /** How a headed managed browser shows on its machine, as its controller
+       * launched it: "window" is a native window on the machine's screen,
+       * "offscreen" is the same browser with no window (for example a managed
+       * browser on a person's Mac). Absent when unknown, headless, remote or
+       * the person's own Chrome. */
+      display: z.enum(["window", "offscreen"]).optional(),
       identityId: primitives.nullableUuid,
       baseRevisionId: primitives.nullableUuid,
       networkRouteId: primitives.nullableUuid,
@@ -2359,6 +2365,8 @@ const browserActionVariants = [
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
     })
     .strict(),
+  /** Ends viewport emulation: the tab returns to the window's own size and scale. */
+  z.object({ type: z.literal("viewport_reset") }).strict(),
   z
     .object({
       type: z.literal("click"),
@@ -3305,6 +3313,17 @@ export const BrowserSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeartbeatResponse>;
 
+/**
+ * The longest a browser is kept after its last use while an agent session
+ * using it is still working (a turn in progress) or deliberately waits (an
+ * armed input wait). A browser normally stops after a few unused minutes;
+ * such a session keeps it, page state and all, until it stops working and
+ * waiting (a wait ends at its deadline) or this long after the browser's last
+ * use, whichever comes first. Anchoring the cap on the last use means a long
+ * turn or repeated waits cannot keep a browser nobody uses.
+ */
+export const BROWSER_WAIT_HOLD_MAX_MS = 60 * 60_000;
+
 const resolvedTargetRole = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(64));
 const resolvedTargetText = /* @__PURE__ */ defineSchema(() =>
   primitives.nonEmptyString.max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),
@@ -3560,6 +3579,13 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       /** Present on the target this computer was last observed or acted on
        * in, which a call that omits targetId works in. */
       current: z.literal(true).optional(),
+      /** Present when someone other than Opengeni (a person, or other
+       * software) used this computer's keyboard, mouse or trackpad within the
+       * last minute, as of the listing or observation that carries it: how
+       * many whole seconds before it. Input Opengeni's computer sessions on
+       * this computer send does not count. A listing marks every target
+       * alike. */
+      personInputSecondsAgo: z.number().int().min(0).max(60).optional(),
     })
     .strict(),
 );
@@ -3661,7 +3687,8 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           context.addIssue({
             code: "custom",
             path: ["continuationOfOperationId"],
-            message: "clickCount 2 requires exactly one prior first-click operation",
+            message:
+              'clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead',
           });
         }
         if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
@@ -3837,6 +3864,11 @@ export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn
  * ignore it, and callers that do not send it receive receipts without it. */
 export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
 
+/** Query parameter by which a caller asks a computer controller to include
+ * `unconfirmedInput` in an action receipt, on the same terms as
+ * {@link COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}. */
+export const COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER = "receiptUnconfirmedInput";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3858,6 +3890,11 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(ComputerActionRoleStandIn)
         .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
         .optional(),
+      /** The action sent raw input (a click or a key press) that its driver
+       * reported as delivered without any confirmation that the app acted on
+       * it. Present only when the controller supports it and the caller asked
+       * for it; never persisted in the controller's operation journal. */
+      unconfirmedInput: z.literal(true).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

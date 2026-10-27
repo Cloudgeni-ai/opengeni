@@ -24,6 +24,7 @@ clients.
 | --- | --- |
 | Host agent | jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite |
 | Templates and a ready pool | new sandboxes from a template, or at once from a ready pool |
+| Templates saved from sandboxes | a prepared sandbox's disk captured as an image new sandboxes start from |
 | Admission | requests and limits, memory guarantees for running VMs |
 | Fleet decisions | placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol |
 | A host in a fleet | registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out |
@@ -294,7 +295,9 @@ not retried. Each sandbox has its own namespace, NAT and firewall: the
 internet is allowed; the host, private and link-local ranges (including the
 cloud metadata address) and other sandboxes are not. A host may list exact
 private destinations and TCP ports sandboxes may also open (`--reach`, such
-as a private Opengeni's API), and nothing else private opens. Every guest's
+as a private Opengeni's API), or offer them by name to only the sandboxes
+whose create asks for that name (`--offer`, and a create's `reach`, which
+placement honours), and nothing else private opens. Every guest's
 name server is its gateway, where the host answers listed names itself and
 passes the rest to public name servers, never to the host's own, so guests
 learn no private name but those listed
@@ -323,6 +326,28 @@ booking the disk the fetch may take first, and keeps it under
 image no create used for as long as a template may go unused, and whose
 template is gone, is removed. A create without an image uses the host's
 base image, as before.
+
+A create may ask for a longer disk than its image's (`disk_mib`, up to
+1 TiB). Its copy is made that long, the new end a hole that takes no host
+disk until the guest writes there, and the guest's init grows its ext4
+root file system to fill it at boot. Templates and ready clones stay per
+image and shape whatever disk a create asks for: a copy of a template is
+lengthened as it is made, a claimed clone as it is claimed, and the guest,
+which knows the template's length, is told the new one through its VMM
+before it next runs and grows its file system then. The new space's inode
+tables are never zeroed, since a hole reads as zeroes already: ext4 would
+otherwise write a sixty-fourth of the space added. Only images whose init
+is from a release that grows its disk do so; an older one runs with its
+image's file system on the longer disk.
+
+A team may also save a sandbox as a template
+([ADR 22](docs/adr/0022-templates-saved-from-sandboxes.md)):
+`POST /v1/sandboxes/{id}/templates` saves the sandbox, has its host copy
+the disk (sharing its blocks, so in milliseconds) and store the copy as an
+image in the background, and records a template naming it; a create names
+it with `template`, by id or name, and boots afresh on that disk. Only the
+filesystem is kept. Images no template, sandbox or built image has used
+for an hour are forgotten.
 
 ## The fleet
 
@@ -370,7 +395,14 @@ The baseline is the E2B JS SDK 2.56.0. One listener (`--e2b-listen`,
 connect, pause, kill, set the timeout, list templates) and traffic to
 `<port>-<id>.<domain>`, or to one address with the `E2b-Sandbox-Id` and
 `E2b-Sandbox-Port` headers. Templates name an image and a shape
-(`--e2b-template base=<image>:2x1024`). With `--e2b-tls-cert` and
+(`--e2b-template base=<image>:2x1024`), and may name the disk their
+sandboxes get (`--e2b-template ci=<image>:4x8192x65536`, in MiB, as a
+create's `disk_mib`) and guarantee them less than their shape
+(`,memory-request=MIB` and `,cpu-request=MILLIS`, as a create's
+`memory_request_mib` and `cpu_request_millis`), so a host runs more of
+them at once and each uses more when the host has it free. A snapshot
+guarantees the sandboxes started from it what its source was guaranteed.
+With `--e2b-tls-cert` and
 `--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
 name and `*.<domain>`; without them it speaks plain HTTP behind a load
 balancer that terminates TLS.
@@ -384,9 +416,30 @@ create with environment, metadata, timeout, internet access, public
 traffic and pause-or-kill at the timeout with auto-resume; connect;
 commands in the foreground and background; PTYs with input and kill;
 files read, write, make directory and remove; `getHost`; pause; kill.
-Left out: snapshots (the backend's optional native snapshot persistence),
-volumes, MCP, IAM, egress rules, sandboxes without internet access,
-template builds, metrics and logs. A create asking for those is refused.
+Filesystem snapshots (`memory: false`) are templates saved from sandboxes
+(ADR 22): create, list and delete them, and create from one by id or
+name. Left out: snapshots with memory, volumes, MCP, IAM, egress rules,
+sandboxes without internet access, template builds, metrics and logs. A
+request asking for those is refused.
+
+## GitHub Actions runner pools
+
+`compute-runners serve` runs one pool: a GitHub runner scale set whose
+every job gets a fresh sandbox, deleted when the job ends
+([ADR 23](docs/adr/0023-github-actions-runner-pools.md)). It speaks
+GitHub's scale set protocol (a long-polled message queue, no webhooks)
+and compute's E2B API, keeps no state of its own, and a second replica
+stands by. Runners start from the pool's template, normally the
+`opengeni-compute-github-runner` image (`docker/github-runner.Dockerfile`),
+which runs Docker for the job and keeps its sandbox awake while the runner
+runs. With `--warm-repo` the pool keeps a warm template: a sandbox with
+the repository cloned where `actions/checkout` puts it and a prepare
+command run (dependencies installed, a first build), saved as a template
+whenever the branch moves, at most every `--warm-every-s`. With
+`--cache-store` it also serves Turborepo's remote cache from object
+storage and gives runners `TURBO_API`, `TURBO_TOKEN` and `TURBO_TEAM`.
+Workflows target a pool by its name (`runs-on: <name>`). The Helm chart
+runs pools from `computeRunners.pools`.
 
 ## Code map
 
@@ -400,6 +453,7 @@ template builds, metrics and logs. A create asking for those is refused.
 | `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
 | `crates/compute-control` | The control service: its store, public API and proxy, the hosts' API, placement, moves and recovery, the leader and the host group. |
 | `crates/compute-control/src/e2b` | The E2B front door: REST API, lifecycle states and their sweeper, traffic routing with kept streams and holds, TLS. |
+| `crates/compute-runners` | GitHub Actions runner pools: the scale set listener, runners as sandboxes, warm templates and the build cache. |
 | `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |

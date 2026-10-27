@@ -23,6 +23,7 @@ import {
 import {
   createElevenLabsRecordingTranscriptionProvider,
   createRecordingTranscriptionProviderRegistry,
+  DEFAULT_RECORDING_LIVE_TRANSCRIPTION,
   DEFAULT_RECORDING_TRANSCRIPTION,
   findRecordingTranscriptionModel,
   RecordingTranscriptionError,
@@ -58,6 +59,14 @@ export type SpeechToTextDeployment = {
   pinned: SpeechToTextModelRef | null;
   /** The model new meeting transcripts use when a workspace names none. */
   meetingDefault: SpeechToTextModelRef;
+  /**
+   * The model a recorder streams to for the live transcript when a request
+   * names none: the one OPENGENI_RECORDING_LIVE_TRANSCRIPTION names, else the
+   * pinned provider's live model, else ElevenLabs Scribe v2 Realtime. Null
+   * when a pinned deployment offers none. With a pinned model, the live
+   * transcript goes only to the pinned provider or this model.
+   */
+  liveDefault: SpeechToTextModelRef | null;
   /**
    * Whether the deployment places a text-only model's words on the audio
    * itself, so every model can serve meetings, not only those that time
@@ -120,6 +129,7 @@ export function createSpeechToTextDeployment(
     order.push(provider.id);
   };
   const azure = azureSpeechAccount(settings, options);
+  const entraToken = deploymentEntraAccessToken(settings, options);
   const elevenLabs = createElevenLabsRecordingTranscriptionProvider(fetchOption);
   const voiceConfigs = resolveVoiceInputProviderRegistry(settings);
   // The order may name the recording providers too; they keep that place.
@@ -141,7 +151,13 @@ export function createSpeechToTextDeployment(
         add(createOpenAiTranscriptionProvider({ ...config, ...fetchOption }));
         break;
       case "azure-openai":
-        add(createAzureOpenAiTranscriptionProvider({ ...config, ...fetchOption }));
+        add(
+          createAzureOpenAiTranscriptionProvider({
+            ...config,
+            accessToken: config.apiKey || config.adToken ? null : entraToken,
+            ...fetchOption,
+          }),
+        );
         break;
       case "azure-mai":
         // The voice input's MAI account and the recordings' Speech account
@@ -203,6 +219,30 @@ export function createSpeechToTextDeployment(
       `OPENGENI_SPEECH_TO_TEXT_PINNED names ${pinned.providerId}/${pinned.model}, which this deployment does not offer`,
     );
   }
+  const configuredLive = modelRef(settings.recordingLiveTranscription);
+  if (
+    configuredLive &&
+    !findRecordingTranscriptionModel(
+      registry,
+      configuredLive.providerId,
+      configuredLive.model,
+      "live",
+    )
+  ) {
+    throw new Error(
+      `OPENGENI_RECORDING_LIVE_TRANSCRIPTION names ${configuredLive.providerId}/${configuredLive.model}, which this deployment does not offer for the live transcript`,
+    );
+  }
+  const pinnedLive = pinned
+    ? registry.get(pinned.providerId)?.models.find((spec) => spec.capabilities.live)
+    : undefined;
+  const liveDefault =
+    configuredLive ??
+    (pinned
+      ? pinnedLive
+        ? { providerId: pinned.providerId, model: pinnedLive.model }
+        : null
+      : DEFAULT_RECORDING_LIVE_TRANSCRIPTION);
   const loadWorkspaceKey =
     options.loadWorkspaceKey ??
     (async (providerId: string, scope: { accountId: string; workspaceId: string }) => {
@@ -221,6 +261,7 @@ export function createSpeechToTextDeployment(
     order,
     pinned,
     meetingDefault,
+    liveDefault,
     wordAlignment: settings.recordingWordAlignment,
     async credentials(providerId, scope) {
       const provider = registry.get(providerId);
@@ -283,34 +324,8 @@ function azureSpeechAccount(
   if (apiKey) {
     credentials = async () => ({ apiKey });
   } else {
-    const identity = deploymentAzureEntraCredential(settings);
-    if (identity) {
-      // The deployment's one identity, shared with every other Azure AI
-      // service it calls, so they share its tokens. Tests inject their own.
-      const token =
-        options.fetch || options.readTokenFile
-          ? createAzureEntraAccessTokenSource(identity, {
-              ...fetchOption,
-              ...(options.readTokenFile ? { readTokenFile: options.readTokenFile } : {}),
-            })
-          : sharedAzureEntraAccessTokenSource(identity);
-      credentials = async () => {
-        try {
-          return { accessToken: await token() };
-        } catch (error) {
-          if (!(error instanceof AzureEntraTokenError)) throw error;
-          throw new RecordingTranscriptionError(
-            error.message,
-            error.reason === "network"
-              ? "network"
-              : error.reason === "unavailable"
-                ? "unavailable"
-                : "unauthorized",
-            error.retryable,
-          );
-        }
-      };
-    }
+    const token = deploymentEntraAccessToken(settings, options);
+    if (token) credentials = async () => ({ accessToken: await token() });
   }
   if (!credentials) return null;
   // A voice input MAI price, where set, prices this account's calls in credits.
@@ -323,6 +338,42 @@ function azureSpeechAccount(
     creditPricing: voiceMai?.kind === "azure-mai" ? (voiceMai.pricing ?? null) : null,
     ...fetchOption,
   });
+}
+
+/**
+ * A Microsoft Entra ID token from the deployment's one identity, for the Azure
+ * AI accounts it calls without a key. Every caller shares its tokens; tests
+ * inject their own fetch or token file.
+ */
+function deploymentEntraAccessToken(
+  settings: Settings,
+  options: SpeechToTextDeploymentOptions,
+): (() => Promise<string>) | null {
+  const identity = deploymentAzureEntraCredential(settings);
+  if (!identity) return null;
+  const token =
+    options.fetch || options.readTokenFile
+      ? createAzureEntraAccessTokenSource(identity, {
+          ...(options.fetch ? { fetch: options.fetch } : {}),
+          ...(options.readTokenFile ? { readTokenFile: options.readTokenFile } : {}),
+        })
+      : sharedAzureEntraAccessTokenSource(identity);
+  return async () => {
+    try {
+      return await token();
+    } catch (error) {
+      if (!(error instanceof AzureEntraTokenError)) throw error;
+      throw new RecordingTranscriptionError(
+        error.message,
+        error.reason === "network"
+          ? "network"
+          : error.reason === "unavailable"
+            ? "unavailable"
+            : "unauthorized",
+        error.retryable,
+      );
+    }
+  };
 }
 
 /**
