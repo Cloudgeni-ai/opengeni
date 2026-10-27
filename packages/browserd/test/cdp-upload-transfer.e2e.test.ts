@@ -14,7 +14,9 @@ const e2e =
 
 // Chrome refuses DOM.setFileInputFiles from an extension debugger that has no
 // file URL access. The driver must then put the files on the input itself.
-for (const mode of ["direct", "button", "multiple", "large", "too large"] as const) {
+// "cleared": the page empties the input once it has read the files, so the
+// same file can be picked again; the upload still arrived.
+for (const mode of ["direct", "button", "multiple", "large", "too large", "cleared"] as const) {
   e2e(
     `uploads without Chrome file access: ${mode}`,
     async () => {
@@ -81,7 +83,9 @@ for (const mode of ["direct", "button", "multiple", "large", "too large"] as con
           globalThis.inputs=0;globalThis.changes=0;globalThis.uploaded=[];
           async function record(event){
             changes++;
-            uploaded=await Promise.all(Array.from(event.target.files,async file=>{
+            const files=Array.from(event.target.files);
+            if (${mode === "cleared"}) event.target.value="";
+            uploaded=await Promise.all(files.map(async file=>{
               let checksum=0;
               for(const byte of new Uint8Array(await file.arrayBuffer())) checksum=(checksum*31+byte)>>>0;
               return {name:file.name,type:file.type,size:file.size,checksum};

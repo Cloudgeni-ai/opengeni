@@ -13,8 +13,7 @@
 //   paths the case shows the writer's copy instead.
 // Runtime calls run as the restricted application role; fixture rows the
 // application never writes directly (scheduler runs, cutover records,
-// delivered internal turns) are written by the database owner, as in
-// subscription-authority-compat-postgres.test.ts.
+// delivered internal turns) are written by the database owner.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,

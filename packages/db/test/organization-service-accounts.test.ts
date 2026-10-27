@@ -26,10 +26,6 @@ const otherAccountId = crypto.randomUUID();
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 
-const migrationSource = await Bun.file(
-  new URL("../drizzle/0603_organization_service_accounts.sql", import.meta.url),
-).text();
-
 function policy(permissions: Permission[]): OrganizationAccessPolicy {
   return { preset: "custom", permissions, workspaceScope: { kind: "all" } };
 }
@@ -57,10 +53,7 @@ async function key(input: {
   return { ...created, keyHash };
 }
 
-test("0603 is a drained maintenance cutover and the table is forced row security", () => {
-  expect(migrationSource.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
-  expect(migrationSource).toContain("opengeni.migration_application_roles");
-  expect(migrationSource).toContain("CHECK (role IN ('admin', 'member'))");
+test("the table is forced row security with runtime DML", () => {
   expect(FORCE_RLS_TABLES).toContain("organization_service_accounts");
   expect(RUNTIME_TABLE_PRIVILEGES.organization_service_accounts).toEqual([
     "SELECT",
@@ -212,51 +205,6 @@ describe.skipIf(!available)("organization service accounts real PostgreSQL", () 
       await expect(
         deleteOrganizationServiceAccount(client.db, accountId, bot.id),
       ).rejects.toBeInstanceOf(OrganizationServiceAccountNotFoundError);
-    },
-    budget,
-  );
-
-  test(
-    "the migration gives every existing organization key its own service account",
-    async () => {
-      const live = crypto.randomUUID();
-      const revoked = crypto.randomUUID();
-      const workspaceKey = crypto.randomUUID();
-      const workspaceId = crypto.randomUUID();
-      await shared!
-        .admin`insert into workspaces (id, account_id, name) values (${workspaceId}, ${otherAccountId}, 'Backfill workspace')`;
-      await shared!
-        .admin`insert into api_keys (id, account_id, workspace_id, name, description, credential_kind, prefix, key_hash, permissions)
-        values (${live}, ${otherAccountId}, null, 'Same name', 'Deploys', 'organization', 'og_org', ${crypto.randomUUID()}, '["workspace:admin"]'::jsonb),
-               (${revoked}, ${otherAccountId}, null, 'Same name', null, 'organization', 'og_org', ${crypto.randomUUID()}, '["workspace:read"]'::jsonb),
-               (${workspaceKey}, ${otherAccountId}, ${workspaceId}, 'Workspace key', null, 'workspace', 'og_ws', ${crypto.randomUUID()}, '["workspace:read"]'::jsonb)`;
-      await shared!.admin`update api_keys set revoked_at = now() where id = ${revoked}`;
-      const start = migrationSource.indexOf("ALTER TABLE api_keys NO FORCE ROW LEVEL SECURITY;");
-      const end =
-        migrationSource.indexOf("ALTER TABLE api_keys FORCE ROW LEVEL SECURITY;") +
-        "ALTER TABLE api_keys FORCE ROW LEVEL SECURITY;".length;
-      await shared!.admin.begin(async (tx) => {
-        await tx.unsafe(migrationSource.slice(start, end));
-      });
-      const rows = await shared!.admin<
-        {
-          id: string;
-          service_account_id: string | null;
-          name: string;
-          role: string;
-          deleted: boolean;
-        }[]
-      >`select k.id, k.service_account_id, s.name, s.role, s.deleted_at is not null as deleted
-        from api_keys k left join organization_service_accounts s on s.id = k.service_account_id
-        where k.account_id = ${otherAccountId}`;
-      const byId = new Map(rows.map((row) => [row.id, row]));
-      expect(byId.get(live)).toMatchObject({ name: "Same name", role: "admin", deleted: false });
-      expect(byId.get(revoked)).toMatchObject({ name: "Same name", role: "admin", deleted: true });
-      expect(byId.get(live)!.service_account_id).not.toBe(byId.get(revoked)!.service_account_id);
-      expect(byId.get(workspaceKey)!.service_account_id).toBeNull();
-      expect(
-        (await listOrganizationServiceAccounts(client.db, otherAccountId)).map((each) => each.id),
-      ).toEqual([byId.get(live)!.service_account_id!]);
     },
     budget,
   );

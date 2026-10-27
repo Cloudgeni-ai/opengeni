@@ -1,7 +1,7 @@
 import {
   getExternalWorkflowHandle,
+  deprecatePatch,
   ParentClosePolicy,
-  patched,
   startChild,
   workflowInfo,
   WorkflowIdReusePolicy,
@@ -73,17 +73,10 @@ export function scheduledTaskDispatchInput(
 export async function scheduledTaskFireWorkflow(
   input: ScheduledTaskFireWorkflowInput,
 ): Promise<void> {
-  // Old malformed manual histories must terminate rather than retrying a usage
-  // conflict forever. All current producers are statically required to provide
-  // the exact charging identity.
-  if (
-    patched("scheduled-task-manual-initiator-v1") &&
-    input.triggerType !== "scheduled" &&
-    input.triggerType !== "event" &&
-    (!input.agentRunUsageIdempotencyKey || !input.initiator)
-  ) {
-    return;
-  }
+  // Every producer provides the charging identity; the guard for malformed
+  // manual histories is retired. Remove this call once no open run carries
+  // the non-deprecated marker.
+  deprecatePatch("scheduled-task-manual-initiator-v1");
   const result = await scheduledTaskActivity.dispatchScheduledTaskRun(
     scheduledTaskDispatchInput(input, workflowInfo().workflowId),
   );

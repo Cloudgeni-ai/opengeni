@@ -2260,27 +2260,6 @@ describe("unified Knowledge storage", () => {
     expect(await getKnowledgeEntry(client.db, agent, finding.entryId)).toBeNull();
   });
 
-  test("0469 rejects missing or live old runtime identities before changing definitions", async () => {
-    const migration = await Bun.file(
-      new URL("../drizzle/0469_knowledge_source_discovery.sql", import.meta.url),
-    ).text();
-    const drain = migration.slice(
-      migration.indexOf("DO $drain$"),
-      migration.indexOf("END $drain$;") + "END $drain$;".length,
-    );
-    const appRole = decodeURIComponent(new URL(shared!.appUrl).username);
-    // Open the lazy runtime pool even when this test is run in isolation.
-    await listKnowledgeEntries(client.db, (await fixture()).human);
-    for (const roles of ["", "[]", '[" invalid "]', JSON.stringify([appRole])]) {
-      await expect(
-        shared!.admin.begin(async (tx) => {
-          await tx`SELECT set_config('opengeni.migration_application_roles',${roles},true)`;
-          await tx.unsafe(drain);
-        }),
-      ).rejects.toMatchObject({ code: "55000" });
-    }
-  });
-
   test("source purpose is validated at the database lifecycle boundary", async () => {
     const f = await fixture();
     for (const purpose of ["unknown", null, 1]) {

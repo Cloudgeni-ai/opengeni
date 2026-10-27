@@ -6567,7 +6567,7 @@ export function browserScreenshotError(error: unknown): unknown {
 }
 
 export function browserScreenshotResponse(
-  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader">,
+  frame: Pick<BrowserControlFrame, "data" | "mediaType" | "metadataHeader" | "inexactScrollbars">,
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
@@ -6577,6 +6577,7 @@ export function browserScreenshotResponse(
       "cache-control": "no-store",
       "content-type": frame.mediaType,
       "x-opengeni-browser-frame": frame.metadataHeader,
+      ...(frame.inexactScrollbars ? { "x-opengeni-browser-frame-note": "inexact-scrollbars" } : {}),
       ...USER_CONTENT_SECURITY_HEADERS,
     },
   });

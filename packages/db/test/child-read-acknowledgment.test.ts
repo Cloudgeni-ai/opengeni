@@ -1,5 +1,5 @@
 import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
-import { readFile } from "node:fs/promises";
+
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -2024,37 +2024,4 @@ test("migration rejects a mismatched launch receipt and a partial identity", asy
       })}`,
     ),
   ).rejects.toThrow("launch_identity_check");
-});
-
-test("0419 launch validation resolves its dedicated data schema", async () => {
-  const schemaName = `command_launch_${crypto.randomUUID().replaceAll("-", "")}`;
-  const migration = await readFile(
-    new URL("../drizzle/0419_background_command_launch_authority.sql", import.meta.url),
-    "utf8",
-  );
-  await shared.admin.begin(async (tx) => {
-    await tx.unsafe(`create schema "${schemaName}"`);
-    await tx`select set_config('search_path', ${schemaName}, true)`;
-    await tx.unsafe(`
-      create table session_turns (id uuid, workspace_id uuid, session_id uuid, account_id uuid);
-      create table session_turn_attempts (id uuid, turn_id uuid, workspace_id uuid, session_id uuid, account_id uuid, execution_generation int);
-      create table session_background_commands (
-        id uuid, account_id uuid, workspace_id uuid, session_id uuid, provider text,
-        retained_process_id uuid, control_workspace_id uuid, enrollment_id uuid,
-        connection_instance_id text, op_id text
-      );`);
-    await tx.unsafe(migration);
-    const account = crypto.randomUUID(),
-      dataWorkspaceId = crypto.randomUUID(),
-      session = crypto.randomUUID(),
-      turn = crypto.randomUUID(),
-      attempt = crypto.randomUUID();
-    await tx`insert into session_turns values (${turn},${dataWorkspaceId},${session},${account})`;
-    await tx`insert into session_turn_attempts values (${attempt},${turn},${dataWorkspaceId},${session},${account},1)`;
-    await tx`insert into session_background_commands (id,account_id,workspace_id,session_id,provider,launch_turn_id,launch_attempt_id,launch_execution_generation)
-      values (${crypto.randomUUID()},${account},${dataWorkspaceId},${session},'connected_machine',${turn},${attempt},1)`;
-    const [count] = await tx`select count(*)::int as count from session_background_commands`;
-    expect(count?.count).toBe(1);
-    await tx.unsafe(`drop schema "${schemaName}" cascade`);
-  });
 });

@@ -14,6 +14,7 @@ class FakeNotification extends EventEmitter {
 export const electronStub = {
   app: { isPackaged: true },
   BaseWindow: EventEmitter,
+  BrowserWindow: EventEmitter,
   WebContentsView: EventEmitter,
   clipboard: {},
   nativeTheme: {},

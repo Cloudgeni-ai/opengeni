@@ -1071,6 +1071,7 @@ describe("productLabelForModelId", () => {
     expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
     expect(productLabelForModelId("gpt-6-astra")).toBe("GPT-6 Astra");
     expect(productLabelForModelId("codex/gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(productLabelForModelId("codex/gpt-6.1-terra")).toBe("GPT-6.1 Terra");
     expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
   });
 });
@@ -1084,6 +1085,8 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("gpt-6-sol")).toBe("6 Sol");
     expect(productShortLabelForModelId("gpt-6-luna")).toBe("6 Luna");
     expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
+    expect(productShortLabelForModelId("codex/gpt-6.1-sol")).toBe("6.1 Sol");
+    expect(productShortLabelForModelId("gpt-6.1-terra")).toBe("6.1 Terra");
     expect(productShortLabelForModelId("grok-4.7")).toBe("4.7");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });

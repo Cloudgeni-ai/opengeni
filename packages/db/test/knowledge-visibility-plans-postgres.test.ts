@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
-import { readFile } from "node:fs/promises";
 import type { SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   listingDatabase,
@@ -152,7 +151,7 @@ test("pending parent heads and historical member links keep their separate revis
   expect((await parity(f, { groupId: f.groupId, limit: 20 })).length).toBeGreaterThan(0);
 }, 180_000);
 
-test("rolling replacement retains security metadata and rejects ambiguous source", async () => {
+test("the visibility routine keeps its security metadata and generic plans", async () => {
   const rows =
     await shared.admin`SELECT p.proowner,p.proacl,array_remove(p.proconfig,'plan_cache_mode=force_generic_plan') proconfig,p.provolatile,p.prosecdef FROM pg_proc p
     WHERE p.oid IN ('knowledge_revisions_visible(uuid,uuid[],uuid[],boolean)'::regprocedure,'knowledge_revisions_visible_before_plan(uuid,uuid[],uuid[],boolean)'::regprocedure)`;
@@ -172,13 +171,6 @@ test("rolling replacement retains security metadata and rejects ambiguous source
       expect(after!.value).toBe(setting);
     });
   }
-  const migration = await readFile(
-    new URL("../drizzle/0936_knowledge_visibility_statement_reuse.sql", import.meta.url),
-    "utf8",
-  );
-  await expect(shared.admin.begin((tx) => tx.unsafe(migration))).rejects.toMatchObject({
-    code: "P0001",
-  });
 });
 
 test("actual restricted-role plans retain every parent check in custom and generic modes", async () => {

@@ -6,9 +6,11 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/contract.ts",
+    "src/main/dictation/public.ts",
     "src/main/mac-login-agent.ts",
     "src/main/system-audio.ts",
     "src/preload/content.ts",
+    "src/preload/dictation.ts",
     "src/preload/system-audio.ts",
     "src/preload/welcome.ts",
   ],

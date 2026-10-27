@@ -16,7 +16,7 @@
 //   (4) FLAG-OFF: with sandboxOwnershipEnabled=false the turn-path gate is never
 //       entered, so NO lease row is ever materialized (byte-for-byte today).
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// pgvector/pgvector:pg16 (the migration baseline does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser, so FORCE RLS applies). Container
 // torn down in afterAll regardless of outcome.
 

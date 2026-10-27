@@ -237,55 +237,6 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "re-peeks after a legacy activity worker returns void without redispatching settled work",
-    async () => {
-      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
-      const scope = workflowScope();
-      let attempts = 0;
-      const failures: unknown[] = [];
-      const queuedTurns = [queuedTurn("event-1")];
-      const admission = createTurnAdmission(queuedTurns, async () => {
-        attempts += 1;
-        throw new Error("boom");
-      });
-      const worker = await testWorker(nativeConnection, taskQueue, {
-        ...admission.activities,
-        markSessionIdle: async () => undefined,
-        failSessionAttempt: async (input: unknown) => {
-          failures.push(input);
-        },
-        settleSessionInterruptions: async () => ({
-          action: "continue" as const,
-        }),
-      });
-      const run = worker.run();
-      try {
-        const client = new Client({ connection });
-        const startedAt = Date.now();
-        const handle = await client.workflow.start("sessionWorkflow", {
-          taskQueue,
-          workflowId: `wf-${crypto.randomUUID()}`,
-          args: [
-            {
-              ...scope,
-              sessionId: crypto.randomUUID(),
-              initialEventId: "event-1",
-            },
-          ],
-        });
-        await handle.result();
-        expect(attempts).toBe(1);
-        expect(failures).toHaveLength(1);
-        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
-      } finally {
-        worker.shutdown();
-        await run;
-      }
-    },
-    temporalWorkflowTestTimeoutMs,
-  );
-
-  test(
     "backs off and reclaims the same turn when failure happens before attempt claim",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
