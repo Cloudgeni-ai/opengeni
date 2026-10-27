@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { organizationAccessPresetPermissions } from "@opengeni/contracts";
+import {
+  OPENGENI_CALLING_WORKSPACE_HEADER,
+  organizationAccessPresetPermissions,
+  signCallingWorkspaceProof,
+} from "@opengeni/contracts";
 import { appActionChangesState, findAppAction } from "@opengeni/contracts/app-actions";
 import {
   createDb,
@@ -21,19 +25,32 @@ import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 import { regionRestrictedHttpError } from "../src/http/api-error";
-import { appActionOtherWorkspaceRefusal } from "../src/mcp/session-admin-access-tools";
-import type { SessionAdminReach } from "../src/mcp/session-admin-access-tools";
+import {
+  appActionContentFlow,
+  withAppActionContentFlow,
+  type SessionAdminReach,
+} from "../src/mcp/session-admin-access-tools";
 import {
   OTHER_WORKSPACE_SESSION_TOOLS,
   reachSessionInOtherWorkspace,
   type OtherWorkspaceSessionTool,
 } from "../src/mcp/session-other-workspace";
-import { REGION_RESTRICTED_TOOL_MESSAGE } from "../src/mcp/workspace-content-flow";
+import {
+  contentFlowCheckFailure,
+  REGION_RESTRICTED_TOOL_MESSAGE,
+  requireCallingWorkspaceContentFlow,
+  withOtherWorkspaceContentFlow,
+} from "../src/mcp/workspace-content-flow";
 
-/* A session reaching another workspace never carries EU-only content into a
-   workspace that isn't EU-only, in either direction, and never runs anything
-   when that can't be checked. Two organizations stand in for two workspaces
-   with different settings: today the setting is the organization's. */
+/* A session reaching another workspace of its organization never carries
+   EU-only content into a workspace that isn't EU-only, in either direction,
+   and never runs anything when that can't be checked; another organization's
+   workspace is left to its route, which never says whether it exists. The
+   setting is the organization's today, so a refusal between two workspaces of
+   one organization can't be set up yet: the checks themselves are covered in
+   packages/db/test/workspace-content-flow.test.ts. Opengeni's own MCP
+   endpoints refuse an agent of a workspace that isn't EU-only reaching EU-only
+   content. */
 
 setDefaultTimeout(120_000);
 let shared: SharedTestDatabase;
@@ -139,112 +156,243 @@ async function reachOther(
   return { result, ran: dispatched.length > 0 };
 }
 
-const SENDS = new Set<OtherWorkspaceSessionTool>(["session_send_message", "session_steer"]);
+/** Another workspace of the same organization. */
+async function sameOrganization(of: WorkspaceContentFlowEnd): Promise<WorkspaceContentFlowEnd> {
+  const workspaceId = crypto.randomUUID();
+  await shared.admin`
+    insert into workspaces (id, account_id, name) values (${workspaceId}, ${of.accountId}, 'Research')`;
+  await shared.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${workspaceId}, ${of.accountId})`;
+  return { accountId: of.accountId, workspaceId };
+}
+
+/** The real database until `fail()`, then unreadable: a setting that can't be read mid-call. */
+function failingLater(db: Database) {
+  let failed = false;
+  const proxy = new Proxy(db, {
+    get: (target, property, receiver) => {
+      if (failed && property !== "then") throw new Error("database unavailable");
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { db: proxy, fail: () => (failed = true) };
+}
+
+const NOT_REACHABLE = "Session not found or access denied";
+const ok: CallToolResult = { content: [{ type: "text", text: "the answer" }] };
 
 describe("session tools in another workspace", () => {
-  test("EU-only to EU-only runs every tool", async () => {
+  test("EU-only to EU-only in one organization runs every tool", async () => {
     const here = await workspace(true);
-    const there = await workspace(true);
+    const there = await sameOrganization(here);
     for (const tool of OTHER_WORKSPACE_SESSION_TOOLS) {
       const { ran } = await reachOther(here, there, tool);
       expect(ran).toBe(true);
     }
   });
 
-  test("an EU-only session never sends or steers into a workspace that isn't EU-only", async () => {
-    const here = await workspace(true);
-    const there = await workspace(false);
-    for (const tool of OTHER_WORKSPACE_SESSION_TOOLS) {
-      const { result, ran } = await reachOther(here, there, tool);
-      // Reading a chat there only brings its content into this EU-only workspace.
-      expect(ran).toBe(!SENDS.has(tool));
-      if (SENDS.has(tool)) {
-        expect(result.isError).toBe(true);
-        expect(textOf(result)).toBe(REGION_RESTRICTED_TOOL_MESSAGE);
+  test("another organization's workspace is answered by its route, never by its setting", async () => {
+    for (const [hereEuOnly, thereEuOnly] of [
+      [true, false],
+      [false, true],
+      [true, true],
+    ] as const) {
+      const here = await workspace(hereEuOnly);
+      const there = await workspace(thereEuOnly);
+      for (const tool of OTHER_WORKSPACE_SESSION_TOOLS) {
+        const { result, ran } = await reachOther(here, there, tool);
+        // The route runs as the person in this organization and denies it,
+        // exactly as for a workspace that doesn't exist.
+        expect(ran).toBe(true);
+        expect(textOf(result)).toContain(NOT_REACHABLE);
+        expect(textOf(result)).not.toContain("EU-only");
       }
-    }
-  });
-
-  test("a session that isn't EU-only never reads or reaches an EU-only chat", async () => {
-    const here = await workspace(false);
-    const there = await workspace(true);
-    for (const tool of OTHER_WORKSPACE_SESSION_TOOLS) {
-      const { result, ran } = await reachOther(here, there, tool);
-      expect(ran).toBe(false);
-      expect(textOf(result)).toBe(REGION_RESTRICTED_TOOL_MESSAGE);
     }
   });
 
   test("nothing runs when the setting can't be read", async () => {
     const here = await workspace(false);
-    const there = await workspace(false);
-    const closed = { db: unreadableDb() };
+    const there = await sameOrganization(here);
     for (const tool of ["session_get", "session_send_message"] as const) {
-      const { result, ran } = await reachOther(here, there, tool, closed.db);
+      const { result, ran } = await reachOther(here, there, tool, unreadableDb());
       expect(ran).toBe(false);
       expect(result.isError).toBe(true);
       expect(textOf(result)).toContain("Nothing was run");
     }
   });
+
+  test("an answer that comes back after the setting can't be read is withheld", async () => {
+    const here = await workspace(true);
+    const there = await sameOrganization(here);
+    const later = failingLater(client.db);
+    const result = await withOtherWorkspaceContentFlow(
+      later.db,
+      { here, thereWorkspaceId: there.workspaceId, flow: "from_there" },
+      async () => {
+        later.fail();
+        return ok;
+      },
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("The answer isn't shown");
+    // Unchanged, the answer comes back.
+    expect(
+      await withOtherWorkspaceContentFlow(
+        client.db,
+        { here, thereWorkspaceId: there.workspaceId, flow: "from_there" },
+        async () => ok,
+      ),
+    ).toBe(ok);
+  });
+
+  test("a refusal reads plainly, before and after the call", () => {
+    const refused = new WorkspaceContentFlowRefusedError(crypto.randomUUID(), crypto.randomUUID());
+    expect(textOf(contentFlowCheckFailure(refused))).toBe(REGION_RESTRICTED_TOOL_MESSAGE);
+    expect(textOf(contentFlowCheckFailure(refused, "after"))).toContain(
+      "Not supported in EU-only workspaces",
+    );
+    expect(textOf(contentFlowCheckFailure(refused, "after"))).toContain("The answer isn't shown");
+    expect(textOf(contentFlowCheckFailure(new Error("x")))).toContain("Retry");
+  });
 });
 
 describe("admin_action_call in another workspace", () => {
   const read = "GET /v1/workspaces/:workspaceId/vaults";
+  const readWithText = "POST /v1/workspaces/:workspaceId/knowledge/entries/search";
   const change = "POST /v1/workspaces/:workspaceId/tools/invoke";
   const call = (id: string, there: WorkspaceContentFlowEnd) => ({
     id,
     pathParameters: { workspaceId: there.workspaceId },
   });
+  async function run(db: Database, here: WorkspaceContentFlowEnd, input: ReturnType<typeof call>) {
+    let ran = false;
+    const result = await withAppActionContentFlow(db, here, input, async () => {
+      ran = true;
+      return ok;
+    });
+    return { result, ran };
+  }
 
-  test("the fixture actions are a read and a change", () => {
+  test("only a read that sends nothing but ids and paging keys just brings content here", () => {
+    const flow = (id: string, input: { query?: Record<string, unknown>; body?: unknown }) =>
+      appActionContentFlow(findAppAction(id)!, input);
     expect(appActionChangesState(findAppAction(read)!)).toBe(false);
-    expect(appActionChangesState(findAppAction(change)!)).toBe(true);
+    expect(appActionChangesState(findAppAction(readWithText)!)).toBe(false);
+    expect(flow(read, {})).toBe("from_there");
+    expect(flow(read, { query: { limit: 5, cursor: "c", sessionId: "s" }, body: {} })).toBe(
+      "from_there",
+    );
+    expect(flow(read, { query: { q: "our launch plan" } })).toBe("both_ways");
+    expect(flow(readWithText, { body: { query: "our launch plan" } })).toBe("both_ways");
+    expect(flow(change, {})).toBe("both_ways");
   });
 
-  test("EU-only to EU-only runs reads and changes", async () => {
+  test("EU-only to EU-only in one organization runs reads and changes", async () => {
     const here = await workspace(true);
-    const there = await workspace(true);
-    expect(await appActionOtherWorkspaceRefusal(client.db, here, call(read, there))).toBeNull();
-    expect(await appActionOtherWorkspaceRefusal(client.db, here, call(change, there))).toBeNull();
+    const there = await sameOrganization(here);
+    for (const id of [read, readWithText, change]) {
+      const { ran } = await run(client.db, here, call(id, there));
+      expect(ran).toBe(true);
+    }
   });
 
-  test("an EU-only session reads elsewhere but never changes a workspace that isn't EU-only", async () => {
-    const here = await workspace(true);
-    const there = await workspace(false);
-    expect(await appActionOtherWorkspaceRefusal(client.db, here, call(read, there))).toBeNull();
-    const refused = await appActionOtherWorkspaceRefusal(client.db, here, call(change, there));
-    expect(refused?.isError).toBe(true);
-    expect(textOf(refused!)).toBe(REGION_RESTRICTED_TOOL_MESSAGE);
-  });
-
-  test("a session that isn't EU-only never reads or changes an EU-only workspace", async () => {
-    const here = await workspace(false);
-    const there = await workspace(true);
-    for (const id of [read, change]) {
-      const refused = await appActionOtherWorkspaceRefusal(client.db, here, call(id, there));
-      expect(textOf(refused!)).toBe(REGION_RESTRICTED_TOOL_MESSAGE);
+  test("another organization's workspace is left to its route", async () => {
+    for (const [hereEuOnly, thereEuOnly] of [
+      [true, false],
+      [false, true],
+    ] as const) {
+      const here = await workspace(hereEuOnly);
+      const there = await workspace(thereEuOnly);
+      for (const id of [read, change]) {
+        const { result, ran } = await run(client.db, here, call(id, there));
+        expect(ran).toBe(true);
+        expect(result).toBe(ok);
+      }
     }
   });
 
   test("its own workspace and actions without a workspace aren't moves", async () => {
     const here = await workspace(false);
-    const closed = { db: unreadableDb() };
     // Nothing is read, so even an unreadable setting doesn't matter.
-    expect(await appActionOtherWorkspaceRefusal(closed.db, here, call(change, here))).toBeNull();
+    expect((await run(unreadableDb(), here, call(change, here))).ran).toBe(true);
     expect(
-      await appActionOtherWorkspaceRefusal(closed.db, here, {
-        id: "GET /v1/organizations/:organizationId/workspaces",
-        pathParameters: { organizationId: here.accountId, workspaceId: crypto.randomUUID() },
-      }),
-    ).toBeNull();
+      (
+        await run(unreadableDb(), here, {
+          id: "GET /v1/organizations/:organizationId/workspaces",
+          pathParameters: { organizationId: here.accountId, workspaceId: crypto.randomUUID() },
+        })
+      ).ran,
+    ).toBe(true);
   });
 
   test("nothing runs when the setting can't be read", async () => {
     const here = await workspace(false);
-    const there = await workspace(false);
-    const closed = { db: unreadableDb() };
-    const refused = await appActionOtherWorkspaceRefusal(closed.db, here, call(read, there));
-    expect(textOf(refused!)).toContain("Nothing was run");
+    const there = await sameOrganization(here);
+    const { result, ran } = await run(unreadableDb(), here, call(read, there));
+    expect(ran).toBe(false);
+    expect(textOf(result)).toContain("Nothing was run");
+  });
+});
+
+describe("Opengeni's own MCP endpoints called from another workspace", () => {
+  const secret = "workspace-content-flow-mcp-secret";
+  const settings = testSettings({ productAccessMode: "managed", delegationSecret: secret });
+  const request = async (calling?: WorkspaceContentFlowEnd | string) =>
+    new Request("http://opengeni.test/v1/mcp", {
+      method: "POST",
+      headers:
+        calling === undefined
+          ? {}
+          : {
+              [OPENGENI_CALLING_WORKSPACE_HEADER]:
+                typeof calling === "string"
+                  ? calling
+                  : await signCallingWorkspaceProof(secret, calling),
+            },
+    });
+
+  test("EU-only content reaches only an EU-only calling workspace", async () => {
+    const eu = await workspace(true);
+    const euElsewhere = await workspace(true);
+    const other = await workspace(false);
+    const deps = { db: client.db, settings };
+    // A workspace, and every workspace of an organization.
+    for (const reached of [{ workspaceId: eu.workspaceId }, { accountId: eu.accountId }]) {
+      await expect(
+        requireCallingWorkspaceContentFlow(deps, await request(other), reached),
+      ).rejects.toBeInstanceOf(WorkspaceContentFlowRefusedError);
+      await requireCallingWorkspaceContentFlow(deps, await request(euElsewhere), reached);
+      await requireCallingWorkspaceContentFlow(deps, await request(eu), reached);
+    }
+    // Content that isn't EU-only may go to an EU-only workspace.
+    for (const reached of [{ workspaceId: other.workspaceId }, { accountId: other.accountId }]) {
+      await requireCallingWorkspaceContentFlow(deps, await request(eu), reached);
+    }
+  });
+
+  test("a request naming no workspace isn't a workspace agent; a bad proof is refused", async () => {
+    const eu = await workspace(true);
+    const deps = { db: client.db, settings };
+    await requireCallingWorkspaceContentFlow(deps, await request(), { accountId: eu.accountId });
+    for (const proof of ["ogcw_forged.signature", "not-a-proof"]) {
+      await expect(
+        requireCallingWorkspaceContentFlow(deps, await request(proof), {
+          accountId: eu.accountId,
+        }),
+      ).rejects.toMatchObject({ status: 403 });
+    }
+  });
+
+  test("refused when the setting can't be read", async () => {
+    const other = await workspace(false);
+    const deps = { db: unreadableDb(), settings };
+    for (const reached of [{ workspaceId: other.workspaceId }, { accountId: other.accountId }]) {
+      await expect(
+        requireCallingWorkspaceContentFlow(deps, await request(other), reached),
+      ).rejects.toThrow("database unavailable");
+    }
   });
 });
 

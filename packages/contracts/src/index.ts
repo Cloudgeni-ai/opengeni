@@ -4150,6 +4150,70 @@ export async function verifyDelegatedAccessToken(
   return payload.data;
 }
 
+// --- Calling-workspace proof (EU-only content flow) ---
+//
+// When an agent in an Opengeni workspace calls Opengeni's own MCP endpoints as
+// a remote MCP server, the runtime adds this header naming that workspace, so
+// the endpoint can keep EU-only content out of a non-EU workspace. The same
+// HMAC envelope as the delegated token with its own `ogcw_` prefix, signed
+// into the MAC, so it is never accepted as any other token. It grants
+// nothing: it only lets the endpoint refuse.
+export const OPENGENI_CALLING_WORKSPACE_HEADER = "x-opengeni-calling-workspace" as const;
+const callingWorkspaceProofPrefix = "ogcw_";
+const CallingWorkspaceProofPayload = z
+  .object({
+    accountId: z.string().min(1),
+    workspaceId: z.string().min(1),
+    exp: z.number().int().positive(),
+  })
+  .strict();
+export type CallingWorkspaceProof = { accountId: string; workspaceId: string };
+
+export async function signCallingWorkspaceProof(
+  secret: string,
+  input: CallingWorkspaceProof & { expiresInSeconds?: number },
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<string> {
+  const payload = CallingWorkspaceProofPayload.parse({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    exp: nowSeconds + (input.expiresInSeconds ?? 300),
+  });
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = await hmacSha256Base64Url(
+    secret,
+    `${callingWorkspaceProofPrefix}${encodedPayload}`,
+  );
+  return `${callingWorkspaceProofPrefix}${encodedPayload}.${signature}`;
+}
+
+/** The calling workspace, or null when the proof is malformed, forged or expired. */
+export async function verifyCallingWorkspaceProof(
+  secret: string,
+  proof: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<CallingWorkspaceProof | null> {
+  if (!proof.startsWith(callingWorkspaceProofPrefix)) return null;
+  const withoutPrefix = proof.slice(callingWorkspaceProofPrefix.length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const expected = await hmacSha256Base64Url(
+    secret,
+    `${callingWorkspaceProofPrefix}${encodedPayload}`,
+  );
+  if (!constantTimeEqual(withoutPrefix.slice(dot + 1), expected)) return null;
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = CallingWorkspaceProofPayload.safeParse(decoded);
+  if (!payload.success || payload.data.exp < nowSeconds) return null;
+  return { accountId: payload.data.accountId, workspaceId: payload.data.workspaceId };
+}
+
 // --- Enrollment bearer credential (bring-your-own-compute M5) ---
 //
 // The signed bearer the agent presents to the control plane after enrollment (the

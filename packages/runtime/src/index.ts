@@ -4,6 +4,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { withCallingWorkspaceProof } from "./calling-workspace";
 import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
@@ -5641,7 +5642,12 @@ export async function prepareAgentTools(
           options.requestSignal?.throwIfAborted();
           await options.authorizeProviderRequest?.();
           options.requestSignal?.throwIfAborted();
-          const initial = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          const credentialed = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          // Opengeni's own endpoints added as a remote server learn which
+          // workspace is calling, so EU-only content stays out of non-EU ones.
+          const initial = firstParty
+            ? credentialed
+            : await withCallingWorkspaceProof(settings, options, input, credentialed);
           const requestInit = options.requestSignal
             ? {
                 ...initial,

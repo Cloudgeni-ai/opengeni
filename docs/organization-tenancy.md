@@ -852,15 +852,28 @@ that carries content both ways, `assertWorkspaceContentExchangeAllowed`
 with `isWorkspaceEuOnly`, read each workspace's organization from the workspace
 itself, and throw when the setting can't be read, so nothing moves. A refusal
 is `WorkspaceContentFlowRefusedError`: HTTP `422 region_restricted`, and a
-plain refusal from MCP tools. A session reaching another workspace is checked
-before anything runs there (`apps/api/src/mcp/workspace-content-flow.ts`):
-session tools given a `workspaceId` and `admin_action_call` naming one bring
-that workspace's content back, and sending, steering and changes also carry
-the session's content there. Every other scope that spans workspaces
-(organization and personal Knowledge, Skills and Documents, Personal
-workspaces, user- and organization-owned machines and browsers, Slack routes,
-personal-resource grants) is bound to one organization, so it always shares
-one setting today; a per-workspace switch must add the pair check there.
+plain refusal from MCP tools. A session reaching another workspace of its
+organization is checked before anything runs there and again when the answer
+returns (`apps/api/src/mcp/workspace-content-flow.ts`): session tools given a
+`workspaceId` and `admin_action_call` naming one bring that workspace's content
+back, and anything carrying the session's text (sending, steering, pausing,
+resuming, changes, searches and previews) also takes it there. Another
+organization's workspace is left to its route, which answers it as not
+reachable, so the answer never says whether it exists or how it is set.
+Opengeni's own MCP endpoints can be added to a workspace as a remote MCP
+server: the runtime then sends the calling workspace in a signed
+`x-opengeni-calling-workspace` header (and sends nothing it can't sign), and
+`/v1/mcp` and `/v1/workspaces/:workspaceId/mcp` refuse with `422
+region_restricted` when content of the organization or workspace they reach
+may not go to that workspace. EU-only covers Opengeni's own inference and
+content moving between Opengeni workspaces, not outside agents an organization
+connects itself (organization MCP clients, API keys, desktop clients): they
+send no header and stay allowed. Every other scope that spans
+workspaces (organization and personal Knowledge, Skills and Documents,
+Personal workspaces, user- and organization-owned machines and browsers, Slack
+routes, personal-resource grants) is bound to one organization, so it always
+shares one setting today; a per-workspace switch must add the pair check
+there.
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling

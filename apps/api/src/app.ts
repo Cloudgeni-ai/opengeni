@@ -136,6 +136,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
+import { requireCallingWorkspaceContentFlow } from "./mcp/workspace-content-flow";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
@@ -1723,6 +1724,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
     };
     let caller: OrganizationMcpCaller;
+    let organizationKeyAccountId: string | null = null;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
       const personalKey = connection
@@ -1752,7 +1754,9 @@ export function createAppComposition(deps: AppDependencies): {
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
-        if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
+        organizationKeyAccountId =
+          accountScopedApiKeyWorkspaceAuthority(context)?.accountId ?? null;
+        if (!organizationKeyAccountId || !authorization) {
           throw new HTTPException(403, {
             message:
               "Connect with Opengeni sign-in, a personal API key or an organization API key.",
@@ -1768,6 +1772,12 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // Added to an Opengeni workspace as a remote MCP server, this reaches
+    // every workspace of the organization: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentFlow(routeDeps, c.req.raw, {
+      accountId: caller.kind === "person" ? caller.accountId : organizationKeyAccountId!,
+    });
     // Stateless JSON-response transport: there is no server-to-client stream.
     // Answering GET with an empty 200 made clients (Claude) reconnect every
     // second; refuse it after authorization, as the workspace endpoint does.
@@ -1881,6 +1891,7 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     if (oauthAccess) {
+      await requireCallingWorkspaceContentFlow(routeDeps, c.req.raw, { workspaceId });
       return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
         if (c.req.method === "GET") return unsupportedGet();
         const prepared = await prepareMcpOAuthWorkspaceToolGateway(
@@ -1917,6 +1928,9 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // Added to another Opengeni workspace as a remote MCP server: EU-only
+    // content stays in EU-only workspaces.
+    await requireCallingWorkspaceContentFlow(routeDeps, c.req.raw, { workspaceId });
     // MCP handshakes (initialize, ping, notifications) read and disclose
     // nothing scoped. A session-bound agent attempt still proves it is the
     // live attempt, but skips the catalog and admin reads

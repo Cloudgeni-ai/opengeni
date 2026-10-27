@@ -1,5 +1,8 @@
+import { asc, eq } from "drizzle-orm";
+
 import { type Database, rlsContextForWorkspace, WorkspaceNotFoundError } from "./database";
 import { isWorkspaceEuOnly } from "./organization-inference-residency";
+import * as schema from "./schema";
 
 /**
  * EU-only content stays in EU-only workspaces. Content from an EU-only
@@ -72,4 +75,27 @@ export async function assertWorkspaceContentExchangeAllowed(
     throw new WorkspaceContentFlowRefusedError(input.here.workspaceId, input.there.workspaceId);
   if (there && !here)
     throw new WorkspaceContentFlowRefusedError(input.there.workspaceId, input.here.workspaceId);
+}
+
+/**
+ * For a step that can bring content from any workspace of an organization to
+ * `target` (an organization-wide connection): allowed when `target` is
+ * EU-only, or when no workspace of that organization is.
+ */
+export async function assertOrganizationContentFlowAllowed(
+  db: Database,
+  input: { sourceAccountId: string; target: WorkspaceContentFlowEnd },
+): Promise<void> {
+  if (await isWorkspaceEuOnly(db, input.target)) return;
+  const workspaces = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.accountId, input.sourceAccountId))
+    .orderBy(asc(schema.workspaces.id));
+  for (const { id } of workspaces) {
+    await assertWorkspaceContentFlowAllowed(db, {
+      source: { accountId: input.sourceAccountId, workspaceId: id },
+      target: input.target,
+    });
+  }
 }

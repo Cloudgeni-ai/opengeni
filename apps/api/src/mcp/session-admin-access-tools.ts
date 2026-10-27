@@ -31,7 +31,10 @@ import {
   searchActions,
   type OrganizationActionContext,
 } from "../organization-mcp";
-import { otherWorkspaceContentRefusal } from "./workspace-content-flow";
+import {
+  withOtherWorkspaceContentFlow,
+  type OtherWorkspaceContentFlow,
+} from "./workspace-content-flow";
 
 /**
  * How a session reaches the app's actions: the same actions as the
@@ -345,34 +348,71 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
-      const refused = await appActionOtherWorkspaceRefusal(db, grant, args);
-      if (refused) return refused;
-      return await callOrganizationAction(reach.actAs(authority), {
-        id: args.id,
-        pathParameters: args.pathParameters,
-        query: args.query,
-        ...(args.body !== undefined ? { body: args.body } : {}),
-      });
+      return await withAppActionContentFlow(db, grant, args, async () =>
+        callOrganizationAction(reach.actAs(authority), {
+          id: args.id,
+          pathParameters: args.pathParameters,
+          query: args.query,
+          ...(args.body !== undefined ? { body: args.body } : {}),
+        }),
+      );
     },
   );
 }
 
+/** Query keys that only name or page through what a read returns, never this session's text. */
+const ID_OR_PAGING_QUERY_KEY =
+  /^(?:[a-z]+Ids?|ids?|limit|cursor|before|after|offset|page|pageSize|order|direction)$/;
+
 /**
- * An app action in another workspace brings that workspace's content into this
- * session, and a change also carries this session's content there: null when
- * that may happen, otherwise the refusal to return instead.
+ * Whether the call only brings the other workspace's content here: a read
+ * with no body whose query holds only ids and paging keys. Anything else
+ * (a change, a search, a preview, a read that sends text) also carries this
+ * session's content there.
  */
-export async function appActionOtherWorkspaceRefusal(
+export function appActionContentFlow(
+  entry: ActionCatalogEntry,
+  call: { query?: Record<string, unknown>; body?: unknown },
+): OtherWorkspaceContentFlow {
+  if (appActionChangesState(entry)) return "both_ways";
+  const body = call.body;
+  const emptyBody =
+    body === undefined ||
+    body === null ||
+    (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0);
+  if (!emptyBody) return "both_ways";
+  return Object.keys(call.query ?? {}).every((key) => ID_OR_PAGING_QUERY_KEY.test(key))
+    ? "from_there"
+    : "both_ways";
+}
+
+/**
+ * An app action in another workspace of this organization brings that
+ * workspace's content into this session, and anything carrying this session's
+ * text takes it there: run only when that may happen, checked again when the
+ * call returns.
+ */
+export async function withAppActionContentFlow(
   db: Database,
   grant: Pick<AccessGrant, "accountId" | "workspaceId">,
-  call: { id: string; pathParameters: Record<string, string> },
-): Promise<CallToolResult | null> {
+  call: {
+    id: string;
+    pathParameters: Record<string, string>;
+    query?: Record<string, unknown>;
+    body?: unknown;
+  },
+  run: () => Promise<CallToolResult>,
+): Promise<CallToolResult> {
   const entry = findAppAction(call.id);
   const otherWorkspaceId = call.pathParameters["workspaceId"];
-  if (!entry?.path.includes(":workspaceId") || !otherWorkspaceId) return null;
-  return await otherWorkspaceContentRefusal(db, {
-    here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
-    thereWorkspaceId: otherWorkspaceId,
-    flow: appActionChangesState(entry) ? "both_ways" : "from_there",
-  });
+  if (!entry?.path.includes(":workspaceId") || !otherWorkspaceId) return await run();
+  return await withOtherWorkspaceContentFlow(
+    db,
+    {
+      here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      thereWorkspaceId: otherWorkspaceId,
+      flow: appActionContentFlow(entry, call),
+    },
+    run,
+  );
 }

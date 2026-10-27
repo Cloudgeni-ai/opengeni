@@ -35,8 +35,9 @@ const OTHER_WORKSPACE_SESSION_TOOL_SET: ReadonlySet<string> = new Set(
   OTHER_WORKSPACE_SESSION_TOOLS,
 );
 /**
- * Every one of these brings the other chat's content back here; sending and
- * steering also carry this session's content there.
+ * Every one of these brings the other chat's content back here; sending,
+ * steering, pausing and resuming (whose reason is text) also carry this
+ * session's content there.
  */
 const CONTENT_FLOW: Record<OtherWorkspaceSessionTool, OtherWorkspaceContentFlow> = {
   session_get: "from_there",
@@ -44,8 +45,8 @@ const CONTENT_FLOW: Record<OtherWorkspaceSessionTool, OtherWorkspaceContentFlow>
   session_wait: "from_there",
   session_send_message: "both_ways",
   session_steer: "both_ways",
-  session_pause: "from_there",
-  session_resume: "from_there",
+  session_pause: "both_ways",
+  session_resume: "both_ways",
 };
 
 /** The first-party server's identity in a workspace's tool gateway. */
@@ -149,11 +150,12 @@ export async function reachSessionInOtherWorkspace(input: {
     return refusal("Pass sessionId with workspaceId: it names a chat in that workspace.");
   const actingPerson = await input.reach.fullAccessPerson();
   if (!actingPerson) return refusal(ENDED);
-  const refused = await otherWorkspaceContentRefusal(input.db, {
+  const contentFlow = {
     here: input.here,
     thereWorkspaceId: input.workspaceId,
     flow: CONTENT_FLOW[input.toolName],
-  });
+  };
+  const refused = await otherWorkspaceContentRefusal(input.db, contentFlow);
   if (refused) return refused;
   const outcome = await runOrganizationAction(actingPerson, {
     id: INVOKE_ACTION,
@@ -167,6 +169,12 @@ export async function reachSessionInOtherWorkspace(input: {
   });
   if ("refused" in outcome) return outcome.refused;
   const { response } = outcome;
+  // A wait can outlast a setting change: nothing comes back once it refuses.
+  const refusedAfter = await otherWorkspaceContentRefusal(input.db, contentFlow, "after");
+  if (refusedAfter) {
+    await response.body?.cancel().catch(() => undefined);
+    return refusedAfter;
+  }
   if (response.status !== 200) {
     const body = (await response.json().catch(() => null)) as {
       error?: { message?: unknown };
