@@ -2112,8 +2112,9 @@ Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
 Insights comparisons use `configuredModelListPricingSchedules` and
-`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
-Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, GPT-6.1
+Terra, Grok, and Claude rates live only in `reviewedModelListPricing`, not debit
+defaults. These
 project reviewed upstream rates
 onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
 product routes without adding comparison-only prices to debit authority or
@@ -2173,6 +2174,9 @@ the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
 5% cache-read rate and the exclusive 272K long-context boundary; native Grok
 4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
 Gateway's separate greater-than-200K schedule must not replace the native one.
+GPT-6.1 Terra was reviewed on 2026-10-27 against the same OpenAI pricing page:
+half of GPT-6.1 Sol's Standard rates, with the same 5% cache-read rate and
+exclusive 272K whole-request boundary, and no Ultrafast tier.
 The reviewed native Claude models have no
 long-context premium. Claude 1-hour native cache writes use 2x base input,
 rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
