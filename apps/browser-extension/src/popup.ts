@@ -1,4 +1,9 @@
 import { BRAND } from "./brand";
+import {
+  readSitePermissions,
+  removeSitePermissionEntry,
+  renderSitePermissions,
+} from "./site-permission-list";
 
 type Status = {
   connected: boolean;
@@ -15,7 +20,11 @@ const state = document.querySelector<HTMLElement>("[data-state]")!;
 const detail = document.querySelector<HTMLElement>("[data-detail]")!;
 const label = document.querySelector<HTMLInputElement>("[data-profile-label]")!;
 const form = document.querySelector<HTMLFormElement>("form")!;
-const save = document.querySelector<HTMLButtonElement>("button")!;
+const save = form.querySelector<HTMLButtonElement>("button")!;
+const sitePermissions = document.querySelector<HTMLElement>("[data-site-permissions]")!;
+const siteEntries = sitePermissions.querySelector<HTMLElement>("[data-entries]")!;
+const siteEmpty = sitePermissions.querySelector<HTMLElement>("[data-empty]")!;
+const manageSitePermissions = sitePermissions.querySelector<HTMLButtonElement>("[data-manage]")!;
 
 /** How often the open popup re-reads the connection state. */
 const STATUS_REFRESH_MS = 1000;
@@ -33,7 +42,27 @@ async function refresh(options: { label: boolean }): Promise<void> {
   // Only fill the label on open and after saving, so a refresh never
   // overwrites what the person is typing.
   if (options.label) label.value = status.profileLabel ?? "";
+  await refreshSitePermissions();
 }
+
+/** Shown once the person allowed agents to set site permissions, or while
+ * changes from before are still in effect. */
+async function refreshSitePermissions(): Promise<void> {
+  const sites = await readSitePermissions();
+  sitePermissions.hidden = !sites.allowed && sites.entries.length === 0;
+  siteEmpty.hidden = sites.entries.length > 0;
+  renderSitePermissions(siteEntries, sites.entries, {
+    canRemove: sites.allowed,
+    onRemove: async (entry) => {
+      await removeSitePermissionEntry(entry);
+      await refreshSitePermissions();
+    },
+  });
+}
+
+manageSitePermissions.addEventListener("click", () => {
+  void chrome.runtime.sendMessage({ type: "open_site_permissions" }).then(() => window.close());
+});
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();

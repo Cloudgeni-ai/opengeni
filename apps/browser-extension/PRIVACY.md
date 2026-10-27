@@ -1,6 +1,6 @@
 # Opengeni Browser privacy notice
 
-Effective October 25, 2026. Published by Cloudgeni AS.
+Effective October 27, 2026. Published by Cloudgeni AS.
 
 Opengeni Browser connects a Chrome profile to the Opengeni machine agent on
 your computer. That agent connects to the Opengeni deployment you configure.
@@ -32,6 +32,15 @@ page, which password managers and similar extensions add for their inline
 menus. When that stops Opengeni from controlling a tab, the extension removes
 those other-extension frames from that tab's page and nothing else. It does
 not read or change the other extension's data.
+
+If you allow it on the extension's own page, Opengeni agents can allow or block
+camera, microphone, location and notifications for the exact site (scheme, host
+and port) shown in a tab Opengeni operates. The extension keeps a list of these
+changes (site, permission, setting and time) in Chrome local extension storage
+and shows it in its popup, where you can remove each change. Chrome shows these
+settings as set by an extension in its site settings. Turning this off on the
+extension's page removes every change and the permission. The extension does
+not read or change any other site settings.
 
 ## Purpose and destinations
 

@@ -22,6 +22,15 @@ import {
   type ExtensionHello,
   type ExtensionInventory,
 } from "./protocol";
+import {
+  SitePermissionError,
+  isSitePermission,
+  openSitePermissionsPage,
+  removeSitePermission,
+  setSitePermission,
+  sitePermissionsState,
+  turnOffSitePermissions,
+} from "./site-permissions";
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
@@ -376,7 +385,9 @@ async function settleCommandNow(
 async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
   switch (command.type) {
     case "ping":
-      return { pong: true };
+      // Commands added since the first release, so the agent can tell
+      // whether this extension knows them before it sends one.
+      return { pong: true, sitePermissions: true };
     case "tabs.list":
       return { tabs: await tabs() };
     case "tabs.create": {
@@ -473,6 +484,15 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     }
     case "downloads.find":
       return { downloads: await findDownloads(command.url, command.startedAfter) };
+    case "permissions.set":
+      try {
+        return await setSitePermission(command, controlledTabs);
+      } catch (error) {
+        if (error instanceof SitePermissionError) {
+          throw new BridgeCommandError(error.code, error.message);
+        }
+        throw error;
+      }
     case "debugger.poll": {
       const firstSequence = debuggerEvents[0]?.sequence ?? debuggerSequence + 1;
       const available = debuggerEvents.filter((event) => event.sequence > command.afterSequence);
@@ -488,6 +508,14 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
 }
 
 const MAX_FOUND_DOWNLOADS = 16;
+
+/** The tabs this extension is debugging for an agent now. */
+async function controlledTabs(): Promise<chrome.tabs.Tab[]> {
+  const found = await Promise.all(
+    [...attachedDebuggerTabs.keys()].map((tabId) => chrome.tabs.get(tabId).catch(() => null)),
+  );
+  return found.filter((tab): tab is chrome.tabs.Tab => tab !== null);
+}
 
 /**
  * Opens a tab without raising Chrome. Opengeni renders and controls attached
@@ -978,9 +1006,14 @@ for (const event of [
   event.addListener(scheduleInventory as never);
 }
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
   if (!message || typeof message !== "object" || !("type" in message)) return false;
-  const typed = message as { type: string; profileLabel?: unknown };
+  const typed = message as {
+    type: string;
+    profileLabel?: unknown;
+    pattern?: unknown;
+    permission?: unknown;
+  };
   if (typed.type === "status") {
     const connected = nativePort !== null && readyGeneration === connectionGeneration;
     const status = connected
@@ -1009,6 +1042,25 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
       respond({ saved: true, profileLabel });
     });
     return true;
+  }
+  // The popup and the site permissions page, never a page script.
+  if (!sender.url?.startsWith(chrome.runtime.getURL(""))) return false;
+  const answer = (work: Promise<unknown>) => {
+    void work.then(respond, (error: unknown) =>
+      respond({ error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  };
+  switch (typed.type) {
+    case "site_permissions":
+      return answer(sitePermissionsState());
+    case "remove_site_permission":
+      if (typeof typed.pattern !== "string" || !isSitePermission(typed.permission)) return false;
+      return answer(removeSitePermission(typed.pattern, typed.permission));
+    case "turn_off_site_permissions":
+      return answer(turnOffSitePermissions());
+    case "open_site_permissions":
+      return answer(openSitePermissionsPage().then(() => ({ opened: true })));
   }
   return false;
 });
