@@ -603,15 +603,16 @@ export function computerTargetsText(targets: readonly ComputerTextTarget[]): str
   return lines.join("\n");
 }
 
-/** A person used the computer within the last minute: an agent's input could
- * meet theirs. Said once, however many targets carry it. */
+/** Someone other than Opengeni (a person, or other software) used the
+ * computer within the last minute: an agent's input could meet theirs. Said
+ * once, however many targets carry it. */
 function personInputLine(targets: readonly ComputerTextTarget[]): string | null {
   const seconds = targets.find(
     (target) => target.personInputSecondsAgo !== undefined,
   )?.personInputSecondsAgo;
   return seconds === undefined
     ? null
-    : `A person used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
+    : `Someone other than Opengeni used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
 }
 
 /** Fixed text, so a listing renders identically for the same targets. */

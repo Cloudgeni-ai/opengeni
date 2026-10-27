@@ -1,5 +1,11 @@
 import { CuaNativeTools } from "./native-tools";
-import { type PersonInputReader, recentPersonInput } from "./macos-person-input";
+import {
+  type AgentInput,
+  agentInput as processAgentInput,
+  type PersonInputReader,
+  reachesHidTimers,
+  recentPersonInput,
+} from "./macos-person-input";
 import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -202,6 +208,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly macWindows: MacWindows | null,
     private readonly frontWindow: WindowFronting | null,
     private readonly personInput: PersonInputReader | null,
+    private readonly agentInput: AgentInput,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -243,6 +250,9 @@ export class CuaComputerBackend implements ComputerBackend {
        * (see macos-person-input.ts). Listings and observations say so when
        * it was within the last minute. */
       personInput?: PersonInputReader | null;
+      /** The input agents send through this process that the person-input
+       * reading would also see; shared by every session by default. */
+      agentInput?: AgentInput;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -258,6 +268,7 @@ export class CuaComputerBackend implements ComputerBackend {
         platform === "macos" ? (options.macWindows ?? null) : null,
         platform === "windows" ? (options.frontWindow ?? null) : null,
         platform === "macos" ? (options.personInput ?? null) : null,
+        options.agentInput ?? processAgentInput,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -302,7 +313,12 @@ export class CuaComputerBackend implements ComputerBackend {
           ? await this.front(window_id, [{ name: request.tool, args: { delivery_mode } }])
           : null;
       try {
-        return await this.nativeTools.call(request);
+        // Input the person-input reading would also see is noted, so it is
+        // not reported as a person's afterwards.
+        const nativeTools = this.nativeTools;
+        return reachesHidTimers(request.tool, request.arguments)
+          ? await this.agentInput.around(() => nativeTools.call(request))
+          : await nativeTools.call(request);
       } finally {
         await fronted?.giveBack();
       }
@@ -349,10 +365,13 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Whole seconds since a person used the keyboard, mouse or trackpad, when
-   * that was within the last minute. A reading that fails says nothing. */
+   * that was within the last minute and clearly after any input agents sent
+   * through this process that the same reading sees. A reading that fails
+   * says nothing. */
   private recentPersonInput(): number | undefined {
     try {
-      return recentPersonInput(this.personInput?.() ?? null);
+      if (!this.personInput) return undefined;
+      return recentPersonInput(this.agentInput.personOnly(this.personInput()));
     } catch {
       return undefined;
     }
@@ -504,10 +523,10 @@ export class CuaComputerBackend implements ComputerBackend {
                 )) ??
                 error
               );
-            // macOS answers an accessibility action with "cannot complete"
-            // (-25205) even when it pressed the button or opened the item, often
-            // because the window changed or closed meanwhile. The windows read
-            // afterwards say whether it did.
+            // macOS can answer an accessibility action with an error even
+            // when it pressed the button or opened the item, often because
+            // the window changed or closed meanwhile (see cannotComplete).
+            // The windows read afterwards say whether it did.
             if (
               operation.name === "click" &&
               operation.args.element_token !== undefined &&
@@ -1120,9 +1139,11 @@ export class CuaComputerBackend implements ComputerBackend {
    * person's front window and without activating its app. Any other window
    * listed off screen is refused at once, and a failed read of a window that
    * left the screen since says so instead of reporting a driver failure. A
-   * failed read of a window still listed on screen is reported as a read that
-   * did not succeed this time, with what to do next, since only a read was
-   * asked and nothing changed. */
+   * failed read of a window still listed on screen is tried once more a
+   * moment later (CUA can fail the first read of a window that is changing
+   * size, and read it at once afterwards); only a read was asked, so nothing
+   * is sent twice. A second failure is refused as unavailable, with what to
+   * do next. */
   private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
     const offScreen = () =>
       new ComputerBackendError(
@@ -1158,14 +1179,25 @@ export class CuaComputerBackend implements ComputerBackend {
         );
       if (!target.onScreen) throw offScreen();
       if (error.code !== "driver_failed") throw error;
-      throw new ComputerBackendError(
-        "unavailable",
-        `${targetId} is still open, but reading it failed this time (${error.message}); observe it again in a moment, since an app that is busy or redrawing the window can fail one read`,
-        // Not retryable: a retried read would not differ, and a frame stream
-        // must not replace the helper for one window's failed read.
-        false,
-        false,
-      );
+      await new Promise((resolve) => setTimeout(resolve, READ_RETRY_DELAY_MS));
+      try {
+        return await read();
+      } catch (again) {
+        if (
+          !(again instanceof ComputerBackendError) ||
+          again.dispatched ||
+          again.code !== "driver_failed"
+        )
+          throw again;
+        throw new ComputerBackendError(
+          "unavailable",
+          `${targetId} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          // Not retryable: it was tried again already, and a frame stream
+          // must not replace the helper for one window's failed read.
+          false,
+          false,
+        );
+      }
     }
   }
 
@@ -2587,6 +2619,10 @@ function inForeground(operation: { args: Record<string, unknown> }): boolean {
 
 const RECENT_OBSERVATIONS = 4;
 
+/** How long a failed read of a window still on screen waits before it is
+ * tried once more. */
+const READ_RETRY_DELAY_MS = 500;
+
 /** The most steps CUA runs in one run_steps call. */
 const MAX_RUN_STEPS = 64;
 
@@ -2824,10 +2860,15 @@ const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
  * open, as `App ("Title", …); Other` (an untitled window by its app only).
  * A window the previous action opened late is reported separately and is
  * not this action's. */
-/** macOS's "cannot complete" (kAXErrorCannotComplete, -25205): an AX action
- * whose effect macOS did not confirm, which may still have happened. */
+/** An AX action error whose action may still have happened: "cannot
+ * complete" (kAXErrorCannotComplete, -25204), which an app returns when it
+ * did not answer in time, and -25205, which file dialogs return for an
+ * AXOpen that opened its item (and some windows for a press that closed
+ * them), although it stands for an unsupported attribute. */
 function cannotComplete(error: unknown): boolean {
-  return error instanceof ComputerBackendError && /-25205|cannot complete/i.test(error.message);
+  return (
+    error instanceof ComputerBackendError && /-2520[45]\b|cannot complete/i.test(error.message)
+  );
 }
 
 /** Whether a reading after an action shows the same window, elements and

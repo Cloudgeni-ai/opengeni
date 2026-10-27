@@ -294,15 +294,22 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   adapter looks it up in its app's own listing.
 - A failed read of a window that is still listed on screen (CUA answering a
   tree read or a capture with text only, or with a capture that does not
-  match) is refused as `unavailable` with what to do next, instead of a driver
-  failure that callers see as an internal error; a window that closed
-  meanwhile is `target_not_found`.
-- On macOS, listings and observations say when a person used the keyboard,
-  mouse or trackpad within the last minute (`personInputSecondsAgo` on each
-  target), from CoreGraphics' per-event-type HID timers: input agents send to
-  apps in the background resets `HIDIdleTime` and the any-event timer, but not
-  these. Input sent in the foreground does count. Reading them takes no
-  screenshot and no permission.
+  match) is tried once more half a second later: CUA can fail the first read
+  of a window that is changing size and read it at once afterwards, while a
+  busy or even stopped app's window still reads (slowly, or with a partial
+  tree). A second failure is refused as `unavailable` with what to do next,
+  instead of a driver failure that callers see as an internal error; a window
+  that closed meanwhile is `target_not_found`.
+- On macOS, listings and observations say when someone other than Opengeni
+  used the keyboard, mouse or trackpad within the last minute
+  (`personInputSecondsAgo` on each target), from CoreGraphics'
+  per-event-type HID timers: input agents send to apps in the background
+  resets `HIDIdleTime` and the any-event timer, but not these. Input sent in
+  the foreground or to the whole desktop does move them, so browserd notes
+  when such input it forwarded (a native call asking for the foreground or
+  the desktop anywhere, or a script) last ended, across every computer
+  session it serves, and reports only input that came more than half a
+  second after it. Reading the timers takes no screenshot and no permission.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.

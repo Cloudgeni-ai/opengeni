@@ -65,3 +65,66 @@ export function recentPersonInput(seconds: number | null): number | undefined {
     ? Math.floor(seconds)
     : undefined;
 }
+
+/** How long after input sent through here ends its events may still reach
+ * the HID timers: input the timers show this soon after it is not told
+ * apart from it. */
+export const AGENT_INPUT_MARGIN_MS = 500;
+
+/**
+ * Input agents send through this process that reaches the HID timers the way
+ * a person's does: input sent in the foreground or to the whole desktop
+ * rather than to one app in the background. Every computer session of the
+ * process shares one, so one agent's input never reads as a person to
+ * another.
+ */
+export class AgentInput {
+  private sending = 0;
+  private endedAt: number | null = null;
+
+  constructor(private readonly now: () => number = () => performance.now()) {}
+
+  /** Runs `send`, input that may reach the HID timers, and notes when it
+   * ended, whether it succeeded or not. */
+  async around<T>(send: () => Promise<T>): Promise<T> {
+    this.sending += 1;
+    try {
+      return await send();
+    } finally {
+      this.sending -= 1;
+      this.endedAt = this.now();
+    }
+  }
+
+  /** `seconds` since the last input the HID timers saw, when that input came
+   * clearly after any sent through here; null otherwise. */
+  personOnly(seconds: number | null): number | null {
+    if (seconds === null || this.sending > 0) return null;
+    if (this.endedAt === null) return seconds;
+    return this.now() - seconds * 1000 > this.endedAt + AGENT_INPUT_MARGIN_MS ? seconds : null;
+  }
+}
+
+/** The input of this process's computer sessions. */
+export const agentInput = new AgentInput();
+
+/** Whether a native CUA call may send input the HID timers see, as a
+ * person's: any part of it asks for the foreground (`delivery_mode`
+ * "foreground", `foreground_fallback`) or the whole desktop (`scope`
+ * "desktop"), or it is a script, which can do either. */
+export function reachesHidTimers(tool: string, args: unknown): boolean {
+  if (tool === "run_script") return true;
+  const asks = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(asks);
+    if (!value || typeof value !== "object") return false;
+    const record = value as Record<string, unknown>;
+    return (
+      (typeof record.delivery_mode === "string" &&
+        record.delivery_mode.toLowerCase() === "foreground") ||
+      record.foreground_fallback === true ||
+      (typeof record.scope === "string" && record.scope.toLowerCase() === "desktop") ||
+      Object.values(record).some(asks)
+    );
+  };
+  return asks(args);
+}

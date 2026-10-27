@@ -1287,10 +1287,11 @@ export type ComputerTarget = {
   /** Present on the target this computer was last observed or acted on in,
    * which a call that omits targetId works in. */
   current?: true | undefined;
-  /** Present when a person used this computer's keyboard, mouse or trackpad
-   * within the last minute, as of the listing or observation that carries
-   * it: how many whole seconds before it. Input agents send to apps in the
-   * background does not count. */
+  /** Present when someone other than Opengeni (a person, or other software)
+   * used this computer's keyboard, mouse or trackpad within the last minute,
+   * as of the listing or observation that carries it: how many whole seconds
+   * before it. Input Opengeni's computer sessions on this computer send does
+   * not count. */
   personInputSecondsAgo?: number | undefined;
 };
 

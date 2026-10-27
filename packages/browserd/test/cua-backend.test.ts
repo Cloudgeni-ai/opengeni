@@ -10,6 +10,7 @@ import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
   ComputerBackendActionCommand,
@@ -512,6 +513,58 @@ describe("CUA desktop boundary", () => {
       expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
     } finally {
       await backend.close();
+    }
+  });
+
+  test("input an agent sent in the foreground is not reported as a person's, in any session", async () => {
+    // The HID timers the reading comes from see input sent in the foreground
+    // as they see a person's; input sent to an app in the background they
+    // do not see.
+    let now = 100_000;
+    let lastInputAt = now - 12_000;
+    class InputFixture extends Fixture {
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "press_key" && args.delivery_mode === "foreground") lastInputAt = now;
+        if (name !== "press_key") return await super.callTool(name, argumentsJson);
+        now += 200;
+        return { ...result({ effect: "unverifiable" }), rawJson: JSON.stringify({ content: [] }) };
+      }
+    }
+    const agentInput = new AgentInput(() => now);
+    const personInput = () => (now - lastInputAt) / 1000;
+    const fixture = new InputFixture();
+    fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+    const backend = await CuaComputerBackend.open(fixture, "macos", { personInput, agentInput });
+    const other = await CuaComputerBackend.open(new Fixture(), "macos", {
+      personInput,
+      agentInput,
+    });
+    const press = (args: Record<string, unknown>) =>
+      backend.callNative({
+        operationId: crypto.randomUUID(),
+        tool: "press_key",
+        arguments: { pid: 42, key: "tab", ...args },
+      });
+    try {
+      const id = (await backend.targets())[0]!.id;
+      // Input sent to the app in the background leaves the person's reading.
+      await press({});
+      expect((await backend.targets())[0]!.personInputSecondsAgo).toBe(12);
+      await press({ delivery_mode: "foreground" });
+      now += 100;
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+      expect((await backend.observe(id)).target).not.toHaveProperty("personInputSecondsAgo");
+      // Nor does another session of this process take it for a person's.
+      expect((await other.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+      // Input that came clearly after it is reported.
+      now += 3_000;
+      lastInputAt = now - 1_000;
+      expect((await backend.targets())[0]!.personInputSecondsAgo).toBe(1);
+      expect((await other.targets())[0]!.personInputSecondsAgo).toBe(1);
+    } finally {
+      await backend.close();
+      await other.close();
     }
   });
 
@@ -2572,10 +2625,12 @@ describe("CUA desktop boundary", () => {
 
   test("a press macOS did not confirm, which closed its window, reads the window it opened", async () => {
     // Excel's start gallery: pressing "Blank Workbook" closes the gallery and
-    // opens the workbook, and macOS answers the press with -25205.
+    // opens the workbook, and macOS answers the press with -25205. A dialog
+    // button that closes its dialog can get "cannot complete" (-25204).
     class GalleryFixture extends Fixture {
       pressed = false;
       opens = true;
+      code = -25205;
       override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
         const args = JSON.parse(argumentsJson) as Record<string, unknown>;
         if (name === "click" && args.element_token !== undefined) {
@@ -2585,7 +2640,7 @@ describe("CUA desktop boundary", () => {
             {
               error: {
                 code: "ax_action_failed",
-                message: "AX action failed: AXUIElementPerformAction(AXPress) returned -25205",
+                message: `AX action failed: AXUIElementPerformAction(AXPress) returned ${this.code}`,
               },
             },
             true,
@@ -2619,9 +2674,15 @@ describe("CUA desktop boundary", () => {
         return response;
       }
     }
-    for (const opens of [true, false]) {
+    for (const [code, opens] of [
+      [-25205, true],
+      [-25205, false],
+      [-25204, true],
+      [-25204, false],
+    ] as const) {
       const fixture = new GalleryFixture();
       fixture.opens = opens;
+      fixture.code = code;
       const backend = await CuaComputerBackend.open(fixture, "macos");
       try {
         const target = (await backend.targets())[0]!;
@@ -3309,22 +3370,37 @@ describe("CUA desktop boundary", () => {
       // Back on screen, it is read again.
       fixture.onScreen = true;
       expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
-      // The same failure for a window still listed on screen is a read that
-      // did not succeed this time, with what to do next, never a driver
-      // failure (which callers see as an internal error): for the elements
-      // and for the pixels alike.
+      // The same failure for a window still listed on screen is tried once
+      // more (CUA can fail the first read of a window that is changing
+      // size), for the elements and for the pixels alike.
       const original = fixture.callTool.bind(fixture);
-      fixture.callTool = async (name, argumentsJson) =>
-        name === "get_window_state"
-          ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
-          : original(name, argumentsJson);
-      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)])
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)]) {
+        let failures = 1;
+        fixture.callTool = async (name, argumentsJson) =>
+          name === "get_window_state" && failures-- > 0
+            ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
+            : original(name, argumentsJson);
+        await read();
+        expect(failures).toBe(-1);
+      }
+      // A second failure is refused with what to do next, never a driver
+      // failure (which callers see as an internal error).
+      let failed = 0;
+      fixture.callTool = async (name, argumentsJson) => {
+        if (name !== "get_window_state") return await original(name, argumentsJson);
+        failed += 1;
+        return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+      };
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)]) {
+        const tries = failed;
         await expect(read()).rejects.toMatchObject({
           code: "unavailable",
           retryable: false,
           dispatched: false,
-          message: `${target.id} is still open, but reading it failed this time (CUA get_window_state did not return a valid result: No content); observe it again in a moment, since an app that is busy or redrawing the window can fail one read`,
+          message: `${target.id} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
         });
+        expect(failed - tries).toBe(2);
+      }
       // A window that closed meanwhile is gone, not unreadable.
       fixture.callTool = async (name, argumentsJson) => {
         if (name === "get_window_state")

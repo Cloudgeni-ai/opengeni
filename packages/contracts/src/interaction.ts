@@ -3579,11 +3579,12 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       /** Present on the target this computer was last observed or acted on
        * in, which a call that omits targetId works in. */
       current: z.literal(true).optional(),
-      /** Present when a person used this computer's keyboard, mouse or
-       * trackpad within the last minute, as of the listing or observation
-       * that carries it: how many whole seconds before it. Input agents send
-       * to apps in the background does not count. A listing marks every
-       * target alike. */
+      /** Present when someone other than Opengeni (a person, or other
+       * software) used this computer's keyboard, mouse or trackpad within the
+       * last minute, as of the listing or observation that carries it: how
+       * many whole seconds before it. Input Opengeni's computer sessions on
+       * this computer send does not count. A listing marks every target
+       * alike. */
       personInputSecondsAgo: z.number().int().min(0).max(60).optional(),
     })
     .strict(),
