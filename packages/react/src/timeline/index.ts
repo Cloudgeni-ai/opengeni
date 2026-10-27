@@ -171,7 +171,7 @@ export {
 export type { ApplyPatchOperation } from "./parsers";
 
 export { KnowledgeActivityProvider } from "./knowledge-receipt";
-export { PaymentPageActivityProvider, type PaymentPageActivity } from "./payment-page-card";
+export { PaymentPageActivityProvider, type PaymentPageActivity } from "./payment-page-activity";
 export {
   LearningRefusalActionsProvider,
   type LearningRefusalActions,
