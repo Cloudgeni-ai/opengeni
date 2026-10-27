@@ -715,6 +715,32 @@ export interface ApprovalStripProps {
  * through chat) reads as a plain question answered with Allow or Cancel; the
  * raw arguments stay behind Details.
  */
+/**
+ * The scrolling part of an approval card. When the review is taller than its
+ * window, the scroll bar shows once (and stays on Android), so a person can see
+ * there is more to read before approving.
+ */
+function ReviewBody({ maxHeight, children }: { maxHeight: number; children: ReactNode }) {
+  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
+  const flashed = useRef(false);
+  return (
+    <ScrollView
+      ref={scroll}
+      style={{ maxHeight, flexGrow: 0 }}
+      contentContainerStyle={{ gap: 12 }}
+      nestedScrollEnabled
+      persistentScrollbar
+      onContentSizeChange={(_width, contentHeight) => {
+        if (flashed.current || contentHeight <= maxHeight) return;
+        flashed.current = true;
+        scroll.current?.flashScrollIndicators();
+      }}
+    >
+      {children}
+    </ScrollView>
+  );
+}
+
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
@@ -806,11 +832,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
               </View>
               {/* The title and the buttons stay pinned; a long review scrolls
                   between them so the buttons are never pushed off screen. */}
-              <ScrollView
-                style={{ maxHeight: bodyMaxHeight, flexGrow: 0 }}
-                contentContainerStyle={{ gap: 12 }}
-                nestedScrollEnabled
-              >
+              <ReviewBody maxHeight={bodyMaxHeight}>
                 {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
                 {facts.effects.length > 0 ? (
                   <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
@@ -884,7 +906,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     </Text>
                   </View>
                 ) : null}
-              </ScrollView>
+              </ReviewBody>
               <DecisionActions
                 style={{ marginTop: 4 }}
                 primary={
