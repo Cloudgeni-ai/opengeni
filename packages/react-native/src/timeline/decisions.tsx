@@ -67,6 +67,7 @@ import {
 } from "./secret-field-model";
 import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
 import { errorMessage } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
@@ -501,6 +502,7 @@ function QuestionControls({
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const messages = useContext(HumanInputMessagesContext);
+  const m = useNativeTimelineMessages();
   const otherInput = useRef<ComponentRef<typeof TextInput>>(null);
   const multi = question.kind === "multi_select";
   const toggle = (value: string) =>
@@ -561,7 +563,7 @@ function QuestionControls({
           multiline
           value={draft.values[0] ?? ""}
           onChangeText={(text) => onChange((existing) => ({ ...existing, values: [text] }))}
-          placeholder={t("humanInputForm.typeYourAnswer")}
+          placeholder={m.typeYourAnswer}
           placeholderTextColor={c["fg-subtle"]}
           style={{
             ...fontStyle(theme),
