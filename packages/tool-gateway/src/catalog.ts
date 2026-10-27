@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -52,9 +53,7 @@ export function assertToolGatewayCatalogSize(catalog: ToolGatewayCatalogValue): 
 }
 
 function assertCatalogSize(catalog: ToolGatewayCatalogValue): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(catalog)).byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES
-  ) {
+  if (Buffer.byteLength(JSON.stringify(catalog), "utf8") > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new ToolGatewayCatalogTooLargeError();
   }
 }
