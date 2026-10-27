@@ -163,7 +163,7 @@ const READ_VERB =
 const QUALIFIER = /^(default|primary|active|current|main|preferred|public|private)$/;
 // A POST to "/accounts/{id}/close" performs that action on the account.
 const ROUTE_ACTION =
-  /^(accept|activate|apply|approve|archive|cancel|capture|close|confirm|copy|deactivate|decline|deploy|disable|dismiss|enable|finalize|generate|lock|mark|merge|move|open|pause|pay|publish|refund|reject|renew|reopen|rerun|reset|resolve|restart|restore|resume|retry|revoke|run|send|start|stop|submit|suspend|sync|transfer|trigger|unarchive|unlock|unpublish|verify|void)$/;
+  /^(accept|activate|apply|approve|archive|cancel|capture|close|confirm|copy|deactivate|decline|delete|deploy|disable|dismiss|enable|finalize|generate|lock|mark|merge|move|open|pause|pay|publish|refund|reject|remove|renew|reopen|rerun|reset|resolve|restart|restore|resume|retry|revoke|run|send|start|stop|submit|suspend|sync|transfer|trigger|unarchive|unlock|unpublish|update|verify|void)$/;
 
 /** Action phrases whose meaning needs the thing they act on. */
 const SUBJECT_ACTIONS: Readonly<Record<string, (subject: string) => string>> = {
@@ -218,15 +218,22 @@ export function integrationOperationDisplayTitle(
     const isParameter = (segment: string | undefined) => segment?.startsWith("{") === true;
     const resource = path.filter((segment) => !isParameter(segment));
     const named = words(path.at(-1) ?? "");
-    // "post_/repos/{owner}/{repo}/archive" archives one repo.
+    // "post_/repos/{owner}/{repo}/archive" archives one repo, and
+    // "post_/users/{id}/reset-password" resets the password for one user.
+    // A plural last word names a collection instead: "merge-requests".
     if (
       method === "post" &&
       isParameter(path.at(-2)) &&
       named.length > 0 &&
       ROUTE_ACTION.test(named[0]!) &&
+      singular(named.at(-1)!) === named.at(-1) &&
       resource.length >= 2
-    )
-      return sentence([...named, ...singularObject(words(resource.at(-2)!))]);
+    ) {
+      const object = singularObject(words(resource.at(-2)!));
+      return named.length === 1
+        ? sentence([...named, ...object])
+        : sentence([...named, "for", ...object]);
+    }
     const noun = resource.length > 0 ? words(resource.at(-1)!) : [];
     if (noun.length === 0) return undefined;
     // One thing when the path names it, or when a POST creates it;

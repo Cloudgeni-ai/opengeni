@@ -142,10 +142,51 @@ test("a link always shows where it goes, closed or not, and only its real href c
     message('<a href="https://bank.example&amp;#64;evil.example">bank</a> a &amp;#64; b'),
   ).toBe("bank (https://bank.example&#64;evil.example) a &#64; b");
   // A ">" inside an attribute stays inside the tag.
-  expect(message('<span title="a > b">Hi</span> <img alt="x"> 1 < 2')).toBe("Hi  1 < 2");
+  expect(message('<span title="a > b">Hi</span> <img alt="x"> 1 < 2')).toBe("Hi 1 < 2");
   expect(message('<a href="https://img.example"><img src="logo.png"></a>')).toBe(
     "https://img.example",
   );
+});
+
+test("every link target a browser would make clickable shows, however the HTML is written", () => {
+  const message = (content: string) =>
+    rows({ body: { body: { contentType: "HTML", content } } })[0]![1];
+  const pay = "pay (https://e.example)";
+  // Script and style end at their first literal closing tag, quoted or not.
+  expect(message('<script>var s = "</script>";</script><a href="https://e.example">pay</a>')).toBe(
+    `";${pay}`,
+  );
+  expect(
+    message('<style>a::after{content:"</style>"}</style><a href=https://e.example>pay</a>'),
+  ).toBe(`"}${pay}`);
+  // A head that is never closed hides nothing.
+  expect(message("<head><p>Please <a href=https://e.example>pay</a>")).toBe(`Please ${pay}`);
+  // Every comment ending browsers accept.
+  expect(message("<!-->Hi <a href=https://e.example>pay</a>")).toBe(`Hi ${pay}`);
+  expect(message("<!--->Hi <a href=https://e.example>pay</a>")).toBe(`Hi ${pay}`);
+  expect(message("<!-- x --!>Hi <a href=https://e.example>pay</a>")).toBe(`Hi ${pay}`);
+  // A stray quote in an unquoted value, of either kind.
+  expect(message("<i class=a'b>Hi</i> <a href=https://e.example>pay</a>")).toBe(`Hi ${pay}`);
+  expect(message('<i class=a"b>Hi</i> <a href=https://e.example>pay</a>')).toBe(`Hi ${pay}`);
+  // SVG links, and "<!--" inside an attribute value.
+  expect(message('<svg><a xlink:href="https://e.example"><text>pay</text></a></svg>')).toBe(pay);
+  expect(message('<a title="<!--" href="https://e.example">pay</a> <!-- x -->')).toBe(pay);
+  // An empty link before another doesn't run into its text.
+  expect(
+    message('<a href="https://evil.example/pay"><a href="https://good.example">good.example</a>'),
+  ).toBe("https://evil.example/pay good.example (https://good.example)");
+  // Fail-safe: a target the text doesn't show is listed first.
+  expect(message('<map><area href="https://map.example"></map><p>Hello</p>')).toBe(
+    "Links: https://map.example\n\nHello",
+  );
+});
+
+test("a huge or broken HTML message still builds its card quickly", () => {
+  const started = performance.now();
+  const content = `${"<a ".repeat(100_000)}<a href="https://e.example">pay</a>`;
+  const preview = rows({ body: { body: { contentType: "HTML", content } } })[0]![1];
+  expect(performance.now() - started).toBeLessThan(1_000);
+  expect(preview).toContain("https://e.example");
 });
 
 test("header values show on the card, and cookies show as protected", () => {

@@ -483,16 +483,44 @@ function decodeEntities(text: string): string {
   });
 }
 
-// One tag, with quoted attribute values that may hold ">"; "a < b" is text.
-const HTML_TAG = /<(\/?)([a-z][a-z0-9:-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>|<![^>]*>|<\?[^>]*>/gi;
-const HTML_ATTRIBUTE = /([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
-const HTML_DROPPED = /^(head|title|script|style)$/i;
+// HTML read the way a browser tokenizes it, closely enough for a review card:
+// quoted values may hold ">" or "<!--", an unquoted value may hold a stray
+// quote, and "a < b" stays text. Names and unquoted values stop at "<", and
+// each name or value is matched whole, so a broken tag fails fast.
+const HTML_NAME = `[^\\s"'>/=<]+(?![^\\s"'>/=<])`;
+const HTML_VALUE = `(?:"[^"]*"|'[^']*'|[^\\s><]*(?![^\\s><]))`;
+const HTML_TAG = new RegExp(
+  `<(/?)([a-z][^\\s/>]*)((?:\\s|/|${HTML_NAME}(?:\\s*=\\s*${HTML_VALUE})?)*)>`,
+  "iy",
+);
+// Comments end at "-->", "--!>", or at once for "<!-->" and "<!--->".
+const HTML_COMMENT = /<!--(?:-?>|[\s\S]*?(?:--!?>|$))/y;
+// Doctypes, processing instructions and "</ >" are skipped like comments.
+const HTML_BOGUS = /<(?:!|\?|\/(?![a-z]))[^>]*(?:>|$)/iy;
+const HTML_ATTRIBUTE = new RegExp(`(${HTML_NAME})(?:\\s*=\\s*(${HTML_VALUE}))?`, "g");
+// Their content is never shown; they end at the first literal closing tag.
+const HTML_RAW_TEXT = /^(script|style|title)$/;
+// Any link target anywhere in the raw HTML, for the fail-safe below.
+const HTML_ANY_HREF =
+  /(?:^|[\s"'/<])(?:xlink:)?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>][^\s>]*))/gi;
+/** Enough HTML for the text a card previews; the full value stays in Details. */
+const HTML_READ_LIMIT = 200_000;
 
-/** The value of a tag's own `href` attribute (not `data-href`), or undefined. */
+/** The value of a tag's own `href` (or SVG `xlink:href`), not `data-href`. */
 function hrefOf(attributes: string): string | undefined {
-  for (const match of attributes.matchAll(HTML_ATTRIBUTE))
-    if (match[1]!.toLowerCase() === "href") return match[2] ?? match[3] ?? match[4] ?? "";
+  for (const match of attributes.matchAll(HTML_ATTRIBUTE)) {
+    const name = match[1]!.toLowerCase();
+    if (name !== "href" && name !== "xlink:href") continue;
+    const value = match[2] ?? "";
+    return /^["']/.test(value) ? value.slice(1, -1) : value;
+  }
   return undefined;
+}
+
+/** A link target as a person reads it, or undefined when it goes nowhere. */
+function linkTarget(raw: string): string | undefined {
+  const target = decodeEntities(raw.trim()).replace(/^mailto:/i, "");
+  return target && !target.startsWith("#") ? target : undefined;
 }
 
 /**
@@ -500,16 +528,18 @@ function hrefOf(attributes: string): string | undefined {
  * its text shows both, "our portal (https://pay.example.net)", because where a
  * link goes is what a person checks before sending. That holds for a link that
  * is never closed too: mail clients keep it a link to the end of its text.
- * Text and link targets are decoded exactly once.
+ * Text and link targets are decoded exactly once. As a fail-safe, any link
+ * target in the HTML that the text doesn't show is listed first, so markup the
+ * reader misjudges can never hide where a link goes.
  */
 function plainText(content: string, contentType: unknown): string {
   if (typeof contentType !== "string" || contentType.toLowerCase() !== "html") return content;
-  const html = content.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  const html = content.slice(0, HTML_READ_LIMIT);
+  const shownTargets = new Set<string>();
   // Text is collected raw and decoded per piece, so nothing decodes twice.
   const pieces: string[] = [];
   let out = "";
-  let link: { target: string; continued: boolean } | undefined;
-  let dropped: string | undefined;
+  let link: { target: string | undefined; continued: boolean } | undefined;
   const flush = () => {
     pieces.push(decodeEntities(out));
     out = "";
@@ -522,12 +552,14 @@ function plainText(content: string, contentType: unknown): string {
     flush();
     const text = pieces.pop()!;
     const shown = text.trim();
-    if (!target || target.startsWith("#") || shown === target) pieces.push(text);
+    if (!target) return void pieces.push(text);
+    shownTargets.add(target);
+    if (shown === target) pieces.push(text);
     else if (shown) {
       // The target follows the words, before any space after them.
       const words = text.trimEnd();
       pieces.push(`${words} (${target})${text.slice(words.length)}`);
-    } else pieces.push(continued ? text : `${text}${target}`);
+    } else pieces.push(continued ? text : `${text}${target} `);
   };
   const block = (separator: string) => {
     // A link still open across a paragraph keeps going in the next one.
@@ -538,39 +570,58 @@ function plainText(content: string, contentType: unknown): string {
     if (open) link = { target: open.target, continued: true };
   };
   let index = 0;
-  for (const match of html.matchAll(HTML_TAG)) {
-    if (!dropped) out += html.slice(index, match.index);
-    index = match.index + match[0].length;
-    const [, closing, rawName, attributes = ""] = match;
-    if (!rawName) continue;
+  while (index < html.length) {
+    const next = html.indexOf("<", index);
+    if (next < 0) break;
+    out += html.slice(index, next);
+    index = next;
+    HTML_COMMENT.lastIndex = HTML_BOGUS.lastIndex = HTML_TAG.lastIndex = next;
+    const comment = HTML_COMMENT.exec(html) ?? HTML_BOGUS.exec(html);
+    if (comment) {
+      index = next + comment[0].length;
+      continue;
+    }
+    const tag = HTML_TAG.exec(html);
+    if (!tag) {
+      // Not a tag: a "<" in the text.
+      out += "<";
+      index = next + 1;
+      continue;
+    }
+    index = next + tag[0].length;
+    const [, closing, rawName = "", attributes = ""] = tag;
     const name = rawName.toLowerCase();
-    if (dropped) {
-      if (closing && name === dropped) dropped = undefined;
-      continue;
-    }
-    if (!closing && HTML_DROPPED.test(name)) {
-      dropped = name;
-      continue;
-    }
-    if (name === "a") {
+    if (!closing && HTML_RAW_TEXT.test(name)) {
+      const end = new RegExp(`</${name}(?=[\\s/>])[^>]*>?`, "ig");
+      end.lastIndex = index;
+      const found = end.exec(html);
+      index = found ? found.index + found[0].length : html.length;
+    } else if (name === "a") {
       closeLink();
       const href = closing ? undefined : hrefOf(attributes);
       if (href !== undefined) {
         flush();
-        link = { target: decodeEntities(href.trim()).replace(/^mailto:/i, ""), continued: false };
+        link = { target: linkTarget(href), continued: false };
       }
     } else if (closing && /^(p|h[1-6]|blockquote)$/.test(name)) block("\n\n");
     else if ((!closing && name === "br") || (closing && /^(div|li|tr)$/.test(name))) block("\n");
   }
-  if (!dropped) out += html.slice(index);
+  out += html.slice(index);
   closeLink();
   flush();
-  return pieces
+  const text = pieces
     .join("")
     .replace(/\u00a0/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  const unshown = new Set<string>();
+  for (const match of content.matchAll(HTML_ANY_HREF)) {
+    const target = linkTarget(match[1] ?? match[2] ?? match[3] ?? "");
+    if (target && !shownTargets.has(target)) unshown.add(target);
+  }
+  return unshown.size > 0 ? `Links: ${[...unshown].join(", ")}\n\n${text}` : text;
 }
 
 /** "Anna Berg <anna@example.com>" for a recipient-like value, else undefined. */
