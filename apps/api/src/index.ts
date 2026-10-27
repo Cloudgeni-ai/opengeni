@@ -62,6 +62,7 @@ import {
   type DocumentIndexClient,
   type SessionWorkflowClient,
 } from "./app";
+import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -584,7 +585,7 @@ export async function startApi(options: StartApiOptions = {}) {
       throw error;
     }
   }
-  const { app, routeDeps } = createAppComposition({
+  const { app, routeDeps, renewBrowserHolds } = createAppComposition({
     ...startApiSessionAuthorizationOverride(options),
     settings,
     db: dbClient.db,
@@ -718,6 +719,7 @@ export async function startApi(options: StartApiOptions = {}) {
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
   const stopEventSubscriptionPump = startEventSubscriptionPump({
     db: dbClient.db,
     settings,
@@ -805,6 +807,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
+      await stopBrowserHoldRenewalPump();
       await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();

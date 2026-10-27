@@ -1871,7 +1871,7 @@ describe("runtime database posture evaluator", () => {
           // 0998 managed-auth passkeys: one auth table without RLS whose
           // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
           (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
-          // 1002 EU-only inference: a runtime-read-only setting and its
+          // 1010 EU-only inference: a runtime-read-only setting and its
           // history with no runtime privileges, both FORCE RLS.
           (tables === RUNTIME_READ_ONLY_TABLES || tables === RUNTIME_DML_TABLES ? 1 : 0) +
           (tables === FORCE_RLS_TABLES ? 2 : tables === PROTECTED_NO_DIRECT_DML_TABLES ? 1 : 0) +
@@ -2016,7 +2016,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          2 + // 1002 EU-only inference setting and its history.
+          2 + // 1010 EU-only inference setting and its history.
           2 + // 0890 model fact reconciliation progress and candidates.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
@@ -2031,7 +2031,7 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          2 + // 1002 EU-only inference setting and its history.
+          2 + // 1010 EU-only inference setting and its history.
           2 + // 0890 model fact reconciliation progress and candidates.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
@@ -3942,6 +3942,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "sandboxes",
     "enrollments",
     "session_background_commands",
+    "browser_sessions",
+    "browser_session_associations",
     "organization_inference_residency",
     "organization_inference_residency_events",
   ];
@@ -3994,12 +3996,14 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
@@ -4052,6 +4056,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
+      "list_agent_held_browser_sessions(integer, bigint)",
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     ]) {
       const posture = eventPosture(false);

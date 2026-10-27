@@ -60,6 +60,11 @@ export function videoCapabilitiesForTurn(input: {
   });
 }
 
+/** Whether credit-funded video debits Opengeni credits on this deployment. */
+export function videoGenerationCreditsCharged(settings: Settings): boolean {
+  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+}
+
 export function managedVideoGenerationCredentialLease(
   settings: Settings,
 ): VideoGenerationCredentialLease | null {
@@ -126,7 +131,7 @@ export async function admitVideoGenerationRequest(input: {
   const requestDigest = videoGenerationRequestDigest(canonical);
   const shouldDebitManagedCredits =
     input.credential.fundingSource === "opengeni_credits" &&
-    (input.settings.billingMode === "stripe" || input.settings.usageLimitsMode === "managed");
+    videoGenerationCreditsCharged(input.settings);
   const pricedCostMicros = shouldDebitManagedCredits
     ? calculateVideoGenerationCreditCostMicros(input.settings, canonical)
     : 0;

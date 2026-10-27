@@ -3,8 +3,9 @@
 //! Every guest, on every host, is told one name server: its gateway,
 //! 169.254.0.22. The host agent answers there, inside each sandbox's own
 //! namespace, so only that sandbox's guest can reach it. A name a
-//! `--reach` entry gives ([`super::reach`]) is answered with the addresses
-//! the firewalls open for it; any other query is passed to the host's
+//! `--reach` entry gives ([`super::reach`]), or an offer the sandbox asked
+//! for, is answered with the addresses the firewalls open for it, in that
+//! sandbox's namespace alone; any other query is passed to the host's
 //! upstream name servers (`--dns`, public ones unless set otherwise) and
 //! their answer passed back. The name server the host itself uses, which
 //! on a private network knows every private name (a cloud's internal names,
@@ -27,7 +28,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -66,7 +67,7 @@ const CLASS_IN: u16 = 1;
 /// The host's name server for its sandboxes. Its methods block; call them
 /// off the async runtime's worker threads.
 pub(crate) struct NameServer {
-    answers: Arc<Answers>,
+    upstreams: Vec<SocketAddr>,
     runtime: Handle,
     /// Each served namespace by name, with its tasks.
     served: Mutex<HashMap<String, Served>>,
@@ -75,8 +76,7 @@ pub(crate) struct NameServer {
 impl fmt::Debug for NameServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NameServer")
-            .field("names", &self.answers.names)
-            .field("upstreams", &self.answers.upstreams)
+            .field("upstreams", &self.upstreams)
             .finish_non_exhaustive()
     }
 }
@@ -86,6 +86,7 @@ struct Served {
     /// The namespace they are in (its device and inode): one deleted and
     /// made again under the same name is another, and needs its own.
     namespace: (u64, u64),
+    answers: Arc<Answers>,
     _tasks: [AbortOnDrop; 2],
 }
 
@@ -99,37 +100,37 @@ impl Drop for AbortOnDrop {
 }
 
 impl NameServer {
-    /// A name server that answers `names` itself and asks `upstreams` for
-    /// everything else, running its listeners on `runtime`.
-    pub fn new(
-        names: BTreeMap<String, Vec<Ipv4Addr>>,
-        upstreams: &[Ipv4Addr],
-        runtime: Handle,
-    ) -> Self {
+    /// A name server that asks `upstreams` for what it does not answer
+    /// itself, running its listeners on `runtime`.
+    pub fn new(upstreams: &[Ipv4Addr], runtime: Handle) -> Self {
         Self {
-            answers: Arc::new(Answers {
-                names,
-                upstreams: upstreams
-                    .iter()
-                    .map(|address| SocketAddr::from((*address, PORT)))
-                    .collect(),
-            }),
+            upstreams: upstreams
+                .iter()
+                .map(|address| SocketAddr::from((*address, PORT)))
+                .collect(),
             runtime,
             served: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Serves the namespace `name` at `path`, unless it is already served.
-    /// Its tap must hold the gateway's address.
-    pub fn serve(&self, name: &str, path: &Path) -> Result<(), NetError> {
+    /// Serves the namespace `name` at `path`, answering `names` itself,
+    /// or, where it is already served, answers `names` from now on. Its
+    /// tap must hold the gateway's address.
+    pub fn serve(
+        &self,
+        name: &str,
+        path: &Path,
+        names: &BTreeMap<String, Vec<Ipv4Addr>>,
+    ) -> Result<(), NetError> {
         let metadata =
             std::fs::metadata(path).map_err(|error| NetError::new("look at namespace", error))?;
         let namespace = (metadata.dev(), metadata.ino());
         let mut served = self.served.lock().unwrap_or_else(PoisonError::into_inner);
-        if served
+        if let Some(served) = served
             .get(name)
-            .is_some_and(|served| served.namespace == namespace)
+            .filter(|served| served.namespace == namespace)
         {
+            served.answers.set(names);
             return Ok(());
         }
         let (udp, tcp) = in_namespace(path, || {
@@ -145,20 +146,22 @@ impl NameServer {
         let register = |error| NetError::new("serve the sandbox's name server", error);
         let udp = UdpSocket::from_std(udp).map_err(register)?;
         let tcp = TcpListener::from_std(tcp).map_err(register)?;
+        let answers = Arc::new(Answers {
+            names: RwLock::new(names.clone()),
+            upstreams: self.upstreams.clone(),
+        });
         let tasks = [
+            AbortOnDrop(self.runtime.spawn(serve_udp(udp, Arc::clone(&answers)))),
             AbortOnDrop(
                 self.runtime
-                    .spawn(serve_udp(udp, Arc::clone(&self.answers))),
-            ),
-            AbortOnDrop(
-                self.runtime
-                    .spawn(serve_tcp(tcp, Arc::clone(&self.answers), TCP_IDLE)),
+                    .spawn(serve_tcp(tcp, Arc::clone(&answers), TCP_IDLE)),
             ),
         ];
         served.insert(
             name.to_owned(),
             Served {
                 namespace,
+                answers,
                 _tasks: tasks,
             },
         );
@@ -177,18 +180,35 @@ impl NameServer {
 /// What the name server answers itself, and whom it asks for the rest.
 #[derive(Debug)]
 struct Answers {
-    names: BTreeMap<String, Vec<Ipv4Addr>>,
+    names: RwLock<BTreeMap<String, Vec<Ipv4Addr>>>,
     upstreams: Vec<SocketAddr>,
 }
 
 impl Answers {
+    /// Answers `names` from now on.
+    fn set(&self, names: &BTreeMap<String, Vec<Ipv4Addr>>) {
+        let mut known = self.names.write().unwrap_or_else(PoisonError::into_inner);
+        if *known != *names {
+            known.clone_from(names);
+        }
+    }
+
+    /// The addresses it answers `name` with itself, if it does.
+    fn known(&self, name: &str) -> Option<Vec<Ipv4Addr>> {
+        self.names
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .cloned()
+    }
+
     /// The answer to `query`, which came over TCP if `tcp`; `None` for
     /// bytes that are not a query.
     async fn answer(&self, query: &[u8], tcp: bool) -> Option<Vec<u8>> {
         if let Some(question) = Question::parse(query)
-            && let Some(addresses) = self.names.get(&question.name)
+            && let Some(addresses) = self.known(&question.name)
         {
-            return Some(question.answer(query, addresses));
+            return Some(question.answer(query, &addresses));
         }
         let forwarded = if tcp {
             forward_tcp(query, &self.upstreams).await
@@ -468,10 +488,12 @@ mod tests {
 
     fn server_of(names: &[(&str, &[Ipv4Addr])], upstreams: Vec<SocketAddr>) -> Answers {
         Answers {
-            names: names
-                .iter()
-                .map(|(name, addresses)| ((*name).to_owned(), addresses.to_vec()))
-                .collect(),
+            names: RwLock::new(
+                names
+                    .iter()
+                    .map(|(name, addresses)| ((*name).to_owned(), addresses.to_vec()))
+                    .collect(),
+            ),
             upstreams,
         }
     }
@@ -538,6 +560,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((six[3], &six[6..8]), (0x80, &[0_u8, 0][..]));
+    }
+
+    /// A sandbox given an offer once it is served, as a claimed ready
+    /// sandbox is, answers the offer's names from then on.
+    #[tokio::test]
+    async fn names_set_later_are_answered_from_then_on() {
+        let server = server_of(&[("api.example", &[API])], Vec::new());
+        let asked = query(7, "k3s.internal", TYPE_A);
+        let failed = server.answer(&asked, false).await.unwrap();
+        assert_eq!((failed[2], failed[3]), (0x81, 0x82), "not known yet");
+        let names = BTreeMap::from([
+            ("api.example".to_owned(), vec![API]),
+            (
+                "k3s.internal".to_owned(),
+                vec![Ipv4Addr::new(10, 20, 0, 10)],
+            ),
+        ]);
+        server.set(&names);
+        let answer = server.answer(&asked, false).await.unwrap();
+        assert_eq!(answer[3], 0x80, "{answer:?}");
+        assert_eq!(&answer[answer.len() - 4..], &[10, 20, 0, 10]);
+        server.set(&BTreeMap::new());
+        let failed = server.answer(&asked, false).await.unwrap();
+        assert_eq!((failed[2], failed[3]), (0x81, 0x82), "taken away");
     }
 
     #[tokio::test]

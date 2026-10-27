@@ -424,6 +424,13 @@ impl Fleet {
         host
     }
 
+    /// As [`Self::host`], for a host that offers sandboxes `offers`.
+    pub async fn host_offering(&self, name: &str, offers: &[&str]) -> FakeHost {
+        let host = FakeHost::start_offering(self, name, roomy(), offers).await;
+        self.sees(&host).await;
+        host
+    }
+
     /// Waits until this replica's view has `host` under its current
     /// registration.
     pub async fn sees(&self, host: &FakeHost) {
@@ -526,6 +533,8 @@ struct HostInner {
     /// the request as expired, as a real host does; 0 never refuses.
     window: AtomicU64,
     attempt: AtomicU64,
+    /// What it offers sandboxes to reach, as it registers.
+    offers: Vec<String>,
     /// The boot of its machine it names when it registers.
     boot: Mutex<Boot>,
 }
@@ -548,6 +557,16 @@ impl FakeHost {
     /// Starts a host named `name` reporting `capacity`, and has it
     /// register; it renews until told to stop.
     pub async fn start(fleet: &Fleet, name: &str, capacity: Capacity) -> Self {
+        Self::start_offering(fleet, name, capacity, &[]).await
+    }
+
+    /// As [`Self::start`], for a host that offers sandboxes `offers`.
+    pub async fn start_offering(
+        fleet: &Fleet,
+        name: &str,
+        capacity: Capacity,
+        offers: &[&str],
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let http = reqwest::Client::builder()
@@ -578,6 +597,7 @@ impl FakeHost {
             check_open: AtomicBool::new(false),
             window: AtomicU64::new(0),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
+            offers: offers.iter().map(|offer| (*offer).to_owned()).collect(),
             boot: Mutex::new(Boot {
                 id: format!("boot-{:016x}", u64::from_le_bytes(random)),
                 nth: 3,
@@ -822,6 +842,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             memory_mib: 64 * 1024,
             cpu_millis: 64_000,
             disk_mib: 1 << 20,
+            offers: inner.offers.clone(),
             boot: Some(inner.boot.lock().unwrap().clone()),
         },
         capacity: inner.capacity.lock().unwrap().clone(),

@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { parseSync } from "oxc-parser";
 import {
@@ -161,15 +161,15 @@ export function checkLegacySubscriptionSource(
   return findings;
 }
 
+const SKIPPED_DIRECTORIES = ["node_modules", "dist", "build", ".git", "test", "tests"];
+const isSourceFile = (path: string) =>
+  /\.[cm]?[jt]sx?$/.test(path) && !/\.(?:test|e2e|integration)\./.test(path);
+
 function files(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (["node_modules", "dist", "build", ".git", "test", "tests"].includes(entry.name)) return [];
+    if (SKIPPED_DIRECTORIES.includes(entry.name)) return [];
     const path = join(directory, entry.name);
-    return entry.isDirectory()
-      ? files(path)
-      : /\.[cm]?[jt]sx?$/.test(path) && !/\.(?:test|e2e|integration)\./.test(path)
-        ? [path]
-        : [];
+    return entry.isDirectory() ? files(path) : isSourceFile(path) ? [path] : [];
   });
 }
 
@@ -177,21 +177,107 @@ function files(directory: string): string[] {
 const GUARD_SOURCES =
   /^scripts\/(?:check-no-legacy-subscription-runtime\.ts|legacy-subscription-runtime\/)/;
 
+/** Whether a repository-relative path is a runtime source the full scan reads. */
+export function isScannedRuntimeSource(file: string): boolean {
+  const parts = file.split("/");
+  return (
+    ["apps", "packages", "scripts"].includes(parts[0]!) &&
+    !parts.slice(0, -1).some((part) => SKIPPED_DIRECTORIES.includes(part)) &&
+    isSourceFile(file) &&
+    !GUARD_SOURCES.test(file)
+  );
+}
+
+/**
+ * The sources a change can newly break, or null when only the full scan is
+ * sound. Findings are per file for a fixed retirement registry and parser, so
+ * unchanged files keep their verdict unless the registry (with every module
+ * it is built from, see `guardInputFiles`), this engine or the toolchain
+ * changed, or the plan is not focused.
+ */
+export function changedRuntimeSources(
+  plan: { mode?: unknown; changedFiles?: unknown },
+  guardInputs: ReadonlySet<string>,
+): string[] | null {
+  if (plan.mode !== "focused" && plan.mode !== "docs") return null;
+  if (!Array.isArray(plan.changedFiles)) return null;
+  const changed = plan.changedFiles.filter((path): path is string => typeof path === "string");
+  const fullScan = (path: string) =>
+    GUARD_SOURCES.test(path) ||
+    guardInputs.has(path) ||
+    path === "package.json" ||
+    path === "bun.lock";
+  if (changed.some(fullScan)) return null;
+  return changed.filter(isScannedRuntimeSource);
+}
+
+const GUARD_ENTRY_POINTS = [
+  "scripts/check-no-legacy-subscription-runtime.ts",
+  "scripts/legacy-subscription-runtime/index.ts",
+];
+
+/**
+ * Every repository file the engine and its retirement registry load, following
+ * relative imports (including JSON) from both entry points. The registry is
+ * partly built from other modules (for example the database runtime posture),
+ * so a change to any of them can retire a name that unchanged files still use.
+ */
+export function guardInputFiles(root: string): Set<string> {
+  const seen = new Set<string>();
+  const pending = [...GUARD_ENTRY_POINTS];
+  while (pending.length > 0) {
+    const file = pending.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const loader = file.endsWith("x") ? "tsx" : "ts";
+    const source = readFileSync(join(root, file), "utf8");
+    for (const { path } of new Bun.Transpiler({ loader }).scanImports(source)) {
+      if (!path.startsWith("./") && !path.startsWith("../")) continue;
+      const base = posix.normalize(posix.join(posix.dirname(file), path));
+      const resolved = [
+        base,
+        ...[".ts", ".tsx", ".js", ".mjs", ".json"].map((extension) => base + extension),
+        ...["ts", "tsx", "js"].map((extension) => `${base}/index.${extension}`),
+      ].find(
+        (candidate) =>
+          existsSync(join(root, candidate)) && statSync(join(root, candidate)).isFile(),
+      );
+      if (!resolved) throw new Error(`cannot resolve ${path} from ${file}`);
+      pending.push(resolved);
+    }
+  }
+  return seen;
+}
+
 export function checkNoLegacySubscriptionRuntime(
   root: string,
   runtimes: readonly LegacySubscriptionRetirement[] = LEGACY_SUBSCRIPTION_RETIREMENTS,
+  only: readonly string[] | null = null,
 ): LegacySubscriptionFinding[] {
-  return ["apps", "packages", "scripts"]
-    .flatMap((dir) => files(join(root, dir)))
-    .flatMap((path) => {
-      const file = relative(root, path);
-      if (GUARD_SOURCES.test(file)) return [];
-      return checkLegacySubscriptionSource(file, readFileSync(path, "utf8"), runtimes);
-    });
+  const sources = only
+    ? only.filter((file) => existsSync(join(root, file)))
+    : ["apps", "packages", "scripts"]
+        .flatMap((dir) => files(join(root, dir)))
+        .map((path) => relative(root, path))
+        .filter((file) => !GUARD_SOURCES.test(file));
+  return sources.flatMap((file) =>
+    checkLegacySubscriptionSource(file, readFileSync(join(root, file), "utf8"), runtimes),
+  );
 }
 
 if (import.meta.main) {
-  const findings = checkNoLegacySubscriptionRuntime(process.cwd());
+  // PR fast checks scope the scan to the impact plan's changed files; Batch
+  // and every other caller scan the whole tree.
+  const planPath = process.env.OPENGENI_GUARD_SCOPE_PLAN;
+  const only = planPath
+    ? changedRuntimeSources(
+        JSON.parse(readFileSync(planPath, "utf8")),
+        guardInputFiles(process.cwd()),
+      )
+    : null;
+  if (only) console.log(`Scoped to ${only.length} changed runtime source(s).`);
+  const findings = checkNoLegacySubscriptionRuntime(process.cwd(), undefined, only);
   for (const finding of findings)
     console.error(`${finding.file}:${finding.line}: ${finding.message}`);
   if (findings.length) process.exitCode = 1;

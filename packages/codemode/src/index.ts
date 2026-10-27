@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
@@ -816,7 +817,7 @@ export function verifyAttemptToolCatalog(input: unknown): {
 }
 
 function assertCatalogSize(catalog: AttemptToolCatalogValue): number {
-  const byteLength = new TextEncoder().encode(JSON.stringify(catalog)).byteLength;
+  const byteLength = Buffer.byteLength(JSON.stringify(catalog), "utf8");
   if (byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new AttemptToolCatalogTooLargeError();
   }

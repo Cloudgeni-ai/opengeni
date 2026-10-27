@@ -299,7 +299,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             })
         };
         let ((outcome, after), mut notes) = notes::scope(async {
-            let (mut outcome, mut after) = self.step(step).await;
+            // Boxed so a job's future stays small whatever its steps hold
+            // across their awaits.
+            let (mut outcome, mut after) = Box::pin(self.step(step)).await;
             if outcome == Outcome::Failed(Failure::MemoryLost) {
                 // The memory (and any pager serving it) goes only after the
                 // process.
@@ -893,6 +895,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         };
         notes::phase("load");
+        // Before the image is marked stale, so a failure may try it again.
+        if let Err(error) = self.tell_disk_length(&vm).await {
+            let outcome = self.end_with_memory(vm, live_memory, failure(&error)).await;
+            return (outcome, After::NoVm);
+        }
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);

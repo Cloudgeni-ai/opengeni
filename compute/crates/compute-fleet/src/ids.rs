@@ -55,3 +55,25 @@ pub struct ClassId(pub u16);
 /// shape. Chosen by the caller, for example as a hash of both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShapeKey(pub u64);
+
+/// Private destinations hosts offer sandboxes that ask for them, as a set
+/// of up to 64 offers numbered by the caller, which interns their names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Offers(pub u64);
+
+impl Offers {
+    /// No offer.
+    pub const NONE: Self = Self(0);
+
+    /// The same, with offer number `offer` (below 64) added.
+    #[must_use]
+    pub const fn with(self, offer: u8) -> Self {
+        Self(self.0 | 1 << (offer & 63))
+    }
+
+    /// Whether every offer of `wanted` is one of these.
+    #[must_use]
+    pub const fn cover(self, wanted: Self) -> bool {
+        self.0 & wanted.0 == wanted.0
+    }
+}

@@ -779,6 +779,8 @@ async fn run(
     // Sandboxes only sleep when the bench asks, so each phase is timed on
     // its own; idle timers would start steps at unpredictable moments.
     let config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,

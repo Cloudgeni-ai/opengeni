@@ -307,6 +307,50 @@ async fn fleet_with_guest() -> (Fleet, FakeHost, Arc<Mutex<Levels>>, Arc<Seen>, 
     (fleet, host, levels, seen, door)
 }
 
+/// A template that names a disk size gives each of its sandboxes a disk
+/// that long, and reports it; one that names none leaves the disk to the
+/// image.
+#[tokio::test]
+async fn a_template_with_a_disk_size_gives_its_sandboxes_that_disk() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host(&fleet, &seen).await;
+    let mut settings = Settings::default();
+    settings.templates.insert(
+        "ci".into(),
+        Template {
+            image: "base".into(),
+            vcpus: 2,
+            memory_mib: 1024,
+            disk: Some(64 << 10),
+            disk_mib: 64 << 10,
+        },
+    );
+    let door = Door::start_with(&fleet, settings).await;
+    for (template, disk) in [("ci", Some(64 << 10)), ("base", None)] {
+        let sandbox = door.create(json!({"templateID": template})).await;
+        let id: Id = sandbox["sandboxID"].as_str().unwrap().parse().unwrap();
+        let created = host
+            .seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config),
+                _ => None,
+            })
+            .expect("the host was asked to create it");
+        assert_eq!(created.disk_mib, disk, "{template}");
+        let (status, detail) = door.get(&format!("/sandboxes/{id}")).await;
+        assert_eq!(status, 200, "{detail}");
+        if let Some(disk) = disk {
+            assert_eq!(detail["diskSizeMB"], disk, "{detail}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn an_e2b_sandbox_is_created_listed_for_its_team_and_killed() {
     let (_fleet, _host, levels, seen, door) = fleet_with_guest().await;
@@ -832,6 +876,7 @@ async fn pauses_that_cannot_finish_do_not_hold_up_later_timeouts() {
             image: "base".into(),
             vcpus: 1,
             memory_mib: 256,
+            disk: None,
             disk_mib: 1024,
         },
     );
