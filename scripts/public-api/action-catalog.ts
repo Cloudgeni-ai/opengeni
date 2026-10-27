@@ -5,6 +5,7 @@
  * manifest where it has them, and leaves out only the exemptions below.
  * Regenerate with `bun scripts/public-api/action-catalog.ts --write`; a test
  * fails when a registered route is neither in the catalog nor exempt.
+ * `--check` fails when either committed file differs from a fresh render.
  */
 import * as contracts from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
@@ -655,4 +656,23 @@ if (import.meta.main && process.argv.includes("--write")) {
   await Bun.write(ACTION_CATALOG_PATH, renderActionCatalog(catalog));
   await Bun.write(ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog));
   console.log(`[action-catalog] wrote ${ACTION_CATALOG_PATH.pathname}`);
+} else if (import.meta.main && process.argv.includes("--check")) {
+  const catalog = buildActionCatalog(registeredApiRoutes());
+  const rendered: Array<[URL, string]> = [
+    [ACTION_CATALOG_PATH, renderActionCatalog(catalog)],
+    [ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog)],
+  ];
+  const stale: string[] = [];
+  for (const [path, text] of rendered) {
+    const file = Bun.file(path);
+    if (!(await file.exists()) || (await file.text()) !== text) stale.push(path.pathname);
+  }
+  if (stale.length > 0) {
+    console.error(
+      `[action-catalog] stale: ${stale.join(", ")}; run \`bun scripts/public-api/action-catalog.ts --write\``,
+    );
+    process.exit(1);
+  }
+  console.log("[action-catalog] current");
+  process.exit(0);
 }

@@ -399,6 +399,15 @@ export function isSessionEventPersistenceError(
   return error instanceof SessionEventPersistenceError;
 }
 
+/**
+ * A database guard refused the request on purpose, and the application has
+ * already said what that means (for example a stale access version or a
+ * missing grant). It keeps the database error as its cause for diagnostics,
+ * but it is a decision, not a database failure: the persistence retry helper
+ * rethrows it unchanged and never retries it.
+ */
+export class ClassifiedDatabaseRefusal extends Error {}
+
 export type IdempotentPersistenceTransactionOptions = {
   stage: string;
   eventTypes?: string[];
@@ -428,6 +437,7 @@ export async function runIdempotentPersistenceTransaction<T>(
     try {
       return await transaction(attempt);
     } catch (error) {
+      if (error instanceof ClassifiedDatabaseRefusal) throw error;
       // An uncertain transport/commit outcome is not a confirmed rollback,
       // even when an older error in its cause chain carries a retryable state.
       const sqlState = isRetryableDatabaseTransportFailure(error)

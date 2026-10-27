@@ -43,6 +43,7 @@ import {
 } from "./knowledge-learning";
 import {
   initialLibraryView,
+  libraryFilesView,
   LibraryTab,
   type EntryRowActions,
   type LibraryView,
@@ -116,7 +117,7 @@ export function KnowledgePage({
   const scopeLink = search.scope;
   useEffect(() => {
     if (legacyFiles) {
-      setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+      setLibrary(libraryFilesView);
       nav.replace(search.file ? { file: search.file } : {});
     } else if (legacyReview) {
       nav.replace({ view: "review" });
@@ -493,6 +494,7 @@ export function KnowledgePage({
             canUpload={canUpload}
             onAdd={withScroll(() => nav.openPage("add"))}
             onUpload={() => setUploadOpen(true)}
+            {...(canEdit ? { onNewCollection: () => setCollectionOpen(true) } : {})}
             onEmptyChange={setLibraryEmpty}
             personal={personal}
           />
@@ -535,7 +537,7 @@ export function KnowledgePage({
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           onUploaded={() => {
-            setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
+            setLibrary(libraryFilesView);
             changed();
           }}
         />

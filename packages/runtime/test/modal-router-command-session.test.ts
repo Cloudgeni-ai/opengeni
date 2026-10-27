@@ -46,9 +46,6 @@ test("a failed first read retains identity without inventing an output capture",
   const first = await withProviderCommandHandle(3, () => session.execCommand!({ cmd: "work" }));
   session.bindProviderCommand!(3, command, {
     load: async () => command,
-    acknowledge: async () => {
-      throw new Error("unexpected legacy acknowledgement");
-    },
     reserveInput: async () => 0,
     captureRouterPage: async (page) => {
       captures++;
@@ -99,9 +96,6 @@ test("byte-offset sessions atomically capture before acknowledging or replaying"
   // Force a yielded command so its original locator can be bound before reading.
   session.bindProviderCommand!(1, stored, {
     load: async () => stored,
-    acknowledge: async () => {
-      throw new Error("legacy append/ack must not run");
-    },
     reserveInput: async () => 0,
     captureRouterPage: async (page) => {
       if (failCapture) throw new Error("database unavailable");
@@ -149,9 +143,6 @@ test("stdin reserves byte count and cursor-CAS loss adopts the winning cursor", 
   });
   session.bindProviderCommand!(2, original, {
     load: async () => original,
-    acknowledge: async () => {
-      throw new Error("legacy acknowledgment forbidden");
-    },
     reserveInput: async (byteLength) => {
       reserved = byteLength;
       return 17;
