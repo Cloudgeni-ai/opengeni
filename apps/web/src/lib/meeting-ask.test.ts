@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { meetingQuestionMessage } from "./meeting-ask";
+import { meetingQuestionMessage, meetingQuestionVisibility } from "./meeting-ask";
 
 const ID = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
 
@@ -21,5 +21,19 @@ describe("meetingQuestionMessage", () => {
     expect(message).toBe(
       `Who owns the follow-up?\n\nAbout meeting ${ID}. Read it with meeting_read.`,
     );
+  });
+});
+
+describe("meetingQuestionVisibility", () => {
+  test("a private meeting's question starts a private chat", () => {
+    expect(meetingQuestionVisibility({ visibility: "private" })).toBe("private");
+  });
+
+  test("a meeting that could not be read also starts a private chat", () => {
+    expect(meetingQuestionVisibility(null)).toBe("private");
+  });
+
+  test("a workspace meeting keeps the workspace's usual chat visibility", () => {
+    expect(meetingQuestionVisibility({ visibility: "workspace" })).toBeUndefined();
   });
 });

@@ -10,7 +10,7 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
 
-import { meetingQuestionMessage } from "@/lib/meeting-ask";
+import { meetingQuestionMessage, meetingQuestionVisibility } from "@/lib/meeting-ask";
 
 /** The detail page draws its own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
@@ -64,9 +64,11 @@ export function MeetingDetailRoute({
   const canAsk = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
   const ask = async (meetingId: string, question: string): Promise<boolean> => {
     const meeting = await recordings.getRecording(workspaceId, meetingId).catch(() => null);
-    const created = await startSession(workspaceId, {
-      text: meetingQuestionMessage(question, { id: meetingId, title: meeting?.title ?? null }),
-    });
+    const created = await startSession(
+      workspaceId,
+      { text: meetingQuestionMessage(question, { id: meetingId, title: meeting?.title ?? null }) },
+      { visibility: meetingQuestionVisibility(meeting) },
+    );
     // startSession has already said why it couldn't start; keep the question.
     if (!created) return false;
     await navigate({

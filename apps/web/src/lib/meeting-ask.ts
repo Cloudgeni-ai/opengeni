@@ -13,3 +13,15 @@ export function meetingQuestionMessage(
     : `meeting ${meeting.id}`;
   return `${question.trim()}\n\nAbout ${named}. Read it with meeting_read.`;
 }
+
+/**
+ * Who can see the chat that asks about a meeting. The chat quotes the
+ * meeting, so it may only be as open as the meeting itself: a meeting shared
+ * with the workspace keeps the workspace's usual chat visibility, and any
+ * other meeting (private, or one we could not read) gets a private chat.
+ */
+export function meetingQuestionVisibility(
+  meeting: { visibility: "private" | "workspace" } | null,
+): "private" | undefined {
+  return meeting?.visibility === "workspace" ? undefined : "private";
+}
