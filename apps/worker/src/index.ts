@@ -13,7 +13,7 @@ import {
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
-  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -1225,10 +1225,7 @@ export async function startWorker() {
     ...databasePoolOptions(settings),
     ...databasePasswordFileOptions(settings),
   };
-  const credentialEvents = (pool: string) =>
-    logDatabaseCredentialEvent(pool, (message, attributes) =>
-      observability.warn(message, attributes),
-    );
+  const credentialEvents = (pool: string) => observeDatabaseCredentialEvents(pool, observability);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
