@@ -67,14 +67,17 @@ pub fn inodes_for(contents: Contents, size: u64) -> u64 {
 }
 
 /// Makes `output`, an ext4 image of `root` with `free` bytes to spare.
-/// Returns its size.
+/// Returns its size. Each is a new file system, with a random UUID, so no
+/// two images made are the same bytes: the control service relies on no
+/// disk being captured with a build's bytes before that build is
+/// recorded (ADR 22).
 pub fn make(root: &Path, output: &Path, free: u64) -> Result<u64> {
     let contents = measure(root)?;
     let size = size_for(contents, free);
     let _ = fs::remove_file(output);
     fs::File::create(output)?.set_len(size)?;
     let status = Command::new("mkfs.ext4")
-        .args(["-q", "-F", "-L", "opengeni", "-N"])
+        .args(["-q", "-F", "-L", "opengeni", "-U", "random", "-N"])
         .arg(inodes_for(contents, size).to_string())
         .arg("-d")
         .arg(root)
@@ -88,6 +91,29 @@ pub fn make(root: &Path, output: &Path, free: u64) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_images_of_one_root_are_different_bytes() {
+        use std::io::Read as _;
+
+        // The superblock, which holds the UUID, is in the first block.
+        let start = |path: &Path| {
+            let mut block = vec![0; 4096];
+            fs::File::open(path)
+                .unwrap()
+                .read_exact(&mut block)
+                .unwrap();
+            block
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file"), "contents").unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        make(&root, &first, 0).unwrap();
+        make(&root, &second, 0).unwrap();
+        assert_ne!(start(&first), start(&second));
+    }
 
     #[test]
     fn sizes_cover_contents_metadata_and_free_space() {

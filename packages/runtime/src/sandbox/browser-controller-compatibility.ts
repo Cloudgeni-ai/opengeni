@@ -42,6 +42,18 @@ export const NEWER_BROWSER_ACTION_OPTIONS: readonly NewerBrowserActionOption[] =
         (value) => (value.kind === "text" || value.kind === "label") && value.exact !== undefined,
       ),
   },
+  {
+    // First accepted by the agent release after 0.1.144.
+    surfaceKeys: [
+      "BrowserAction $",
+      "BrowserAction $|type=viewport_reset",
+      "BrowserAction $|type=viewport_reset.type",
+    ],
+    name: 'type "viewport_reset"',
+    context: "an action",
+    alternative: "set type viewport with the window's own width and height",
+    usedBy: (action) => someObject(action, (value) => value.type === "viewport_reset"),
+  },
 ];
 
 /**

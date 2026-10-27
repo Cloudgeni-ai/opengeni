@@ -227,8 +227,8 @@ impl Preparer {
     }
 }
 
-/// Where built images go: the host's store.
-trait Keeps: Send + Sync + 'static {
+/// Where built and captured images go: the host's store.
+pub(crate) trait Keeps: Send + Sync + 'static {
     fn keep<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Option<ImageId>, EngineError>>;
 }
 

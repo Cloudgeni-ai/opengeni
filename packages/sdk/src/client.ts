@@ -11346,7 +11346,7 @@ export class OpenGeniClient {
    */
   async getBillingCheckout(
     checkoutSessionId: string,
-    options: { accountId?: string } = {},
+    options: { accountId?: string; signal?: AbortSignal } = {},
   ): Promise<BillingCheckoutStatus> {
     return await this.requestJson(
       "GET",
@@ -11355,6 +11355,7 @@ export class OpenGeniClient {
       {
         ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 
