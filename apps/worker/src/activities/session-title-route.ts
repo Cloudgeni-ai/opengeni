@@ -37,6 +37,12 @@ export const SessionTitleRequest = z.object({
   countsTowardTokenCap: z.boolean(),
   pricingJson: z.string(),
   serviceTier: z.enum(["fast", "priority", "ultrafast"]).optional(),
+  /**
+   * Processing residency of the accepted title route, recorded on the title's
+   * usage event and fact. Read with `parseModelCallProcessingResidency`;
+   * requests admitted before it existed omit it and record unknown.
+   */
+  processingResidency: z.unknown().optional(),
 });
 export type SessionTitleRequest = z.infer<typeof SessionTitleRequest>;
 

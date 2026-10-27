@@ -1,5 +1,6 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { ModelProcessingGeography } from "./model-residency";
 // Deliberately exported only from @opengeni/contracts/insights-usage. Importing
 // these schemas must not pull in the root contracts index or its browser graph.
 import { z } from "zod";
@@ -728,6 +729,11 @@ export const InsightsCall = /* @__PURE__ */ defineSchema(() =>
       chargedMicros: SafeCount,
       listMicros: SafeCount.nullable(),
       listByClassMicros: InsightsUsageClassMicros.nullable(),
+      /**
+       * Where the route that served the call processed it. Null for calls
+       * recorded before calls carried a processing residency; unknown is never EU.
+       */
+      processingGeography: ModelProcessingGeography.nullable(),
     })
     .strict()
     .superRefine((value, context) => {

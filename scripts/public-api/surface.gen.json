@@ -18618,6 +18618,7 @@
         "$.occurredAt": "string!",
         "$.payer": "ref(InsightsUsagePayer)!",
         "$.personKey": "string! null",
+        "$.processingGeography": "ref(ModelProcessingGeography)! null",
         "$.provider": "string!",
         "$.sessionId": "string! null",
         "$.sessionKind": "enum!=[\"\\\"deleted\\\"\",\"\\\"private\\\"\",\"\\\"visible\\\"\"]",

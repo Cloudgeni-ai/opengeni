@@ -101,3 +101,19 @@ Declaration example (a registry provider in the deployment catalog):
   "models": [{ "id": "azure-eu/gpt-eu", "upstreamModelId": "gpt-eu" }]
 }
 ```
+
+## Recorded region
+
+Every model call records where the route that served it processes data. The
+worker resolves the record from the route that actually served the call (the
+resolved `ConfiguredModel.residency`, or `builtinModelResidency` for the
+built-in fallback), never from a name, and stores its claim
+(`ModelCallProcessingResidencyV1`: `geography`, `deploymentType`, `regions`,
+never evidence) on the call's `model_call_facts.processing_residency` and its
+durable `agent.model.usage` event as `processingResidency`. That covers turn
+responses, the aggregate billing fallback, compaction and session titles (the
+independent title freezes its accepted route's record in its request). Facts
+rebuilt from usage events keep the event's value. A new call whose route has
+no readable record is recorded as `unknown`; null means only that the call was
+recorded before calls carried one (migration 1001). Insights calls expose each
+call's `processingGeography`.

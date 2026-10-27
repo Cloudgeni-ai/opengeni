@@ -177,6 +177,7 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import {
@@ -200,7 +201,11 @@ import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./own
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type {
+  ModelCallProcessingResidencyV1,
+  PromptCacheRequestFingerprint,
+  TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -488,6 +493,14 @@ export async function runTurnStreamAttempt(
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
+  // Where this turn's route processes data, recorded on every call it serves.
+  // The title records its own route's residency once that route is chosen.
+  const turnProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
+  let titleProcessingResidency: ModelCallProcessingResidencyV1 | null = null;
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let independentTitleAdmission: Promise<void> | null = null;
   let beginIndependentTitleAdmission: (() => Promise<void>) | null = null;
@@ -539,6 +552,7 @@ export async function runTurnStreamAttempt(
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
         leaseLostMessage: "Provider credential lease expired during session title generation",
+        processingResidency: titleProcessingResidency ?? turnProcessingResidency,
       });
     }
     if (!generated.title) {
@@ -1349,6 +1363,7 @@ export async function runTurnStreamAttempt(
             latestPromptCacheRequest = null;
             return request;
           },
+          processingResidency: turnProcessingResidency,
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -2052,6 +2067,7 @@ export async function runTurnStreamAttempt(
               servingAccountHash: aggregateAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,
+              processingResidency: turnProcessingResidency,
             });
             if (aggregateAuthoritative && billing) {
               await recordAuthoritativeModelCallFact({
@@ -2070,6 +2086,7 @@ export async function runTurnStreamAttempt(
                 subscriptionConnectionId:
                   subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
+                processingResidency: turnProcessingResidency,
               });
               recordAuthoritativeModelUsageMetrics({
                 observability,
@@ -2576,6 +2593,11 @@ export async function runTurnStreamAttempt(
       ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
       : undefined;
     titleUsageModelId = titleRoute.usageModelId;
+    titleProcessingResidency = servedRouteProcessingResidency(
+      settings,
+      titleRoute.resolvedModel,
+      titleRoute.usageModelId ?? turnExecutionPolicy.productModelId,
+    );
     if (
       startSessionTitleWorkflow &&
       titleRoute.resolvedModel &&

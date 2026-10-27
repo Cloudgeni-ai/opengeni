@@ -138,6 +138,9 @@ import {
   AppShotCapture,
   classifyPromptCacheWarmMiss,
   parsePromptCacheObservation,
+  parseModelCallProcessingResidency,
+  modelCallProcessingResidency,
+  type ModelCallProcessingResidencyV1,
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
@@ -6025,6 +6028,11 @@ export type ModelCallFact = {
   contextContributions: readonly ModelContextContributionSummary[] | null;
   /** Prompt-cache observation and warm-miss classification, when recorded. */
   promptCacheDiagnostics: PromptCacheDiagnostics | null;
+  /**
+   * Where the route that served the call processed it (no evidence). Null
+   * only for calls recorded before calls carried a processing residency.
+   */
+  processingResidency: ModelCallProcessingResidencyV1 | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -6065,6 +6073,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
         : null,
     contextContributions: row.contextContributions,
     promptCacheDiagnostics: row.promptCacheDiagnostics ?? null,
+    processingResidency: parseModelCallProcessingResidency(row.processingResidency),
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -6151,6 +6160,12 @@ export async function recordModelCallFact(
      * call of the same model in the session. Omitted by repair paths.
      */
     promptCache?: PromptCacheObservation | null;
+    /**
+     * Processing residency claim of the route that served the call. Only the
+     * claim is stored, never evidence; a call whose route is not known is
+     * recorded as unknown, never null.
+     */
+    processingResidency?: ModelCallProcessingResidencyV1 | null;
     occurredAt?: Date;
     /**
      * The shared-core subscription connection that served the call (core
@@ -6286,6 +6301,9 @@ export async function recordModelCallFact(
           connectionId: input.connectionId ?? null,
           ...modelCallTimingColumns(timing),
           promptCacheDiagnostics,
+          processingResidency:
+            parseModelCallProcessingResidency(input.processingResidency) ??
+            modelCallProcessingResidency(null),
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -6315,6 +6333,7 @@ export async function recordModelCallFact(
             timeToFirstTextMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTextMs}, excluded.time_to_first_text_ms)`,
             durationMs: sql`coalesce(${schema.modelCallFacts.durationMs}, excluded.duration_ms)`,
             promptCacheDiagnostics: sql`coalesce(${schema.modelCallFacts.promptCacheDiagnostics}, excluded.prompt_cache_diagnostics)`,
+            processingResidency: sql`coalesce(${schema.modelCallFacts.processingResidency}, excluded.processing_residency)`,
           },
         })
         .returning();

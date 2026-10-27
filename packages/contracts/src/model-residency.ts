@@ -354,3 +354,51 @@ export function projectClientModelResidency(residency: ModelResidencyV1): Client
     eu: isEuResidency(residency),
   };
 }
+
+/**
+ * Where the route that served one model call processes data, as recorded on
+ * the call's `model_call_facts` row and its durable `agent.model.usage` event:
+ * the residency claim only. Evidence is never recorded, because its reference
+ * text may name internal resources.
+ */
+export const ModelCallProcessingResidencyV1 = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      geography: ModelProcessingGeography,
+      deploymentType: ModelDeploymentType,
+      regions: z.array(z.string().regex(REGION_PATTERN)).max(32),
+    })
+    .strict(),
+);
+export type ModelCallProcessingResidencyV1 = z.infer<typeof ModelCallProcessingResidencyV1>;
+
+/**
+ * The recorded processing residency for a call served by a route with this
+ * residency record. A missing or invalid record is recorded as unknown.
+ */
+export function modelCallProcessingResidency(
+  residency: ModelResidencyV1 | null | undefined,
+): ModelCallProcessingResidencyV1 {
+  const parsed = ModelResidencyV1.safeParse(residency);
+  return modelResidencyClaim(parsed.success ? parsed.data : UNKNOWN_MODEL_RESIDENCY);
+}
+
+/**
+ * Read a recorded processing residency (a fact column or event payload field).
+ * Absent or null means the call was recorded before calls carried one. A value
+ * that is present but malformed is unknown. Any other field, such as evidence,
+ * is dropped.
+ */
+export function parseModelCallProcessingResidency(
+  value: unknown,
+): ModelCallProcessingResidencyV1 | null {
+  if (value === undefined || value === null) return null;
+  const record =
+    typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const parsed = ModelCallProcessingResidencyV1.safeParse({
+    geography: record.geography,
+    deploymentType: record.deploymentType,
+    regions: record.regions,
+  });
+  return modelResidencyClaim(parsed.success ? parsed.data : UNKNOWN_MODEL_RESIDENCY);
+}

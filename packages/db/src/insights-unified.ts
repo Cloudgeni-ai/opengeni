@@ -428,6 +428,13 @@ function validCursorTimestamp(value: unknown): value is string {
   );
 }
 
+/**
+ * Private reader keys added to the calls query (migration 1001). The SQL filter
+ * ignores them; the reader returns the added fields only when asked, so the
+ * previous release keeps receiving the response shape it parses.
+ */
+const CALLS_READER_FIELDS = { processingGeography: true } as const;
+
 /** Visible details only; cursor and all filters are inside the bounded raw read. */
 export async function readInsightsCalls(
   db: Database,
@@ -473,7 +480,7 @@ export async function readInsightsCalls(
       const result =
         await scoped.execute(sql`select payload from opengeni_private.insights_scoped_calls_rows(
       ${input.accountId}::uuid,${input.workspaceId}::uuid,${window.since.toISOString()}::timestamptz,${window.until.toISOString()}::timestamptz,
-      ${JSON.stringify(input.query)}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
+      ${JSON.stringify({ ...input.query, ...CALLS_READER_FIELDS })}::jsonb,${cursorAt}::timestamptz,${cursorId}::uuid,${input.query.limit + 1}::int,
       ${details},${input.detailsSharedWorkspaces === true}::boolean)
       order by (payload->>'occurredAt')::timestamptz desc,payload->>'id' desc limit ${input.query.limit + 1}`);
       return rows<{ payload: InsightsCall }>(result).map((row) => row.payload);
@@ -488,6 +495,9 @@ export async function readInsightsCalls(
           "base64url",
         )
       : null;
-  for (const call of selected) call.occurredAt = new Date(call.occurredAt).toISOString();
+  for (const call of selected) {
+    call.occurredAt = new Date(call.occurredAt).toISOString();
+    call.processingGeography ??= null;
+  }
   return { calls: selected, nextCursor };
 }
