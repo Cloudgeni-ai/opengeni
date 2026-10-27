@@ -780,6 +780,7 @@ async fn run(
     // its own; idle timers would start steps at unpredictable moments.
     let config = SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,

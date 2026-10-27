@@ -101,8 +101,9 @@ impl<S: Store> Service<S> {
     /// Moves a team's sandbox off its host: the owner hands it off and the
     /// service clears its owner. With `to`, the host of that name adopts
     /// it at once, under its renewal as it stands once the hand-off is
-    /// done (which can take minutes); otherwise its next wake places it.
-    /// With `awake`, it goes even while it is awake.
+    /// done (which can take minutes), if it offers all the sandbox
+    /// reaches; otherwise its next wake places it. With `awake`, it goes
+    /// even while it is awake.
     pub async fn move_to(
         &self,
         team: &str,
@@ -110,16 +111,29 @@ impl<S: Store> Service<S> {
         to: Option<&str>,
         awake: bool,
     ) -> Result<SandboxRow, Failure> {
-        let to = to
+        let named = to
             .map(|name| {
                 self.view
                     .named(name)
                     .filter(|known| known.state == HostState::Live)
-                    .map(|known| known.target.host)
                     .ok_or_else(|| Failure::Invalid(format!("no live host is named {name}")))
             })
             .transpose()?;
         let row = self.get(team, id).await?;
+        if let Some(known) = &named
+            && let Some(name) = row
+                .spec
+                .config
+                .reach
+                .iter()
+                .find(|name| !known.info.offers.contains(name))
+        {
+            return Err(Failure::Invalid(format!(
+                "host {} does not offer {name:?}, which the sandbox reaches",
+                known.target.name
+            )));
+        }
+        let to = named.map(|known| known.target.host);
         if let Some(host) = row.ownership.owner {
             if to == Some(host) {
                 return Ok(row);

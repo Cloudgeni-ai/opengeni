@@ -74,6 +74,7 @@ fn host_info(id: u64) -> HostInfo {
         zone: ZoneId(u16::try_from(id % 3).unwrap()),
         class: ClassId(u16::try_from(id % 2).unwrap()),
         huge_pages: id.is_multiple_of(4),
+        offers: compute_fleet::Offers::NONE,
     }
 }
 
@@ -102,6 +103,7 @@ fn demand(rng: &mut Rng) -> Demand {
         memory_max_mib: memory_mib * 2,
         cpu_millis: 0,
         disk_mib: 1_024,
+        reach: compute_fleet::Offers::NONE,
         // Creates and adopts in equal parts.
         prefer: if rng.chance(1, 2) {
             Prefer::ReadyClone(ShapeKey(rng.below(SHAPES)))

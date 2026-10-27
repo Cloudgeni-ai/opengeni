@@ -276,6 +276,7 @@ impl Agent {
 async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
     let config = SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: 1,
         memory_mib: 512,

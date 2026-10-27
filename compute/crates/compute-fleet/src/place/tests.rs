@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use super::{
-    Capacity, ClassId, Demand, Fleet, HostId, HostInfo, HostState, Prefer, Rng, ShapeKey, ZoneId,
+    Capacity, ClassId, Demand, Fleet, HostId, HostInfo, HostState, Offers, Prefer, Rng, ShapeKey,
+    ZoneId,
 };
 
 const SHAPE: ShapeKey = ShapeKey(42);
@@ -11,6 +12,7 @@ fn info(zone: u16) -> HostInfo {
         zone: ZoneId(zone),
         class: ClassId(0),
         huge_pages: false,
+        offers: Offers::NONE,
     }
 }
 
@@ -32,6 +34,7 @@ fn demand(memory_mib: u64) -> Demand {
         memory_max_mib: memory_mib * 2,
         cpu_millis: 0,
         disk_mib: 1_000,
+        reach: Offers::NONE,
         prefer: Prefer::Any,
     }
 }
@@ -242,6 +245,68 @@ fn huge_page_hosts_need_all_the_guest_memory() {
     assert_eq!(
         fleet.place(&demand(800), &HashSet::from([HostId(2)]), &mut rng),
         None
+    );
+}
+
+/// A sandbox that asks to reach offers goes only to a host that makes all
+/// of them, however much room the others have, found by walking the pool
+/// when the draws miss it; one that asks for none goes anywhere.
+#[test]
+fn a_sandbox_that_reaches_offers_goes_only_to_hosts_that_offer_them() {
+    let mut fleet = fleet(100, 64 * 1024);
+    let previews = Offers::NONE.with(0);
+    let both = previews.with(5);
+    let offering = |offers| HostInfo { offers, ..info(0) };
+    fleet.upsert(HostId(7), offering(both), HostState::Live, capacity(1_000));
+    fleet.upsert(
+        HostId(8),
+        offering(previews),
+        HostState::Live,
+        capacity(2_000),
+    );
+    let mut rng = Rng::new(9);
+    let wanted = |reach| Demand {
+        reach,
+        ..demand(500)
+    };
+    for _ in 0..200 {
+        let host = fleet
+            .place(&wanted(previews), &HashSet::new(), &mut rng)
+            .unwrap()
+            .host;
+        assert!([HostId(7), HostId(8)].contains(&host), "{host:?}");
+        let host = fleet
+            .place(&wanted(both), &HashSet::new(), &mut rng)
+            .unwrap()
+            .host;
+        assert_eq!(host, HostId(7));
+    }
+    // Even when no host fits by the view, only hosts that offer it are
+    // asked, and none is left once they refused.
+    let host = fleet
+        .place(
+            &Demand {
+                reach: both,
+                ..demand(4_000)
+            },
+            &HashSet::new(),
+            &mut rng,
+        )
+        .unwrap()
+        .host;
+    assert_eq!(host, HostId(7));
+    assert_eq!(
+        fleet.place(&wanted(both), &HashSet::from([HostId(7)]), &mut rng),
+        None
+    );
+    assert_eq!(
+        fleet.place(&wanted(Offers::NONE.with(6)), &HashSet::new(), &mut rng),
+        None
+    );
+    assert!(
+        fleet
+            .place(&wanted(Offers::NONE), &HashSet::new(), &mut rng)
+            .is_some()
     );
 }
 

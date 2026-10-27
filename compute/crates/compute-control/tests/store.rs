@@ -59,6 +59,7 @@ fn register(name: &str, attempt: u64, held: Vec<Held>) -> Register {
             memory_mib: 4096,
             cpu_millis: 4000,
             disk_mib: 4096,
+            offers: Vec::new(),
         },
         capacity: capacity(),
         held,
@@ -78,6 +79,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
             image: "base".into(),
             config: SandboxConfig {
                 disk_mib: None,
+                reach: Vec::new(),
                 vcpus: 1,
                 memory_mib: 256,
                 memory_request_mib: None,

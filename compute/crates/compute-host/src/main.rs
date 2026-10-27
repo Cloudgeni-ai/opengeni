@@ -161,6 +161,7 @@ impl CreateArgs {
         }
         SandboxConfig {
             disk_mib: None,
+            reach: Vec::new(),
             image: self.image,
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
@@ -353,6 +354,16 @@ struct ServeArgs {
     /// host, metadata services or other sandboxes. Repeatable.
     #[arg(long = "reach")]
     reach: Vec<compute_host::net::Reach>,
+    /// A destination, as for `--reach`, that only the sandboxes that ask
+    /// for it by name may open: `NAME=DESTINATION:PORTS`, such as
+    /// `previews=k3s.internal:6443`. Entries with one name make one offer
+    /// of all their destinations; a sandbox's create lists the names it
+    /// asks for in its `reach`, and the host opens and answers them in its
+    /// namespace alone. In a fleet, the host tells the control service
+    /// its offers' names, and only such sandboxes are placed on it for
+    /// them. Needs `--network`. Repeatable.
+    #[arg(long = "offer", requires = "network")]
+    offers: Vec<compute_host::net::Offer>,
     /// Another range sandboxes may not reach, such as the host's public
     /// address where the cloud maps it onto a private one. Repeatable.
     #[arg(long = "block")]
@@ -410,6 +421,17 @@ impl ServeArgs {
             blocking: get(self.blocking_threads, compress + 64),
             compress,
         }
+    }
+
+    /// The sandboxes' network, if the host makes one, taking its settings.
+    fn take_network(&mut self) -> Option<NetworkConfig> {
+        self.network.then(|| NetworkConfig {
+            pool: self.network_pool,
+            reach: std::mem::take(&mut self.reach),
+            offers: std::mem::take(&mut self.offers),
+            blocked: std::mem::take(&mut self.blocked),
+            dns: std::mem::take(&mut self.dns),
+        })
     }
 }
 
@@ -748,7 +770,8 @@ fn host_policy(
     Ok(policy)
 }
 
-async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let network = args.take_network();
     let pool = pool_config(&args);
     let threads = args.threads();
     tracing::info!(?threads, "thread counts");
@@ -780,6 +803,9 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         cpu_millis: policy
             .cpu_budget
             .context("a serving host guarantees processor time")?,
+        offers: network
+            .as_ref()
+            .map_or_else(Vec::new, NetworkConfig::offer_names),
     })?;
     let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
     // A host in a fleet keeps agent links for the sandboxes that run
@@ -811,12 +837,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
         pool,
-        network: args.network.then_some(NetworkConfig {
-            pool: args.network_pool,
-            reach: args.reach,
-            blocked: args.blocked,
-            dns: args.dns,
-        }),
+        network,
         busy: (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
             cpu_percent: args.busy_cpu_percent,
             io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),

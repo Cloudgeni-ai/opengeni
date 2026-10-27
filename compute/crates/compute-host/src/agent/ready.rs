@@ -786,6 +786,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             change: guarantees != (filled.memory_request(), filled.cpu_weight()),
             guarantees,
             disk: self.claimed_disk(&idle.record),
+            // Filled reaching nothing: one that asks for offers is given
+            // them before its guest first runs as it.
+            network: self
+                .net
+                .clone()
+                .filter(|_| !config.reach.is_empty())
+                .zip(Images::link(&idle.record))
+                .map(|(net, link)| (net, link.reaching(&config.reach))),
         };
         tokio::spawn(async move {
             let result = match fitting.fit(&*engine, &idle.live.vm, &config).await {
@@ -977,6 +985,9 @@ struct Fitting {
     /// Whether they differ from what the VM was filled with.
     change: bool,
     disk: super::disk::ClaimedDisk,
+    /// Its network and the link to set up again with the offers the
+    /// create asks to reach, where it asks for any.
+    network: Option<(Arc<crate::net::Networks>, crate::net::Link)>,
 }
 
 impl Fitting {
@@ -989,7 +1000,10 @@ impl Fitting {
         config: &SandboxConfig,
     ) -> std::io::Result<Fit> {
         let Self {
-            template, sources, ..
+            template,
+            sources,
+            network,
+            ..
         } = self;
         // A template that no longer fits today's kernel, image or VMM
         // makes its ready sandboxes stale too.
@@ -1010,6 +1024,14 @@ impl Fitting {
             .then(|| engine.set_guarantees(vm, memory, weight))
         {
             return Ok(Fit::Unfit(error.to_string()));
+        }
+        if let Some((net, link)) = network {
+            let reached = tokio::task::spawn_blocking(move || net.ensure(&link))
+                .await
+                .map_err(std::io::Error::other)?;
+            if let Err(error) = reached {
+                return Ok(Fit::Unfit(error.to_string()));
+            }
         }
         Ok(match self.disk.lengthen(engine, vm, config).await {
             Ok(length) => Fit::Fits(Some(length)),

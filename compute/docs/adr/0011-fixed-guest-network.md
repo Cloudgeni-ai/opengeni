@@ -1,7 +1,8 @@
 # 11. The same guest network everywhere, firewalled per sandbox
 
 Status: Accepted, 2026-10-16; amended 2026-10-20 (listed destinations and
-the sandboxes' name server replace the `trusted` switch)
+the sandboxes' name server replace the `trusted` switch) and 2026-10-27
+(destinations offered only to the sandboxes that ask for them)
 
 ## Context
 
@@ -25,6 +26,18 @@ Sandboxes run untrusted code next to each other and next to the host.
   This replaced an earlier all-or-nothing `trusted` switch that opened the
   whole local network, which on a host joined to an overlay network or a
   home network gave every sandbox everything the host could reach.
+- A host may also offer destinations, listed the same way, under a name
+  (`--offer previews=k3s.internal:6443`), to only the sandboxes whose
+  create asks for that name (`reach`). An offer opens in those sandboxes'
+  namespaces alone; on the host it opens only for their links' addresses,
+  kept in a set per offer, so it too is enforced twice. Their name servers
+  answer its names; others' do not. A host tells the control service its
+  offers' names, placement puts such a sandbox only on a host that makes
+  every one it asks for, and the operator grants each team the offers its
+  sandboxes may ask for (`--team-reach`). Otherwise a destination only some
+  workloads need, such as a private cluster's API that only deploy jobs
+  use, would open to every sandbox on the host, or need a host of its own
+  that placement cannot steer to.
 - Every guest's name server is its gateway, 169.254.0.22, on every host.
   The host answers there inside each namespace: a listed name with the
   addresses the firewalls open for it, anything else by asking public name

@@ -29,11 +29,13 @@
 //! then the one with more free memory, then the one with more it could
 //! free. Drawing two keeps load even without herding every request onto the
 //! single emptiest host, and costs the same at five thousand hosts as at
-//! five.
+//! five. A sandbox that asks to reach private destinations hosts offer
+//! goes only to a host that offers all of them; where few hosts do, the
+//! draws miss and placement walks the pool for one.
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::ids::{ClassId, HostId, ShapeKey, ZoneId};
+use crate::ids::{ClassId, HostId, Offers, ShapeKey, ZoneId};
 use crate::rng::Rng;
 
 /// What placement needs to know about a host that does not change while it
@@ -47,6 +49,8 @@ pub struct HostInfo {
     /// Whether it backs guest memory with huge pages, and so reserves a
     /// sandbox's whole memory rather than what it requests.
     pub huge_pages: bool,
+    /// The private destinations it opens to sandboxes that ask for them.
+    pub offers: Offers,
 }
 
 /// Whether placement may use a host.
@@ -93,6 +97,8 @@ pub struct Demand {
     pub cpu_millis: u64,
     /// Disk in MiB it needs.
     pub disk_mib: u64,
+    /// The offers its host must make: the private destinations it reaches.
+    pub reach: Offers,
     /// The hosts it would rather go to.
     pub prefer: Prefer,
 }
@@ -344,6 +350,7 @@ impl Fleet {
                 let memory = demand.memory_on(entry.info);
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
+                    && entry.info.offers.cover(demand.reach)
                     && capacity.memory_mib >= memory
                     && (!now
                         || (capacity

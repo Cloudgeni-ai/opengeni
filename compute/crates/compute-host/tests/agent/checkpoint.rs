@@ -57,6 +57,7 @@ fn shared_extents() -> Option<PathBuf> {
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         vcpus: 1,
         memory_mib: 256,
         memory_request_mib: None,

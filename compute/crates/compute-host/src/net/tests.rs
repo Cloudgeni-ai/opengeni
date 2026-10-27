@@ -170,8 +170,8 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
             .iter()
             .any(|net| net == "93.184.216.0/24")
     );
-    let none = plain.allowed().unwrap();
-    let rules = plain.sandbox_rules(1460, &none);
+    let none = plain.reachable().unwrap();
+    let rules = plain.sandbox_rules(1460, &none.every);
     assert!(rules.contains("policy drop"));
     assert!(rules.contains("meta l4proto tcp reject with tcp reset"));
     assert!(rules.contains("10.0.0.0/8"));
@@ -197,8 +197,8 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
 
     // Listed ports open on that address alone, in both firewalls, ahead
     // of what blocks the rest of the local network.
-    let allowed = reaching.allowed().unwrap();
-    let rules = reaching.sandbox_rules(1460, &allowed);
+    let allowed = reaching.reachable().unwrap();
+    let rules = reaching.sandbox_rules(1460, &allowed.every);
     let open = "iifname \"tap0\" oifname \"uplink\" ip saddr 169.254.0.21 ip daddr \
                 10.20.0.7/32 tcp dport { 443, 9443-9445 } accept";
     let opened = rules
@@ -217,7 +217,145 @@ fn the_local_network_is_blocked_but_for_the_ports_a_host_lists() {
             reach: vec![closed.parse().unwrap()],
             ..reaching.clone()
         };
-        assert!(config.allowed().is_err(), "{closed}");
+        assert!(config.reachable().is_err(), "{closed}");
+    }
+}
+
+/// An offer opens its destinations only to the sandboxes that ask for it:
+/// in their namespaces' rules, in their name servers' answers, and on the
+/// host for their links' addresses alone, kept in the offer's set. Each
+/// name is looked up once however many entries give it.
+#[test]
+fn an_offer_opens_only_for_the_sandboxes_that_ask_for_it() {
+    let offer = |text: &str| text.parse::<Offer>().unwrap();
+    let config = NetworkConfig {
+        reach: vec!["api.internal:443".parse().unwrap()],
+        offers: vec![
+            offer("previews=10.20.0.9:6443"),
+            offer("previews=k3s.internal:6443,10250"),
+            offer("builds=api.internal:22"),
+        ],
+        ..NetworkConfig::default()
+    };
+    assert_eq!(config.offer_names(), ["builds", "previews"]);
+    let mut looked_up = Vec::new();
+    let reachable = config
+        .reachable_with(|name| {
+            looked_up.push(name.to_owned());
+            Ok(vec![match name {
+                "api.internal" => Ipv4Addr::new(100, 70, 0, 1),
+                _ => Ipv4Addr::new(10, 20, 0, 10),
+            }])
+        })
+        .unwrap();
+    assert_eq!(looked_up, ["api.internal", "k3s.internal"]);
+
+    // The host opens each offer for the addresses in its set alone,
+    // ahead of what blocks the rest of the local network.
+    let host = config.host_rules(&reachable);
+    assert!(
+        host.contains("set offer0 {\n        type ipv4_addr;\n    }"),
+        "{host}"
+    );
+    assert!(host.contains("set offer1 {"), "{host}");
+    let previews = "iifname \"ogc*\" ip saddr @offer1 ip daddr 10.20.0.9/32 tcp dport { 6443 } \
+                    accept";
+    let opened = host.find(previews).expect("the host opens the offer");
+    assert!(opened < host.find("ip daddr {").unwrap());
+    assert!(host.contains(
+        "iifname \"ogc*\" ip saddr @offer1 ip daddr 10.20.0.10/32 tcp dport { 6443, 10250 } accept"
+    ));
+    assert!(host.contains(
+        "iifname \"ogc*\" ip saddr @offer0 ip daddr 100.70.0.1/32 tcp dport { 22 } accept"
+    ));
+    assert!(host.contains("iifname \"ogc*\" ip daddr 100.70.0.1/32 tcp dport { 443 } accept"));
+
+    // A sandbox's own rules and names hold what every sandbox reaches and
+    // the offers it asks for, and no others.
+    let asks =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    let plain = reachable.of(&[]);
+    assert_eq!(plain, reachable.every);
+    let rules = config.sandbox_rules(1460, &plain);
+    assert!(!rules.contains("10.20.0.9"), "{rules}");
+    assert!(!plain.names.contains_key("k3s.internal"));
+    let reaching = reachable.of(&asks(&["previews", "gone"]));
+    let rules = config.sandbox_rules(1460, &reaching);
+    assert!(
+        rules.contains("ip daddr 10.20.0.9/32 tcp dport { 6443 } accept"),
+        "{rules}"
+    );
+    assert!(rules.contains("ip daddr 10.20.0.10/32 tcp dport { 6443, 10250 } accept"));
+    assert!(rules.contains("ip daddr 100.70.0.1/32 tcp dport { 443 } accept"));
+    assert!(!rules.contains("tcp dport { 22 }"), "{rules}");
+    assert_eq!(
+        reaching.names.keys().collect::<Vec<_>>(),
+        ["api.internal", "k3s.internal"]
+    );
+    let both = reachable.of(&asks(&["builds", "previews"]));
+    let rules = config.sandbox_rules(1460, &both);
+    assert!(
+        rules.contains("ip daddr 100.70.0.1/32 tcp dport { 443, 22 } accept"),
+        "{rules}"
+    );
+}
+
+/// A link joins the sets of the offers it asks for and leaves the others,
+/// whatever it was in before, in one transaction.
+#[test]
+fn a_link_joins_the_sets_of_the_offers_it_asks_for() {
+    let config = NetworkConfig {
+        offers: vec![
+            "previews=10.20.0.9:6443".parse().unwrap(),
+            "builds=10.20.0.8:22".parse().unwrap(),
+        ],
+        ..NetworkConfig::default()
+    };
+    let reachable = config.reachable_with(|_| unreachable!()).unwrap();
+    let asks = |name: &str| vec![name.to_owned()];
+    let at = Ipv4Addr::new(198, 18, 0, 5);
+    let commands = reachable.set_commands(at, &asks("previews")).unwrap();
+    assert_eq!(
+        commands,
+        "add element inet opengeni_compute offer0 { 198.18.0.5 }\n\
+         delete element inet opengeni_compute offer0 { 198.18.0.5 }\n\
+         add element inet opengeni_compute offer1 { 198.18.0.5 }\n"
+    );
+    let none = reachable.set_commands(at, &[]).unwrap();
+    assert_eq!(none.matches("delete element").count(), 2, "{none}");
+    assert_eq!(
+        Reachable::default().set_commands(at, &asks("previews")),
+        None
+    );
+    assert!(
+        !NetworkConfig::default()
+            .host_rules(&Reachable::default())
+            .contains("set ")
+    );
+}
+
+/// Offers parse as a name and a destination, and may not open what
+/// sandboxes may never reach.
+#[test]
+fn offers_are_named_destinations_that_may_not_open_what_is_closed() {
+    let closed = NetworkConfig {
+        offers: vec!["metadata=169.254.169.254:80".parse().unwrap()],
+        ..NetworkConfig::default()
+    };
+    let error = closed.reachable_with(|_| unreachable!()).unwrap_err();
+    assert!(error.to_string().contains("--offer metadata="), "{error}");
+
+    let parsed: Offer = "previews=K3s.Internal.:6443".parse().unwrap();
+    assert_eq!(parsed.name, "previews");
+    assert_eq!(parsed.to_string(), "previews=k3s.internal:6443");
+    for wrong in [
+        "previews",
+        "Previews=10.0.0.1:1",
+        "=10.0.0.1:1",
+        "a_b=10.0.0.1:1",
+        "p=10.0.0.1",
+    ] {
+        assert!(wrong.parse::<Offer>().is_err(), "{wrong}");
     }
 }
 

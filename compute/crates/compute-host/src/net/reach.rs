@@ -17,6 +17,13 @@
 //! any of its entries lists, so the two always agree. A name that moves to
 //! another address takes effect when the agent next starts; its sandboxes
 //! keep running meanwhile (ADR 9).
+//!
+//! A host may also offer destinations to only the sandboxes that ask for
+//! them (`--offer`), each under a name a sandbox's create lists in its
+//! `reach`, such as a private cluster's API for the sandboxes that deploy
+//! to it. An offer opens and answers exactly like a `--reach` entry, but
+//! in those sandboxes' namespaces alone, and on the host only for traffic
+//! from their links.
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -105,6 +112,44 @@ impl fmt::Display for Reach {
     }
 }
 
+/// Something a host offers sandboxes that ask for it by name: one
+/// destination and its ports, under the offer's name. Entries with the
+/// same name make one offer of all their destinations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub name: String,
+    pub reach: Reach,
+}
+
+/// Parses `NAME=DESTINATION:PORTS`: the name of the offer, as sandboxes ask
+/// for it, and one destination as for [`Reach`], such as
+/// `previews=k3s.internal:6443`.
+impl FromStr for Offer {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (name, reach) = text
+            .split_once('=')
+            .ok_or_else(|| format!("{text} is not NAME=DESTINATION:PORTS"))?;
+        if !compute_protocol::host::is_offer_name(name) {
+            return Err(format!(
+                "{text}: {name:?} is not an offer's name: 1 to 63 lowercase letters, digits and \
+                 inner hyphens"
+            ));
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            reach: reach.parse()?,
+        })
+    }
+}
+
+impl fmt::Display for Offer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", self.name, self.reach)
+    }
+}
+
 /// Parses `DESTINATION:PORTS`: the destination a DNS name, an address or
 /// `address/prefix`, the ports a comma-separated list of ports and
 /// `first-last` ranges, such as `api.internal:443,9443-9445`.
@@ -180,7 +225,7 @@ impl Allowed {
     /// Resolves `reach`, looking each name up once with `lookup`, and
     /// checks that nothing it opens is a range guests may never reach
     /// (`never`). Entries that lead to the same destination open the
-    /// ports of all of them there.
+    /// ports of all of them there. Errors name an entry after `flag`.
     ///
     /// # Errors
     ///
@@ -189,6 +234,7 @@ impl Allowed {
     pub fn resolve(
         reach: &[Reach],
         never: &[Ipv4Net],
+        flag: &str,
         mut lookup: impl FnMut(&str) -> Result<Vec<Ipv4Addr>, String>,
     ) -> Result<Self, String> {
         let mut allowed = Self::default();
@@ -221,13 +267,28 @@ impl Allowed {
             for net in nets {
                 if let Some(closed) = never.iter().find(|closed| closed.overlaps(net)) {
                     return Err(format!(
-                        "--reach {entry}: {net} is in {closed}, which sandboxes may never reach"
+                        "{flag}{entry}: {net} is in {closed}, which sandboxes may never reach"
                     ));
                 }
                 allowed.open_ports(net, &entry.ports);
             }
         }
         Ok(allowed)
+    }
+
+    /// The same, with what `other` allows too.
+    #[must_use]
+    pub fn and(&self, other: &Self) -> Self {
+        let mut both = self.clone();
+        for (net, ports) in &other.open {
+            both.open_ports(*net, ports);
+        }
+        for (name, addresses) in &other.names {
+            both.names
+                .entry(name.clone())
+                .or_insert_with(|| addresses.clone());
+        }
+        both
     }
 
     /// Adds `ports` to what guests may open at `net`.
@@ -348,7 +409,7 @@ mod tests {
             .collect();
         let never = [net("169.254.0.0/16"), net("198.18.0.0/15")];
         let mut asked = Vec::new();
-        let allowed = Allowed::resolve(&reach, &never, |name| {
+        let allowed = Allowed::resolve(&reach, &never, "--reach ", |name| {
             asked.push(name.to_owned());
             Ok(vec![
                 Ipv4Addr::new(100, 70, 0, 2),
@@ -377,7 +438,7 @@ mod tests {
                 .contains("api.example = 100.70.0.1,100.70.0.2")
         );
         assert_eq!(
-            Allowed::resolve(&[], &never, |_| unreachable!()).unwrap(),
+            Allowed::resolve(&[], &never, "--reach ", |_| unreachable!()).unwrap(),
             Allowed::default()
         );
     }
@@ -398,7 +459,10 @@ mod tests {
         let mut answers = [Ipv4Addr::new(100, 70, 0, 1), Ipv4Addr::new(100, 70, 0, 2)]
             .into_iter()
             .cycle();
-        let allowed = Allowed::resolve(&reach, &[], |_| Ok(vec![answers.next().unwrap()])).unwrap();
+        let allowed = Allowed::resolve(&reach, &[], "--reach ", |_| {
+            Ok(vec![answers.next().unwrap()])
+        })
+        .unwrap();
         let told = &allowed.names["api.example"];
         assert_eq!(told, &[Ipv4Addr::new(100, 70, 0, 1)]);
         let port = |port| Ports {
@@ -428,17 +492,19 @@ mod tests {
             "198.19.0.0/16:80",
             "0.0.0.0/0:443",
         ] {
-            let refused = Allowed::resolve(&reach(closed), &never, |_| unreachable!());
+            let refused = Allowed::resolve(&reach(closed), &never, "--reach ", |_| unreachable!());
             assert!(refused.is_err(), "{closed}");
         }
         // A name is checked by what it resolves to.
-        let metadata = Allowed::resolve(&reach("metadata.internal:80"), &never, |_| {
+        let metadata = Allowed::resolve(&reach("metadata.internal:80"), &never, "--reach ", |_| {
             Ok(vec![Ipv4Addr::new(169, 254, 169, 254)])
         });
         assert!(metadata.unwrap_err().contains("may never reach"));
-        let nothing = Allowed::resolve(&reach("gone.example:80"), &never, |_| Ok(Vec::new()));
+        let nothing = Allowed::resolve(&reach("gone.example:80"), &never, "--reach ", |_| {
+            Ok(Vec::new())
+        });
         assert!(nothing.unwrap_err().contains("no IPv4 address"));
-        let failed = Allowed::resolve(&reach("gone.example:80"), &never, |name| {
+        let failed = Allowed::resolve(&reach("gone.example:80"), &never, "--reach ", |name| {
             Err(format!("{name}: no such name"))
         });
         assert!(failed.unwrap_err().contains("no such name"));

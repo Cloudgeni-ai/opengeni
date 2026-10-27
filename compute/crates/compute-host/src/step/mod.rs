@@ -299,7 +299,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             })
         };
         let ((outcome, after), mut notes) = notes::scope(async {
-            let (mut outcome, mut after) = self.step(step).await;
+            // Boxed so a job's future stays small whatever its steps hold
+            // across their awaits.
+            let (mut outcome, mut after) = Box::pin(self.step(step)).await;
             if outcome == Outcome::Failed(Failure::MemoryLost) {
                 // The memory (and any pager serving it) goes only after the
                 // process.

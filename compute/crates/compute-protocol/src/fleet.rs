@@ -87,6 +87,12 @@ pub struct HostInfo {
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
+    /// What it offers sandboxes that ask to reach it
+    /// ([`crate::host::SandboxConfig::reach`]), by name, sorted: placement
+    /// puts such a sandbox only on a host that offers all it asks for.
+    /// Missing from what a host of an earlier release sends: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<String>,
 }
 
 /// Ready clones a host holds of one image and shape (see the host's ready

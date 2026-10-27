@@ -23,9 +23,11 @@
 //! 169.254.169.254), loopback, multicast or reserved range, or any other
 //! sandbox. A host may list exact destinations and TCP ports beyond the
 //! internet that guests may open, such as a private Opengeni's API
-//! ([`reach`]); nothing else private is reachable. The rules are enforced
-//! twice: inside the namespace, which the VMM joins without the privilege
-//! to change it, and again on the host.
+//! ([`reach`]), and offer more to only the sandboxes that ask for them by
+//! name; nothing else private is reachable. The rules are enforced twice:
+//! inside the namespace, which the VMM joins without the privilege to
+//! change it, and again on the host, where an offer opens only for the
+//! links of the sandboxes that asked for it.
 //!
 //! Every guest's name server is its gateway, where the host answers inside
 //! the namespace ([`dns`]): names the host lists, with their addresses, and
@@ -38,6 +40,7 @@
 //! about a namespace's tap: inside a namespace a lookup can block on a name
 //! service the namespace cannot reach ([`netlink`]).
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -57,7 +60,7 @@ mod netlink;
 pub mod reach;
 
 use reach::Allowed;
-pub use reach::Reach;
+pub use reach::{Offer, Reach};
 
 /// The guest's address, the same in every sandbox.
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 21);
@@ -168,6 +171,9 @@ pub struct NetworkConfig {
     /// connections to, with their ports; none may lie in what is always
     /// blocked, the pool or `blocked`.
     pub reach: Vec<Reach>,
+    /// Destinations, with their ports, that only the sandboxes that ask
+    /// for them by name may open, as `reach` opens them for every sandbox.
+    pub offers: Vec<Offer>,
     /// More ranges guests may not reach, such as the host's public address
     /// where a cloud maps it onto a private one.
     pub blocked: Vec<Ipv4Net>,
@@ -184,6 +190,7 @@ impl Default for NetworkConfig {
                 prefix: 15,
             },
             reach: Vec::new(),
+            offers: Vec::new(),
             blocked: Vec::new(),
             dns: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
         }
@@ -248,26 +255,80 @@ impl NetworkConfig {
         never
     }
 
-    /// `reach` with every name resolved by the host.
-    fn allowed(&self) -> Result<Allowed, NetError> {
-        let allowed = Allowed::resolve(&self.reach, &self.never(), look_up)
-            .map_err(|error| NetError::new("--reach", error))?;
-        if !allowed.open.is_empty() {
-            tracing::info!(reach = %allowed.describe(), "sandboxes may also reach");
-        }
-        Ok(allowed)
+    /// The names of what the host offers, in order, each once.
+    #[must_use]
+    pub fn offer_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.offers.iter().map(|offer| offer.name.clone()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
-    /// The host's own rules, replacing any earlier version atomically.
-    fn host_rules(&self, allowed: &Allowed) -> String {
+    /// `reach` and each offer with every name resolved by the host.
+    fn reachable(&self) -> Result<Reachable, NetError> {
+        let reachable = self.reachable_with(look_up)?;
+        if !reachable.every.open.is_empty() {
+            tracing::info!(reach = %reachable.every.describe(), "sandboxes may also reach");
+        }
+        for (name, allowed) in &reachable.offers {
+            tracing::info!(offer = %name, reach = %allowed.describe(), "sandboxes that ask may reach");
+        }
+        Ok(reachable)
+    }
+
+    /// As [`Self::reachable`], looking each name up once with `lookup`
+    /// however many entries give it.
+    fn reachable_with(
+        &self,
+        mut lookup: impl FnMut(&str) -> Result<Vec<Ipv4Addr>, String>,
+    ) -> Result<Reachable, NetError> {
+        let never = self.never();
+        let mut known: BTreeMap<String, Result<Vec<Ipv4Addr>, String>> = BTreeMap::new();
+        let mut once = |name: &str| {
+            known
+                .entry(name.to_owned())
+                .or_insert_with(|| lookup(name))
+                .clone()
+        };
+        let every = Allowed::resolve(&self.reach, &never, "--reach ", &mut once)
+            .map_err(|error| NetError::new("--reach", error))?;
+        let mut offers = BTreeMap::new();
+        for name in self.offer_names() {
+            let reach: Vec<Reach> = self
+                .offers
+                .iter()
+                .filter(|offer| offer.name == name)
+                .map(|offer| offer.reach.clone())
+                .collect();
+            let flag = format!("--offer {name}=");
+            let allowed = Allowed::resolve(&reach, &never, &flag, &mut once)
+                .map_err(|error| NetError::new("--offer", error))?;
+            offers.insert(name, allowed);
+        }
+        Ok(Reachable { every, offers })
+    }
+
+    /// The host's own rules, replacing any earlier version atomically:
+    /// with a set per offer of the links of the sandboxes that asked for
+    /// it, which starts empty, for [`Networks::ensure`] to fill.
+    fn host_rules(&self, reachable: &Reachable) -> String {
         let blocked = self.blocked().join(", ");
-        let reach = allowed.accept_rules(&format!("iifname \"{PREFIX}*\""));
+        let mut reach = reachable
+            .every
+            .accept_rules(&format!("iifname \"{PREFIX}*\""));
+        let mut sets = String::new();
+        for (number, allowed) in reachable.offers.values().enumerate() {
+            let set = offer_set(number);
+            let _ = writeln!(sets, "    set {set} {{\n        type ipv4_addr;\n    }}");
+            reach
+                .push_str(&allowed.accept_rules(&format!("iifname \"{PREFIX}*\" ip saddr @{set}")));
+        }
         let pool = self.pool;
         format!(
             "table inet {HOST_TABLE}
 delete table inet {HOST_TABLE}
 table inet {HOST_TABLE} {{
-    chain input {{
+{sets}    chain input {{
         type filter hook input priority filter - 10; policy accept;
         iifname \"{PREFIX}*\" meta l4proto tcp reject with tcp reset
         iifname \"{PREFIX}*\" reject with icmpx type admin-prohibited
@@ -341,6 +402,56 @@ table inet {SANDBOX_TABLE} {{
     }
 }
 
+/// What sandboxes may reach, every name resolved: what every sandbox may,
+/// and what each offer, by name, adds for the sandboxes that ask for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Reachable {
+    every: Allowed,
+    offers: BTreeMap<String, Allowed>,
+}
+
+impl Reachable {
+    /// What a sandbox that asks for `reach` may reach: what every sandbox
+    /// may, and each offer it asks for that the host makes.
+    fn of(&self, reach: &[String]) -> Allowed {
+        reach
+            .iter()
+            .filter_map(|name| self.offers.get(name))
+            .fold(self.every.clone(), |allowed, offer| allowed.and(offer))
+    }
+
+    /// `nft` commands that put `address`, a sandbox's link, in the set of
+    /// each offer `reach` names and take it out of every other: added and
+    /// deleted in one transaction, which takes out an address whether or
+    /// not it was in. `None` when the host offers nothing.
+    fn set_commands(&self, address: Ipv4Addr, reach: &[String]) -> Option<String> {
+        if self.offers.is_empty() {
+            return None;
+        }
+        let mut commands = String::new();
+        for (number, name) in self.offers.keys().enumerate() {
+            let set = offer_set(number);
+            let _ = writeln!(
+                commands,
+                "add element inet {HOST_TABLE} {set} {{ {address} }}"
+            );
+            if !reach.contains(name) {
+                let _ = writeln!(
+                    commands,
+                    "delete element inet {HOST_TABLE} {set} {{ {address} }}"
+                );
+            }
+        }
+        Some(commands)
+    }
+}
+
+/// The host table's set of the links that may reach the offer numbered
+/// `number` in name order.
+fn offer_set(number: usize) -> String {
+    format!("offer{number}")
+}
+
 /// Setting up or tearing down a network failed.
 #[derive(Debug, thiserror::Error)]
 #[error("{command} failed: {detail}")]
@@ -385,6 +496,8 @@ pub(crate) struct Link {
     /// The VMM's user and group, which own the tap.
     uid: u32,
     gid: u32,
+    /// What the host offers that the sandbox asked to reach, by name.
+    reach: Vec<String>,
 }
 
 impl Link {
@@ -398,7 +511,15 @@ impl Link {
             inner_ip: addresses.inner,
             uid,
             gid,
+            reach: Vec::new(),
         }
+    }
+
+    /// The same, for a sandbox that asked to reach the offers `reach`.
+    #[must_use]
+    pub fn reaching(mut self, reach: &[String]) -> Self {
+        self.reach = reach.to_vec();
+        self
     }
 
     /// The namespace's path, which the VMM joins.
@@ -582,7 +703,8 @@ fn host_name(ordinal: u32) -> String {
 pub(crate) struct Networks {
     /// The MTU of the host's route to the internet.
     mtu: u32,
-    sandbox_rules: String,
+    config: NetworkConfig,
+    reachable: Reachable,
     names: dns::NameServer,
 }
 
@@ -594,38 +716,56 @@ impl Networks {
         config: &NetworkConfig,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, NetError> {
-        let allowed = config.allowed()?;
+        let reachable = config.reachable()?;
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
             .map_err(|error| NetError::new("enable forwarding", error))?;
-        run("nft", &["-f", "-"], Some(&config.host_rules(&allowed)))?;
+        run("nft", &["-f", "-"], Some(&config.host_rules(&reachable)))?;
         warn_of_foreign_forward_drops();
         let mtu = uplink_mtu().unwrap_or_else(|error| {
             tracing::warn!(%error, "could not find the host's uplink MTU; assuming 1500");
             1500
         });
         Ok(Self {
-            sandbox_rules: config.sandbox_rules(mtu, &allowed),
             mtu,
-            names: dns::NameServer::new(allowed.names, &config.dns, runtime),
+            config: config.clone(),
+            reachable,
+            names: dns::NameServer::new(&config.dns, runtime),
         })
+    }
+
+    /// Whether the host offers sandboxes `name`.
+    pub fn offers(&self, name: &str) -> bool {
+        self.reachable.offers.contains_key(name)
     }
 
     /// Makes sure `link` exists, complete, with the current rules and its
     /// name server: what is missing is added and every setting set,
     /// whatever an earlier attempt cut short left. Nothing that exists is
-    /// replaced, so a VM using the network keeps running.
+    /// replaced, so a VM using the network keeps running. An offer it
+    /// asked for that the host no longer makes is left out.
     pub fn ensure(&self, link: &Link) -> Result<(), NetError> {
         let path = link.namespace_path();
         let namespace_exists = path.exists();
         let link_exists = self.clear_stale_link(link, namespace_exists)?;
         let host = link.host_commands(self.mtu, namespace_exists, link_exists);
         run("ip", &["-batch", "-"], Some(&host))?;
+        for name in link.reach.iter().filter(|name| !self.offers(name)) {
+            tracing::warn!(
+                namespace = %link.namespace,
+                offer = %name,
+                "a sandbox asks to reach what this host no longer offers; it reaches it no more"
+            );
+        }
+        if let Some(commands) = self.reachable.set_commands(link.inner_ip, &link.reach) {
+            run("nft", &["-f", "-"], Some(&commands))?;
+        }
         in_namespace(&path, || {
             let inner = link.namespace_commands(Tap::find(link.uid, link.gid)?);
             run("ip", &["-batch", "-"], Some(&inner))
         })?;
-        self.configure(link)?;
-        self.names.serve(&link.namespace, &path)
+        let allowed = self.reachable.of(&link.reach);
+        self.configure(link, &allowed)?;
+        self.names.serve(&link.namespace, &path, &allowed.names)
     }
 
     /// Whether `link`'s pair exists whole: its host end and its namespace's
@@ -674,14 +814,15 @@ impl Networks {
     /// several blocked addresses at once would see all but the first few
     /// refusals arrive a second late, as timeouts. The namespace-wide cap
     /// (`icmp_msgs_per_sec`) still bounds them.
-    fn configure(&self, link: &Link) -> Result<(), NetError> {
+    fn configure(&self, link: &Link, allowed: &Allowed) -> Result<(), NetError> {
+        let rules = self.config.sandbox_rules(self.mtu, allowed);
         in_namespace(&link.namespace_path(), || {
             for (setting, value) in NAMESPACE_SETTINGS {
                 let path = Path::new("/proc/sys/net").join(setting);
                 std::fs::write(&path, value)
                     .map_err(|error| NetError::new(&path.display().to_string(), error))?;
             }
-            run("nft", &["-f", "-"], Some(&self.sandbox_rules))
+            run("nft", &["-f", "-"], Some(&rules))
         })
     }
 
@@ -711,6 +852,14 @@ impl Networks {
             {
                 return Err(error);
             }
+        }
+        // Its link's address leaves every offer's set, for whichever
+        // sandbox takes the ordinal next.
+        if let Some(ordinal) = ordinal
+            && let Ok(addresses) = self.config.addresses(ordinal)
+            && let Some(commands) = self.reachable.set_commands(addresses.inner, &[])
+        {
+            run("nft", &["-f", "-"], Some(&commands))?;
         }
         ordinal
             .map(host_name)

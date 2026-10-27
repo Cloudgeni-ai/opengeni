@@ -13,7 +13,7 @@ mod moves;
 mod reach;
 mod requests;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -111,6 +111,9 @@ fn unplaced(unplaced: Unplaced) -> Failure {
             "this replica has not read its hosts from the store for {} s",
             since.as_secs()
         )),
+        Unplaced::Unoffered(name) => {
+            Failure::Unavailable(format!("no host offers {name:?}, which it asks to reach"))
+        }
     }
 }
 
@@ -146,6 +149,10 @@ pub struct Settings {
     /// gone, is given up on as soon as its lease allows. Never shorter
     /// than the lease's term and margin, which keep it safe.
     pub give_up_after: Duration,
+    /// What each team's sandboxes may ask to reach of what hosts offer
+    /// ([`SandboxConfig::reach`]), by team: a team not here may ask for
+    /// none.
+    pub reach: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Settings {
@@ -156,6 +163,25 @@ impl Settings {
         match self.images.get(name) {
             Some(image) => Some(image),
             None => (name == self.image).then_some(None),
+        }
+    }
+
+    /// Refuses `team` a sandbox that reaches `reach`, unless it may reach
+    /// every one.
+    ///
+    /// # Errors
+    ///
+    /// The first it may not reach.
+    pub fn may_reach(&self, team: &str, reach: &[String]) -> Result<(), Failure> {
+        let granted = self.reach.get(team);
+        match reach
+            .iter()
+            .find(|name| !granted.is_some_and(|granted| granted.contains(*name)))
+        {
+            Some(name) => Err(Failure::Invalid(format!(
+                "this team's sandboxes may not reach {name:?}"
+            ))),
+            None => Ok(()),
         }
     }
 }
@@ -171,6 +197,7 @@ impl Default for Settings {
             images: crate::images::Images::default(),
             links: None,
             give_up_after: Duration::from_secs(120),
+            reach: BTreeMap::new(),
         }
     }
 }
@@ -261,8 +288,14 @@ impl<S: Store> Service<S> {
         &self.settings
     }
 
-    fn demand(&self, config: &SandboxConfig, prefer: Prefer) -> Demand {
-        Demand {
+    /// What a sandbox of `config` asks of the host it is placed on.
+    ///
+    /// # Errors
+    ///
+    /// It asks to reach what no host this replica read offers, or the
+    /// replica has read no host yet to tell.
+    fn demand(&self, config: &SandboxConfig, prefer: Prefer) -> Result<Demand, Failure> {
+        Ok(Demand {
             memory_mib: u64::from(config.memory_request()),
             memory_max_mib: u64::from(config.memory_mib),
             cpu_millis: u64::from(config.cpu_request()),
@@ -270,8 +303,9 @@ impl<S: Store> Service<S> {
                 .settings
                 .disk_mib
                 .max(config.disk_mib.map_or(0, u64::from)),
+            reach: self.view.offers(&config.reach).map_err(unplaced)?,
             prefer,
-        }
+        })
     }
 
     /// The config `target` is sent for `row`'s sandbox, which it holds
@@ -498,6 +532,8 @@ impl<S: Store> Service<S> {
         metadata: BTreeMap<String, String>,
     ) -> Result<(SandboxRow, Demand), Failure> {
         spec.config.validate().map_err(Failure::Invalid)?;
+        // What hosts offer to reach is the operator's to give, per team.
+        self.settings.may_reach(team, &spec.config.reach)?;
         // Only the service names a link, per host and owner epoch.
         spec.config.link = None;
         if let Some(agent) = &spec.agent {
@@ -524,7 +560,7 @@ impl<S: Store> Service<S> {
             u32::from(spec.config.vcpus),
             spec.config.memory_mib,
         );
-        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape));
+        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape))?;
         let row = SandboxRow {
             id,
             team: team.to_owned(),
@@ -690,5 +726,39 @@ mod tests {
             unplaced(Unplaced::Blind(None)),
             Failure::Unavailable(_)
         ));
+        let unoffered = unplaced(Unplaced::Unoffered("previews".into()));
+        assert!(
+            matches!(&unoffered, Failure::Unavailable(why) if why.contains("\"previews\"")),
+            "{unoffered}"
+        );
+    }
+
+    #[test]
+    fn a_team_may_reach_only_what_it_was_given() {
+        let settings = Settings {
+            reach: BTreeMap::from([(
+                "team-a".to_owned(),
+                BTreeSet::from(["builds".to_owned(), "previews".to_owned()]),
+            )]),
+            ..Settings::default()
+        };
+        let names = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        assert!(settings.may_reach("team-a", &[]).is_ok());
+        assert!(settings.may_reach("team-b", &[]).is_ok());
+        assert!(
+            settings
+                .may_reach("team-a", &names(&["builds", "previews"]))
+                .is_ok()
+        );
+        let refused = settings
+            .may_reach("team-a", &names(&["builds", "other"]))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, Failure::Invalid(why) if why.contains("\"other\"")),
+            "{refused}"
+        );
+        assert!(settings.may_reach("team-b", &names(&["previews"])).is_err());
     }
 }

@@ -180,7 +180,7 @@ impl<S: Store> Service<S> {
             .as_deref()
             .and_then(|class| self.view.class(class))
             .map_or(Prefer::Any, Prefer::Class);
-        let demand = self.demand(&row.spec.config, prefer);
+        let demand = self.demand(&row.spec.config, prefer)?;
         let mut asked = 0;
         loop {
             let target = match on {

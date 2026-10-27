@@ -346,6 +346,7 @@ async fn an_unreadable_record_blocks_its_id() {
             id: broken,
             config: SandboxConfig {
                 disk_mib: None,
+                reach: Vec::new(),
                 image: None,
                 vcpus: 1,
                 memory_mib: 256,
@@ -447,6 +448,7 @@ fn create_request(id: Id) -> Request {
         id,
         config: SandboxConfig {
             disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,
@@ -633,6 +635,7 @@ async fn a_removal_gives_its_vms_processors_back_once_the_vm_ends() {
     // They are free for a sandbox that asks for most of the host.
     let config = SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: 1,
         memory_mib: 256,
@@ -1000,6 +1003,7 @@ async fn create_refuses_an_existing_directory() {
             id: sandbox,
             config: SandboxConfig {
                 disk_mib: None,
+                reach: Vec::new(),
                 image: None,
                 vcpus: 1,
                 memory_mib: 256,
@@ -1035,6 +1039,7 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
     let sandbox = id(43);
     let config = SandboxConfig {
         disk_mib: None,
+        reach: Vec::new(),
         image: None,
         vcpus: 1,
         memory_mib: 256,

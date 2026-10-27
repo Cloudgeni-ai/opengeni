@@ -989,6 +989,23 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
   default); keep them public, as sandboxes can look up whatever they
   know.
+- **Private destinations only some sandboxes need.** Where only some
+  workloads should reach a private destination, such as CI jobs that
+  deploy to a private cluster's API, offer it under a name instead:
+  `--offer previews=k3s.internal:6443` in `COMPUTE_HOST_ARGS`, repeated
+  per destination (entries with one name make one offer). It is checked
+  and resolved as `--reach` is, but opens only to the sandboxes whose
+  create lists the name in `reach` (`"reach": ["previews"]`), in their
+  namespaces and, on the host, for their links' addresses alone; their
+  name servers alone answer its names. The host tells the control service
+  its offers' names, and placement puts such a sandbox only on a host that
+  offers every name it asks for: elsewhere its create answers 503 (no host
+  offers it). Grant each team the names its sandboxes may ask for on the
+  control service, `--team-reach TEAM=NAME`, repeated (in the chart,
+  `computeControl.extraArgs`); a create asking for one its team was not
+  given is refused with 400. A sandbox keeps its `reach` for life,
+  including on another host after a move, which must offer it too; one on
+  a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with

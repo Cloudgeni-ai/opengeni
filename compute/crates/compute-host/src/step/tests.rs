@@ -173,6 +173,7 @@ impl Sandbox {
     async fn record(&self, change: Change) -> Record {
         let config = SandboxConfig {
             disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,
