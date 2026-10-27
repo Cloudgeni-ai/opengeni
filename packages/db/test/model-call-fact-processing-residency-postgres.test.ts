@@ -245,6 +245,44 @@ test("Insights calls expose each call's processing geography", async () => {
       "unknown",
     ],
     ["eu-self-hosted", { geography: "eu", deploymentType: "self_hosted", regions: [] }, "eu"],
+    // Well-formedness comes first, for every geography and deployment type.
+    [
+      "eu-self-hosted-scalar-regions",
+      { geography: "eu", deploymentType: "self_hosted", regions: "eu-west-1" },
+      "unknown",
+    ],
+    [
+      "eu-provider-default-number-region",
+      { geography: "eu", deploymentType: "provider_default", regions: [5] },
+      "unknown",
+    ],
+    [
+      "eu-self-hosted-bad-region",
+      { geography: "eu", deploymentType: "self_hosted", regions: ["EU West"] },
+      "unknown",
+    ],
+    [
+      "eu-self-hosted-too-many-regions",
+      {
+        geography: "eu",
+        deploymentType: "self_hosted",
+        regions: Array.from({ length: 33 }, (_, index) => `r${index}`),
+      },
+      "unknown",
+    ],
+    ["eu-no-regions-field", { geography: "eu", deploymentType: "self_hosted" }, "unknown"],
+    [
+      "us-scalar-regions",
+      { geography: "us", deploymentType: "provider_default", regions: "x" },
+      "unknown",
+    ],
+    ["us-unlisted-type", { geography: "us", deploymentType: "global", regions: [] }, "unknown"],
+    ["array-value", ["eu"], "unknown"],
+    [
+      "us-provider-default",
+      { geography: "us", deploymentType: "provider_default", regions: [] },
+      "us",
+    ],
     [
       "eu-bedrock",
       {
