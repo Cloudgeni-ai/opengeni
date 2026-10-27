@@ -711,7 +711,8 @@ the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
 insert the same speech twice. Cancel or Escape keeps anything longer than
 three seconds to insert later. A client without the recordings API (only
-`transcribeAudio`, which also takes a `language`) records in memory and
+`transcribeAudio` or, on a phone, `transcribeExpoRecording`, both of which
+also take a `language`) records in memory and
 sends one request, as before.
 
 Dictation recordings replace the older `transcription-recordings` routes,
