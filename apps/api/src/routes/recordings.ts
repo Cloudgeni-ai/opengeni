@@ -52,7 +52,10 @@ import {
   listRecordingLiveSegments,
   listRecordingNotes,
   listRecordingPeople,
-  listRecordings,
+  listRecordingsWithOwnElsewhere,
+  ownRecordingHome,
+  ownRecordingWorkspaces,
+  recordingVisible,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
@@ -80,6 +83,7 @@ import {
   createSpeechToTextDeployment,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextServesMeetings,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
@@ -116,6 +120,12 @@ function storedTranscription(
   return { ...rest, ...(language ? { language } : {}) };
 }
 
+/** The billing code a credit refusal carries (insufficient_credits, allowance_exhausted, ...). */
+function refusalCode(refused: ApiHttpError): string {
+  const code = refused.details?.code;
+  return typeof code === "string" && code ? code : refused.code;
+}
+
 /**
  * Recordings: captured conversations made of audio tracks. Clients record
  * locally, upload chunks straight to storage with presigned URLs, then
@@ -142,16 +152,94 @@ export function registerRecordingRoutes(
   const registry = deployment.registry;
   const base = "/v1/workspaces/:workspaceId/recordings";
 
+  /**
+   * Who is asking, in which workspace. On a meeting's own routes that is the
+   * workspace storing it: the person's own Only me meeting from another
+   * workspace of the same organization opens in place in every workspace of it
+   * they belong to, so it is read and changed where it is stored, as them, and
+   * only with the access this request has there (the same permission, for the
+   * same person). Without it the meeting is not found.
+   */
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
-    return {
+    const actor = {
       workspaceId,
       subjectId: grant.subjectId,
       accountId: grant.accountId,
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
+      /** The workspace that stores the meeting, when it is another than this one. */
+      sourceWorkspace: null as { id: string; name: string } | null,
     };
+    const recordingId = c.req.param("recordingId");
+    if (
+      !recordingId ||
+      !z.string().uuid().safeParse(recordingId).success ||
+      (await recordingVisible(db, { ...actor, recordingId }))
+    ) {
+      return actor;
+    }
+    const home = await ownRecordingHome(db, {
+      subjectId: actor.subjectId,
+      recordingId,
+      workspaces: await ownRecordingWorkspaces(db, actor),
+    });
+    const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
+    if (!home || !there) return actor;
+    return {
+      ...actor,
+      workspaceId: home.id,
+      accountId: there.accountId,
+      creditAttribution: creditDebitAttributionForGrant(there),
+      sourceWorkspace: { id: home.id, name: home.name },
+    };
+  }
+
+  /**
+   * This request's grant in another workspace of the organization, for the
+   * same person, with the permission; null without one (a key or delegation
+   * scoped to this workspace, a narrower role there, or no access).
+   */
+  async function sameGrantIn(
+    c: Context,
+    workspaceId: string,
+    permission: "sessions:read" | "sessions:create",
+    actor: { subjectId: string; accountId: string },
+  ) {
+    const grant = await requireAccessGrant(c, deps, workspaceId, permission).catch(() => null);
+    return grant && grant.subjectId === actor.subjectId && grant.accountId === actor.accountId
+      ? grant
+      : null;
+  }
+
+  /** The person's other workspaces of the organization this request may list meetings in. */
+  async function ownListableElsewhere(
+    c: Context,
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+  ): Promise<{ id: string; name: string }[]> {
+    const candidates = await ownRecordingWorkspaces(db, actor);
+    const allowed: { id: string; name: string }[] = [];
+    for (let start = 0; start < candidates.length; start += 8) {
+      const batch = candidates.slice(start, start + 8);
+      const grants = await Promise.all(
+        batch.map((workspace) => sameGrantIn(c, workspace.id, "sessions:read", actor)),
+      );
+      batch.forEach((workspace, index) => {
+        if (grants[index]) allowed.push({ id: workspace.id, name: workspace.name });
+      });
+    }
+    return allowed;
+  }
+
+  /** A meeting as the workspace the request came through shows it. */
+  function shownHere<T extends Recording>(
+    recording: T,
+    actor: { sourceWorkspace: { id: string; name: string } | null },
+  ): T {
+    return actor.sourceWorkspace
+      ? { ...recording, sourceWorkspace: actor.sourceWorkspace }
+      : recording;
   }
 
   /**
@@ -217,7 +305,13 @@ export function registerRecordingRoutes(
   async function transcriptionChoice(
     actor: { workspaceId: string; accountId: string; subjectId: string },
     requested: RecordingTranscriptionRequest,
-  ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    /** Nobody chose the model: not the request, the workspace or a pinned deployment. */
+    automatic: boolean;
+  }> {
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     // A request that names its provider takes no default, not even its model.
@@ -252,6 +346,7 @@ export function registerRecordingRoutes(
       providerId,
       model: found.spec.model,
       options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+      automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
     };
   }
 
@@ -328,7 +423,11 @@ export function registerRecordingRoutes(
    * The transcription a recording's next version uses, with who it is
    * billed to. A model the deployment pays for is admitted against the
    * payer's credits first, where credit billing is on, so a payer without
-   * credits is refused before any audio is sent.
+   * credits is refused before any audio is sent. When nobody chose that
+   * model, a usable one the deployment doesn't pay for (a connected
+   * subscription or the workspace's own key) runs instead. Otherwise a
+   * meeting's refusal is returned, not thrown, so finalizing still ends
+   * capture and stores a failed transcript that says why.
    */
   async function versionChoice(
     actor: {
@@ -339,10 +438,17 @@ export function registerRecordingRoutes(
     },
     recording: Recording,
     requested: RecordingTranscriptionRequest,
-  ) {
-    const choice =
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    creditAttribution: CreditDebitAttribution;
+    /** The credit refusal a meeting's transcript can't start without fixing. */
+    refused: ApiHttpError | null;
+  }> {
+    const { automatic, ...choice } =
       recording.purpose === "dictation"
-        ? await dictationChoice(actor, recording)
+        ? { ...(await dictationChoice(actor, recording)), automatic: false }
         : await transcriptionChoice(actor, requested);
     // EU-only: refused before the version exists, so no audio is ever sent.
     await deployment.assertRegion(
@@ -352,33 +458,68 @@ export function registerRecordingRoutes(
     );
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
-    if (
+    const refused =
       provider?.funding === "deployment" &&
       voiceInputCreditBillingActive(deps.settings) &&
       (recording.purpose === "dictation" || spec?.creditPricing)
-    ) {
-      await admitCredits(() =>
-        deps.transcription?.admit?.({
-          providerId: choice.providerId,
-          accountId: actor.accountId,
-          workspaceId: actor.workspaceId,
-          attribution: actor.creditAttribution,
-        }),
-      );
+        ? await creditRefusal(() =>
+            deps.transcription?.admit?.({
+              providerId: choice.providerId,
+              accountId: actor.accountId,
+              workspaceId: actor.workspaceId,
+              attribution: actor.creditAttribution,
+            }),
+          )
+        : null;
+    if (refused && automatic) {
+      const free = await meetingModelWithoutCreditsFor(deployment, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      });
+      const found = free
+        ? findRecordingTranscriptionModel(registry, free.providerId, free.model)
+        : null;
+      // Work that spends no credits still counts against a usage allowance
+      // that prices it at list price; a used-up one is the refusal instead.
+      const overAllowance =
+        free && found
+          ? await admitRecordingUsage(actor).then(
+              () => null,
+              (error: unknown) => {
+                if (error instanceof ApiHttpError) return error;
+                throw error;
+              },
+            )
+          : null;
+      if (overAllowance) {
+        return { ...choice, creditAttribution: actor.creditAttribution, refused: overAllowance };
+      }
+      if (free && found) {
+        return {
+          ...choice,
+          providerId: free.providerId,
+          model: found.spec.model,
+          creditAttribution: actor.creditAttribution,
+          refused: null,
+        };
+      }
     }
-    return {
-      ...choice,
-      creditAttribution: actor.creditAttribution,
-    };
+    // A dictation is the composer's: it shows the refusal where the person typed.
+    if (refused && recording.purpose === "dictation") throw refused;
+    return { ...choice, creditAttribution: actor.creditAttribution, refused };
   }
 
-  /** A credit refusal as the same 402 or 429 a session admission gives. */
-  async function admitCredits(admit: () => Promise<void> | undefined): Promise<void> {
+  /** A credit refusal as the same 402 or 429 a session admission gives; null when admitted. */
+  async function creditRefusal(
+    admit: () => Promise<void> | undefined,
+  ): Promise<ApiHttpError | null> {
     try {
       await admit();
+      return null;
     } catch (error) {
       if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
-      throw new ApiHttpError(error.status, {
+      return new ApiHttpError(error.status, {
         code:
           error.code === "allowance_exhausted"
             ? "allowance_exhausted"
@@ -467,20 +608,33 @@ export function registerRecordingRoutes(
       if (Number.isNaN(parsed.getTime())) throw invalid(`${name} must be a date and time`);
       return parsed;
     };
-    return c.json(
-      await listRecordings(db, {
-        workspaceId: actor.workspaceId,
-        subjectId: actor.subjectId,
-        query: query || undefined,
-        person: person || undefined,
-        startedFrom: instant("startedFrom"),
-        startedTo: instant("startedTo"),
-        externalRef: externalRef || undefined,
-        purpose: purpose.data,
-        before,
-        limit: Number.isFinite(limit) ? limit : 50,
+    // With the person's own Only me meetings from their other workspaces of
+    // this organization, each saying where it is stored.
+    const page = await listRecordingsWithOwnElsewhere(db, {
+      elsewhere:
+        (purpose.data ?? "meeting") === "meeting" && !externalRef
+          ? await ownListableElsewhere(c, actor)
+          : [],
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      query: query || undefined,
+      person: person || undefined,
+      startedFrom: instant("startedFrom"),
+      startedTo: instant("startedTo"),
+      externalRef: externalRef || undefined,
+      purpose: purpose.data,
+      before,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    return c.json({
+      recordings: page.recordings.map((recording) => {
+        const name = page.sourceWorkspaces.get(recording.workspaceId);
+        return name === undefined
+          ? recording
+          : { ...recording, sourceWorkspace: { id: recording.workspaceId, name } };
       }),
-    );
+      nextBefore: page.nextBefore,
+    });
   });
 
   app.post(base, async (c) => {
@@ -588,7 +742,10 @@ export function registerRecordingRoutes(
   app.get(`${base}/:recordingId`, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     return c.json(
-      await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+      shownHere(
+        await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+        actor,
+      ),
     );
   });
 
@@ -596,7 +753,18 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, UpdateRecordingRequest);
-    return c.json(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })));
+    // Sharing shares with the workspace that stores the meeting, so it is
+    // done there, where everyone it is shared with sees it.
+    if (actor.sourceWorkspace && body.visibility !== undefined && body.visibility !== "private") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "Share this meeting from the workspace it was recorded in.",
+        retryable: false,
+      });
+    }
+    return c.json(
+      shownHere(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })), actor),
+    );
   });
 
   app.delete(`${base}/:recordingId`, async (c) => {
@@ -740,7 +908,14 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await versionChoice(actor, current, current.transcription);
+    // Capture always ends here. A transcript the payer can't pay for is stored
+    // failed with the refusal's code, so the meeting says what to fix and can
+    // be transcribed again once it is fixed, instead of staying unfinished.
+    const { refused, ...transcription } = await versionChoice(
+      actor,
+      current,
+      current.transcription,
+    );
     const result = await guard(() =>
       finalizeRecording(db, {
         ...actor,
@@ -749,6 +924,7 @@ export function registerRecordingRoutes(
         tracks: body.tracks,
         transcription,
         versionId: crypto.randomUUID(),
+        transcriptRefusedCode: refused ? refusalCode(refused) : undefined,
       }),
     );
     // Finalizing again restarts a lost start; a running workflow is left alone.
@@ -776,11 +952,12 @@ export function registerRecordingRoutes(
     }
     // Dictations are paid for with credits, which their ledger debit counts.
     if (recording.purpose !== "dictation") await admitRecordingUsage(actor);
-    const transcription = await versionChoice(
+    const { refused, ...transcription } = await versionChoice(
       actor,
       recording,
       body.transcription ?? recording.transcription,
     );
+    if (refused) throw refused;
     const version = await guard(() =>
       createRecordingTranscriptVersion(db, {
         ...actor,
@@ -1078,6 +1255,12 @@ export function registerRecordingRoutes(
         const meetingRegion = meeting && state?.region !== false;
         const liveRegion = live && state?.liveRegion !== false;
         const restricted = !meetingRegion && !liveRegion;
+        // The same test the worker charges by.
+        const chargedInCredits = Boolean(
+          provider.funding === "deployment" &&
+          voiceInputCreditBillingActive(deps.settings) &&
+          spec.creditPricing,
+        );
         return [
           {
             providerId: provider.id,
@@ -1095,12 +1278,8 @@ export function registerRecordingRoutes(
             // A price only where this workspace pays it: its own key, or credits
             // charged for a deployment's model. Otherwise the hour costs it nothing.
             usdPerHour:
-              provider.funding === "workspace_key" ||
-              (provider.funding === "deployment" &&
-                voiceInputCreditBillingActive(deps.settings) &&
-                spec.creditPricing)
-                ? spec.usdPerHour
-                : null,
+              provider.funding === "workspace_key" || chargedInCredits ? spec.usdPerHour : null,
+            chargedInCredits,
           },
         ];
       }),

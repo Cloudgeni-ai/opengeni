@@ -26,7 +26,7 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { desktopBridge, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
+import { desktopPlatform, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -54,7 +54,7 @@ import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from 
 export const SETTINGS_SHELL_CLASS =
   "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[18rem_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
-const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
+const NARROW_QUERY = desktopPlatform ? "(max-width: 639px)" : "(max-width: 1023px)";
 
 export interface SettingsRailItem {
   id: string;

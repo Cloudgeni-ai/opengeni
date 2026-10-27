@@ -628,6 +628,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -877,6 +882,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;

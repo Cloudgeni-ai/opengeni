@@ -577,3 +577,29 @@ export function speechToTextProcessingResidency(
     ? sideFeatureProcessingResidency(settings, route)
     : { geography: "unknown", deploymentType: "provider_default", regions: [] };
 }
+
+/**
+ * The first meeting model this workspace can use that the deployment doesn't
+ * pay for (a connected subscription or the workspace's own key), in provider
+ * order. A meeting whose automatic model is refused for credits runs this one
+ * instead, since it costs the payer nothing. Null on a pinned deployment,
+ * which sends audio to no other model, and when none is usable.
+ */
+export async function meetingModelWithoutCreditsFor(
+  deployment: SpeechToTextDeployment,
+  scope: { accountId?: string; workspaceId: string; subjectId?: string },
+): Promise<SpeechToTextModelRef | null> {
+  if (deployment.pinned) return null;
+  for (const providerId of deployment.order) {
+    const provider = deployment.registry.get(providerId);
+    if (!provider || provider.funding === "deployment") continue;
+    const spec = provider.models.find(
+      (candidate) =>
+        candidate.capabilities.batch && speechToTextServesMeetings(deployment, candidate),
+    );
+    if (!spec) continue;
+    const available = await deployment.available(providerId, scope).catch(() => false);
+    if (available) return { providerId, model: spec.model };
+  }
+  return null;
+}

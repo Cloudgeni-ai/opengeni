@@ -286,6 +286,8 @@ export type ToolGatewayTargetApprovalRequest = {
   operationId: string;
   arguments: Record<string, unknown>;
   expectedDefinitionDigest: string;
+  /** "Always allow for this Site" (this person, this Site, this tool and connection). Site context only. */
+  rememberForSite?: boolean;
   siteArtifactId?: string;
   siteVersionId?: string;
 };
@@ -295,6 +297,38 @@ export type ToolGatewayTargetApprovalResponse = {
   tool: ToolGatewayResolvedTool;
   approvalToken: string;
   expiresAt: string;
+};
+/** The viewer's own accounts for a Site's declared tool (host code only). */
+export type ToolGatewaySiteConsentRequest = {
+  identity: ToolGatewayIdentity;
+  siteArtifactId: string;
+  siteVersionId: string;
+  /** The exact arguments, to review what the call would do on the selected account. */
+  arguments?: Record<string, unknown>;
+};
+export type ToolGatewaySiteConsentAccount = {
+  identity: ToolGatewayIdentity;
+  connector: string;
+  account: string;
+};
+/** The provider's own reading of the call (for Gmail, the message as it would be sent). */
+export type ToolGatewaySiteConsentReview = {
+  kind: "generic" | "gmail";
+  email?: {
+    from: string;
+    to: string;
+    cc: string;
+    bcc: string;
+    subject: string;
+    attachments: number;
+  };
+};
+export type ToolGatewaySiteConsentResponse = {
+  version: 1;
+  accounts: ToolGatewaySiteConsentAccount[];
+  selected: ToolGatewayIdentity | null;
+  review: ToolGatewaySiteConsentReview | null;
+  connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];

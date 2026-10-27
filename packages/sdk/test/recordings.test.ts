@@ -16,6 +16,7 @@ import {
   sha256Hex,
   uploadRecordingAudio,
   type RecordingChunk,
+  type RecordingUploadStatus,
   type RecordingTransport,
 } from "../src/recordings";
 import type { DesktopBridge } from "../src/desktop-bridge";
@@ -354,6 +355,37 @@ describe("RecordingUploader", () => {
     expect(status.finalized).toBe(false);
     expect(status.failed?.code).toBe("forbidden");
     expect((await store.listChunks(RECORDING)).length).toBe(1);
+  });
+
+  test("retry() finishes a failed upload once its cause is fixed, from the audio kept here", async () => {
+    const server = fakeServer();
+    server.state.refuse = { status: 402, code: "insufficient_credits" };
+    const { uploader, store } = uploaderFor(server);
+    expect(uploader.retry(RECORDING)).toBe(false);
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const failed = await uploader.finish(RECORDING);
+    expect(failed.failed?.code).toBe("insufficient_credits");
+    expect((await store.listChunks(RECORDING)).length).toBe(1);
+    // Credits are added, or a model that needs none is chosen.
+    server.state.refuse = null;
+    // retry() itself runs the upload again: no other call finishes it.
+    const finalized = new Promise<RecordingUploadStatus>((resolve) => {
+      uploader.subscribe((status) => {
+        if (status.recordingId === RECORDING && status.finalized) resolve(status);
+      });
+    });
+    expect(uploader.retry(RECORDING)).toBe(true);
+    const status = await finalized;
+    expect(status.failed).toBeNull();
+    expect(uploader.finalized.has(RECORDING)).toBe(true);
+    expect(await store.getRecording(RECORDING)).toBeNull();
+    // Nothing is left to try again.
+    expect(uploader.retry(RECORDING)).toBe(false);
   });
 
   test("a sign-in that is not valid yet is retried, not failed", async () => {

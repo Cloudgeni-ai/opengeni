@@ -117,6 +117,121 @@ test("expanded Sites keep desktop navigation clear of native controls", async ()
   }
 }, 210_000);
 
+// The desktop app can show a page its preload didn't reach, so the page has no
+// bridge. The app's user agent still says it is the macOS app; without that,
+// the full-window Site's Back sat under the traffic lights, where a click
+// lands on the lights (green zooms the window) and there was no way back.
+const MAC_DESKTOP_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Opengeni/0.1.32 Chrome/152.0.7977.149 Electron/44.7.2 Safari/537.36";
+const MAC_BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+
+test("the macOS app's full-window Site Back stays clickable without the shell bridge", async () => {
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const output = fileURLToPath(new URL("../../.agent/artifact-desktop/", import.meta.url));
+  await mkdir(output, { recursive: true });
+  const web = await startProcess(
+    [
+      "bun",
+      "run",
+      "vite",
+      "dev",
+      ".",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--strictPort",
+    ],
+    {
+      cwd: fileURLToPath(new URL("../../apps/web", import.meta.url)),
+      ready: async () =>
+        (await fetch(`${baseUrl}/test/artifact-desktop.html`).catch(() => null))?.ok === true,
+      timeoutMs: 45_000,
+    },
+  );
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.OPENGENI_TEST_CHROMIUM ?? chromium.executablePath(),
+  });
+  try {
+    for (const [label, userAgent] of [
+      ["macos-app", MAC_DESKTOP_UA],
+      ["mac-browser", MAC_BROWSER_UA],
+    ] as const) {
+      for (const theme of ["dark", "light"] as const) {
+        const context = await browser.newContext({
+          userAgent,
+          viewport: { width: 1000, height: 700 },
+        });
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(`${baseUrl}/test/artifact-desktop.html`);
+        await page
+          .getByRole("button", { name: "Open Site full screen" })
+          .waitFor({ timeout: 90_000 });
+        await page.evaluate((dark) => {
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.dataset.ogTheme = dark ? "dark" : "light";
+        }, theme === "dark");
+        expect(await page.evaluate(() => "opengeniDesktop" in window)).toBe(false);
+        expect(await page.evaluate(() => document.documentElement.dataset.desktop ?? null)).toBe(
+          label === "macos-app" ? "macos" : null,
+        );
+        await page.getByRole("button", { name: "Open Site full screen" }).click();
+        expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(true);
+        const back = page.getByRole("button", { name: "Back", exact: true });
+        const bounds = (await back.boundingBox())!;
+        const header = page.locator("[data-artifact-fullscreen] > [data-window-drag]");
+        const headerHeight = await header.evaluate((el) => el.getBoundingClientRect().height);
+        await page.screenshot({
+          path: `${output}/no-bridge-${label}-${theme}.png`,
+          clip: { x: 0, y: 0, width: 640, height: 120 },
+        });
+        if (label === "macos-app") {
+          // The traffic lights (18px to about 80px across, 21px to 35px down)
+          // and the sharing badge (to about 80px) leave Back alone.
+          expect(bounds.x).toBeGreaterThanOrEqual(84);
+          expect(headerHeight).toBe(56);
+          expect(
+            await back.evaluate((el) =>
+              getComputedStyle(el).getPropertyValue("-webkit-app-region"),
+            ),
+          ).toBe("no-drag");
+        } else {
+          // A browser on a Mac keeps the web layout.
+          expect(bounds.x).toBeLessThan(30);
+          expect(headerHeight).toBe(48);
+        }
+        await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
+        if (label === "macos-app" && theme === "dark") {
+          // A window the page opens (a sign-in or connect flow) has the system
+          // title bar, so it keeps the web layout.
+          const [popup] = await Promise.all([
+            context.waitForEvent("page"),
+            page.evaluate(() => void window.open("/test/artifact-desktop.html", "_blank")),
+          ]);
+          await popup
+            .getByRole("button", { name: "Open Site full screen" })
+            .waitFor({ timeout: 90_000 });
+          expect(
+            await popup.evaluate(() => document.documentElement.dataset.desktop ?? null),
+          ).toBeNull();
+          await popup.close();
+        }
+        expect(errors).toEqual([]);
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+    await web.stop();
+  }
+}, 210_000);
+
 // The app's notices across the top of the window sit where the desktop app
 // draws its window controls. macOS: the traffic lights end about 72px in,
 // and the purple badge macOS swaps in while the window is shared ends about
