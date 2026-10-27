@@ -34,6 +34,7 @@ fn now_ms() -> u64 {
 
 fn capacity() -> Capacity {
     Capacity {
+        guest: None,
         memory_free_mib: 1024,
         memory_reclaimable_mib: 0,
         cpu_millis: 4000,
