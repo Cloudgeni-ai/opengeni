@@ -546,6 +546,9 @@ describe("Connected Machine conversation card", () => {
       const connect = h.button("Connect another computer");
       expect(connect?.textContent).toBe("Connect");
       expect(connect?.closest("[data-slot='connected-machines']")).not.toBeNull();
+      // Its own list: it isn't a connected machine.
+      expect(connect?.closest("[aria-label='Connected machines']")).toBeNull();
+      expect(connect?.closest("[aria-label='Connect another computer']")).not.toBeNull();
       // Screen control and Chrome wait until this chat runs on a machine.
       expect(h.text()).not.toContain("Screen control");
       expect(h.text()).not.toContain("Chrome");
@@ -565,6 +568,13 @@ describe("Connected Machine conversation card", () => {
       expect(h.text()).toContain("This chat runs on Studio Mac");
       expect(h.button("Connect another computer")).not.toBeNull();
       expect(h.text()).toContain("Screen control");
+      // It ends the card, after the chat machine's screen control and Chrome
+      // rows rather than between the machine and them.
+      const lists = [...h.container.querySelectorAll(":not(button)[aria-label]")].map((node) =>
+        node.getAttribute("aria-label"),
+      );
+      const order = ["Connected machines", "Screen control", "Chrome", "Connect another computer"];
+      expect(lists.filter((label) => order.includes(label ?? ""))).toEqual(order);
     } finally {
       await h.close();
     }

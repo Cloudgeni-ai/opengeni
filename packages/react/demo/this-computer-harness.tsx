@@ -308,6 +308,14 @@ function WebCards() {
           onConnect={async () => {}}
         />
       </Tile>
+      <Tile title="web: computer ready, download page only">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[machine("online")]}
+          rationale={rationale}
+          downloadUrl="https://example.com/download"
+        />
+      </Tile>
       <Tile title="web: no computer, host links">
         <ThisComputerCard
           productName="Acme"

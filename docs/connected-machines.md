@@ -1642,9 +1642,10 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   reachable machine gets the same quiet button (only a machine that just
   connected from the card's own dialog gets the primary one), because the card
   can't know which computer the person means;
-- ends that list with an **Another computer** row whose **Connect** opens the
-  connect flow below, so connecting a computer that isn't listed yet is a peer
-  of using a listed one rather than a trailing link;
+- ends the card with an **Another computer** row (its own list, after the
+  machines and any screen control and Chrome rows) whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't connected yet is a
+  peer of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts

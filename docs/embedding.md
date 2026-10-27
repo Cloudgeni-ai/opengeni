@@ -265,8 +265,10 @@ an Opengeni download, setup token, shell command, or model-supplied setup URL.
 On the web, once a computer is connected the card still offers **Connect another
 computer** as a secondary action when the host supplied `onConnect`,
 `downloads`, `openAppUrl` or `downloadUrl`, so a person whose connected computer
-isn't the one they meant can add another. The phone timeline from
-`@opengeni/react-native` can't connect the phone itself; give
+isn't the one they meant can add another. With `onConnect` it calls the host;
+otherwise it opens in place and says the steps happen on the computer they want
+to connect, with this device's links under "If it's this computer:". The phone
+timeline from `@opengeni/react-native` can't connect the phone itself; give
 `useNativeInChatConnect` a `shareConversation` callback and its computer offer
 adds **Share link to this chat** so the person can open the chat on the computer
 they want to connect.

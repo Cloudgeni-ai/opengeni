@@ -16126,6 +16126,15 @@
 :where(.og-root).og-tc-card-another,:where(.og-root) .og-tc-card-another {
   justify-content: flex-start;
 }
+:where(.og-root).og-tc-card-another-steps .og-tc-card-foot > p.og-tc-card-here,:where(.og-root) .og-tc-card-another-steps .og-tc-card-foot > p.og-tc-card-here {
+  flex-basis: 100%;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-tc-card-another-steps .og-tc-card-downloads > a,:where(.og-root) .og-tc-card-another-steps .og-tc-card-downloads > a {
+  background: var(--og-color-surface-1);
+  border-color: var(--og-color-border);
+  color: var(--og-color-fg);
+}
 :where(.og-root).og-tc-card .og-tc-error,:where(.og-root) .og-tc-card .og-tc-error {
   width: auto;
   margin: 0 19px 12px;

@@ -407,7 +407,7 @@ export function SessionMachineCapabilityCard({
                       Use a different machine
                     </Button>
                   ) : null}
-                  {!folded && (ordered.length > 0 || connectAnother) ? (
+                  {!folded && ordered.length > 0 ? (
                     <RowList label="Connected machines" flush>
                       {ordered.map((machine) => (
                         <MachineRow
@@ -420,22 +420,6 @@ export function SessionMachineCapabilityCard({
                           onUse={() => void use(machine)}
                         />
                       ))}
-                      {connectAnother ? (
-                        <ListRow
-                          leading={<LogoTile icon={<PlusIcon />} />}
-                          title="Another computer"
-                          description="Not in this list yet"
-                          control={
-                            <RowButton
-                              aria-label="Connect another computer"
-                              aria-haspopup="dialog"
-                              onClick={() => openSetup()}
-                            >
-                              Connect
-                            </RowButton>
-                          }
-                        />
-                      ) : null}
                     </RowList>
                   ) : null}
                   {!folded && chromeMachine ? (
@@ -453,6 +437,27 @@ export function SessionMachineCapabilityCard({
                       chrome={chrome}
                       machineName={machineDisplayName(t, chromeMachine)}
                     />
+                  ) : null}
+                  {!folded && connectAnother ? (
+                    // Its own list after the machines and their steps: it is
+                    // not a connected machine, and it shouldn't split the chat
+                    // machine from its screen control and Chrome rows.
+                    <RowList label="Connect another computer" flush>
+                      <ListRow
+                        leading={<LogoTile icon={<PlusIcon />} />}
+                        title="Another computer"
+                        description="Not connected yet"
+                        control={
+                          <RowButton
+                            aria-label="Connect another computer"
+                            aria-haspopup="dialog"
+                            onClick={() => openSetup()}
+                          >
+                            Connect
+                          </RowButton>
+                        }
+                      />
+                    </RowList>
                   ) : null}
                 </div>
               ) : null}

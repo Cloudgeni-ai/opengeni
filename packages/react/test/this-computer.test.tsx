@@ -160,8 +160,10 @@ test("a ready computer leaves connecting another one a click away on the web", (
   );
   expect(links).toContain("Agents can use Studio desktop");
   expect(links).toContain("Connect another computer");
-  // The install steps wait behind that button instead of crowding a done card.
-  expect(links).not.toContain("Download Acme");
+  // The install steps wait, closed, behind that button instead of crowding a
+  // done card.
+  expect(links).toContain('aria-expanded="false"');
+  expect(links).toMatch(/class="og-tc-card-another-steps" hidden=""/);
 
   const callback = renderToStaticMarkup(
     <ThisComputerCard productName="Acme" machines={ready} onConnect={async () => {}} />,
