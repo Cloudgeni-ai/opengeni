@@ -54,6 +54,7 @@ import { boundEvent, firstText, parseEventTime, type NormalizedEventInput } from
 import { postTriggerNotices } from "./trigger-notices";
 import { generateStandardWebhookSecret, verifyStandardWebhook } from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Keeps every MCP event subscription that an automation wants alive. One pump
@@ -492,7 +493,7 @@ async function handleStepFailure(
   now: Date,
 ): Promise<void> {
   const { workspaceId } = subscription;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const finish = (nextActionAt: Date, extra: Partial<StepOutcome> = {}) =>
     finishMcpEventSubscriptionStep(deps.db, workspaceId, subscription.id, {
       ...extra,
@@ -559,7 +560,7 @@ export async function pumpDueMcpEventSubscriptions(
       } catch (error) {
         deps.observability?.error("MCP event subscription step crashed; it will retry", {
           subscriptionId: next.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }

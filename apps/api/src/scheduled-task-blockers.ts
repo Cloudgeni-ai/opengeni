@@ -16,6 +16,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * A schedule must never stay stuck without its owner knowing. After each
@@ -359,7 +360,7 @@ export async function reviewScheduledTaskBlockerInventory(deps: Dependencies): P
     } catch (error) {
       deps.observability?.error("Scheduled task blocker review will retry", {
         taskId: candidate.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }

@@ -88,16 +88,42 @@ impl ShareCheck {
 /// [`super::HostConfig::disk_reading`]): each one given is taken by the
 /// next sample, and samples take none until the next is given. Tests
 /// decide with it what the disk holds and when work waiting for a reading
-/// is decided.
-#[derive(Clone, Debug, Default)]
+/// is decided, and what changes as it is read.
+#[derive(Clone, Default)]
 pub struct DiskGauge {
-    next: Arc<Mutex<Option<DiskSpace>>>,
+    next: Arc<Mutex<Option<Next>>>,
+}
+
+/// A reading given to a [`DiskGauge`], and what changes just before it.
+struct Next {
+    available: DiskSpace,
+    change: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl std::fmt::Debug for DiskGauge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let next = self.lock().as_ref().map(|next| next.available);
+        f.debug_struct("DiskGauge").field("next", &next).finish()
+    }
 }
 
 impl DiskGauge {
     /// Has the next sample read `available`.
     pub fn give(&self, available: DiskSpace) {
-        *self.lock() = Some(available);
+        *self.lock() = Some(Next {
+            available,
+            change: None,
+        });
+    }
+
+    /// Has the next sample read `available` just after `change` is made,
+    /// as what a guest does while the agent reads the disk: the sample
+    /// reads what its VMs wrote before, and their disks after.
+    pub fn give_after(&self, change: impl FnOnce() + Send + 'static, available: DiskSpace) {
+        *self.lock() = Some(Next {
+            available,
+            change: Some(Box::new(change)),
+        });
     }
 
     /// Whether a sample has taken the reading last given.
@@ -107,16 +133,23 @@ impl DiskGauge {
     }
 
     fn take(&self) -> Option<DiskSpace> {
-        self.lock().take()
+        // Made under the lock, so it is made once the reading is taken.
+        let mut given = self.lock();
+        let next = given.take()?;
+        if let Some(change) = next.change {
+            change();
+        }
+        drop(given);
+        Some(next.available)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DiskSpace>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Next>> {
         self.next.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
-    pub(super) fn sample(&mut self) {
+    pub(super) async fn sample(&mut self) {
         let huge = self.engine.memory_profile().pages == PageSize::Huge;
         self.available_memory = crate::host_memory::available(huge);
         #[cfg(target_os = "linux")]
@@ -151,14 +184,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         {
             batch.push(Input::Memory { available });
         }
-        // What disks may still grow by and which memory images are still
-        // being filled, then the disk reading that shows what they took.
+        // What running VMs have written and which memory images are still
+        // being filled, then the disk reading that shows what they took,
+        // then what each disk may still grow by as that reading saw it.
         // The core ignores them without a disk policy.
-        batch.extend(self.disk_readings());
+        let before = self.disk_readings();
         let disk = match &self.disk_gauge {
             Some(gauge) => gauge.take(),
             None => read_disk(&self.root),
         };
+        batch.extend(self.disk_growth_readings(before).await);
         if let Some(available) = disk {
             batch.push(Input::Disk { available });
         }

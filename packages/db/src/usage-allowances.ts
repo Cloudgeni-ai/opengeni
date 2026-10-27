@@ -36,6 +36,9 @@ export type MemberAllowance = {
   version: number;
 };
 export type WorkspaceUsage = {
+  /** Every amount is an integer USD micro: 1 USD = 1,000,000. */
+  unit: "usd_micros";
+  /** The window the counters cover, configured or not; null when unknown or lifetime. */
   period: { start: string | null; end: string | null };
   workspace: AllowanceUsage & { includedCredits: number; grantsRemaining: number };
   members: (AllowanceUsage &
@@ -348,7 +351,10 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
     };
   });
   return {
-    period: config ? raw.period : { start: null, end: null },
+    unit: "usd_micros",
+    // The window these counters were read for. Without a budget, usage still
+    // counts per calendar month, so the month is still the answer.
+    period: raw.period,
     workspace: {
       ...allowanceUsage(pool, Number(raw.used), resetsAt, config?.thresholds?.workspace),
       includedCredits: config?.includedCredits ?? 0,

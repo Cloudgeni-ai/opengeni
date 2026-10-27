@@ -67,6 +67,9 @@ export const WindowState = z.object({
   pid: id,
   window_id: id,
   snapshot_id: z.string().max(256).optional(),
+  // macOS: the app is Chromium-based and takes AXPress on any page node,
+  // though it lists the action on none of them.
+  web_content_takes_press: z.boolean().optional(),
   capture_id: z.string().max(256).optional(),
   window_bounds: Rect.optional(),
   elements: z.array(Element).max(2000).default([]),
@@ -321,6 +324,15 @@ function cuaFailureReason(result: ToolResult, data: Record<string, unknown>): st
  * `"caller-settles"` is a mutation whose tool reports success in its own
  * result (launch_app's pid) rather than an action disposition: failures are
  * still ambiguous, and the caller decides whether a result proves completion. */
+/** Whether CUA delivered a call without confirming its effect: raw input,
+ * which no app acknowledges. */
+export function deliveredUnconfirmed(call: {
+  data: Record<string, unknown>;
+  result: ToolResult;
+}): boolean {
+  return (call.data.effect ?? call.result.action?.effect) === "unverifiable";
+}
+
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,

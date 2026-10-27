@@ -12610,6 +12610,7 @@
         "$.controller": "ref(InteractionControllerBinding)! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
+        "$.display": "enum?=[\"\\\"offscreen\\\"\",\"\\\"window\\\"\"]",
         "$.driverId": "string!",
         "$.engine": "enum!=[\"\\\"chrome\\\"\",\"\\\"chromium\\\"\",\"\\\"external\\\"\",\"\\\"firefox\\\"\",\"\\\"lightpanda\\\"\",\"\\\"webkit\\\"\"]",
         "$.engineVersion": "string! null",
@@ -14075,7 +14076,8 @@
         "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.unconfirmedInput": "const?=[\"true\"]"
       }
     },
     "ComputerActionRequest": {
@@ -32968,6 +32970,7 @@
         "$.members[]": "ref(MemberAllowanceUsage)",
         "$.nextCursor": "string! null",
         "$.period": "ref(UsageAllowanceWindow)!",
+        "$.unit": "const?=[\"\\\"usd_micros\\\"\"]",
         "$.workspace": "ref(WorkspaceAllowanceUsage)!"
       }
     },
@@ -37722,6 +37725,7 @@
       "McpCapabilityConnectInput": "type",
       "providerLabel": "value",
       "reconnectCandidate": "value",
+      "showsMcpServerLabel": "value",
       "useChatConnectionsAllowed": "value",
       "useConnect": "value",
       "useConnectSetupFlow": "value",
@@ -38063,10 +38067,12 @@
       "CodexRealtimeControl": "value",
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
+      "MicrophoneAccess": "type",
       "NewSessionRealtimeControl": "value",
       "prestartSessionRealtime": "value",
       "realtimeAppLanguage": "value",
       "realtimeConversationLanguage": "value",
+      "RealtimeLoadState": "type",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",

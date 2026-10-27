@@ -35,6 +35,7 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 
 async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
   const body: unknown = await c.req.json().catch(() => null);
@@ -146,7 +147,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         changeId,
         attempt,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return { change, started: false };
     }
@@ -184,7 +185,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         {
           workspaceId,
           versionId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         },
       );
       return false;

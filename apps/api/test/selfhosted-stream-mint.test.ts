@@ -221,6 +221,26 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     expect(cell?.url).not.toContain(cell!.token);
   });
 
+  test("mintTerminalStream: the token may type only when the route verified terminal:attach", async () => {
+    const secret = resolveStreamTokenSecret(settings)!;
+    const mint = async (terminalInput?: boolean) => {
+      const cell = await mintTerminalStream(services, {
+        accountId: "acc",
+        workspaceId: WS,
+        session: baseSession as never,
+        viewerId: VIEWER,
+        ...(terminalInput === undefined ? {} : { terminalInput }),
+        resolveSelfhostedSession: fakeResolveSession(7681),
+      });
+      return (await verifyStreamToken(secret, cell!.token))?.mode;
+    };
+    // Independent of the desktop stream-control setting (off in these settings).
+    expect(settings.streamControlEnabled).toBe(false);
+    expect(await mint(true)).toBe("control");
+    expect(await mint(false)).toBe("view");
+    expect(await mint()).toBe("view");
+  });
+
   test("mintDesktopStream: routes to relay when activeSandboxId is selfhosted + attaches resolution", async () => {
     const cell = await mintDesktopStream(services, {
       accountId: "acc",
@@ -237,6 +257,8 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
     expect(claims?.authorityEpoch).toBe(1);
+    // The desktop stays watch-only: the relay drops typed input from a view token.
+    expect(claims?.mode).toBe("view");
     expect(cell?.leaseEpoch).toBe(7);
     // Desktop cell must carry resolution.
     expect(cell?.resolution).toBeDefined();

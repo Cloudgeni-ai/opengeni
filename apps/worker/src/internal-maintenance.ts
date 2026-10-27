@@ -47,6 +47,7 @@ import {
 } from "./sandbox-reaper-contract";
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
 import type { TelemetryScheduler } from "./telemetry-scheduler";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
 export const KNOWLEDGE_INDEXING_WORKFLOW_ID = "opengeni-knowledge-indexing";
@@ -168,7 +169,7 @@ export async function internalMaintenanceCadences(input: {
           onError: (error, accountId) =>
             observability.warn("Subscription plan maintenance account failed", {
               accountId,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             }),
         });
         if (result.failedAccounts > 0)

@@ -20,6 +20,7 @@ import {
 } from "../src/routes/api-keys";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 /**
  * An integrating backend provisions organization workspaces with its
@@ -70,13 +71,6 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 60_000);
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 async function organizationKey(accountId: string, permissions: Permission[]) {
   const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;

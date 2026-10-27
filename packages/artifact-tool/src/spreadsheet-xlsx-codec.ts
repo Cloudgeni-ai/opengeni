@@ -48,6 +48,7 @@ import type {
   FormulaResult,
   SpreadsheetImageConfig,
 } from "./spreadsheet-types";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const DEFAULT_XLSX_IMPORT_LIMITS: SpreadsheetXlsxImportLimits = Object.freeze({
   compressedBytes: 64 * 1024 * 1024,
@@ -1318,13 +1319,6 @@ async function toBytes(
 
 async function workbookModelDigest(workbook: Workbook): Promise<string> {
   return sha256Hex(new TextEncoder().encode(JSON.stringify(workbook.toJSON())));
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const owned = new Uint8Array(bytes.byteLength);
-  owned.set(bytes);
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", owned));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** ExcelJS stamps ZIP headers with wall-clock time; normalize package metadata only. */

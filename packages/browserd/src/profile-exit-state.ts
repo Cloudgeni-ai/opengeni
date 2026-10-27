@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Largest Preferences file this will rewrite. Chromium's own file is tens of
  * kilobytes; anything far larger is left for Chromium to handle. */
@@ -62,8 +63,4 @@ export async function markProfileExitedCleanly(profileDirectory: string): Promis
     throw error;
   }
   return true;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

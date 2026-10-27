@@ -9,6 +9,7 @@ import type {
 } from "@opengeni/sdk/recordings";
 import { createLiveTranscriber, RecordingUploader } from "@opengeni/sdk/recordings";
 import type { FileRecordingChunkStore, RecordingFileSystem } from "./file-store";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** A chunk file the native recorder finished, already in the recording's directory. */
 export type NativeAudioChunkEvent = {
@@ -105,7 +106,7 @@ export type NativeRecorderOptions = RecorderOptions & {
   fetch?: typeof fetch;
 };
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const message = (error: unknown) => errorMessage(error);
 
 /** Little-endian 16-bit samples from base64. */
 function decodePcm(data: string): Int16Array {

@@ -2,6 +2,7 @@ import type { SessionEvent } from "@opengeni/contracts";
 import { listSessionEvents } from "@opengeni/db";
 
 import type { EvalStack, EvalWorkspace } from "./stack";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type HumanInputQuestionView = {
   id: string;
@@ -161,9 +162,7 @@ export async function driveSession(
             outcome.errors.push(`turn ${outcome.turns} failed`);
           }
         } catch (error) {
-          outcome.errors.push(
-            `runAgentTurn threw: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          outcome.errors.push(`runAgentTurn threw: ${errorMessage(error)}`);
           // The workflow would run the failure-control activity; the durable
           // state usually already reflects the failure. Re-peek once more and
           // stop if the same error repeats.

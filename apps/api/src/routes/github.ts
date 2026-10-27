@@ -100,6 +100,7 @@ import {
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -355,7 +356,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });
@@ -372,7 +373,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });

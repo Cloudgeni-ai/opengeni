@@ -25,6 +25,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
 import type { ActivityServices, WakeSessionWorkflowSignal } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type NotifyServices = {
   db: Database;
@@ -240,11 +241,9 @@ async function deliverParentSystemUpdateOutbox(
       woke: result.shouldWake,
     });
   } catch (error) {
-    await markSessionSystemUpdateOutboxFailed(
-      svc.db,
-      outbox,
-      error instanceof Error ? error.message : String(error),
-    ).catch(() => undefined);
+    await markSessionSystemUpdateOutboxFailed(svc.db, outbox, errorMessage(error)).catch(
+      () => undefined,
+    );
     throw error;
   }
 }
@@ -315,9 +314,7 @@ export async function reconcileAutomaticSessionTitleFanout(
         delivered += 1;
       } catch (error) {
         failed += 1;
-        await markFailed(svc.db, row, error instanceof Error ? error.message : String(error)).catch(
-          () => undefined,
-        );
+        await markFailed(svc.db, row, errorMessage(error)).catch(() => undefined);
       }
     }
   });
@@ -470,11 +467,9 @@ export async function reconcilePendingSessionWorkflowWakes(
         }
       } catch (error) {
         failed += 1;
-        await markSessionWorkflowWakeFailed(
-          svc.db,
-          repair,
-          error instanceof Error ? error.message : String(error),
-        ).catch(() => undefined);
+        await markSessionWorkflowWakeFailed(svc.db, repair, errorMessage(error)).catch(
+          () => undefined,
+        );
       }
     }
   });

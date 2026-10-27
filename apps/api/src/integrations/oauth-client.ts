@@ -95,6 +95,7 @@ import {
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
 import { decideOAuthAccountConnection, oauthAccountFailureMessage } from "./oauth-account-identity";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -2782,10 +2783,6 @@ export function oauthPublicErrorFields(error: unknown): OAuthPublicErrorFields {
     // replace the exact OAuth failure with a projection failure.
   }
   return fields;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function oauthErrorFromResponse(

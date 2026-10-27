@@ -18,7 +18,13 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { defineSiteDataCollection } from "../site-data/operations";
 import { siteDataStore } from "../site-data/service";
 import { defineSiteSqlQuery } from "../site-sql/service";
-import { resolveSiteOutsideModel, type SiteOutsideModelChoice } from "./agent-model";
+import {
+  resolveSiteOutsideModel,
+  siteOutsideModelFunding,
+  siteUnfundedReason,
+  type SiteAgentUnfundedReason,
+  type SiteOutsideModelChoice,
+} from "./agent-model";
 import { effectiveSiteAccess, siteGuestsAllowed } from "./viewer";
 
 /**
@@ -113,6 +119,12 @@ export type SiteReadinessInput = {
   }>;
   queries: ReadonlyArray<{ name: string; audience: SiteSqlQueryAudience }>;
   outsideModel: SiteOutsideModelChoice | null;
+  /**
+   * Why the workspace can't pay for the outside model right now (no credits
+   * for it, or its usage allowance is used up), so outsiders' turns are
+   * refused; null or absent when it can.
+   */
+  outsideModelUnfunded?: SiteAgentUnfundedReason | null;
 };
 
 function audienceLabel(input: Pick<SiteReadinessInput, "access" | "guestsAllowed">): string {
@@ -218,6 +230,23 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
       message: `The assistant uses a subscription, and this workspace has no credit-billed model, so ${who} can't use it.`,
       suggestion: "Pick a credit-billed model for the Site's assistant.",
     });
+  else if (
+    input.agent.enabled &&
+    input.outsideModelUnfunded === "no_credits" &&
+    input.outsideModel &&
+    input.outsideModel.kind !== "unavailable"
+  )
+    add({
+      code: "agent_model_outside_no_credits",
+      message: `This workspace has no credits for ${input.outsideModel.model}, so ${who} can't use the assistant.`,
+      suggestion: "Add credits, or pick a model your credits cover for the Site's assistant.",
+    });
+  else if (input.agent.enabled && input.outsideModelUnfunded === "allowance_exhausted")
+    add({
+      code: "agent_model_outside_allowance_used",
+      message: `This workspace's usage allowance is used up, so ${who} can't use the assistant.`,
+      suggestion: "Raise the workspace's usage allowance, or wait until it resets.",
+    });
   return warnings.slice(0, 50);
 }
 
@@ -246,6 +275,14 @@ export async function readSitePublicationReadiness(
         agentModel: publication.agent.model,
       }).catch(() => null)
     : null;
+  // A failed check reports nothing: the warning needs a definite refusal.
+  const outsideModelUnfunded =
+    outsideModel && outsideModel.kind !== "unavailable"
+      ? await siteOutsideModelFunding(deps, scope, outsideModel.model).then(
+          siteUnfundedReason,
+          () => null,
+        )
+      : null;
   const site = await getPublishedSite(deps.db, scope, publication.siteId).catch(() => null);
   const version = site?.currentVersionId
     ? await getPublishedSiteVersion(
@@ -291,6 +328,7 @@ export async function readSitePublicationReadiness(
       collections: described?.collections ?? [],
       queries,
       outsideModel,
+      outsideModelUnfunded,
     }),
     outsideAgentModel: outsideModel?.kind === "fallback" ? outsideModel.model : null,
   };

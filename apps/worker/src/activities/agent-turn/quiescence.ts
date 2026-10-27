@@ -11,6 +11,7 @@ import type {
 import { type ResumedTurnSandbox } from "../../sandbox-resume";
 import { type SessionEvent } from "@opengeni/contracts";
 import { sleep } from "./sandbox-provision";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function shouldRunTurnEndWorkspacePersistence(input: {
   activityStatus: RunAgentTurnResult["status"] | "unknown";
@@ -417,7 +418,7 @@ export class MandatoryHistoryPersistenceError extends Error {
     readonly stage: MandatoryHistoryPersistenceStage,
     cause: unknown,
   ) {
-    super(cause instanceof Error ? cause.message : String(cause));
+    super(errorMessage(cause));
     this.cause = cause;
   }
 }
