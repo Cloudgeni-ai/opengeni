@@ -207,6 +207,21 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
         }
         await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
+        if (label === "macos-app" && theme === "dark") {
+          // A window the page opens (a sign-in or connect flow) has the system
+          // title bar, so it keeps the web layout.
+          const [popup] = await Promise.all([
+            context.waitForEvent("page"),
+            page.evaluate(() => void window.open("/test/artifact-desktop.html", "_blank")),
+          ]);
+          await popup
+            .getByRole("button", { name: "Open Site full screen" })
+            .waitFor({ timeout: 90_000 });
+          expect(
+            await popup.evaluate(() => document.documentElement.dataset.desktop ?? null),
+          ).toBeNull();
+          await popup.close();
+        }
         expect(errors).toEqual([]);
         await context.close();
       }

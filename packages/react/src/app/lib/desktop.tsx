@@ -31,11 +31,15 @@ export function desktopPlatformFromUserAgent(userAgent: string): DesktopPlatform
  * The desktop app's platform. The bridge says so; without it (a page the
  * shell's preload didn't reach) the app's user agent still does, so the page
  * keeps room for the native window controls drawn over it. Capabilities come
- * only from the bridge.
+ * only from the bridge. A window the page opened (sign-in and connect flows)
+ * has the system title bar and no bridge, so it keeps the web layout; so does
+ * a page in a frame.
  */
 export const desktopPlatform: DesktopPlatform | null =
   desktopBridge?.platform ??
-  (typeof navigator === "undefined" ? null : desktopPlatformFromUserAgent(navigator.userAgent));
+  (typeof window === "undefined" || window.opener || window.top !== window
+    ? null
+    : desktopPlatformFromUserAgent(navigator.userAgent));
 
 /**
  * In the macOS app the window's traffic lights sit in the top-left corner of
