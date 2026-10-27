@@ -245,7 +245,7 @@ describe("organization administration surface", () => {
       expect(adminSource).toContain(`${helper}(`);
     }
     expect(adminSource).not.toContain("personalWorkspaceId");
-    expect(peopleModelSource).toContain("member.name?.trim() || member.email");
+    expect(peopleModelSource).toContain("member.name?.trim() || memberEmail(member)");
     expect(peopleSource).toContain("memberName(member)");
     // Invite people is its own page; access is one role per shared workspace.
     expect(peopleSource).toContain('title="Invite people"');
