@@ -169,17 +169,23 @@ access limitation. Missing publishing access itself still blocks publication.
    catalog into model context. Generate local types with
    `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
-   identity in the Site's `requestedTools` publish field.
+   identity in the Site's `requestedTools` publish field. For a connector tool
+   that runs on a person's account (Gmail, Slack, ...), declare and call the
+   connector identity (`{ serverId: "gmail", toolName: "send_message" }`), not
+   your own account route: each viewer then uses their own account.
 3. Do not request tools the Site does not call. A Site using only `site.client`
    SDK operations, with no direct `site.tools` calls, should publish
    `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Execution still follows
-   normal tool approval rules, but a Site can't ask the viewer to approve a
-   call, so a tool set to Ask fails there: show which tool needs Allow. When
-   that blocks the person you work for, offer to set it to Allow in the chat
-   with the integration's tool approval app action instead of describing the
-   setting.
+   normal tool approval rules: in Opengeni the frame asks the viewer to confirm
+   (Send/Cancel, "Always allow for this Site") before an approval-required call
+   runs, so do not build your own confirmation for it. Handle a cancelled call
+   (`site_tool_consent_declined`) and, on a published hostname,
+   `site_tool_consent_requires_opengeni` as normal UI states. When a published
+   Site is blocked by a tool set to Ask and that blocks the person you work for,
+   offer to set it to Allow in the chat with the integration's tool approval app
+   action instead of describing the setting.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal

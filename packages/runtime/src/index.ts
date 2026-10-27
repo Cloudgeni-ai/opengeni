@@ -1000,6 +1000,8 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal credential lookup mode; preflight never refreshes or records usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /** Approval preflight: an expired access token that has a refresh token passes. */
+  preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
 };
@@ -5024,6 +5026,15 @@ export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
   /**
+   * Current-human workspace gateway only: give every connection-backed MCP
+   * server (built-in bridges and remote servers) a side-effect-free approval
+   * preflight, so an approval-required tool can be confirmed by a person. The
+   * preflight resolves the exact connection without refreshing it or
+   * recording provider use, and fails before an approval capability is issued
+   * when the connection is missing, inactive, unbound or needs reconnection.
+   */
+  connectionApprovalPreflight?: boolean;
+  /**
    * Attempt-scoped secret resolver. When present and enabled, remote MCP and
    * Codex-app tool arguments have their `{{secret:…}}` references resolved by
    * the gateway after approval; otherwise references pass through literally.
@@ -5811,7 +5822,11 @@ export async function prepareAgentTools(
             firstParty && !bestEffort,
             buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
             tool.eager !== true,
-            undefined,
+            options.connectionApprovalPreflight &&
+              config.connectionRef &&
+              !isCodexAppsMcpServer(config)
+              ? connectionApprovalPreflight(options, config.id, config.connectionRef, url)
+              : undefined,
             undefined,
             firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
               ? inputWaitYield
@@ -7223,6 +7238,45 @@ function recordResolvedMcpConnectionId(
     throw new Error("MCP connection identity changed during attempt preparation");
   }
   resolvedMcpConnectionIds.set(config.id, connectionId);
+}
+
+/** Thrown when a connection cannot serve an approved call; nothing was sent to the provider. */
+export class ConnectionApprovalPreflightError extends Error {
+  readonly name = "ConnectionApprovalPreflightError";
+  constructor(readonly reason: string) {
+    super("This connection needs attention before the action can run.");
+  }
+}
+
+/**
+ * The approval preflight of a connection-backed server: one non-refreshing,
+ * non-recording credential lookup of the exact connection for the server's own
+ * destination. An access token past its expiry still passes when it can be
+ * refreshed, because only execution refreshes it.
+ */
+function connectionApprovalPreflight(
+  options: PrepareToolsOptions,
+  serverId: string,
+  connectionRef: McpServerConnectionRef,
+  destinationUrl: string,
+): NonNullable<LocalMcpServerRegistration["preflightCall"]> {
+  return async (toolName, _args, preflightOptions) => {
+    preflightOptions?.signal?.throwIfAborted();
+    if (!options.workspaceId || !options.resolveCredential)
+      throw new ConnectionApprovalPreflightError("missing_connection");
+    const result = await options.resolveCredential({
+      workspaceId: options.workspaceId,
+      serverId,
+      toolName,
+      connectionRef,
+      destinationUrl,
+      forceRefresh: false,
+      credentialResolutionMode: "preflight",
+      preflightAcceptsRefreshableExpiry: true,
+      ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+    });
+    if (result.status !== "ok") throw new ConnectionApprovalPreflightError(result.reason);
+  };
 }
 
 async function resolveConnectionForRequest(

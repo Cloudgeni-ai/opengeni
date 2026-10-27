@@ -1,5 +1,13 @@
-export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export {
+  createSiteToolBridge,
+  isSiteCatalogStaleError,
+  SiteToolConsentDeclinedError,
+  SiteToolConnectionRequiredError,
+} from "./site-tool-bridge";
 export type {
+  SiteToolConsentPrompt,
+  SiteToolConsentDecision,
+  SiteToolConnectPrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,

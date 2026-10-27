@@ -52,6 +52,8 @@ Limits follow who is viewing:
 
 People outside the workspace never get workspace tools and never use a member's ChatGPT, Claude or SuperGrok plan: when the Site's model runs on a plan, they use the workspace's default model paid with credits. The Publish page lists anything on the page that won't work for the Site's audience, with a **Fix** button where a safe fix exists, and **View as visitor** opens the Site as an invited person or a public visitor would see it.
 
+A published address has no Opengeni frame around the page, so it cannot ask you to confirm a tool call there. An action that needs your confirmation says to open the Site in Opengeni instead; actions you chose **Always allow for this Site** for still run.
+
 ## Platform usage
 
 Apart from agent spend, Sites use requests, Site SQL rows and storage. Every workspace gets 1 million requests, 10 million rows read, 100,000 rows written and 1 GB of storage each month. Workspace settings > Usage shows how much of it is used. When your deployment bills platform usage, use above the allowance is paid with credits, and without credits new publications and Site SQL calls stop until the next month or until credits are added; published pages keep loading.
