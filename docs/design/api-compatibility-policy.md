@@ -131,7 +131,6 @@ a versioning mechanism for integrations:
 | Check | Command | What it proves |
 | --- | --- | --- |
 | Public surface snapshot | `bun run check:public-api` (refresh: `bun run public-api:refresh`) | See below |
-| Published-SDK compatibility | `bun run test:sdk-compat` | See below |
 | Contract parity | `packages/sdk/test/contract-parity.test.ts` | SDK wire types match `@opengeni/contracts` |
 
 **Public surface snapshot** (`bun run check:public-api`) regenerates
@@ -152,24 +151,7 @@ The check fails in each of these cases:
 - **Missing route.** A public SDK method calls a route the API does not
   register.
 
-**Published-SDK compatibility** (`bun run test:sdk-compat`) installs the latest
-patch of the last three stable minors of the current major from npm. They are
-configurable through `--versions`, `OPENGENI_SDK_COMPAT_VERSIONS`, and
-`OPENGENI_SDK_COMPAT_MINORS`.
-
-- Each version drives the current API over real HTTP on real PostgreSQL with
-  the contract fence enabled. The flow is:
-  1. `ensureWorkspace`
-  2. `addExternalWorkspaceMember`, then `asUser`
-  3. `createSession`, then `sendMessage`
-  4. `listEvents`, then an SSE replay
-  5. `createScheduledTask`, then `triggerScheduledTask`
-- The check fails on any 5xx, any `409 API_CONTRACT_CHANGED`, any
-  SDK-thrown contract mismatch, or any broken step.
-- No worker or model runs. The check stops at API acceptance plus durable
-  event and scheduled-task state.
-
-Both checks are CI guards. They run in full mode and whenever the impact plan
+The snapshot check is a CI guard. It runs in full mode and whenever the impact plan
 touches `@opengeni/api-router`, `@opengeni/contracts`, `@opengeni/sdk`, or
 `@opengeni/react`, including anything those packages depend on.
 

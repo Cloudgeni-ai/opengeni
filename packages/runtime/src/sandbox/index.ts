@@ -118,10 +118,9 @@ export {
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
-import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
 import type { ComputeCreateIdentity } from "./compute/session";
-import { errorMessage } from "@opengeni/contracts/values";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -140,14 +139,6 @@ export {
   replayConnectedCommandOutput,
   connectedCommandExitProof,
 } from "./selfhosted/terminal-replay";
-
-export {
-  repairSerializedRunStateExposedPorts,
-  runStateCompatibilityProvider,
-  runStateExposedPortsRecord,
-  type RunStateExposedPortsCompatibilityRepair,
-  type RunStateExposedPortsCompatibilityResult,
-} from "./run-state-compat";
 
 // The provider registry surface — the descriptor table self-test, the per-
 // provider registrations, selection + capability negotiation, and the typed
@@ -1252,6 +1243,12 @@ export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
     : undefined;
 }
 
+/** RunState owns `exposedPorts` as a port-keyed endpoint record; provider
+ * clients keep their configured port arrays in provider state. */
+function runStateExposedPortsRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? structuredClone(value) : undefined;
+}
+
 export async function deserializeSandboxSessionStateEnvelope(
   client: SandboxClient,
   envelope: unknown,
@@ -1293,13 +1290,6 @@ export async function deserializeSandboxSessionStateEnvelope(
     }
   }
   const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
-  if (state.exposedPorts !== undefined && exposedPorts === undefined) {
-    console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
-      provider: runStateCompatibilityProvider(client.backendId),
-      sessionClass: "root",
-      path: "sessionState.exposedPorts",
-    });
-  }
   return await client.deserializeSessionState({
     ...providerState,
     manifest: state.manifest,

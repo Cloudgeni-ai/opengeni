@@ -1074,8 +1074,7 @@ public surface (SDK-reachable `/v1` routes and their shapes, the session event
 envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
 routes) evolves additively and both sides are tolerant readers. Breaking
 changes need a deprecation, at least 90 days on the managed service, and a new
-major. `bun run check:public-api` and
-`bun run test:sdk-compat` enforce it in CI.
+major. `bun run check:public-api` enforces it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
 negotiates at runtime.

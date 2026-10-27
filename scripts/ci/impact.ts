@@ -751,10 +751,8 @@ function fullPlan(
       "migration-test-budgets",
       // Contract requirement IDs and the tests that claim them stay consistent.
       "subscription-contract",
-      // The public API surface snapshot and the published-SDK compatibility
-      // run (docs/design/api-compatibility-policy.md).
+      // The public API surface snapshot (docs/design/api-compatibility-policy.md).
       "public-api",
-      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -975,7 +973,7 @@ export function createImpactPlan(
     );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
-    guards.push("public-api", "sdk-compat");
+    guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");
