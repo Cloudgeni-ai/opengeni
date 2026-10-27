@@ -186,11 +186,13 @@ reaches the open document it describes. A new chat that starts with that item
 loads those tools before its first model request, as a tool search by name
 would, so the agent can call them in its first step without searching. The
 chat's instructions and tool list stay the same as any other chat's, and its
-timeline shows that tool search. This is decided once, when the chat is
-created: context that arrives later never loads tools, and names outside the
-chat's tool selection are ignored, so it grants nothing. Through the HTTP API,
-send the same names as `modelContextTools` next to `modelContext` when creating
-a session; the session proxy forwards them only with the browser's own context.
+timeline shows that tool search. On Claude models (Anthropic Messages) nothing
+is loaded ahead and the agent searches as usual. This is decided once, when
+the chat is created: context that arrives later never loads tools, and names
+outside the chat's tool selection are ignored, so it grants nothing. Through
+the HTTP API, send the same names as `modelContextTools` next to
+`modelContext` when creating a session; the session proxy forwards them only
+with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
 Links in agent messages to Opengeni objects (files, Sites, editable

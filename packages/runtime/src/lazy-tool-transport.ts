@@ -730,7 +730,10 @@ export class LazyToolRuntime {
   async openingToolLoad(request: ModelRequest): Promise<ModelResponse | null> {
     if (!this.hasOpeningToolLoad()) return null;
     this.openingToolLoadConsidered = true;
-    if (!startsTurn(request.input)) return null;
+    // A later attempt of the same turn (say, resumed with a newly delivered
+    // update after the person's message) replays the stored load; loading
+    // again would rewrite history that was already sent.
+    if (!startsTurn(request.input) || holdsOpeningToolLoad(request.input)) return null;
     const offersSearch = request.tools.some((tool) =>
       this.transport === "generic_dispatch"
         ? tool.type === "function" && tool.name === TOOL_SEARCH_NAME
@@ -1947,6 +1950,13 @@ function startsTurn(input: ModelRequest["input"]): boolean {
       .slice(lastUser + 1)
       .every((item) => isRecord(item) && (item.role === "developer" || item.role === "system"))
   );
+}
+
+/** Whether the history already holds this session's opening tool load. */
+function holdsOpeningToolLoad(input: ModelRequest["input"]): boolean {
+  if (typeof input === "string") return false;
+  const items: unknown[] = input;
+  return items.some((item) => isRecord(item) && callId(item) === OPENING_TOOL_LOAD_CALL_ID);
 }
 
 class LazyToolModel implements Model {

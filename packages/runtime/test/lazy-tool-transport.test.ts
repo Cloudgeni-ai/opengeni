@@ -3532,6 +3532,90 @@ describe("opening tool load", () => {
     expect(result.state.usage.requests).toBe(1);
   });
 
+  for (const transport of ["openai_native", "generic_dispatch"] as const) {
+    test(`${transport}: a later attempt whose history holds the load never loads again`, async () => {
+      const definition = {
+        type: "function",
+        name: WEATHER_TOOL,
+        description: "Look up the current weather for a city",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+        strict: false,
+      };
+      const args = { query: "", names: [WEATHER_TOOL] };
+      const stored =
+        transport === "generic_dispatch"
+          ? [
+              {
+                type: "function_call",
+                callId: "call_opening_tools",
+                name: "tool_search",
+                arguments: JSON.stringify(args),
+                status: "completed",
+              },
+              {
+                type: "function_call_result",
+                callId: "call_opening_tools",
+                name: "tool_search",
+                status: "completed",
+                output: JSON.stringify({
+                  tools: [{ name: WEATHER_TOOL, description: definition.description }],
+                  schemasLoaded: true,
+                  unavailable: [],
+                }),
+              },
+            ]
+          : [
+              {
+                type: "tool_search_call",
+                call_id: "call_opening_tools",
+                execution: "client",
+                status: "completed",
+                arguments: args,
+              },
+              {
+                type: "tool_search_output",
+                execution: "client",
+                status: "completed",
+                tools: [definition],
+                providerData: { call_id: "call_opening_tools", execution: "client" },
+              },
+            ];
+      // The first attempt's message and load, then an update delivered before
+      // a later attempt of the same turn.
+      const history = [
+        { type: "message", role: "user", content: "What is the weather?" },
+        ...stored,
+        { type: "message", role: "user", content: "Update: the person is in Oslo." },
+      ];
+      const agent = weatherAgent(() => "unused");
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      runtime.loadAtOpening([WEATHER_TOOL]);
+      const model = new ScriptedStreamingModel([[finalMessage("ok")]]);
+      const result = await new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      }).run(agent, structuredClone(history) as never, {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 4,
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+      expect(model.requests).toHaveLength(1);
+      const input = model.requests[0]!.input as Array<Record<string, unknown>>;
+      // The stored load keeps its place before the later message, once.
+      expect(input.map((item) => item.type ?? item.role)).toEqual(history.map((item) => item.type));
+      expect(input.at(-1)).toMatchObject({
+        role: "user",
+        content: "Update: the person is in Oslo.",
+      });
+    });
+  }
+
   test("nothing loads without opening tools, for unknown names, or mid-turn", async () => {
     const run = async (names: string[] | null, history: boolean) => {
       const agent = weatherAgent(() => "unused");
