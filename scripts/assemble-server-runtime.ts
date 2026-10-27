@@ -79,6 +79,7 @@ export function finalizeCommandEntry(input: {
   return `${input.output.trimEnd()}\nif (import.meta.main) await ${input.runner}();\n`;
 }
 
+/** Operator commands bundled at scripts/<name>.ts, each with a `db:<name>` root script. */
 const operatorCommands = [
   "inventory-tenancy",
   "check-tenancy-parity",
@@ -87,7 +88,30 @@ const operatorCommands = [
   "backfill-connection-authority",
   "verify-resource-classification",
   "sweep-organization-retention",
-  "admission-settings",
+] as const;
+
+/** Bundled operator commands run by path only (`bun scripts/<name>.ts`). */
+const pathOperatorCommands = ["admission-settings"] as const;
+
+/**
+ * Root scripts that operators run through the API image under their public
+ * name (for example `bun run model-catalog:upsert`), each bundled from its
+ * source path so the frozen runtime keeps working without the source tree.
+ */
+export const API_IMAGE_SCRIPT_COMMANDS = [
+  ["catalog:import", "import-integrations-catalog", "scripts/import-integrations-catalog.ts"],
+  ["model-catalog:upsert", "upsert-model-catalog", "scripts/upsert-model-catalog.ts"],
+] as const;
+
+/** Every root script the assembled API image's package.json dispatches. */
+export const API_RUNTIME_PACKAGE_SCRIPTS = [
+  "db:migrate",
+  "db:migrate-plan",
+  "db:provision-roles",
+  "db:assert-runtime-posture",
+  "db:backfill-lifecycle-facts",
+  ...operatorCommands.map((command) => `db:${command}` as const),
+  ...API_IMAGE_SCRIPT_COMMANDS.map(([script]) => script),
 ] as const;
 
 export async function assembleServerRuntime(root: string, role: "api" | "worker") {
@@ -137,8 +161,10 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     const commands = await Bun.build({
       entrypoints: [
         ...databaseCommands.map((command) => join(root, `packages/db/src/${command}.ts`)),
-        ...operatorCommands.map((command) => join(root, `scripts/${command}.ts`)),
-        join(root, "scripts/import-integrations-catalog.ts"),
+        ...[...operatorCommands, ...pathOperatorCommands].map((command) =>
+          join(root, `scripts/${command}.ts`),
+        ),
+        ...API_IMAGE_SCRIPT_COMMANDS.map(([, , path]) => join(root, path)),
       ],
       root,
       outdir: destination,
@@ -159,8 +185,10 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     }
     for (const [command, relativePath] of [
       ...databaseCommands.map((name) => [name, `packages/db/src/${name}.ts`] as const),
-      ...operatorCommands.map((name) => [name, `scripts/${name}.ts`] as const),
-      ["import-integrations-catalog", "scripts/import-integrations-catalog.ts"] as const,
+      ...[...operatorCommands, ...pathOperatorCommands].map(
+        (name) => [name, `scripts/${name}.ts`] as const,
+      ),
+      ...API_IMAGE_SCRIPT_COMMANDS.map(([, name, path]) => [name, path] as const),
     ]) {
       const builtPath = join(destination, relativePath);
       await writeFile(
@@ -183,6 +211,10 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     // Its reviewed snapshot and vendored logos stay local; never refetch them.
     await cp(join(root, "data/catalog"), join(destination, "data/catalog"), { recursive: true });
     const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    const missing = API_RUNTIME_PACKAGE_SCRIPTS.filter((command) => !manifest.scripts?.[command]);
+    if (missing.length > 0) {
+      throw new Error(`Root package.json lacks API image scripts: ${missing.join(", ")}`);
+    }
     // The root is only a runtime command dispatcher, not an install workspace.
     await writeFile(
       join(destination, "package.json"),
@@ -190,15 +222,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
         name: manifest.name,
         type: "module",
         scripts: Object.fromEntries(
-          [
-            "db:migrate",
-            "db:migrate-plan",
-            "db:provision-roles",
-            "db:assert-runtime-posture",
-            "db:backfill-lifecycle-facts",
-            ...operatorCommands.map((command) => `db:${command}`),
-            "catalog:import",
-          ].map((command) => [command, manifest.scripts[command]]),
+          API_RUNTIME_PACKAGE_SCRIPTS.map((command) => [command, manifest.scripts[command]]),
         ),
       }),
     );

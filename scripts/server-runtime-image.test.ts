@@ -76,7 +76,9 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             if (parserResolved) throw new Error('API must not ship the worker-only native parser');
             const migrations = await import('./packages/db/src/migrate.ts');
             if (typeof migrations.migrate !== 'function') throw new Error('missing migrator');
-            const sharedMigrations = await Promise.all(readdirSync('./packages/db/src').filter(name=>name.startsWith('runtime-')&&name.endsWith('.js')).map(async name=>{
+            // The bundler may keep migrate() in its entry or move it into a
+            // shared chunk; either way the SQL ledger must sit beside it.
+            const sharedMigrations = await Promise.all(readdirSync('./packages/db/src').filter(name=>name==='migrate.ts'||(name.startsWith('runtime-')&&name.endsWith('.js'))).map(async name=>{
               const path='./packages/db/src/'+name;
               const source=readFileSync(path,'utf8');
               if (!source.includes('async function migrate(')) return;
@@ -93,6 +95,14 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             const catalog = await import('./scripts/import-integrations-catalog.ts');
             if (typeof catalog.normalizeCatalogSnapshot !== 'function') throw new Error('missing catalog importer');
             if (!existsSync('./data/catalog/integrations-snapshot.json')) throw new Error('missing reviewed catalog');
+            const modelCatalog = await import('./scripts/upsert-model-catalog.ts');
+            if (typeof modelCatalog.runModelCatalogUpsert !== 'function') throw new Error('missing model catalog upsert');
+            const runtimeScripts = JSON.parse(readFileSync('./package.json','utf8')).scripts;
+            for (const script of ['catalog:import','model-catalog:upsert']) {
+              if (!runtimeScripts[script]) throw new Error('missing operator script '+script);
+            }
+            const upsertUsage = Bun.spawnSync([process.execPath, '--no-env-file', 'scripts/upsert-model-catalog.ts', '--help'], { env: { PATH: process.env.PATH } });
+            if (upsertUsage.exitCode !== 0 || !upsertUsage.stdout.toString().includes('model-catalog:upsert')) throw new Error('model catalog upsert does not run');
             for (const command of ['inventory-tenancy','check-tenancy-parity','backfill-session-ownership','backfill-organization-memberships','backfill-connection-authority','verify-resource-classification','sweep-organization-retention']) {
               await import('./scripts/'+command+'.ts');
               const manifest=JSON.parse(readFileSync('./package.json','utf8'));

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   API_RUNTIME_EXTERNALS,
+  API_IMAGE_SCRIPT_COMMANDS,
+  API_RUNTIME_PACKAGE_SCRIPTS,
   WORKER_RUNTIME_EXTERNALS,
   DATABASE_COMMAND_RUNNERS,
   finalizeCommandEntry,
@@ -19,6 +21,21 @@ test("only the worker image retains the native Documents parser", () => {
   expect(API_RUNTIME_EXTERNALS).toContain("sharp");
   expect(API_RUNTIME_EXTERNALS).toContain("ws");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("ws");
+});
+
+test("the API image dispatches the documented operator scripts, bundled from their sources", async () => {
+  const root = join(import.meta.dir, "..");
+  const manifest = JSON.parse(await Bun.file(join(root, "package.json")).text());
+  // Deployments run these through the API image (docs/deployment.md).
+  expect(API_RUNTIME_PACKAGE_SCRIPTS).toContain("model-catalog:upsert");
+  expect(API_RUNTIME_PACKAGE_SCRIPTS).toContain("catalog:import");
+  for (const script of API_RUNTIME_PACKAGE_SCRIPTS) {
+    expect(manifest.scripts[script], script).toBeString();
+  }
+  for (const [script, , path] of API_IMAGE_SCRIPT_COMMANDS) {
+    expect(manifest.scripts[script]).toContain(`bun ${path}`);
+    expect(await Bun.file(join(root, path)).exists()).toBe(true);
+  }
 });
 
 test("both images ship the 1Password SDK as a package, so its WASM core travels with it", () => {
