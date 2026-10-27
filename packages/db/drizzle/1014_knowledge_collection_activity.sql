@@ -24,9 +24,14 @@ CREATE TABLE knowledge_collection_activity (
   account_id uuid NOT NULL,
   entry_id uuid NOT NULL,
   changed_at timestamptz NOT NULL,
-  via_entry_id uuid NOT NULL,
+  -- The direct member the time came through. Cleared when that member is
+  -- deleted, whoever deletes it (a cascade from a workspace the application
+  -- deletes cannot run the maintainer); the next maintained write recomputes
+  -- the collection, and until then its reads walk.
+  via_entry_id uuid,
   PRIMARY KEY (account_id, entry_id),
-  FOREIGN KEY (account_id, entry_id) REFERENCES knowledge_entries(account_id, id) ON DELETE CASCADE
+  FOREIGN KEY (account_id, entry_id) REFERENCES knowledge_entries(account_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (account_id, via_entry_id) REFERENCES knowledge_entries(account_id, id) ON DELETE SET NULL (via_entry_id)
 );
 -- Led by the member, so it is never a cheaper-looking scan of a whole
 -- organization than the key when statistics underestimate an organization.
@@ -136,6 +141,10 @@ BEGIN
     END IF;
   ELSE
     changed_ids:=coalesce(changed_ids,'{}');
+    -- Collections whose member was deleted without maintenance (its reference
+    -- was cleared): recompute them now.
+    recompute_ids:=recompute_ids||coalesce((SELECT array_agg(s.entry_id) FROM knowledge_collection_activity s
+      WHERE s.via_entry_id IS NULL AND s.account_id=p_account),'{}');
     <<maintain>> WHILE cardinality(changed_ids)+cardinality(recompute_ids)>0 LOOP
       steps:=steps+cardinality(changed_ids)+cardinality(recompute_ids);
       IF steps>100000 THEN
@@ -300,7 +309,8 @@ END $$;
 
 -- Statement triggers, so a bulk change refreshes once per organization. They
 -- run as the writer (Knowledge tables are written only through their owner's
--- routines and migrations) and reach the tables only through the refresh.
+-- routines and migrations, and deleted by cascades) and reach the tables only
+-- through the refresh.
 CREATE FUNCTION knowledge_collection_activity_entries_changed() RETURNS trigger
 LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT AS $$
 DECLARE account uuid; changed uuid[];
@@ -317,7 +327,15 @@ BEGIN
       PERFORM knowledge_collection_activity_refresh(account,changed,NULL,true);
     END LOOP;
   ELSE
-    -- Deletion never builds: it is also how an organization is removed.
+    -- Deletion never builds: it is also how an organization is removed. A
+    -- deletion that cascades from a workspace or organization the application
+    -- deletes runs this as the application role (before PostgreSQL 18), which
+    -- cannot run the maintainer. It only removes members, so the kept times
+    -- left can only be too new; the deleted members' references are cleared
+    -- with them, and the next maintained write recomputes those collections.
+    IF NOT has_function_privilege('knowledge_collection_activity_refresh(uuid,uuid[],uuid[],boolean)','EXECUTE') THEN
+      RETURN NULL;
+    END IF;
     FOR account,changed IN SELECT o.account_id,array_agg(o.id) FROM old_rows o GROUP BY o.account_id LOOP
       PERFORM knowledge_collection_activity_refresh(account,changed,NULL,false);
     END LOOP;

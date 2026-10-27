@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { createDb, saveKnowledgeEntry } from "../src";
+import { createDb, deleteWorkspace, saveKnowledgeEntry } from "../src";
 import type { KnowledgeActor } from "../src/knowledge-entries";
 
 /* Newest-first lists keep each collection's newest change (migration 1014)
@@ -713,6 +713,61 @@ test("a built library answers Collections without walking members", async () => 
   await shared.admin`UPDATE knowledge_entries SET archived=false WHERE account_id=${f.accountId} AND archived`;
   await expectKeptMatchesRebuild(f);
   await expectParity(f, reader, { kind: "group" }, 10);
+}, 300_000);
+
+test("a workspace the application deletes leaves lists exact, and the next write repairs them", async () => {
+  const at = clock();
+  const f = await fixture();
+  // A second workspace whose entries belong to the first workspace's collections.
+  const other = { ...f, workspaceId: crypto.randomUUID() };
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${other.workspaceId},${f.accountId},'Deleted')`;
+  await shared.admin`INSERT INTO workspace_inference_controls(workspace_id,account_id)
+    VALUES(${other.workspaceId},${f.accountId})`;
+  const outer = await create(f, { kind: "group", title: "Outer", at: at() });
+  const group = await create(f, { kind: "group", title: "Group", groupIds: [outer], at: at() });
+  const elsewhere = await create(f, { kind: "group", title: "Elsewhere", at: at() });
+  await create(f, { kind: "note", title: "Kept", groupIds: [group], at: at() });
+  await create(f, { kind: "note", title: "Other note", groupIds: [elsewhere], at: at() });
+  // The newest change in Group (and so in Outer) is in the workspace deleted below.
+  await create(other, { kind: "note", title: "Removed", groupIds: [group], at: at() });
+  const sub = await create(other, {
+    kind: "group",
+    title: "Removed sub",
+    groupIds: [outer],
+    at: at(),
+  });
+  await create(other, { kind: "note", title: "Under removed", groupIds: [sub], at: at() });
+  await expectKeptMatchesRebuild(f);
+  // The application deletes the workspace; its entries go by cascade, and
+  // before PostgreSQL 18 the cascade's trigger runs as the application role.
+  const client = createDb(shared.appUrl);
+  try {
+    await deleteWorkspace(client.db, other.workspaceId);
+  } finally {
+    await client.close();
+  }
+  const [left] = await shared.admin`SELECT count(*)::int AS n FROM knowledge_entries
+    WHERE account_id=${f.accountId} AND scope_workspace_id=${other.workspaceId}`;
+  expect(left!.n).toBe(0);
+  // Before PostgreSQL 18 nothing maintained it: the deleted members' references
+  // were cleared, and Group and Outer keep their older, too-new times.
+  const [server] = await shared.admin`SELECT current_setting('server_version_num')::int AS version`;
+  const [orphaned] = await shared.admin`SELECT count(*)::int AS n FROM knowledge_collection_activity
+    WHERE account_id=${f.accountId} AND via_entry_id IS NULL`;
+  if (server!.version < 180_000) expect(orphaned!.n).toBe(2);
+  // Whatever was kept, every list still equals the walk.
+  for (const reader of [actor(f.subjectId, true), actor(f.subjectId, false)]) {
+    await expectParity(f, reader, { rootOnly: true }, 2);
+    await expectParity(f, reader, { kind: "group" });
+    await expectParity(f, reader, {}, 3);
+  }
+  // The next maintained write in the organization recomputes what the deletion left.
+  await create(f, { kind: "note", title: "Later", groupIds: [elsewhere], at: at() });
+  await expectKeptMatchesRebuild(f);
+  const [cleared] = await shared.admin`SELECT count(*)::int AS n FROM knowledge_collection_activity
+    WHERE account_id=${f.accountId} AND via_entry_id IS NULL`;
+  expect(cleared!.n).toBe(0);
+  await expectAllReadsMatch(f, [outer, group, elsewhere]);
 }, 300_000);
 
 test("organization removal and security metadata", async () => {
