@@ -2104,7 +2104,7 @@ export type SiteConversationGroup = {
   title: string;
   /** Root conversations in the group; 0 for a Site with none yet. */
   conversations: number;
-  /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
+  /** When the Site last got a new published version (creation is the first); for a viewer who cannot read the Site, when its first conversation here started. Its conversations, the chats that made it and opening it never move it. */
   updatedAt: string;
   /** Creation time of the group's newest conversation, else of the Site. */
   createdAt: string;
@@ -3529,7 +3529,7 @@ export type ScheduledTaskStatus = "active" | "paused";
 
 export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
-export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
+export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one" | "steer";
 
 export type ScheduledTaskDayOfWeek =
   | "SUNDAY"
@@ -5420,6 +5420,10 @@ export type ClientAuthConfig =
        */
       newSignupsEnabled?: boolean;
       signupChallengeSiteKey?: string | undefined;
+      /** Sign in with a passkey, and add passkeys in Security; omitted (false) by older deployments. */
+      passkeySignIn?: boolean;
+      /** Create an account with only a name and a passkey; omitted (false) by older deployments. */
+      passkeySignUp?: boolean;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract

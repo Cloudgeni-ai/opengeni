@@ -49,6 +49,7 @@ import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-acc
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
+import { appSessionPath } from "@/app-links";
 import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
@@ -240,6 +241,13 @@ function LiveSession(props: {
   // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
   const renderMarkdown = useMemo(() => {
     const openLink = (target: OpenGeniLinkTarget) => {
+      // Another chat opens here in the app, in the workspace the link names (or this one).
+      if (target.kind === "session") {
+        router.push(
+          appSessionPath(target.sessionId, target.workspaceId ?? props.workspaceId, null),
+        );
+        return;
+      }
       if (!webBaseUrl) return;
       const workspace = encodeURIComponent(props.workspaceId);
       if (target.kind === "site")

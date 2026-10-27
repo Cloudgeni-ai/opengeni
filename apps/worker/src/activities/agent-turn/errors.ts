@@ -1142,10 +1142,6 @@ export function sandboxRouteTransitionCode(
   return null;
 }
 
-export function isSandboxRouteTransitionError(error: unknown): boolean {
-  return sandboxRouteTransitionCode(error) !== null;
-}
-
 /** Backward-compatible name for callers/tests that only exercised the original
  * machine-to-home transition. */
 export function isHomeSandboxTurnTransitionError(error: unknown): boolean {

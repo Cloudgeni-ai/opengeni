@@ -961,8 +961,3 @@ function cipherRequestBody(cipher: Json, encryptedFor: string, changes: Json): J
     archivedDate: typeof cipher.archivedDate === "string" ? cipher.archivedDate : null,
   };
 }
-
-/** True when the error came from decrypting data rather than from the server. */
-export function isCryptoError(error: unknown): error is BitwardenCryptoError {
-  return error instanceof BitwardenCryptoError;
-}

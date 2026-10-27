@@ -154,7 +154,8 @@ async function fixture() {
     head_sha: sourceSha,
     head_branch: "main",
     path: ".github/workflows/ci.yml",
-    name: "CI",
+    // CI's run-name makes `name` the landed commit's subject.
+    name: "Batch 0123abcd: PR #1 from fix/example",
     event: "push",
     status: "completed",
     conclusion: "success",
@@ -341,6 +342,13 @@ test("rejects PR, fork, wrong branch/workflow/SHA and unsuccessful producer with
   f.producer.event = "pull_request";
   await expect(publishArtifactRuntime(f.options)).rejects.toThrow("canonical main-push");
   expect(f.mutations).toHaveLength(0);
+});
+
+test("accepts the canonical CI run whatever its run-name display title", async () => {
+  const f = await fixture();
+  for (const name of ["CI", "fix: a landed commit subject", "Batch 0123abcd: PR #1 from x"]) {
+    expect(() => validateRuntimeProducer({ ...f.producer, name }, f.options)).not.toThrow();
+  }
 });
 
 test("rejects archive corruption, missing or duplicate target before any publication", async () => {

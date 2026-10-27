@@ -57,10 +57,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
-import {
-  connectSetupPermission,
-  requireConnectOwnerAuthority,
-} from "../integrations/connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
 import { startAtlassianOAuth } from "../integrations/atlassian";
 import { startSlackBotInstall } from "../integrations/slack-install";

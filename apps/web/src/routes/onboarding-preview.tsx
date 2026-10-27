@@ -555,8 +555,16 @@ export function OnboardingPreviewRoute() {
   if (view === "billing") return <CreditBalancePreview />;
   if (view === "organization") return <ModelPreview organization />;
   if (view === "models") return <ModelPreview />;
-  if (view === "signin") return <ManagedAuthPanel onSubmit={async () => undefined} />;
+  // `&passkeys=1` previews a deployment that offers passkey sign-in and sign-up.
+  const passkeys = new URLSearchParams(window.location.search).get("passkeys") === "1";
+  const passkeyProps = passkeys
+    ? { passkeySignIn: true, passkeySignUp: true, onPasskeySubmit: async () => undefined }
+    : {};
+  if (view === "signin")
+    return <ManagedAuthPanel {...passkeyProps} onSubmit={async () => undefined} />;
   if (view === "verification-expired")
     return <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />;
-  return <ManagedAuthPanel initialMode="signup" onSubmit={async () => undefined} />;
+  return (
+    <ManagedAuthPanel {...passkeyProps} initialMode="signup" onSubmit={async () => undefined} />
+  );
 }

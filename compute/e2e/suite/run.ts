@@ -1312,7 +1312,7 @@ check("ui", "the web UI: file browser, terminal and desktop (Playwright)", ["fil
 
 check("run-as", "commands as another user", ["create"], async () => {
   throw new NotApplicable(
-    "the compute backend and the agent support runAs, but Opengeni offers no way to ask for it: sandboxRunAs sets none and no API request carries it",
+    "the compute backend and the agent support runAs, but Opengeni offers no way to ask for it: no sandbox setting or API request carries it",
   );
 });
 

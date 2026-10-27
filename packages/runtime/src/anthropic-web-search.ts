@@ -43,13 +43,6 @@ export function isHostedWebSearchTool(tool: {
   );
 }
 
-export function isAnthropicWebSearchBlock(block: Json): boolean {
-  return (
-    (block.type === "server_tool_use" && block.name === ANTHROPIC_WEB_SEARCH_TOOL_NAME) ||
-    block.type === "web_search_tool_result"
-  );
-}
-
 /**
  * Opaque identity of the Anthropic account a request runs on, or null when
  * the request carries no credential. A Claude subscription is identified by

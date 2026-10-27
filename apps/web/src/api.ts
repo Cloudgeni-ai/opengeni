@@ -21,6 +21,7 @@ import {
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
+import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   decideVoiceDeployment,
@@ -1002,6 +1003,35 @@ export async function signInEmail(input: {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+/** Signs in with a passkey the browser offers; leaves the session cookie set. */
+export async function signInPasskey(): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-in/options", {
+    method: "POST",
+    body: "{}",
+  });
+  const response = await askForPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-in", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
+/** Creates an account with only a name and a new passkey, and signs in to it. */
+export async function signUpPasskey(input: {
+  name: string;
+  signupChallengeToken?: string;
+}): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-up/options", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  const response = await createPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-up", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
   });
 }
 

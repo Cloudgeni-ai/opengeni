@@ -1284,7 +1284,7 @@ test("site-runtime checks the gateway signature before anything else", async () 
 }, 60_000);
 
 /** Real account expansion, encrypted credentials and HTTP MCP; no gateway mocks. */
-async function pageToolsFixture() {
+async function pageToolsFixture(options: { requireApproval?: string[] } = {}) {
   const authorizations: string[] = [];
   const callAuthorizations: string[] = [];
   let atProvider: (() => Promise<void>) | undefined;
@@ -1319,6 +1319,7 @@ async function pageToolsFixture() {
           url: `${proxy.url}mcp`,
           cacheToolsList: false,
           allowedTools: ["search_documents", "fetch_document"],
+          ...(options.requireApproval ? { requireApproval: options.requireApproval } : {}),
           connectionRef: {
             providerDomain: "127.0.0.1",
             kind: "api_key",
@@ -1545,6 +1546,51 @@ test("published page tools: declarations, audiences, live membership and approva
     await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
     expect((await f.post("catalog", {}, member)).status).toBe(403);
     expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+// Regression: Bendik's newsletter Site could not send Gmail after he set the
+// recommended-Ask "Send message" tool to Allow. Sites call through targeted
+// resolve/invoke, so a saved Allow must make that path work, and switching the
+// tool back to Ask must stop the next call before the provider is reached.
+test("published page tools: a saved Allow makes a recommended-Ask connection tool callable through targeted invoke", async () => {
+  const f = await pageToolsFixture({ requireApproval: ["search_documents"] });
+  try {
+    for (const account of [f.prod, f.personal]) {
+      const resolved = await f.post("resolve", { target: { identity: account.identity } });
+      expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+      const invoked = await f.post("invoke", {
+        target: { identity: account.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: resolved.json.definitionDigest,
+        arguments: { query: account.label },
+      });
+      expect(invoked.status, JSON.stringify(invoked.json)).toBe(200);
+      expect(invoked.json.result.content[0].text).toBe(`found document for ${account.label}`);
+    }
+    expect(f.provider.calls).toHaveLength(2);
+    const resolved = await f.post("resolve", { target: { identity: f.prod.identity } });
+    expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+    await updateConnectorToolPermissionPolicies(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+      serverId: "grafana",
+      toolNames: [f.prod.identity.toolName],
+      policy: "ask",
+    });
+    const asked = await f.post("invoke", {
+      target: { identity: f.prod.identity },
+      operationId: crypto.randomUUID(),
+      expectedDefinitionDigest: resolved.json.definitionDigest,
+      arguments: { query: "after ask" },
+    });
+    expect(asked.status, JSON.stringify(asked.json)).toBe(404);
+    expect(asked.json.error.message).toBe("tool_unavailable");
+    expect(f.provider.calls).toHaveLength(2);
   } finally {
     f.close();
   }

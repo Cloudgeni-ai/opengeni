@@ -1017,32 +1017,6 @@ async function readRetainedImageObject(
   }
 }
 
-/** Expand durable markers in an SDK RunState immediately before resume. */
-export async function materializeRetainedScreenshotRunState(input: {
-  db: Database;
-  objectStorage: ObjectStorage | null;
-  workspaceId: string;
-  sessionId: string;
-  serialized: string;
-  now?: Date;
-}): Promise<string> {
-  const parsed = parseSerializedRunState(input.serialized);
-  if (!parsed) return input.serialized;
-  const cache = new Map<string, string | null>();
-  let changed = false;
-  await visitSerializedRunStateItemArraysAsync(parsed, async (items) => {
-    const materialized = await materializeRetainedScreenshotHistoryWithCache(
-      { ...input, history: items },
-      cache,
-    );
-    if (materialized.some((item, index) => item !== items[index])) {
-      items.splice(0, items.length, ...materialized);
-      changed = true;
-    }
-  });
-  return changed ? JSON.stringify(parsed) : input.serialized;
-}
-
 async function materializeRetainedScreenshotHistoryWithCache(
   input: {
     db: Database;
@@ -1323,43 +1297,6 @@ function visitSerializedRunStateItemArrays(
   ) {
     const output = (lastModelResponse as Record<string, unknown>).output;
     if (Array.isArray(output)) visitor(output as Array<Record<string, unknown>>);
-  }
-}
-
-async function visitSerializedRunStateItemArraysAsync(
-  root: Record<string, unknown>,
-  visitor: (items: Array<Record<string, unknown>>) => Promise<void>,
-): Promise<void> {
-  const originalInput = root.originalInput;
-  if (Array.isArray(originalInput)) {
-    await visitor(originalInput as Array<Record<string, unknown>>);
-  }
-  if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
-      if (!wrapper || typeof wrapper !== "object" || Array.isArray(wrapper)) continue;
-      const record = wrapper as Record<string, unknown>;
-      const rawItem = record.rawItem;
-      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
-      const items = [rawItem as Record<string, unknown>];
-      await visitor(items);
-      if (items[0] !== rawItem) record.rawItem = items[0];
-    }
-  }
-  if (Array.isArray(root.modelResponses)) {
-    for (const response of root.modelResponses) {
-      if (!response || typeof response !== "object" || Array.isArray(response)) continue;
-      const output = (response as Record<string, unknown>).output;
-      if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
-    }
-  }
-  const lastModelResponse = root.lastModelResponse;
-  if (
-    lastModelResponse &&
-    typeof lastModelResponse === "object" &&
-    !Array.isArray(lastModelResponse)
-  ) {
-    const output = (lastModelResponse as Record<string, unknown>).output;
-    if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
   }
 }
 

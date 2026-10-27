@@ -197,6 +197,7 @@ import {
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
+  scheduledTaskOverlapPolicyToolInput,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
 import {
@@ -219,7 +220,7 @@ import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
   type FirstPartyToolAuthorization,
-} from "./first-party-tool-permissions";
+} from "@opengeni/contracts";
 import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
@@ -279,7 +280,7 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   eventTriggersEnabled,
   manualScheduledTaskTriggerUsageKey,
@@ -714,6 +715,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
         schedule: scheduledTaskScheduleToolInput().optional(),
+        overlapPolicy: scheduledTaskOverlapPolicyToolInput(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
@@ -2116,7 +2118,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, ...requested }) => {
         const existing = await requireVisibleTask(id);
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const { input: raw, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
@@ -2212,7 +2214,7 @@ export function buildOpenGeniMcpServer(
         if (existing.status === "paused") {
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const adminPause =
           viewer.admin &&
           (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
@@ -2240,7 +2242,7 @@ export function buildOpenGeniMcpServer(
         if (existing.status === "active") {
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
-        const previous = await captureScheduledTaskRestoreState(deps.db, existing);
+        const previous: ScheduledTaskRestoreState = { task: existing };
         const update = await validatedScheduledTaskUpdate({
           settings: deps.settings,
           db: deps.db,

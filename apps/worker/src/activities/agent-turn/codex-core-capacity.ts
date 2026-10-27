@@ -41,15 +41,6 @@ import {
 } from "./subscription-core-capacity";
 import type { CodexSubscriptionCoreTurn, ProviderTurnState } from "./turn-context";
 
-export function isCoreCodexSourceDisconnectedError(error: unknown): boolean {
-  let current = error;
-  for (let depth = 0; depth < 8 && current instanceof Error; depth++) {
-    if (current instanceof SubscriptionCoreCodexSourceDisconnectedError) return true;
-    current = current.cause;
-  }
-  return false;
-}
-
 /** Read-only hint after atomic claim. Renewal stays at live placement. */
 export function prepareCoreCodexTurnEntitlements(
   deps: Pick<CapacityPhaseDeps, "db" | "settings" | "input" | "turn" | "observability">,

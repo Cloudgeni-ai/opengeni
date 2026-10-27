@@ -207,7 +207,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
       );
     }
-    browser = await chromium.launch();
+    // OPENGENI_TEST_CHROMIUM points at a system Chromium where Playwright's
+    // own build can't load (NixOS, for example), as other browser tests allow.
+    browser = await chromium.launch(
+      process.env.OPENGENI_TEST_CHROMIUM
+        ? { executablePath: process.env.OPENGENI_TEST_CHROMIUM, args: ["--no-sandbox"] }
+        : {},
+    );
   }, 180_000);
 
   afterAll(async () => {
@@ -3722,8 +3728,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A recursive Pause is visible and actionable from a deeply nested
       // session. Sending there remains inert in that selected branch's queue;
       // it does not silently resume the child, manager, or workspace. The
-      // header breadcrumb remains bounded and exposes every
-      // ancestor (the middle ancestors collapse into one explicit menu).
+      // header breadcrumb remains bounded and exposes every ancestor: the
+      // earlier ones share one explicit menu, and the parent stays a visible
+      // link even with the paused control and a long title on the same row.
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       const deepChildUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${deepChild.id}`;
@@ -3732,8 +3739,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: "Session ancestry",
       });
       await ancestry.waitFor();
-      await ancestry.getByRole("button", { name: "1 intermediate ancestor sessions" }).waitFor();
-      expect(await ancestry.getByRole("link").count()).toBe(2);
+      await ancestry.getByRole("button", { name: "2 earlier sessions" }).waitFor();
+      const parentLink = ancestry.getByRole("link");
+      expect(await parentLink.count()).toBe(1);
+      const parentBox = await parentLink.boundingBox();
+      expect(parentBox?.width ?? 0).toBeGreaterThanOrEqual(40);
       await desktopPage
         .getByRole("button", {
           name: /^Paused by .*\. Open workstream controls$/,

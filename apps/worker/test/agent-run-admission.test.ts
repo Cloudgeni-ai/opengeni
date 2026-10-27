@@ -4,7 +4,7 @@ import * as opengeniCore from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
-import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
 import { checkLimit } from "@opengeni/core";
