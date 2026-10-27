@@ -155,6 +155,15 @@ html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] dialo
   padding-left: 32px;
 }
 
+/* The publish form takes the Site's place, so its header is then the top row.
+   It is already 32px in, until a narrow column (chat dragged wide) halves its
+   padding; keep the 32px that clears the controls and the sharing badge, for
+   the body and buttons too so the form keeps one left edge. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > :is(header, [data-slot="form-body"]),
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > footer > div {
+  padding-left: 32px;
+}
+
 /* A full-window workspace panel (maximized, or the overlay in a narrow
    window) puts its tab row under the traffic lights. */
 html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
