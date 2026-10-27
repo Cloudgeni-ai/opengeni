@@ -519,6 +519,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       aligner: () => null,
       now: () => Date.now() + budget - window,
       saveRetryDelaysMilliseconds: [0, 0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
       // The database drops the first two saves, the first one only once the
       // budget has run out.
       saveTranscript: async (db, version) => {
@@ -589,6 +590,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       diarizer: () => null,
       aligner: () => null,
       saveRetryDelaysMilliseconds: [0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
       saveTranscript: async () => {
         saves += 1;
         throw new Error("connection terminated unexpectedly");
