@@ -865,9 +865,6 @@ three seconds to insert later. A client without the recordings API (only
 also take a `language`) records in memory and
 sends one request, as before.
 
-Dictation recordings replace the older `transcription-recordings` routes,
-which are deprecated and kept for older clients until their sunset.
-
 ### Dictation from anywhere (desktop)
 
 In the desktop app, a shortcut dictates into whatever app has the cursor:

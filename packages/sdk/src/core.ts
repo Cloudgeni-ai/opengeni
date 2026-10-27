@@ -39,7 +39,5 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
 export type { OpenGeniReadRetryOptions } from "./read-retry";
-export { parseDeprecationNotice } from "./deprecation";
-export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
 export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";

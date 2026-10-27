@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
+import * as primitives from "./primitives";
 
 /**
  * Recordings: captured conversations (meetings, interviews, site walks) with
@@ -1134,3 +1135,19 @@ export type RecordingEventData = {
   noteRevision?: number;
   sessionId?: string | null;
 };
+
+/** Limits of durable (chunked, resumable) dictation, advertised in client config. */
+export const ClientResumableVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      maxDurationSeconds: primitives.positiveInteger.max(8 * 60 * 60),
+      maxSizeBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
+      maxChunkSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
+      providerSegmentSeconds: z.number().int().positive().max(600),
+    })
+    .strict(),
+);
+export type ClientResumableVoiceInputConfig = z.infer<typeof ClientResumableVoiceInputConfig>;
+
+/** Audio is sent to a transcription provider in segments of at most this length. */
+export const TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS = 50;

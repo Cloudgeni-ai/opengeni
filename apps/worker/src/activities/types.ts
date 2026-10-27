@@ -586,19 +586,6 @@ export type RunKnowledgeSourceSyncBatchInput = {
   overlapPolicy: "skip" | "buffer_one";
 };
 
-export type DispatchAutomationRunInput = {
-  accountId: string;
-  workspaceId: string;
-  runId: string;
-};
-
-export type DispatchAutomationRunResult =
-  | { action: "started"; sessionId: string }
-  | { action: "already_dispatched"; sessionId: string }
-  | { action: "skipped"; reason: string }
-  | { action: "failed"; reason: string }
-  | { action: "not_found" };
-
 export type RunKnowledgeSourceSyncBatchResult = (
   | { action: "continue" }
   | {

@@ -592,33 +592,6 @@ describe("embedding host session authorization routes", () => {
     });
   });
 
-  test("answers 410 variable_sets_removed for the retired session Variable Set route", async () => {
-    if (!available) return;
-    const value = await fixture();
-    const app = appWith({
-      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
-      resolveListScope: async () => ({ kind: "all" }),
-    });
-    const response = await app.request(
-      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`,
-      {
-        method: "PUT",
-        headers: { authorization: value.authorization, "content-type": "application/json" },
-        body: JSON.stringify({ variableSetIds: [crypto.randomUUID()] }),
-      },
-    );
-    expect(response.status).toBe(410);
-    expect(await response.json()).toMatchObject({
-      error: "variable_sets_removed",
-      details: { vaultsPath: "/vaults" },
-    });
-    const [session] = await shared!.admin<Array<{ variableSetIds: string[] }>>`
-      select variable_set_ids as "variableSetIds" from sessions
-      where workspace_id = ${value.grant.workspaceId} and id = ${value.child.id}
-    `;
-    expect(session).toEqual({ variableSetIds: [] });
-  });
-
   test("rejects non-empty legacy Variable Set create fields with 422 and accepts empty ones", async () => {
     if (!available) return;
     const value = await fixture();

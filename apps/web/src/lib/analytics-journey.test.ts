@@ -261,20 +261,5 @@ describe("content-free customer journey", () => {
       operation: "dictation",
       properties: { workspace_id: workspace, method: "POST", mode: "direct" },
     });
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "POST"),
-    ).toEqual({
-      operation: "dictation",
-      properties: { workspace_id: workspace, method: "POST", mode: "recording" },
-    });
-    expect(
-      journeyOperation(
-        `/v1/workspaces/${workspace}/transcription-recordings/${session}/finalize`,
-        "POST",
-      ),
-    ).toBeNull();
-    expect(
-      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "GET"),
-    ).toBeNull();
   });
 });

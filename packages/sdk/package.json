@@ -118,14 +118,6 @@
       "types": "./src/memory-slack.ts",
       "default": "./src/memory-slack.ts"
     },
-    "./automations": {
-      "types": "./src/automations.ts",
-      "default": "./src/automations.ts"
-    },
-    "./pr-review": {
-      "types": "./src/pr-review.ts",
-      "default": "./src/pr-review.ts"
-    },
     "./organization-integration-policy": {
       "types": "./src/organization-integration-policy.ts",
       "default": "./src/organization-integration-policy.ts"

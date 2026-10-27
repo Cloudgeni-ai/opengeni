@@ -13,10 +13,8 @@ import { getWorkspace } from "@opengeni/db";
 import type { Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
-import { registerResumableTranscriptionRoutes } from "./transcription-recordings";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
-  registerResumableTranscriptionRoutes(app, deps);
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");

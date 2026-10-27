@@ -16,10 +16,7 @@ import {
   githubAppMissingSettings,
   githubOAuthAuthorizeUrl,
   readSignedState,
-  prReviewGitHubAppMissingSettings,
-  settingsForPrReviewGitHubApp,
 } from "@opengeni/github";
-import { commitGitHubLensConnect, requireGitHubLensConnect } from "./github-lens-connect";
 import { eventRouteSecret, type ApiRouteDeps, type PreparedConnectOperation } from "@opengeni/core";
 import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { claimOAuthAcquisition, finishOAuthAcquisition, integrationBaseUrl } from "./oauth-client";
@@ -38,7 +35,7 @@ const stateSchema = z.object({
   connectAttemptId: z.string().uuid(),
   phase: z.enum(["discover", "install", "bind"]),
   installationId: z.number().int().positive().safe().optional(),
-  providerId: z.enum(["github-app", "github-lens"]).default("github-app"),
+  providerId: z.literal("github-app").default("github-app"),
   nonce: z.string().min(1),
   iat: z.number().int(),
 });
@@ -49,21 +46,11 @@ export function isGitHubAppConnectState(deps: ApiRouteDeps, raw: string | undefi
   return !!raw && readSignedState(raw, deps.githubStateSecret)?.kind === "github_app_connect";
 }
 
-type GitHubConnectScope = ConnectActorScope & {
-  personalOwnerVerified?: boolean;
-  providerId?: "github-app" | "github-lens";
-};
+type GitHubConnectScope = ConnectActorScope & { personalOwnerVerified?: boolean };
 function callbackAuthority(scope: GitHubConnectScope): ConnectOperationAuthorization {
   return async (tx, _attempt, origin) => {
     const actor = { ...scope, ...(origin ? { externalContinuation: origin } : {}) };
-    await requireConnectOwnerAuthority(
-      tx,
-      actor,
-      scope.providerId === "github-lens" ? "workspace:admin" : "github:manage",
-      origin,
-    );
-    if (scope.providerId === "github-lens")
-      await requireConnectOwnerAuthority(tx, actor, "secrets:write", origin);
+    await requireConnectOwnerAuthority(tx, actor, "github:manage", origin);
   };
 }
 
@@ -74,14 +61,9 @@ export function githubAppConnectNavigation(
   requestUrl: string,
   phase: State["phase"] = "discover",
   installationId?: number,
-  providerId: State["providerId"] = "github-app",
 ) {
-  const settings =
-    providerId === "github-lens" ? settingsForPrReviewGitHubApp(deps.settings) : deps.settings;
-  const missing =
-    providerId === "github-lens"
-      ? prReviewGitHubAppMissingSettings(deps.settings)
-      : githubAppMissingSettings(settings);
+  const settings = deps.settings;
+  const missing = githubAppMissingSettings(settings);
   if (missing.length || !settings.githubAppSlug?.trim())
     throw new HTTPException(503, { message: "GitHub App is not configured" });
   const state = createSignedState(deps.githubStateSecret, {
@@ -92,7 +74,7 @@ export function githubAppConnectNavigation(
     personalOwnerVerified: scope.personalOwnerVerified === true,
     connectAttemptId: attemptId,
     phase,
-    providerId,
+    providerId: "github-app",
     ...(installationId ? { installationId } : {}),
   });
   const url =
@@ -101,7 +83,7 @@ export function githubAppConnectNavigation(
       : githubOAuthAuthorizeUrl({
           clientId: settings.githubClientId!.trim(),
           state,
-          redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}${providerId === "github-lens" ? "/v1/pr-review/github" : "/v1/github"}/oauth/callback`,
+          redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}/v1/github/oauth/callback`,
         });
   return { authorizationUrl: url, expiresAt: new Date(Date.now() + lifetimeMs).toISOString() };
 }
@@ -140,7 +122,6 @@ export function prepareGitHubAppConnectAction(
     requestUrl,
     phase,
     installationId,
-    attempt.providerId === "github-lens" ? "github-lens" : "github-app",
   );
   return {
     commit: async (_tx, current) => ({
@@ -164,14 +145,11 @@ export async function completeGitHubAppConnect(
     setupAction?: string | undefined;
     error?: string | undefined;
     requestUrl: string;
-    expectedProvider?: "github-app" | "github-lens";
   },
 ): Promise<Response> {
   let destination: string | undefined;
   try {
     const state = stateSchema.parse(readSignedState(input.state ?? "", deps.githubStateSecret));
-    if (state.providerId !== (input.expectedProvider ?? "github-app"))
-      throw new Error("GitHub callback provider mismatch");
     const age = Date.now() - state.iat * 1000;
     if (age < 0 || age >= lifetimeMs) throw new Error("Expired GitHub connection state");
     const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
@@ -204,8 +182,6 @@ export async function completeGitHubAppConnect(
             new URL(current.nextAction.url).searchParams.get("state") !== input.state
           )
             throw new Error("Stale GitHub setup stage");
-          if (acquiring && state.providerId === "github-lens")
-            await requireGitHubLensConnect({ ...deps, db: tx });
         },
       },
       state.providerId,
@@ -224,12 +200,8 @@ export async function completeGitHubAppConnect(
         headers: { Location: claim.attempt.nextAction.url },
       });
     if (claim.status !== "replayed") {
-      const provider =
-        state.providerId === "github-lens" ? deps.prReviewGithubAppApi : deps.githubAppApi;
-      const settings =
-        state.providerId === "github-lens"
-          ? settingsForPrReviewGitHubApp(deps.settings)
-          : deps.settings;
+      const provider = deps.githubAppApi;
+      const settings = deps.settings;
       let prepared: PreparedConnectOperation;
       if (input.error || (state.phase !== "install" && !input.code)) {
         prepared = {
@@ -275,7 +247,6 @@ export async function completeGitHubAppConnect(
             input.requestUrl,
             "bind",
             installationId,
-            state.providerId,
           );
           prepared = {
             commit: async (_tx, current) => ({
@@ -347,29 +318,6 @@ export async function completeGitHubAppConnect(
         const checkedAt = new Date();
         prepared = {
           commit: async (tx, current) => {
-            if (state.providerId === "github-lens") {
-              const registration = await commitGitHubLensConnect(deps, tx, {
-                ...state,
-                installationId,
-                proof,
-                checkedAt,
-                expiresAt: new Date(state.iat * 1000 + lifetimeMs),
-                nonce: state.nonce,
-              });
-              return {
-                ...current,
-                revision: current.revision + 1,
-                state: "complete",
-                nextAction: { type: "none" },
-                account: {
-                  id: `lens-registration:${registration.id}`,
-                  providerId: "github-lens",
-                  label: proof.installation.accountLogin!,
-                  ownership: "workspace",
-                  status: "connected",
-                },
-              };
-            }
             const bound = await bindAuthorizedGitHubInstallationRepositories(tx, {
               accountId: state.accountId,
               workspaceId: state.workspaceId,

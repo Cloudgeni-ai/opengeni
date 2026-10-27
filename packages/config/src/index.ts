@@ -996,12 +996,6 @@ const SettingsSchema = z.object({
   sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
-  voiceInputResumableRetentionSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(7 * 24 * 60 * 60)
-    .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   /**
    * Our own CPU speaker models for meeting recordings (apps/worker/speakers):
@@ -2158,12 +2152,6 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
-  prReviewGithubAppId: z.string().optional(),
-  prReviewGithubClientId: z.string().optional(),
-  prReviewGithubClientSecret: z.string().optional(),
-  prReviewGithubAppSlug: z.string().optional(),
-  prReviewGithubWebhookSecret: z.string().optional(),
-  prReviewGithubAppPrivateKey: z.string().optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
@@ -5717,9 +5705,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     sessionArchiveEnabled: optional("OPENGENI_SESSION_ARCHIVE_ENABLED"),
     sessionArchiveIdleDays: optional("OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"),
-    voiceInputResumableRetentionSeconds: optional(
-      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
-    ),
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
@@ -6147,12 +6132,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
-    prReviewGithubAppId: optional("OPENGENI_PR_REVIEW_GITHUB_APP_ID"),
-    prReviewGithubClientId: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID"),
-    prReviewGithubClientSecret: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET"),
-    prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
-    prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
-    prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),

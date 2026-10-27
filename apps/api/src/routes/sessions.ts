@@ -2697,14 +2697,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
-  // Variable Sets were replaced by vaults. The route answers 410 so old
-  // clients learn where secrets moved instead of silently doing nothing.
-  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    return variableSetsRemovedResponse(c, 410);
-  });
-
   // Manual rename and description/avatar edit. A user-set title is permanent:
   // the db write is unconditional (source='user'), so it always pins the
   // session over later automatic agent titles. Returns the refreshed session,

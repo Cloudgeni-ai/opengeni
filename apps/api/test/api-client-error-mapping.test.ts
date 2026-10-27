@@ -5,7 +5,6 @@ import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import { createApp, type AppDependencies } from "../src/app";
 import { HTTPException } from "hono/http-exception";
-import { routeRetired } from "../src/http/deprecation";
 import { parseRequestJson, parseRequestQuery } from "../src/http/request-body";
 import { validatedAllowedToolIds } from "../src/routes/api-integrations";
 import { workspaceUpdateRequestsSettings } from "../src/routes/workspaces";
@@ -230,23 +229,6 @@ describe("Integration allowedTools", () => {
 });
 
 describe("gone", () => {
-  test("a retired route is a 410 gone that names its replacement", async () => {
-    const app = appFor();
-    app.post("/v1/test-probe/retired", () => {
-      throw routeRetired("POST /v1/test-probe/current", "Search moved to /v1/test-probe/current.");
-    });
-    const response = await app.request("/v1/test-probe/retired", { method: "POST" });
-    expect(response.status).toBe(410);
-    expect(await envelope(response)).toEqual({
-      status: 410,
-      code: "gone",
-      message: "Search moved to /v1/test-probe/current.",
-      retryable: false,
-      requestId: expect.any(String),
-      details: { code: "route_retired", replacement: "POST /v1/test-probe/current" },
-    });
-  });
-
   test("any other 410 is gone too, never internal_error", async () => {
     const app = appFor();
     app.get("/v1/test-probe/expired", () => {
