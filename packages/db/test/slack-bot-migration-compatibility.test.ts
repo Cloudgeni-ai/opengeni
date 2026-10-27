@@ -348,7 +348,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime role lacks EXECUTE on private routine set_promotion_detector_mode(text, text)",
       "runtime role lacks EXECUTE on private routine set_promotion_enforcement(boolean, text, text, boolean)",
       "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
-      // 1002 withholds the EU-only change function's grant the same way.
+      // 1010 withholds the EU-only change function's grant the same way.
       "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
     ]);
