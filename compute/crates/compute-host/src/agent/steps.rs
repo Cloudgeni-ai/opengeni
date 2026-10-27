@@ -78,12 +78,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
-            Event::Checked {
-                id,
-                incarnation,
-                reach,
-                unfrozen,
-            } => self.checked(id, incarnation, reach, unfrozen),
+            Event::Checked(done) => self.checked(done),
             Event::Asked {
                 id,
                 op,

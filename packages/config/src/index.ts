@@ -333,6 +333,15 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // Optional files holding the runtime login's password (the user in
+  // databaseUrl), read on every new connection so the password can be rotated
+  // without a restart. Unset → the URL password, exactly as before. A missing
+  // or empty current file also falls back to the URL password; a missing or
+  // empty previous file means no previous candidate. During a rotation the
+  // pools try previous first and switch to current after one rejected login.
+  // See docs/deployment.md ("Rotating the runtime database password").
+  databasePasswordFile: z.string().optional(),
+  databasePreviousPasswordFile: z.string().optional(),
   // LISTEN needs a session-pinned connection. Direct deployments reuse the
   // ordinary URL; transaction poolers supply this separate direct endpoint.
   databaseNotificationUrl: z.string().optional(),
@@ -1029,6 +1038,20 @@ const SettingsSchema = z.object({
     .string()
     .trim()
     .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
+    .optional(),
+  /**
+   * The model a recorder streams to for the live transcript, as
+   * `provider/model`. Defaults to ElevenLabs Scribe v2 Realtime. With
+   * OPENGENI_SPEECH_TO_TEXT_PINNED, the live transcript goes only to the
+   * pinned provider or this model.
+   */
+  recordingLiveTranscription: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-openai/gpt-4o-transcribe",
+    )
     .optional(),
   /**
    * One speech-to-text model for every use (meetings, dictation), as
@@ -2175,6 +2198,13 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Lets a person create a managed account with only a passkey: no email
+  // address and no password. Off by default, because such an account has no
+  // email to verify, invite, notify or recover through; the deployment's
+  // sign-up switches, signup challenge and email allowlist still apply (an
+  // allowlist refuses passkey-only accounts). Passkey sign-in, and adding a
+  // passkey to an existing account, need no setting.
+  managedAuthPasskeySignUpEnabled: EnvBoolean.default(false),
   // Unset retains environment-based verification (required outside local).
   managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
@@ -2741,10 +2771,18 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
         "2025-04-01-preview";
       const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
       const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
+      // Without a key or a fixed token, the deployment's own Microsoft Entra
+      // identity signs in to a speech deployment named for voice input, as it
+      // does for the recordings' Speech account.
+      const signsInAsDeployment =
+        Boolean(settings.voiceInputAzureEndpoint || settings.voiceInputAzureDeployment) &&
+        deploymentAzureEntraCredential(settings) !== null;
       if (
         !endpoint ||
         !deployment ||
-        (!isUsableVoiceInputSecret(apiKey) && !isUsableVoiceInputSecret(adToken))
+        (!isUsableVoiceInputSecret(apiKey) &&
+          !isUsableVoiceInputSecret(adToken) &&
+          !signsInAsDeployment)
       ) {
         continue;
       }
@@ -5260,6 +5298,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    databasePasswordFile: optional("OPENGENI_DATABASE_PASSWORD_FILE"),
+    databasePreviousPasswordFile: optional("OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE"),
     databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
@@ -5497,6 +5537,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
     recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
     recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    recordingLiveTranscription: optional("OPENGENI_RECORDING_LIVE_TRANSCRIPTION"),
     speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
@@ -5955,6 +5996,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthPasskeySignUpEnabled: optional("OPENGENI_MANAGED_AUTH_PASSKEY_SIGNUP_ENABLED"),
     managedAuthRequireEmailVerification: optional(
       "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
     ),
@@ -11166,6 +11208,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
   }
   for (const [env, value] of [
     ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_RECORDING_LIVE_TRANSCRIPTION", settings.recordingLiveTranscription],
     ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
   ] as const) {
     const provider = value?.split("/")[0];

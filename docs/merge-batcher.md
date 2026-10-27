@@ -251,11 +251,27 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_FETCH_TIMEOUT_SECONDS` | `600` for cold/large Git fetches; other Git commands retain a 60-second bound |
 | `BATCHER_MISSING_RUN_SECONDS` | `900` before a never-started workflow becomes an abandoned infrastructure hold |
 | `BATCHER_LEASE_SECONDS` | `120`, durable provider lease, not local leadership |
+| `BATCHER_OWNER_ID` | Random per process; a supervisor that runs one `--once` child at a time passes one UUID per control generation (see below) |
 | `PORT` | `8080` |
 | `GH_TOKEN` or `GITHUB_TOKEN` | Existing repository token; never baked into the image |
 | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` | Alternative App authentication; private key PEM supplied at runtime |
 
 An existing token is preferred over App authentication when both are configured.
+
+`BATCHER_OWNER_ID` is the durable lease owner. Without it every process is its own
+owner, so a supervisor spawning `run --once` children waits out each predecessor's
+lease and acts only every other cycle. A supervisor generates one UUID when it
+adopts a control generation and passes it to every child of that generation; a
+new START gets a new ID. Sharing it is safe only because the supervisor never
+starts a child before the previous one has provably exited. It does not bypass
+anything: every write still needs the state-ref compare-and-swap and epoch fence,
+and processes with another owner, including other generations, still wait for
+the lease. Never configure the same ID for concurrently running processes.
+Because a running generation now renews the lease continuously, operator
+`recover-effect` and `recover-missing-run` commands (random owners) are fenced
+until the controller is stopped: STOP first, then run them. The supervisor
+reports the generation's owner as `controllerOwner` in `/status` and in each
+`writer_started` record for attribution.
 App authentication mints a short-lived installation token; in shadow it requests
 only contents/actions/pull_requests/issues **read** permissions. That auth exchange
 does not mutate repository refs, comments, labels, workflows or checks. The
@@ -720,8 +736,16 @@ PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
 the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
 PR-number input for the same group. Planning, one fast-check job and the final
 aggregate run sequentially; the fast-check job has a hard 15-minute timeout and
-covers lint, impacted types and at most
+covers Batch's seconds-cheap source contracts, lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
+The cheap source contracts are the shared pending-changeset release plan
+(`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
+ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
+Site runtime check, the committed workflow execution graph (otherwise only a unit
+test that workflow-changing PRs defer to Batch), and the impact plan's guards
+except lint (its own step), `subscription-contract` (about 20 seconds) and the
+output-producing guards Batch also defers. A broken changeset or stale public API
+snapshot therefore fails its own PR instead of a batch of up to 15.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
 defers full coverage to Batch CI. Release-note `.changeset/` files alone do not

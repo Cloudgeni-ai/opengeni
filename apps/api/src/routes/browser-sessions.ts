@@ -282,6 +282,7 @@ import {
   BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
   browserRecordingFailureStatus,
   browserRecordingOwner,
+  readyBrowserRecordingOutputs,
   stageBrowserRecordingBundle,
 } from "../browser-recording-save";
 import {
@@ -1288,9 +1289,9 @@ export function registerBrowserSessionRoutes(
    * The browser host only uploads its frame bundle. That makes it a
    * recording, and the worker encodes its video, so no browser host and no
    * API request needs a video encoder. While the bundle is still uploading
-   * over a slow link, or its video is being made, this answers 202 with
-   * `retryAfterMs`; repeating the request with the same operationId joins
-   * that work instead of starting it again. */
+   * over a slow link, or its video is being made or not yet readable from
+   * storage, this answers 202 with `retryAfterMs`; repeating the request
+   * with the same operationId joins that work instead of starting it again. */
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
     async (context) => {
@@ -1424,12 +1425,17 @@ export function registerBrowserSessionRoutes(
             ? await getBrowserRecordingVideo(deps.db, actor)
             : null;
         if (!video) return progress("encoding");
-        const actionLog = await objectStorage.getObjectBytes(video.actionLogObjectKey);
-        if (!actionLog) {
-          throw new HTTPException(503, {
-            message: "browser recording action log is not available",
-          });
-        }
+        // Storage that replicates in the background can miss the worker's
+        // fresh writes for a while; until it shows both, keep answering 202.
+        const readable = await readyBrowserRecordingOutputs({
+          objectStorage,
+          videoKey: video.objectKey,
+          actionLogKey: video.actionLogObjectKey,
+          readyForMs: video.readyForMilliseconds,
+          signal: context.req.raw.signal,
+        });
+        if (!readable) return progress("encoding");
+        const actionLog = { bytes: readable.actionLog };
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
         const videoPath =

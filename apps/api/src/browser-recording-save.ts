@@ -7,6 +7,7 @@ import {
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import { InteractionResourceStateError } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
 
 /** How long one save request waits for a recording's bundle to reach storage
  * before answering 202; the caller repeats the request to keep waiting. */
@@ -17,6 +18,10 @@ export const BROWSER_RECORDING_SAVE_RETRY_AFTER_MS = 2_000;
 export const BROWSER_RECORDING_LEGACY_EXPORT_TIMEOUT_MS = 200_000;
 /** Staged recording objects outlive any save that could still use them. */
 export const BROWSER_RECORDING_STAGING_TTL_MS = 6 * 60 * 60 * 1_000;
+/** For this long after its video is made, a save whose video or action log
+ * storage does not show yet answers 202 and is asked again: storage that
+ * replicates in the background can miss a fresh write for a while. */
+export const BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS = 60_000;
 
 export type StagedBrowserRecording = {
   recording: BrowserRecordingSummary;
@@ -152,4 +157,58 @@ export function browserRecordingOwner(input: {
  * problem; anything else is ours. */
 export function browserRecordingFailureStatus(errorCode: string | null): 422 | 502 {
   return errorCode === "invalid_bundle" || errorCode === "no_frames" ? 422 : 502;
+}
+
+/**
+ * Reads back a ready recording's action log and checks its video is there
+ * before the save copies both into the workspace. Each is retried while
+ * storage does not show it yet. Returns null when one is still missing
+ * within {@link BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS} of the video
+ * being made, so the save answers 202 and is asked again; after that it
+ * fails with a reason the agent can act on.
+ */
+export async function readyBrowserRecordingOutputs(input: {
+  objectStorage: Pick<ObjectStorage, "getObjectBytes" | "headObject">;
+  videoKey: string;
+  actionLogKey: string;
+  /** How long ago the recording became ready, on the database's clock. */
+  readyForMs: number;
+  /** A monotonic clock that times the retries below. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
+}): Promise<{ actionLog: Uint8Array } | null> {
+  const { objectStorage } = input;
+  const now = input.now ?? (() => performance.now());
+  const startedAt = now();
+  const retry = {
+    ...(input.sleep ? { sleep: input.sleep } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+  };
+  const actionLog = await retryWhileMissing(
+    async () => await objectStorage.getObjectBytes(input.actionLogKey),
+    retry,
+  );
+  const video =
+    actionLog &&
+    (await retryWhileMissing(
+      async () =>
+        objectStorage.headObject
+          ? await objectStorage.headObject(input.videoKey)
+          : await objectStorage.getObjectBytes(input.videoKey),
+      retry,
+    ));
+  if (actionLog && video) return { actionLog: actionLog.bytes };
+  const readyFor = input.readyForMs + (now() - startedAt);
+  if (Number.isFinite(readyFor) && readyFor < BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS) {
+    return null;
+  }
+  throw new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message:
+      "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later, before its browser session ends, to save it.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: "browser_recording_output_unreadable" },
+  });
 }

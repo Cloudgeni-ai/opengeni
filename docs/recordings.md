@@ -90,10 +90,18 @@ mounted hooks call.
 `@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
 the console uses:
 
-- `MeetingRecorderProvider`: mount it once above the routes, so a recording
-  keeps going while the person moves around. In the desktop app it also
-  carries out the call notifications ("Record this meeting?"); pass
-  `onOpenMeetings` and `onOpenMeeting` to say where those open. A host
+- `MeetingRecorderProvider`: mount it once above the routes, and above
+  anything that unmounts when the person switches workspace, so a recording
+  keeps going while the person moves around. A recording stays with the
+  workspace it started in until it stops, even when `workspaceId` changes or
+  is null for a while; then the recorder moves to the workspace shown. In
+  the desktop app it also carries out the call notifications ("Record this
+  meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say where those
+  open. `onOpenMeeting` gets the meeting's workspace, which may not be the
+  one shown, and `MeetingsListPage` uses it to open a recording made in
+  another workspace after Stop. A host that mounts it above sign-in passes
+  `scope`, such as the signed-in person's id: a new value ends a recording
+  at once, and `scope={null}` (nobody signed in) records nothing. A host
   without an `OpenGeniProvider` above its routes passes its SDK `client`,
   and `workspaceId={null}` until it knows the workspace.
 - `MeetingsListPage`: the recorder plus the searchable list. Pass
@@ -105,11 +113,17 @@ the console uses:
   can't record here instead of the recorder, such as a setting an
   administrator has to turn on, while the meetings stay listed; and
   `header={false}` when the list sits inside a page of your own.
-- `MeetingDetailPage`: one meeting, with its player, transcript, speaker
-  naming, versions and sharing. `details` adds your own lines beside the
-  transcript, such as the project it belongs to. While this device records
-  the meeting (Take notes opens it), the page shows the recording's clock with
-  Pause and Stop; after Stop it reads Transcribing. Audio uploads while it
+- `MeetingDetailPage`: one meeting, with its player, speaker naming,
+  versions and sharing, and Summary · Transcript · Notepad tabs under the
+  title. It opens on Summary when the meeting has written `notes`, otherwise
+  on Transcript, whose turns read as speaker bubbles. `details` adds your own
+  lines beside the transcript, such as the project it belongs to. `onAsk`
+  adds "Ask about this meeting" under Summary and Transcript and receives the
+  meeting id and the question; the console starts a chat with the meeting
+  attached and the question as its first message. While this device records
+  the meeting (Take notes opens it), the page has no tabs: it shows the
+  recording's clock with Pause and Stop, the notepad and the live preview;
+  after Stop it reads Transcribing. Audio uploads while it
   records, so neither page says Uploading: a meeting still being recorded
   elsewhere reads In progress, and only a lost connection or a refused upload
   is called out. `meetingHereStatus` in `@opengeni/react/recordings` is that
@@ -176,7 +190,9 @@ Native screens:
   module, while the phone is locked or another app is in front. Audio is
   written to the phone as it is captured and uploaded in the background. Pass
   a `storeScope` per signed-in account, so unsent audio is only ever uploaded
-  with that account's credential. A host without an `OpenGeniProvider` above
+  with that account's credential; a new `storeScope` ends a recording at
+  once. A recording stays with the workspace it started in until it stops,
+  even when `workspaceId` changes. A host without an `OpenGeniProvider` above
   its screens passes its SDK `client`, and `workspaceId={null}` until it
   knows the workspace.
 - `MeetingsList`: the recorder plus the list. `useMeetingView`: one
@@ -200,21 +216,35 @@ capture and upload carry on unchanged.
 `settings.recordings.liveTranscript: true` turns it on by default for the
 workspace's recorders; the person recording can still turn it off. It needs a
 model with the `live` capability (`GET …/recording-models` lists them; today
-ElevenLabs Scribe v2 Realtime at $0.39 an hour of streamed audio, billed by
-the provider on top of the transcript itself).
+ElevenLabs Scribe v2 Realtime at $0.39 an hour of streamed audio, and
+gpt-4o-transcribe or gpt-4o-mini-transcribe on OpenAI or Azure OpenAI, billed
+by the provider on top of the transcript itself).
+
+A recorder that names no model streams to the deployment's live model:
+`OPENGENI_RECORDING_LIVE_TRANSCRIPTION` (`provider/model`, such as
+`azure-openai/gpt-4o-transcribe`), else ElevenLabs Scribe v2 Realtime. Boot
+fails if the named model is not configured or can't stream. OpenAI Realtime
+sends text a stretch at a time, when the speaker pauses, rather than word by
+word.
 
 The audio goes straight from the device to the provider, never through
 Opengeni, and the workspace's provider key never reaches the device:
 
 1. `POST …/recordings/:id/live-session` with `{ trackNumber }` returns a
-   short-lived grant for one track: a `url` holding a single-use token, the
-   `protocol` (`elevenlabs.scribe_realtime`), the audio format to send
-   (16-bit mono PCM at `audio.sampleRate`) and `expiresAt`. Only the person
-   recording can ask, and only while the recording is `capturing`. It answers
-   409 `credential_unavailable` when the workspace has no key for the model.
-2. The device opens the WebSocket and sends audio in tenths of a second. A
-   dropped connection asks for a new grant; up to 15 seconds of audio is held
-   meanwhile and sent once it is back.
+   short-lived grant for one track: the `protocol`, where to connect, the
+   audio format to send (16-bit mono PCM at `audio.sampleRate`) and
+   `expiresAt`. Only the person recording can ask, and only while the
+   recording is `capturing`. It answers 409 `credential_unavailable` when the
+   workspace has no key for the model; a deployment's own account needs none.
+   - `elevenlabs.scribe_realtime`: `url` holds a single-use token.
+   - `openai.realtime`: a transcription session already set up, with `token`,
+     a client secret sent as `Authorization: Bearer`. A browser posts its
+     WebRTC offer to `webrtcUrl` and sends the track itself; a client whose
+     WebSocket takes headers (React Native) opens `url` and sends PCM.
+2. The device connects and sends audio in tenths of a second. A dropped
+   connection asks for a new grant; up to 15 seconds of audio is held
+   meanwhile and sent once it is back (not over WebRTC, which streams the
+   track live).
 3. Finished stretches of text are saved with `POST …/live-segments`
    (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
    A segment number sent again keeps its first copy, and the streamed time
@@ -249,6 +279,11 @@ microphone track is the person recording and the system track is everyone
 else, so only the system track needs diarization. A microphone alone (a
 phone, or the web without tab audio) may hear a whole room, so it is
 diarized like any other track.
+Without headphones the microphone also hears the others from the speakers,
+so the transcript leaves out microphone words that were said at the same
+moment in the system track: runs of at least two words that match within
+1.5 seconds, with at most two misheard words in a row between them. What the
+person recording says, even right after someone else, stays.
 When the chosen model can tell speakers apart, its diarization is used.
 Otherwise, or when the request or `settings.recordings.diarizer` says
 `ours`, Opengeni tells the speakers apart itself, on the worker's CPU.
@@ -368,9 +403,10 @@ anchored, spread over a stretch it could not align exactly, or untimed
 `OPENGENI_SPEECH_TO_TEXT_PINNED` (`provider/model`, such as
 `azure-speech/MAI-Transcribe-2`) makes one model the only one for every use.
 Workspaces cannot pick another, dictation does not fall back to another
-provider and the live preview is offered only if that provider has one. Use
-it when a deployment must guarantee where audio goes. Boot fails if the
-pinned model is not configured.
+provider and the live preview goes only to that provider's live model or the
+one `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` names, such as an Azure OpenAI
+deployment in the same region. Use it when a deployment must guarantee where
+audio goes. Boot fails if the pinned model is not configured.
 
 The recording providers:
 
@@ -512,6 +548,36 @@ its title and speakers; deleting the meeting deletes them.
 
 Saving the `notes` is a `recording.notes.updated` event; the notepad, which
 saves as people type, is not.
+
+### Mentions in the notes
+
+The `notes` may name the meeting's speakers and people with Markdown links of
+exactly two forms. This is a fixed contract between whatever writes the notes
+(a person, or an agent after the meeting) and the meeting page:
+
+- `[Display name](speaker:<speakerLabel>)`: a voice in this meeting, by its
+  transcript speaker label, such as `[Tomas Eriksen](speaker:speaker_0)` or
+  `[Ingrid Solberg](speaker:track-0)`.
+- `[Display name](person:<personId>)`: someone in the workspace's people
+  directory, by id.
+
+The page's Summary shows each as a small chip with the current name: a
+speaker by the meeting's speaker names (the same name the transcript shows,
+such as "Speaker 2" while unnamed), in that speaker's colour; a person by
+their directory name. Renaming a speaker or a person therefore updates the
+summary without rewriting it, and the display name in the link is only what
+it read when written. A label or id the meeting doesn't know shows the link
+text as plain text, never as a link. Copy on the Summary copies the Markdown
+with each mention replaced by its current name. Write a plain name, not a
+mention, for anyone who isn't a speaker or in the directory.
+
+The standalone `MeetingNotes` section doesn't load the speakers and people,
+so there every mention shows its link text as plain text; chips and Copy are
+on `MeetingDetailPage`.
+
+A summary usually opens with a short overview paragraph, then a heading per
+topic with nested bullets, then `## Decisions` and `## Action items`
+(`- [ ] [Name](speaker:speaker_1) does what, by when`).
 
 ## Recognizing people by voice
 

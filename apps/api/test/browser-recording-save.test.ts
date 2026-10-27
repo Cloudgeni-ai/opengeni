@@ -3,12 +3,15 @@ import { randomUUID } from "node:crypto";
 import type { BrowserRecordingSummary } from "@opengeni/contracts";
 import {
   BROWSER_RECORDING_LEGACY_EXPORT_TIMEOUT_MS,
+  BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS,
   BROWSER_RECORDING_STAGING_TTL_MS,
   BROWSER_RECORDING_UPLOAD_WAIT_MS,
   browserRecordingFailureStatus,
   browserRecordingOwner,
+  readyBrowserRecordingOutputs,
   stageBrowserRecordingBundle,
 } from "../src/browser-recording-save";
+import { ApiHttpError } from "../src/http/api-error";
 
 const recordingId = randomUUID();
 const sha256 = "b".repeat(64);
@@ -234,5 +237,109 @@ describe("browserRecordingFailureStatus", () => {
     expect(browserRecordingFailureStatus("encode_failed")).toBe(502);
     expect(browserRecordingFailureStatus("bundle_missing")).toBe(502);
     expect(browserRecordingFailureStatus(null)).toBe(502);
+  });
+});
+
+describe("readyBrowserRecordingOutputs", () => {
+  const videoKey = "workspaces/w/recordings/r/prepared/track-0.mp4";
+  const actionLogKey = "workspaces/w/recordings/r/prepared/track-0.actions.json";
+  const log = new TextEncoder().encode('{"actions":[]}');
+
+  /** Storage that shows each object only after it was asked for it `misses` times. */
+  function storage(misses: { video?: number; actionLog?: number }, head = true) {
+    const reads: string[] = [];
+    const left = new Map([
+      [videoKey, misses.video ?? 0],
+      [actionLogKey, misses.actionLog ?? 0],
+    ]);
+    const shown = (key: string) => {
+      reads.push(key);
+      const remaining = left.get(key) ?? 0;
+      left.set(key, remaining - 1);
+      return remaining <= 0;
+    };
+    return {
+      reads,
+      objectStorage: {
+        getObjectBytes: async (key: string) =>
+          shown(key) ? { bytes: key === actionLogKey ? log : Uint8Array.from([0]) } : null,
+        ...(head
+          ? { headObject: async (key: string) => (shown(key) ? { ContentLength: 1 } : null) }
+          : {}),
+      },
+    };
+  }
+  const read = async (
+    objectStorage: ReturnType<typeof storage>["objectStorage"],
+    sinceReadyMs: number,
+  ) =>
+    await readyBrowserRecordingOutputs({
+      objectStorage: objectStorage as never,
+      videoKey,
+      actionLogKey,
+      readyForMs: sinceReadyMs,
+      now: () => 0,
+      sleep: async () => undefined,
+    });
+
+  test("an action log storage shows a moment after the video was made is read, not refused", async () => {
+    // The worker's write had landed, but the first reads back still missed it.
+    const run = storage({ actionLog: 3 });
+    expect(await read(run.objectStorage, 2_000)).toEqual({ actionLog: log });
+    expect(run.reads.filter((key) => key === actionLogKey)).toHaveLength(4);
+  });
+
+  test("checks the video is there too, by head when storage has it and by reading otherwise", async () => {
+    const headed = storage({ video: 2 });
+    expect(await read(headed.objectStorage, 2_000)).toEqual({ actionLog: log });
+    expect(headed.reads.filter((key) => key === videoKey)).toHaveLength(3);
+    const unheaded = storage({}, false);
+    expect(await read(unheaded.objectStorage, 2_000)).toEqual({ actionLog: log });
+    expect(unheaded.reads).toEqual([actionLogKey, videoKey]);
+  });
+
+  test("an output storage still does not show soon after the video was made asks the caller to come back", async () => {
+    expect(await read(storage({ actionLog: 1_000 }).objectStorage, 2_000)).toBeNull();
+    expect(await read(storage({ video: 1_000 }).objectStorage, 2_000)).toBeNull();
+    expect(
+      await read(
+        storage({ actionLog: 1_000 }).objectStorage,
+        BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS - 1,
+      ),
+    ).toBeNull();
+  });
+
+  test("an output still unreadable long after the video was made fails with a reason the agent can act on", async () => {
+    const failure = await read(
+      storage({ actionLog: 1_000 }).objectStorage,
+      BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS,
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiHttpError);
+    expect(failure).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: "browser_recording_output_unreadable" },
+      message:
+        "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later, before its browser session ends, to save it.",
+    });
+  });
+
+  test("the time spent retrying counts toward the window, on the API's own monotonic clock", async () => {
+    // Ready 100 ms short of the window by the database's clock; the retries
+    // themselves take the rest of it.
+    let clock = 5_000;
+    const failure = await readyBrowserRecordingOutputs({
+      objectStorage: storage({ actionLog: 1_000 }).objectStorage as never,
+      videoKey,
+      actionLogKey,
+      readyForMs: BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS - 100,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ details: { code: "browser_recording_output_unreadable" } });
   });
 });

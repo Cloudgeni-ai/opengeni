@@ -33,3 +33,6 @@ deploy/observability/charts/
 .claude/
 /agent/target/
 **/target/
+
+# Interrupted slack-bot-migration-compatibility runs leave old-runtime copies here.
+/.slack-old-runtime-*/
