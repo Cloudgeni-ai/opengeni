@@ -18,12 +18,13 @@
 //! which must list everything the host holds, waits.
 
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use compute_core::At;
 use compute_fleet::{HostEpoch, HostLease, LeaseTerms, Renewal};
 use compute_protocol::fleet::{
-    Answered, Capacity, Held, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, ReadyClones,
+    Answered, Boot, Capacity, Held, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, ReadyClones,
     Register, Registered, Renew, Renewed, Report, Terms,
 };
 use compute_protocol::host::HostStatus;
@@ -53,6 +54,9 @@ pub(crate) struct Renewer {
     pub(crate) gate: LeaseGate,
     pub(crate) agent: Agent,
     pub(crate) info: HostInfo,
+    /// The boot of its machine its cloud took, once telling it ended: a
+    /// registration names it, and none is sent before then.
+    pub(crate) told: Arc<OnceLock<Option<Boot>>>,
     /// The name the fleet gives the image this host's sandboxes start
     /// from.
     pub(crate) image: String,
@@ -134,6 +138,18 @@ impl Running {
             return Ok(());
         };
         if renewer.lease.attempt_started(renewal) || self.attempt.is_none() {
+            // A registration names the machine's boot only once the cloud
+            // took it, so that a restart since is seen as one; telling it
+            // ends within seconds of the agent starting.
+            let Some(boot) = renewer.told.get() else {
+                tracing::debug!("registering once the cloud is told of this boot");
+                self.attempt = None;
+                return Ok(());
+            };
+            let info = HostInfo {
+                boot: boot.clone(),
+                ..renewer.info.clone()
+            };
             // What the host lists must be all it holds: a create, adopt or
             // change of owner still under way could land after the list
             // and run unruled. None can start now, with no registration
@@ -160,7 +176,7 @@ impl Running {
             self.attempt = Some(Register {
                 host: renewer.host,
                 attempt: renewal.attempt,
-                info: renewer.info.clone(),
+                info,
                 capacity: capacity(&status, &renewer.image),
                 held: status
                     .sandboxes

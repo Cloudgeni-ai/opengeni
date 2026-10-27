@@ -37,6 +37,7 @@ import { ApiHttpError } from "./http/api-error";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceSiteToolAuthorization,
+  requireWorkspaceToolApprovalAuthorization,
   requireWorkspaceToolGatewayAuthorization,
   throwWorkspaceToolGatewayHttpError,
   type PreparedWorkspaceToolGateway,
@@ -389,6 +390,7 @@ export async function approveWorkspaceToolTarget(
   request: ToolGatewayTargetApprovalRequest,
   options: TargetGatewayOptions = {},
 ) {
+  requireWorkspaceToolApprovalAuthorization(authorization);
   return await withTarget(
     deps,
     authorization,

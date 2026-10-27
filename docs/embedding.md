@@ -165,6 +165,7 @@ A preset decides which features show and single keys switch them:
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
 | `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `addCredits`: the new-chat page's "Add credits" button for people who manage billing (card billing only); the credits notice still shows when a model's credits run out | on | off | on |
 
 Everything else (model and effort, capabilities, repositories, runs on,
 secrets, usage limit, approvals and questions, goals, attachments, voice, find
@@ -676,6 +677,9 @@ The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
 boolean: the authenticated parent first creates a five-minute, hash-only,
 single-use approval capability bound to the current human, operation, catalog,
 identity, and arguments, then presents that token on the exact matching call.
+An organization API key acting as itself has no person to approve, so it cannot
+create approvals; a host approves as the verified external actor who saw its
+approval UI.
 After consumption, its hash-only row remains as an operation tombstone so the
 same operation id cannot be approved again after an ambiguous provider outcome.
 Live approval issuance and expiry queries use a subject-scoped partial index
@@ -764,7 +768,9 @@ surfaces in `apps/api/src/`.
 
 Workspace permissions answer whether a principal may use a capability at all.
 An embedding host may additionally own per-session ownership, sharing, and
-revocation by binding `AppDependencies.sessionAuthorization`:
+revocation by binding `AppDependencies.sessionAuthorization` (a host that runs
+the packaged `startApi` entry instead of mounting `createApp(deps)` passes the
+same port as `startApi({ sessionAuthorization })`):
 
 ```ts
 type SessionAuthorizationPort = {

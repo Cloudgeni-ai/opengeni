@@ -15,6 +15,7 @@ import {
   publicEndpointOrigin,
   publicProbeErrorDiagnostic,
 } from "./deployment-preflight-diagnostics";
+import { errorMessage } from "@opengeni/contracts/values";
 
 interface Args {
   profile: string;
@@ -374,10 +375,6 @@ function failed(id: LiveProbeResult["id"], detail: string): LiveProbeResult {
 
 function skipped(id: LiveProbeResult["id"], detail: string): LiveProbeResult {
   return { id, status: "skipped", detail };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function compactDetail(value: string): string {

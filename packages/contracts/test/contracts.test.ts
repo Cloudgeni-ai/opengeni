@@ -114,6 +114,7 @@ import {
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
 } from "../src";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API key descriptions", () => {
   test("accepts a bounded description and rejects blank or oversized values", () => {
@@ -524,7 +525,7 @@ describe("contracts", () => {
         },
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
     expect(message).toContain("policy.definitionVersion");
     expect(message).not.toContain(sensitiveMarker);
@@ -599,7 +600,7 @@ describe("contracts", () => {
           [TURN_EXECUTION_POLICY_METADATA_KEY]: malformedPolicy,
         });
       } catch (error) {
-        message = error instanceof Error ? error.message : String(error);
+        message = errorMessage(error);
       }
       expect(message).toContain(`policy.${testCase.nestedPath}`);
       for (const marker of testCase.sensitiveMarkers) {

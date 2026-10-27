@@ -21,6 +21,7 @@ import type {
   JsonSchema,
 } from "./types";
 import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type OpenApiHttpMethod =
   | "get"
@@ -898,8 +899,4 @@ function normalizeMcpSchema(schema: JsonSchema): LocalMcpTool["inputSchema"] {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

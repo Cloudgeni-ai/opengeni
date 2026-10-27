@@ -13,6 +13,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { organizationApiKeyPermissions } from "../src/routes/api-keys";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 // The workspace Members surface (`/v1/workspaces/:id/members*`) admits an
 // active organization owner or admin for any shared workspace in their
@@ -132,13 +133,6 @@ function request(
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
   );
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 beforeAll(async () => {

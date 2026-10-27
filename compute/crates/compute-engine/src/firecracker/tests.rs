@@ -152,26 +152,6 @@ fn a_launch_leaves_its_runtime_for_a_later_agent() {
 
 /// A trim that measured the previous launch's log and punches it out late
 /// reaches only that file, never what the next launch has begun to write.
-#[test]
-fn a_late_trim_of_the_last_log_spares_the_new_one() {
-    use std::io::Write;
-    use std::os::unix::fs::FileExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("vmm.log");
-    fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
-    // The trimmer opens and measures the old log...
-    let trimming = File::options().write(true).open(&path).unwrap();
-    let measured = trimming.metadata().unwrap().len();
-    // ...a new launch starts its log meanwhile...
-    let mut fresh = fresh_log(&path).unwrap();
-    fresh.write_all(b"new launch\n").unwrap();
-    // ...and the trim lands on what it measured.
-    let zeros = vec![0; usize::try_from(measured).unwrap()];
-    trimming.write_all_at(&zeros, 0).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
-}
-
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {

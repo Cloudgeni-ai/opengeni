@@ -47,6 +47,7 @@ import {
   type PackageJson,
   type WorkspacePackage,
 } from "./publishable-workspaces";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const SERVER_EMBED_PACKAGES = [
   "agent-proto",
@@ -531,9 +532,7 @@ if (!existsSync(workerWorkflowBundlePath)) {
       new Script(code, { filename: workerWorkflowBundlePath }).createCachedData();
     } catch (error) {
       failures.push(
-        `@opengeni/worker-bundle workflow artifact is not valid JavaScript: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `@opengeni/worker-bundle workflow artifact is not valid JavaScript: ${errorMessage(error)}`,
       );
     }
   }

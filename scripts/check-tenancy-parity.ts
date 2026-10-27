@@ -19,6 +19,7 @@
 // command could not run (bad input or database error).
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import { checkOrganizationTenancyParity, createDb, type DbClient } from "@opengeni/db";
+import { errorMessage } from "@opengeni/contracts/values";
 
 function argument(name: string): string | null {
   const index = process.argv.indexOf(name);
@@ -83,7 +84,7 @@ async function main(): Promise<number> {
 
 if (import.meta.main) {
   process.exitCode = await main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(errorMessage(error));
     return 2;
   });
 }

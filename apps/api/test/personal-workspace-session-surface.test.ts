@@ -50,6 +50,7 @@ import { registerExternalIdentityLinkRoutes } from "../src/routes/external-ident
 import { registerConnectRoutes } from "../src/routes/connect";
 
 import { requireConnectOwnerAuthority } from "@opengeni/core";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const delegationSecret = `personal-ws-session-surface-${crypto.randomUUID()}`;
@@ -336,13 +337,6 @@ async function saveDraftDirectly(
       }),
     ),
   );
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 async function seedSession(human: ManagedHuman, workspaceId: string): Promise<string> {

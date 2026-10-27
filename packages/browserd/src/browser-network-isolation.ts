@@ -4,6 +4,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Managed Linux Chrome runs in its own network namespace, reached through
@@ -100,7 +101,7 @@ let probed: Promise<BrowserNetworkIsolation> | undefined;
 export function linuxBrowserNetworkIsolation(): Promise<BrowserNetworkIsolation> {
   probed ??= probeBrowserNetworkIsolation().catch((error: unknown) => ({
     kind: "unavailable" as const,
-    reason: error instanceof Error ? error.message : String(error),
+    reason: errorMessage(error),
   }));
   return probed;
 }

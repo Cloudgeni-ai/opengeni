@@ -16,6 +16,7 @@ import {
   isRoutingMutationOutcomeUnknownError,
   isRoutingMutationOutputRejectedError,
 } from "./sandbox/routing/routing-session";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES = 128 * 1024;
 export const CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES = 64 * 1024;
@@ -120,10 +121,6 @@ export function connectorAttachmentSandboxPath(
     digest,
     attachment.fileName,
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function containsPrivateSourceUrl(value: unknown, sourceUrls: readonly string[]): boolean {

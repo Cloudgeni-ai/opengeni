@@ -637,7 +637,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ClearWorkspaceAllowanceResponse"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "closeBrowserTarget",
@@ -1314,6 +1315,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateSessionResponse"
     ],
+    "permission": "sessions:create",
     "secretFields": [
       "request.mcpServers[].headers"
     ]
@@ -1666,7 +1668,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "ClearWorkspaceAllowanceRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "account:admin"
   },
   {
     "id": "deleteApiKey",
@@ -2982,14 +2985,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "method": "GET",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
@@ -3012,7 +3017,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage/me",
@@ -4168,7 +4174,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceUsageResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getVideoGenerationOperation",
@@ -4222,7 +4229,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceAllowance"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceAllowanceState",
@@ -4231,7 +4239,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceAllowanceState"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceArtifact",
@@ -4344,7 +4353,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInsightsResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceInsightsSiteUsage",
@@ -4540,7 +4550,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceCreditGrant"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "heartbeatBrowserSession",
@@ -7198,7 +7209,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "GrantWorkspaceCreditsRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "account:admin"
   },
   {
     "id": "prepareKnowledgeFile",
@@ -7452,7 +7464,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SetMemberAllowanceRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -7577,7 +7590,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/:subjectId/allowance",
@@ -7586,7 +7600,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SetMemberAllowanceRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/external/:memberSource/:memberExternalId/allowance",
@@ -7595,7 +7610,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SetMemberAllowanceRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "putOrganizationCredentialProvider",
@@ -8573,7 +8589,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemberAllowance"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",
@@ -8688,7 +8705,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceAllowance"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "setWorkspaceArtifactStatus",

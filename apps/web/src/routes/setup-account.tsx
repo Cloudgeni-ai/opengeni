@@ -17,6 +17,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
 import type { AuthSession, OrganizationInvitation } from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { setupAccountTokenFromUrl } from "@/setup-account-token";
 
@@ -140,7 +141,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
       });
       setCompletion("created");
     } catch (caught) {
-      const raw = caught instanceof Error ? caught.message : String(caught);
+      const raw = errorMessage(caught);
       setError(
         /invalid|expired|belongs|404/i.test(raw)
           ? "This setup link is invalid or has expired. Ask your organization administrator for a new invitation."
