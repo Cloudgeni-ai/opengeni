@@ -60,8 +60,11 @@ END $tables$;
 -- Rebuild one organization from its current data: each collection's newest
 -- direct member, then raised to anything newer below its sub-collections until
 -- nothing changes (membership cycles converge). Marks the organization built.
+-- It reads the whole organization, so it joins whole sets: a row estimate that
+-- is off (an organization new to the table statistics) must not turn its joins
+-- into repeated scans of the organization.
 CREATE FUNCTION knowledge_collection_activity_rebuild(p_account uuid) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT SET enable_nestloop = off AS $$
 DECLARE raised integer; rounds integer:=0;
 BEGIN
   DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account;
@@ -104,13 +107,14 @@ END $$;
 -- p_recompute collections. A collection takes a changed member's new offer when
 -- it is newer. When the member it recorded changed and now offers less, that
 -- collection and every collection whose kept time came through it are forgotten
--- and recomputed from their direct members, raising within that set until it
--- is stable, so a membership cycle cannot keep a time that no longer exists.
--- Changes then move to parent collections.
+-- and recomputed from their direct members, nearest first, then raised within
+-- that set until it is stable, so a membership cycle cannot keep a time that
+-- no longer exists. Changes then move to parent collections.
 CREATE FUNCTION knowledge_collection_activity_refresh(p_account uuid, p_changed uuid[], p_recompute uuid[], p_build boolean)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE changed_ids uuid[]:=p_changed; recompute_ids uuid[]:=coalesce(p_recompute,'{}'); steps integer:=0;
-  reset_ids uuid[]; reset_previous timestamptz[]; raised integer;
+  reset_ids uuid[]; reset_previous timestamptz[]; level_ends integer[]; level_end integer; level_start integer;
+  raised uuid[];
   tenant text:=current_setting('opengeni.account_id',true);
 BEGIN
   IF p_account IS NULL OR coalesce(cardinality(changed_ids),0)+cardinality(recompute_ids)=0 THEN RETURN; END IF;
@@ -136,7 +140,10 @@ BEGIN
         DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='built';
         EXIT;
       END IF;
-      -- Sets are joined, never scanned per row, so a bulk change stays linear.
+      -- Each set is driven from the changed entries and reaches every table by
+      -- key, one table per step: no row estimate (an organization new to the
+      -- table statistics) can turn a step into a scan of the organization, and
+      -- a bulk change stays linear.
       WITH changed AS MATERIALIZED (
         SELECT DISTINCT c.id FROM unnest(changed_ids) AS c(id)
       ), recompute AS MATERIALIZED (
@@ -144,15 +151,18 @@ BEGIN
       ), offered AS MATERIALIZED (
         -- What each changed member now offers every collection it belongs to.
         SELECT l.target_entry_id AS group_id,e.id AS member_id,
-          greatest(coalesce(d.created_at,r.created_at),CASE WHEN r.body->>'kind'='group' THEN s.changed_at END) AS changed_at
+          greatest(r.changed_at,CASE WHEN r.kind='group' THEN (SELECT s.changed_at FROM knowledge_collection_activity s
+            WHERE s.account_id=p_account AND s.entry_id=e.id) END) AS changed_at
         FROM changed c
-        JOIN knowledge_entries e ON e.account_id=p_account AND e.id=c.id AND NOT e.archived
-        JOIN knowledge_entry_links l ON l.revision_id=e.published_revision_id AND l.account_id=e.account_id
-          AND l.entry_id=e.id AND l.relation='group'
-        JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id AND r.id=e.published_revision_id
-        LEFT JOIN LATERAL (SELECT v.created_at FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
-          AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1) d ON true
-        LEFT JOIN knowledge_collection_activity s ON s.account_id=e.account_id AND s.entry_id=e.id
+        CROSS JOIN LATERAL (SELECT e.id,e.published_revision_id AS revision_id FROM knowledge_entries e
+          WHERE e.account_id=p_account AND e.id=c.id AND NOT e.archived OFFSET 0) e
+        CROSS JOIN LATERAL (SELECT r.body->>'kind' AS kind,coalesce((SELECT v.created_at FROM knowledge_entry_decisions v
+            WHERE v.account_id=p_account AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1),
+            r.created_at) AS changed_at
+          FROM knowledge_entry_revisions r WHERE r.account_id=p_account AND r.entry_id=e.id AND r.id=e.revision_id OFFSET 0) r
+        -- By revision: links are reached through their revision's key only.
+        CROSS JOIN LATERAL (SELECT l.target_entry_id FROM knowledge_entry_links l
+          WHERE l.revision_id=e.revision_id AND l.entry_id=e.id AND l.relation='group' OFFSET 0) l
       ), affected AS MATERIALIZED (
         -- Collections a change can move, with their kept time. Keep it when its
         -- member did not change; reset it when it was recomputed, or when its
@@ -163,10 +173,12 @@ BEGIN
         FROM (
           SELECT o.group_id FROM offered o
           UNION SELECT s.entry_id FROM changed c
-            JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.via_entry_id=c.id
+            CROSS JOIN LATERAL (SELECT s.entry_id FROM knowledge_collection_activity s
+              WHERE s.account_id=p_account AND s.via_entry_id=c.id OFFSET 0) s
           UNION SELECT r.id FROM recompute r) a
-        JOIN knowledge_entries g ON g.account_id=p_account AND g.id=a.group_id
-        LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=a.group_id
+        CROSS JOIN LATERAL (SELECT g.id FROM knowledge_entries g WHERE g.account_id=p_account AND g.id=a.group_id OFFSET 0) g
+        LEFT JOIN LATERAL (SELECT s.changed_at,s.via_entry_id FROM knowledge_collection_activity s
+          WHERE s.account_id=p_account AND s.entry_id=a.group_id OFFSET 0) s ON true
         LEFT JOIN recompute rc ON rc.id=a.group_id
         LEFT JOIN changed vc ON vc.id=s.via_entry_id
         LEFT JOIN (SELECT o.group_id,o.member_id,max(o.changed_at) AS changed_at FROM offered o GROUP BY 1,2) ov
@@ -195,48 +207,76 @@ BEGIN
       recompute_ids:='{}';
       CONTINUE WHEN cardinality(reset_ids)=0;
       -- Forget each reset collection and every collection whose kept time came
-      -- through it, then recompute them from their direct members.
-      WITH RECURSIVE dependent(id) AS (
-        SELECT c.id FROM unnest(reset_ids) AS c(id)
-        UNION SELECT s.entry_id FROM dependent d
-          JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.via_entry_id=d.id
-      ) SELECT array_agg(d.id),array_agg(s.changed_at) INTO reset_ids,reset_previous
-      FROM dependent d LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=d.id;
+      -- through it, with its distance from the reset collection it depends on.
+      -- Recorded members form a tree; the path only guards against a loop.
+      WITH RECURSIVE reset AS MATERIALIZED (
+        SELECT DISTINCT c.id FROM unnest(reset_ids) AS c(id)
+      ), dependent(id,depth,path) AS (
+        SELECT r.id,0,ARRAY[r.id] FROM reset r
+        UNION ALL SELECT s.entry_id,d.depth+1,d.path||s.entry_id FROM dependent d
+          CROSS JOIN LATERAL (SELECT s.entry_id FROM knowledge_collection_activity s
+            WHERE s.account_id=p_account AND s.via_entry_id=d.id OFFSET 0) s
+        WHERE NOT EXISTS(SELECT 1 FROM reset r WHERE r.id=s.entry_id) AND s.entry_id<>ALL(d.path)
+      ), ordered AS MATERIALIZED (
+        SELECT d.id,d.depth,(SELECT s.changed_at FROM knowledge_collection_activity s
+          WHERE s.account_id=p_account AND s.entry_id=d.id) AS changed_at
+        FROM (SELECT DISTINCT ON (d.id) d.id,d.depth FROM dependent d ORDER BY d.id,d.depth) d
+      ) SELECT (SELECT array_agg(o.id ORDER BY o.depth,o.id) FROM ordered o),
+          (SELECT array_agg(o.changed_at ORDER BY o.depth,o.id) FROM ordered o),
+          (SELECT array_agg(x.last ORDER BY x.depth) FROM (SELECT o.depth,(sum(count(*)) OVER (ORDER BY o.depth))::integer AS last
+            FROM ordered o GROUP BY o.depth) x)
+        INTO reset_ids,reset_previous,level_ends;
       steps:=steps+cardinality(reset_ids);
-      DELETE FROM knowledge_collection_activity t USING unnest(reset_ids) AS c(id)
-      WHERE t.account_id=p_account AND t.entry_id=c.id;
-      INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
-      SELECT DISTINCT ON (m.group_id) p_account,m.group_id,m.changed_at,m.via FROM (
-        SELECT c.id AS group_id,e.id AS via,
-          greatest(coalesce(d.created_at,r.created_at),CASE WHEN r.body->>'kind'='group' THEN s.changed_at END) AS changed_at
-        FROM unnest(reset_ids) AS c(id)
-        JOIN knowledge_entries g ON g.account_id=p_account AND g.id=c.id
-        JOIN knowledge_entry_links l ON l.account_id=p_account AND l.target_entry_id=c.id AND l.relation='group'
-        JOIN knowledge_entries e ON e.account_id=l.account_id AND e.id=l.entry_id
-          AND e.published_revision_id=l.revision_id AND NOT e.archived
-        JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id AND r.id=l.revision_id
-        LEFT JOIN LATERAL (SELECT v.created_at FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
-          AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1) d ON true
-        LEFT JOIN knowledge_collection_activity s ON s.account_id=e.account_id AND s.entry_id=e.id
-      ) m ORDER BY m.group_id,m.changed_at DESC,m.via;
-      -- Raise within the set until stable; cycles converge.
+      DELETE FROM knowledge_collection_activity t WHERE t.account_id=p_account AND t.entry_id=ANY(reset_ids);
+      -- Recompute them from their direct members, nearest first, so along a
+      -- chain each one already sees the member below it.
+      level_start:=1;
+      FOREACH level_end IN ARRAY level_ends LOOP
+        INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
+        SELECT DISTINCT ON (m.group_id) p_account,m.group_id,m.changed_at,m.via FROM (
+          SELECT c.id AS group_id,e.id AS via,
+            greatest(r.changed_at,CASE WHEN r.kind='group' THEN (SELECT s.changed_at FROM knowledge_collection_activity s
+              WHERE s.account_id=p_account AND s.entry_id=e.id) END) AS changed_at
+          FROM unnest(reset_ids[level_start:level_end]) AS c(id)
+          CROSS JOIN LATERAL (SELECT g.id FROM knowledge_entries g WHERE g.account_id=p_account AND g.id=c.id OFFSET 0) g
+          CROSS JOIN LATERAL (SELECT l.entry_id,l.revision_id FROM knowledge_entry_links l
+            WHERE l.account_id=p_account AND l.target_entry_id=c.id AND l.relation='group' OFFSET 0) l
+          CROSS JOIN LATERAL (SELECT e.id FROM knowledge_entries e WHERE e.account_id=p_account AND e.id=l.entry_id
+            AND e.published_revision_id=l.revision_id AND NOT e.archived OFFSET 0) e
+          CROSS JOIN LATERAL (SELECT r.body->>'kind' AS kind,coalesce((SELECT v.created_at FROM knowledge_entry_decisions v
+              WHERE v.account_id=p_account AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1),
+              r.created_at) AS changed_at
+            FROM knowledge_entry_revisions r WHERE r.account_id=p_account AND r.entry_id=e.id AND r.id=l.revision_id OFFSET 0) r
+        ) m ORDER BY m.group_id,m.changed_at DESC,m.via;
+        level_start:=level_end+1;
+      END LOOP;
+      -- Raise within the set until stable (cycles converge), each round taking
+      -- offers only from the collections the previous round raised.
+      raised:=reset_ids;
       LOOP
-        WITH offered AS (
+        WITH offered AS MATERIALIZED (
           SELECT DISTINCT ON (l.target_entry_id) l.target_entry_id AS group_id,s.changed_at,e.id AS via
-          FROM unnest(reset_ids) AS m(id)
-          JOIN knowledge_entries e ON e.account_id=p_account AND e.id=m.id AND NOT e.archived
-          JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id
-            AND r.id=e.published_revision_id AND r.body->>'kind'='group'
-          JOIN knowledge_entry_links l ON l.revision_id=e.published_revision_id AND l.account_id=e.account_id
-            AND l.entry_id=e.id AND l.relation='group'
-          JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=e.id
+          FROM unnest(raised) AS m(id)
+          CROSS JOIN LATERAL (SELECT e.id,e.published_revision_id AS revision_id FROM knowledge_entries e
+            WHERE e.account_id=p_account AND e.id=m.id AND NOT e.archived OFFSET 0) e
+          CROSS JOIN LATERAL (SELECT r.id FROM knowledge_entry_revisions r WHERE r.account_id=p_account AND r.entry_id=e.id
+            AND r.id=e.revision_id AND r.body->>'kind'='group' OFFSET 0) r
+          CROSS JOIN LATERAL (SELECT s.changed_at FROM knowledge_collection_activity s
+            WHERE s.account_id=p_account AND s.entry_id=e.id OFFSET 0) s
+          CROSS JOIN LATERAL (SELECT l.target_entry_id FROM knowledge_entry_links l
+            WHERE l.revision_id=e.revision_id AND l.entry_id=e.id AND l.relation='group' OFFSET 0) l
           ORDER BY l.target_entry_id,s.changed_at DESC,e.id
-        ) UPDATE knowledge_collection_activity t SET changed_at=o.changed_at,via_entry_id=o.via
-          FROM offered o JOIN unnest(reset_ids) AS c(id) ON c.id=o.group_id
-          WHERE t.account_id=p_account AND t.entry_id=o.group_id AND o.changed_at>t.changed_at;
-        GET DIAGNOSTICS raised=ROW_COUNT;
-        EXIT WHEN raised=0;
-        steps:=steps+raised;
+        ), updated AS (
+          -- Every collection in the set that a member offers to has a row.
+          INSERT INTO knowledge_collection_activity AS t(account_id,entry_id,changed_at,via_entry_id)
+          SELECT p_account,o.group_id,o.changed_at,o.via FROM offered o
+          WHERE EXISTS(SELECT 1 FROM unnest(reset_ids) AS c(id) WHERE c.id=o.group_id)
+          ON CONFLICT (account_id,entry_id) DO UPDATE SET changed_at=excluded.changed_at,via_entry_id=excluded.via_entry_id
+          WHERE excluded.changed_at>t.changed_at
+          RETURNING t.entry_id
+        ) SELECT coalesce(array_agg(u.entry_id),'{}') INTO raised FROM updated u;
+        EXIT WHEN cardinality(raised)=0;
+        steps:=steps+cardinality(raised);
         IF steps>100000 THEN
           DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='built';
           EXIT maintain;
@@ -245,8 +285,8 @@ BEGIN
       -- Reset collections whose time moved change their parents in turn.
       SELECT changed_ids||coalesce(array_agg(c.id),'{}') INTO changed_ids
       FROM unnest(reset_ids,reset_previous) AS c(id,previous)
-      LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=c.id
-      WHERE s.changed_at IS DISTINCT FROM c.previous;
+      WHERE (SELECT s.changed_at FROM knowledge_collection_activity s WHERE s.account_id=p_account AND s.entry_id=c.id)
+        IS DISTINCT FROM c.previous;
     END LOOP;
   END IF;
   PERFORM set_config('opengeni.account_id',coalesce(tenant,''),true);
@@ -345,7 +385,10 @@ BEGIN
   definition := replace(definition,anchor,$new$  ), activity_start AS MATERIALIZED (
     SELECT g.id AS group_id,s.changed_at,s.changed_at>coalesce(g.decided_at,g.revision_created_at) AS newer
     FROM candidates g
-    LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=g.id
+    -- Every lookup below is by key from the listed collection, one table per
+    -- step, so no row estimate can turn a step into a scan of the organization.
+    LEFT JOIN LATERAL (SELECT s.changed_at FROM knowledge_collection_activity s
+      WHERE s.account_id=p_account AND s.entry_id=g.id OFFSET 0) s ON true
     -- Lists only: they have one row per entry (history has one per revision).
     WHERE p_request->>'order'='updated' AND coalesce(p_request->>'query','')='' AND NOT pending
       AND operation='list' AND g.body->>'kind'='group'
@@ -355,21 +398,23 @@ BEGIN
     WITH RECURSIVE chain(group_id,target,node,depth,witness_id,witness_revision) AS (
       SELECT a.group_id,a.changed_at,a.group_id,0,NULL::uuid,NULL::uuid FROM activity_start a WHERE a.newer
       UNION ALL
-      SELECT c.group_id,c.target,e.id,c.depth+1,CASE WHEN x.changed_at=c.target THEN e.id END,
-        CASE WHEN x.changed_at=c.target THEN r.id END
+      SELECT c.group_id,c.target,e.id,c.depth+1,CASE WHEN r.changed_at=c.target THEN e.id END,
+        CASE WHEN r.changed_at=c.target THEN r.id END
       FROM chain c
-      JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=c.node AND s.changed_at=c.target
-      JOIN knowledge_entries e ON e.account_id=p_account AND e.id=s.via_entry_id
-      JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id AND r.id=e.published_revision_id
-      LEFT JOIN LATERAL (SELECT v.created_at FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
-        AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1) d ON true
-      CROSS JOIN LATERAL (SELECT coalesce(d.created_at,r.created_at) AS changed_at) x
+      CROSS JOIN LATERAL (SELECT s.via_entry_id FROM knowledge_collection_activity s
+        WHERE s.account_id=p_account AND s.entry_id=c.node AND s.changed_at=c.target OFFSET 0) s
+      CROSS JOIN LATERAL (SELECT e.id,e.published_revision_id AS revision_id FROM knowledge_entries e
+        WHERE e.account_id=p_account AND e.id=s.via_entry_id AND NOT e.archived AND knowledge_scope_visible(e)
+          AND (NOT(p_request ? 'scope') OR e.scope=p_request->>'scope') OFFSET 0) e
+      CROSS JOIN LATERAL (SELECT r.id,r.body->>'kind' AS kind,coalesce((SELECT v.created_at FROM knowledge_entry_decisions v
+          WHERE v.account_id=p_account AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1),
+          r.created_at) AS changed_at
+        FROM knowledge_entry_revisions r WHERE r.account_id=p_account AND r.entry_id=e.id AND r.id=e.revision_id OFFSET 0) r
       WHERE c.witness_id IS NULL AND c.depth<32
-        AND NOT e.archived AND knowledge_scope_visible(e)
-        AND (NOT(p_request ? 'scope') OR e.scope=p_request->>'scope')
-        AND (x.changed_at=c.target OR r.body->>'kind'='group')
-        AND EXISTS(SELECT 1 FROM knowledge_entry_links l WHERE l.revision_id=r.id AND l.account_id=e.account_id
-          AND l.entry_id=e.id AND l.relation='group' AND l.target_entry_id=c.node)
+        AND (r.changed_at=c.target OR r.kind='group')
+        -- Still a published member of the step above (a scalar lookup, never joined).
+        AND (SELECT true FROM knowledge_entry_links l WHERE l.revision_id=r.id AND l.entry_id=e.id
+          AND l.relation='group' AND l.target_entry_id=c.node LIMIT 1)
     ) SELECT DISTINCT group_id,target,witness_id,witness_revision FROM chain WHERE witness_id IS NOT NULL
   ), activity_allowed AS MATERIALIZED (
     SELECT v.* FROM (SELECT array_agg(w.witness_id) ids,array_agg(w.witness_revision) revisions FROM (
@@ -387,13 +432,17 @@ BEGIN
     WITH RECURSIVE walk(group_id,entry_id,revision_id,changed_at,is_group) AS ($new$);
 
   -- 2. The walk starts only from collections the kept activity did not answer.
-  anchor := $old$      WHERE p_request->>'order'='updated' AND coalesce(p_request->>'query','')=''
-        AND g.body->>'kind'='group'$old$;
+  -- They are removed before any member is joined, and members are looked up by
+  -- collection, so answered collections cost nothing whatever the row estimates.
+  anchor := $old$      FROM candidates g
+      JOIN knowledge_entry_links l ON l.account_id=p_account AND l.target_entry_id=g.id AND l.relation='group'$old$;
   IF (length(definition)-length(replace(definition,anchor,'')))/length(anchor) <> 1 THEN
     RAISE EXCEPTION 'Knowledge activity start anchor changed';
   END IF;
-  definition := replace(definition,anchor,$new$      WHERE p_request->>'order'='updated' AND coalesce(p_request->>'query','')=''
-        AND g.body->>'kind'='group' AND NOT EXISTS(SELECT 1 FROM activity_known k WHERE k.group_id=g.id)$new$);
+  definition := replace(definition,anchor,$new$      FROM (SELECT g.* FROM candidates g
+        WHERE NOT EXISTS(SELECT 1 FROM activity_known k WHERE k.group_id=g.id) OFFSET 0) g
+      CROSS JOIN LATERAL (SELECT l.* FROM knowledge_entry_links l
+        WHERE l.account_id=p_account AND l.target_entry_id=g.id AND l.relation='group' OFFSET 0) l$new$);
 
   -- 3. Activity is the kept time where it applied, the walk's elsewhere.
   anchor := $old$    GROUP BY m.group_id

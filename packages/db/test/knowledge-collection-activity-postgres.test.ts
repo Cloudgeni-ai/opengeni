@@ -771,3 +771,173 @@ test("organization removal and security metadata", async () => {
     })),
   );
 }, 180_000);
+
+/** Plans of every statement run by `work`, nested ones included, with buffers. */
+async function explained(work: (tx: postgres.TransactionSql) => Promise<unknown>) {
+  const notices: string[] = [];
+  const instrument = postgres(shared.adminUrl, {
+    max: 1,
+    onnotice: (n) => {
+      if (n.message?.includes("plan:\n")) notices.push(n.message);
+    },
+  });
+  try {
+    await instrument
+      .begin(async (tx) => {
+        await tx`LOAD 'auto_explain'`;
+        await tx`SET LOCAL auto_explain.log_min_duration=0`;
+        await tx`SET LOCAL auto_explain.log_analyze=true`;
+        await tx`SET LOCAL auto_explain.log_buffers=true`;
+        await tx`SET LOCAL auto_explain.log_nested_statements=true`;
+        await tx`SET LOCAL auto_explain.log_format='json'`;
+        await tx`SET LOCAL client_min_messages='log'`;
+        await work(tx);
+        throw new Error("rollback");
+      })
+      .catch((error: Error) => {
+        if (error.message !== "rollback") throw error;
+      });
+  } finally {
+    await instrument.end();
+  }
+  return notices.map(
+    (n) =>
+      JSON.parse(n.slice(n.indexOf("plan:\n") + 6)) as {
+        "Query Text": string;
+        Plan: Record<string, unknown>;
+      },
+  );
+}
+const buffers = (plan: { Plan: Record<string, unknown> }) =>
+  Number(plan.Plan["Shared Hit Blocks"]) + Number(plan.Plan["Shared Read Blocks"]);
+/** Buffers of the activity maintenance a write's triggers ran, after `SELECT 'measure'`. */
+function maintenance(
+  plans: { "Query Text": string; Plan: Record<string, unknown> }[],
+  write: string,
+) {
+  const end = plans.findIndex((p) => p["Query Text"].trimStart().startsWith(write));
+  const start = plans.findIndex((p) => p["Query Text"].includes("SELECT 'measure'"));
+  const calls = plans
+    .slice(start, end)
+    .filter((p) =>
+      p["Query Text"].trimStart().startsWith("SELECT knowledge_collection_activity_refresh"),
+    );
+  expect(start >= 0 && end > start && calls.length > 0).toBe(true);
+  return calls.reduce((sum, plan) => sum + buffers(plan), 0);
+}
+
+/** Collections in one statement: `parents[i]` is the parent of collection i. */
+async function bulkLibrary(
+  tx: postgres.TransactionSql,
+  f: Fixture,
+  parents: (number | null)[],
+  notesEach: number[],
+) {
+  await tx`SELECT set_config('opengeni.account_id',${f.accountId},true)`;
+  await tx`CREATE TEMP TABLE shape ON COMMIT DROP AS
+    WITH c AS (SELECT i-1 AS i,p.parent,gen_random_uuid() AS id,gen_random_uuid() AS revision
+      FROM unnest(${parents}::int[],${notesEach}::int[]) WITH ORDINALITY AS p(parent,notes,i))
+    SELECT c.id,c.revision,'group' AS kind,c.i,c.parent FROM c
+    UNION ALL SELECT gen_random_uuid(),gen_random_uuid(),'note',NULL,c.i FROM c,
+      generate_series(1,(${notesEach}::int[])[c.i+1]) n`;
+  await tx`INSERT INTO knowledge_entries(id,account_id,origin_workspace_id,scope,scope_workspace_id,version)
+    SELECT id,${f.accountId},${f.workspaceId},'workspace',${f.workspaceId},1 FROM shape`;
+  await tx`INSERT INTO knowledge_entry_revisions(id,account_id,entry_id,number,body,preview,actor,created_at)
+    SELECT revision,${f.accountId},id,1,jsonb_build_object('kind',kind,'title','Entry '||id,'content','Entry',
+      'groupIds','[]'::jsonb,'relationships','[]'::jsonb,'evidence','[]'::jsonb),
+      'Entry','{}',timestamptz '2026-01-01' + (random()*1000000)*interval '1 second' FROM shape`;
+  await tx`INSERT INTO knowledge_entry_decisions(account_id,entry_id,revision_id,version,outcome,actor,created_at)
+    SELECT ${f.accountId},s.id,s.revision,1,'published','{}',r.created_at FROM shape s
+    JOIN knowledge_entry_revisions r ON r.id=s.revision`;
+  await tx`UPDATE knowledge_entries e SET published_revision_id=s.revision,latest_revision_id=s.revision
+    FROM shape s WHERE e.id=s.id`;
+  await tx`INSERT INTO knowledge_entry_links(account_id,entry_id,revision_id,ordinal,target_entry_id,relation)
+    SELECT ${f.accountId},c.id,c.revision,0,p.id,'group' FROM shape c
+    JOIN shape p ON p.kind='group' AND p.i=c.parent`;
+}
+
+test("maintenance and reads stay keyed for an organization new to the table statistics", async () => {
+  const f = await fixture();
+  const reader = actor(f.subjectId, true);
+  // Statistics that do not know this organization: it looks like one row.
+  for (const table of [
+    "knowledge_entries",
+    "knowledge_entry_revisions",
+    "knowledge_entry_links",
+    "knowledge_entry_decisions",
+  ])
+    await shared.admin.unsafe(`ANALYZE ${table}`);
+  // 120 top-level collections with 10 entries each, loaded in one transaction.
+  const parents = Array.from({ length: 120 }, () => null);
+  const plans = await explained(async (tx) => {
+    await bulkLibrary(
+      tx,
+      f,
+      parents,
+      parents.map(() => 10),
+    );
+    await tx`SELECT knowledge_collection_activity_rebuild(${f.accountId})`;
+    // Archive the newest entry: its collection is recomputed from its members.
+    const [newest] = await tx`SELECT e.id FROM knowledge_entries e
+      JOIN knowledge_entry_revisions r ON r.id=e.published_revision_id
+      WHERE e.account_id=${f.accountId} AND r.body->>'kind'='note' ORDER BY r.created_at DESC LIMIT 1`;
+    await tx`SELECT 'measure'`;
+    await tx`UPDATE knowledge_entries SET archived=true WHERE id=${newest!.id}`;
+    expect(await readAll(tx, f, reader, { rootOnly: true }, 50)).toHaveLength(120);
+    expect(await readAll(tx, f, reader, { rootOnly: true }, 50, false)).toHaveLength(120);
+  });
+  const top = (text: string) => plans.find((p) => p["Query Text"].trimStart().startsWith(text));
+  const rebuild = top("SELECT knowledge_collection_activity_rebuild");
+  const write = maintenance(plans, "UPDATE knowledge_entries SET archived=true WHERE id=");
+  const reads = plans.filter((p) =>
+    p["Query Text"].includes("WITH candidate_rows AS MATERIALIZED"),
+  );
+  expect(rebuild).toBeTruthy();
+  // Three pages ordered by activity, then the same three pages unordered.
+  expect(reads).toHaveLength(6);
+  const ordered = reads.slice(0, 3).reduce((sum, plan) => sum + buffers(plan), 0);
+  const unordered = reads.slice(3).reduce((sum, plan) => sum + buffers(plan), 0);
+  // 1,320 entries: the rebuild reads each a few times, not once per collection.
+  expect(buffers(rebuild!)).toBeLessThan(1_320 * 10);
+  // Its whole-organization joins never become per-row scans, whatever the estimates.
+  const [config] = await shared.admin`SELECT proconfig FROM pg_proc
+    WHERE oid='knowledge_collection_activity_rebuild(uuid)'::regprocedure`;
+  expect(config!.proconfig).toContain("enable_nestloop=off");
+  // One archived entry touches its collection's members, not the organization.
+  expect(write).toBeLessThan(2_000);
+  // Ordering costs about what the unordered list costs.
+  expect(ordered).toBeLessThan(unordered * 1.2);
+}, 300_000);
+
+test("a deep chain of collections forgets a change in one pass", async () => {
+  const f = await fixture();
+  // 150 nested collections, entries in the deepest one.
+  const parents = Array.from({ length: 150 }, (_, i) => (i === 0 ? null : i - 1));
+  await shared.admin.begin((tx) =>
+    bulkLibrary(
+      tx,
+      f,
+      parents,
+      parents.map((_, i) => (i === 149 ? 20 : 0)),
+    ),
+  );
+  await shared.admin.begin(async (tx) => {
+    await tx`SELECT set_config('opengeni.account_id',${f.accountId},true)`;
+    await tx`SELECT knowledge_collection_activity_rebuild(${f.accountId})`;
+  });
+  await expectKeptMatchesRebuild(f);
+  const [newest] = await shared.admin`SELECT e.id FROM knowledge_entries e
+    JOIN knowledge_entry_revisions r ON r.id=e.published_revision_id
+    WHERE e.account_id=${f.accountId} AND r.body->>'kind'='note' ORDER BY r.created_at DESC LIMIT 1`;
+  const plans = await explained(async (tx) => {
+    await tx`SELECT 'measure'`;
+    await tx`UPDATE knowledge_entries SET archived=true WHERE id=${newest!.id}`;
+  });
+  const write = maintenance(plans, "UPDATE knowledge_entries");
+  // Recomputed nearest first, the cost grows with the depth, not its square
+  // (a round per level read about 350,000 buffers here).
+  expect(write).toBeLessThan(150 * 300);
+  await shared.admin`UPDATE knowledge_entries SET archived=true WHERE id=${newest!.id}`;
+  await expectKeptMatchesRebuild(f);
+  await expectParity(f, actor(f.subjectId, true), { kind: "group" }, 50);
+}, 300_000);
