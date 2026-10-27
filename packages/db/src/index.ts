@@ -123,6 +123,7 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  BROWSER_WAIT_HOLD_MAX_MS,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -54970,6 +54971,63 @@ export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+/** A browser an agent session holds while it works or waits. */
+export type AgentHeldBrowserSession = {
+  accountId: string;
+  workspaceId: string;
+  browserSessionId: string;
+  /** The person to reach its controller as: the most recent person who
+   * started a turn of a holding session, or null when no person did. */
+  routeSubjectId: string | null;
+};
+
+const LIST_AGENT_HELD_BROWSER_SESSIONS =
+  "opengeni_private.list_agent_held_browser_sessions(integer, bigint)";
+
+/**
+ * The browsers that agent sessions hold right now, across workspaces: active,
+ * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
+ * that is still working (a turn queued, running, recovering, waiting for
+ * capacity or waiting on a person) or has an armed input wait. The same rule
+ * as the box release below; the API renews each one's hold on its controller.
+ * Most recently used first, at most `limit`.
+ *
+ * 1002 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this lists nothing. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function listAgentHeldBrowserSessions(
+  db: Database,
+  input: { limit: number },
+): Promise<AgentHeldBrowserSession[]> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${LIST_AGENT_HELD_BROWSER_SESSIONS})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return [];
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    browser_session_id: string;
+    route_subject_id: string | null;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_agent_held_browser_sessions(
+      ${input.limit}::integer, ${BROWSER_WAIT_HOLD_MAX_MS}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    browserSessionId: row.browser_session_id,
+    routeSubjectId: row.route_subject_id,
+  }));
+}
+
 /**
  * An idle browser or desktop does not keep its Modal box warm. Activity is
  * deliberate and durable: the newest of the interaction holder heartbeat and
@@ -54979,6 +55037,14 @@ const INTERACTION_HOLDER_RESOURCE =
  * tab or a closed view stops counting within seconds. An in-flight lifecycle
  * operation counts too. Interventions waiting for a person do not: a wait is
  * not use (see `sandboxGroupIdleForCommandContainmentTx`).
+ *
+ * One kind of pause does keep a browser: an agent session that
+ * created or is using it and is still working (a turn queued, running,
+ * recovering, waiting for capacity or waiting on a person) or deliberately
+ * waiting (an armed input wait) keeps it, page state and all, but never
+ * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
+ * browser's own controller keeps it by the same rule;
+ * `list_idle_interaction_leases` (migration 1002) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
@@ -55125,7 +55191,20 @@ export async function releaseIdleInteractionHolders(
       tx,
       sql`
       select id, lifecycle, controller_generation,
-        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true)
+          and not exists (
+            select 1 from browser_session_associations association
+            join sessions waiting on waiting.id = association.session_id
+              and waiting.workspace_id = association.workspace_id
+            where association.workspace_id = browser_sessions.workspace_id
+              and association.browser_session_id = browser_sessions.id
+              and association.relationship in ('created', 'using')
+              and (waiting.status in ('queued', 'running', 'requires_action', 'recovering',
+                  'waiting_capacity')
+                or waiting.input_wait_until > now())
+              and browser_sessions.last_used_at
+                > now() - (${BROWSER_WAIT_HOLD_MAX_MS}::bigint * interval '1 millisecond')
+          )) as idle,
         (placement_kind = 'sandbox_group'
           and controller_host_sandbox_group_id = ${input.sandboxGroupId}
           and placement_instance_id = ${lease.instance_id}
