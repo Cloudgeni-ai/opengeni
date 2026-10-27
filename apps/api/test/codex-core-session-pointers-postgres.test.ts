@@ -1,7 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
   createApiKey,
@@ -16,10 +15,9 @@ import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { organizationReadApiKeyPermissions } from "../src/routes/api-keys";
 
-// Every response that returns a Session shows the Codex pointers by the
-// organization's cutover disposition (M3 PR 2b): legacy ids without a cutover
-// row, the core binding with an enabled one, nulls with a disabled one, and
-// never a failed read because of Codex state.
+// Every response that returns a Session shows the Codex pointers from the
+// shared subscription core binding, and never fails a read because of Codex
+// state.
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const DELEGATION_SECRET = "codex-core-session-pointers-delegation-secret";
@@ -281,15 +279,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
-  test("without a cutover row every response clears the legacy pointers", async () => {
-    // Migration 0680 seeds every organization on the core; this case
-    // reproduces the pre-cutover world (no Codex row).
-    await setCutover(null);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
-  test("an enabled cutover projects the core binding everywhere", async () => {
+  test("every Session response projects the core binding", async () => {
     await setCutover(true);
     expectEverywhere(
       await everySessionResponse(),
@@ -297,25 +287,5 @@ describe.skipIf(!realDb)("Codex session pointers on every Session response", () 
       // No core binding: nulls, never the legacy ids.
       { codexPinnedCredentialId: null, codexLastCredentialId: null },
     );
-  });
-
-  test("a disabled cutover (maintenance) shows nulls everywhere", async () => {
-    await setCutover(false);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
-  test("an unreadable cutover never fails a session read", async () => {
-    await setCutover(true);
-    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-    restores.push(
-      warn,
-      spyOn(opengeniDb, "readCodexCutoverDisposition").mockImplementation(async () => {
-        throw new Error("cutover read failed");
-      }),
-    );
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-    expect(warn).toHaveBeenCalled();
   });
 });

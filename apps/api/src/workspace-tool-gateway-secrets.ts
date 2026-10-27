@@ -19,6 +19,8 @@ import { createSecretResolver, hasPermission } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
 } from "@opengeni/runtime/workspace-tool-gateway";
 import type { ToolGatewayArgumentResolver } from "@opengeni/tool-gateway";
@@ -71,11 +73,17 @@ export function workspaceGatewaySecretArguments(input: {
 }): ToolGatewayArgumentResolver {
   const encryptionKey = environmentsEncryptionKeyBytes(input.settings) ?? null;
   return async (call) => {
-    if (secretArgumentMode(call.entry) !== "literal") return call.arguments;
+    // Hand-off tools (sessions, messages, schedules, goals, notes, Knowledge,
+    // artifacts, notifications) keep reference text and need no secrets:use.
+    const mode = secretArgumentMode(call.entry, call.arguments);
+    if (mode === "handoff") return handOffSecretArguments(call.arguments);
+    if (mode !== "literal") return call.arguments;
     const site = siteSecretContexts.getStore() ?? null;
     // Site viewers are checked in the database (secrets:use on the viewer);
-    // people and services are checked here, like the vault routes.
-    const references = collectReferencesDeep(call.arguments);
+    // people and services are checked here, like the vault routes. Only the
+    // references that become values count (an admin_action_call resolves
+    // only its credential fields).
+    const references = collectReferencesDeep(literalSecretScope(call.entry, call.arguments).target);
     if (
       !site &&
       references.length > 0 &&

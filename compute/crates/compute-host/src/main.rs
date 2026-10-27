@@ -33,7 +33,7 @@ use tokio::signal::unix::SignalKind;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 use crate::bench::{BenchArgs, bench, exec};
-use crate::policy::{guarantee_vm_processors, host_policy, processor_share};
+use crate::policy::{guarantee_vm_processors, host_policy, limit_vm_memory, processor_share};
 
 /// How long a template's freshly booted guest may take to become ready.
 const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -225,7 +225,9 @@ struct ServeArgs {
     pager_record_ms: u64,
     /// The guest kernel's command line. The engine adds the clock source and
     /// the free-page reporting order for the host's memory profile unless
-    /// this names them.
+    /// this names them. The agent adds `init=/opengeni/init`, the init every
+    /// image has, so a sandbox whose packages replaced `/sbin/init` still
+    /// boots.
     #[arg(
         long,
         default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1"
@@ -765,6 +767,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
+    let engine = limit_vm_memory(engine, memory_profile, &policy)?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
     readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);

@@ -468,7 +468,7 @@ describe("workspace Gateway custom model API", () => {
       ).toBeNull();
     });
   }
-  test("Claude core access refuses missing connections and maintenance routes fail closed", async () => {
+  test("Claude core access refuses missing connections", async () => {
     if (!client || !grant || !publicApp || !shared)
       throw new Error("Real database fixture required");
     const connectionId = crypto.randomUUID();
@@ -488,29 +488,6 @@ describe("workspace Gateway custom model API", () => {
         version: 1,
       }),
     ).resolves.toBeNull();
-    const path = `/claude/accounts/${connectionId}`;
-    const routes: Array<[string, string, unknown?]> = [
-      ["GET", "/claude/accounts"],
-      ["POST", `${path}/activate`],
-      ["PATCH", "/claude/settings", { rotationEnabled: true }],
-      ["PATCH", `${path}/allocator`, { enabled: false, expectedVersion: 1 }],
-      ["PATCH", path, { label: "renamed" }],
-      ["DELETE", path],
-      ["GET", `/model-connections/claude_subscription/${connectionId}/access`],
-    ];
-    await shared.admin`
-      update subscription_provider_cutovers set enabled = false
-      where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
-    try {
-      for (const [method, route, body] of routes) {
-        const response = await request(route, { method, body }, publicApp);
-        expect({ method, route, status: response.status }).toEqual({ method, route, status: 503 });
-      }
-    } finally {
-      await shared.admin`
-        update subscription_provider_cutovers set enabled = true
-        where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
-    }
   });
   test("an access path naming no connection kind or id is a 404, never a 500", async () => {
     if (!publicApp) throw new Error("Real database fixture required");

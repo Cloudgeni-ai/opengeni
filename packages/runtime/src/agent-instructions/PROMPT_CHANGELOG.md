@@ -31,6 +31,25 @@ the plain-Markdown renderer module adds `session:` to the links it forbids. Both
 compositions change identically; legacy prompt digests are refreshed for this
 reviewed change.
 
+Secret references in hand-off tools. One sentence of the always-on Secrets
+block changes (119 bytes longer). Opengeni's own tools that store or send text
+now keep references as text instead of receiving values, so the prompt asks
+for the escape only in shell commands and scripts (including `ogtool call`),
+where the value is put in before any tool runs. It also says that Opengeni's
+built-in Slack and social posting tools send the reference text, never the
+value. The sentence list of the "Secrets" entry below is updated to the new
+sentences; before and after:
+
+```text
+- A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
++ A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
+```
+
+The bundled `secrets` Skill says the same, and its Codemode page adds that an
+`ogtool call` inside a shell command still needs the escape, because the shell
+resolves the reference before the tool sees it. Before, writing an unescaped
+reference into `session_create` stored the real value in the new session.
+
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
 example Gmail and Outlook Mail) that serve the same need, the first
@@ -526,8 +545,9 @@ so "never request credentials in chat" comes with the supported alternative.
 
 ```diff
 + Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
-+ A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call.
-+ To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
++ A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls.
++ Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
++ In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
 + Never ask for passwords, keys or codes in chat or in a plain text question.

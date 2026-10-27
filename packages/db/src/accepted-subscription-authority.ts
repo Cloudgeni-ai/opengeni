@@ -7,8 +7,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 import {
-  coreSubscriptionAuthorityV2ActiveInTransaction,
-  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  subscriptionAuthorityV2OrEmpty,
   EMPTY_SUBSCRIPTION_AUTHORITY_V2,
 } from "./subscription-core-acceptance-authority";
 
@@ -126,7 +125,6 @@ export async function receiverSubscriptionAuthorityV2InTransaction(
     causalHumanSubjectId: string | null;
   },
 ): Promise<SubscriptionPersonalAuthorityV2 | null> {
-  if (!(await coreSubscriptionAuthorityV2ActiveInTransaction(db, input.accountId))) return null;
   const source = await receiverAuthoritySourceInTransaction(db, input);
   const frozen =
     source.codexV2 === null || source.codexV2 === undefined
@@ -366,7 +364,7 @@ export async function getScheduledTaskSubscriptionAuthority(
     ) {
       return EMPTY_SUBSCRIPTION_AUTHORITY_V2;
     }
-    return coreSubscriptionAuthorityV2OrEmptyInTransaction(tx, row.accountId, frozen);
+    return subscriptionAuthorityV2OrEmpty(frozen);
   });
 }
 

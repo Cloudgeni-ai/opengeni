@@ -1,11 +1,40 @@
 import { describe, expect, test } from "bun:test";
+import { appendFile, cp, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   SHARED_TEST_PG_IMAGE,
   sharedTestContainerNeedsReplacement,
   sharedTestContainerRunArgs,
   sharedTestContainerSpec,
+  sharedTestTemplateName,
 } from "../src/shared-pg";
+
+describe("shared test template name", () => {
+  test("is the same for identical checkouts at different paths", async () => {
+    const dbPackageDir = fileURLToPath(new URL("../../db", import.meta.url));
+    const scratch = await mkdtemp(join(tmpdir(), "opengeni-template-name-"));
+    try {
+      const copies = [join(scratch, "one", "db"), join(scratch, "elsewhere", "two", "db")];
+      for (const copy of copies) {
+        await cp(join(dbPackageDir, "drizzle"), join(copy, "drizzle"), { recursive: true });
+        await cp(join(dbPackageDir, "src"), join(copy, "src"), { recursive: true });
+      }
+      const original = await sharedTestTemplateName(dbPackageDir);
+      expect(original).toMatch(/^og_test_template_[0-9a-f]{12}$/u);
+      expect(await sharedTestTemplateName(copies[0]!)).toBe(original);
+      expect(await sharedTestTemplateName(copies[1]!)).toBe(original);
+
+      // Any change to the template contract still gets its own template.
+      await appendFile(join(copies[1]!, "src", "provision-roles.ts"), "\n// changed\n");
+      expect(await sharedTestTemplateName(copies[1]!)).not.toBe(original);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("shared test PostgreSQL container", () => {
   test("gets enough shared memory for parallel queries across hundreds of connections", () => {

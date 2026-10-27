@@ -545,7 +545,7 @@ describe("recording routes", () => {
         || '{"voiceInput":{"enabled":true},"recordings":{"language":"sv"}}'::jsonb
       where id = ${scope.workspaceId}`;
     const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
-    // Only the language: the workspace's voice input still picks the model.
+    // Only the language and keyterms: the workspace's voice input still picks the model.
     expect(
       (
         await scope.owner.call("POST", "/recordings", {
@@ -595,6 +595,14 @@ describe("recording routes", () => {
     // People dictate in more languages than they meet in: no language detects it.
     expect(await heard()).toEqual({});
     expect(await heard({ language: null })).toEqual({});
+    // The person's vocabulary goes with it, for a model that takes one.
+    expect(await heard({ keyterms: ["Kubernetes", "Ada Lovelace"] })).toEqual({
+      keyterms: ["Kubernetes", "Ada Lovelace"],
+    });
+    expect(await heard({ language: "en", keyterms: ["Kubernetes"] })).toEqual({
+      language: "en",
+      keyterms: ["Kubernetes"],
+    });
   });
 
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
@@ -671,6 +679,18 @@ describe("recording routes", () => {
     expect((await scope.admin("PATCH", "/settings", { recordings: {} })).status).toBe(200);
     const people = (await scope.owner.call("GET", "/recording-people")).body.people;
     expect(people.map((person: { voice: unknown }) => person.voice)).toEqual([null, null]);
+  });
+
+  test("the built-in meeting summary is a workspace setting that admins can turn off", async () => {
+    const scope = await fixture();
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { autoSummary: "off" } })).status,
+    ).toBe(400);
+    const off = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: false } });
+    expect(off.status).toBe(200);
+    expect(off.body.settings.recordings).toEqual({ autoSummary: false });
+    const on = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: true } });
+    expect(on.body.settings.recordings).toEqual({ autoSummary: true });
   });
 
   test("people and models", async () => {

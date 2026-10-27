@@ -361,6 +361,7 @@ import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
 import { registerAutomationTemplateRoutes } from "./routes/automation-templates";
+import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import {
@@ -2450,6 +2451,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerEventSourceRoutes(app, routeDeps);
   registerAutomationTemplateRoutes(app, routeDeps);
+  registerBotTemplateRoutes(app, routeDeps);
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
@@ -4243,6 +4245,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   if (
     pathname === "/v1/auth/organization-onboarding" ||
+    pathname === "/v1/auth/organization-onboarding/use-case" ||
     pathname === "/v1/auth/organization-setup"
   ) {
     return true;
