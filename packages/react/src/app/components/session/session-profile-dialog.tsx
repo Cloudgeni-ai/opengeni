@@ -131,6 +131,7 @@ export function SessionProfileDialog({
   );
   const [nameError, setNameError] = useState<string | null>(null);
   const [emojiError, setEmojiError] = useState<string | null>(null);
+  const [lettersError, setLettersError] = useState<string | null>(null);
   const [opened, setOpened] = useState(open);
   // Each opening starts from what the chat has now.
   if (open !== opened) {
@@ -145,6 +146,7 @@ export function SessionProfileDialog({
       setLetters(initial.avatar?.kind === "letters" ? initial.avatar.letters : "");
       setNameError(null);
       setEmojiError(null);
+      setLettersError(null);
     }
   }
   const initialImage = initial.avatar?.kind === "image" ? initial.avatar : null;
@@ -188,6 +190,10 @@ export function SessionProfileDialog({
         }
         if (kind === "emoji" && !avatar) {
           setEmojiError("Use a single emoji.");
+          return false;
+        }
+        if (kind === "letters" && !avatar) {
+          setLettersError("Use one or two letters or digits.");
           return false;
         }
         return (
@@ -335,14 +341,21 @@ export function SessionProfileDialog({
               </div>
             ) : null}
             {kind === "letters" ? (
-              <Field label="Letters" hint="One or two letters or digits.">
+              <Field
+                label="Letters"
+                hint="One or two letters or digits."
+                error={lettersError ?? undefined}
+              >
                 <TextInput
                   value={letters}
                   placeholder={sessionAvatarInitials(name || "Bot").slice(0, 2)}
                   maxLength={2}
                   autoComplete="off"
                   className="w-24 uppercase"
-                  onChange={(event) => setLetters(event.target.value)}
+                  onChange={(event) => {
+                    setLetters(event.target.value);
+                    setLettersError(null);
+                  }}
                 />
               </Field>
             ) : null}
