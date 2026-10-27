@@ -11,6 +11,7 @@ import {
   desktopReleaseFile,
   githubRepositoryOf,
   newestDesktopVersion,
+  refsFromLsRefs,
   registerDesktopDistributionRoutes,
 } from "../src/routes/desktop-distribution";
 
@@ -22,20 +23,37 @@ function routes(settings: Settings, resolveVersion?: () => Promise<string>) {
   return app;
 }
 
-function refs(...tags: string[]) {
-  return tags.map((tag) => ({ ref: `refs/tags/${tag}` }));
+const GIT_URL = "https://github.com/Cloudgeni-ai/opengeni.git/git-upload-pack";
+const API_URL =
+  "https://api.github.com/repos/Cloudgeni-ai/opengeni/git/matching-refs/tags/desktop-v";
+
+function pkt(line: string) {
+  return `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
 }
 
-function fakeGitHub(answers: Array<unknown>) {
+/** A Git protocol v2 ls-refs response listing the tags. */
+function lsRefs(...tags: string[]) {
+  return `${tags.map((tag) => pkt(`${"a".repeat(40)} refs/tags/${tag}\n`)).join("")}0000`;
+}
+
+type Answer = string[] | number | Error;
+
+/** GitHub's Git endpoint and REST API, each answering from its own queue. */
+function fakeGitHub(git: Answer[], api: Answer[] = []) {
   const calls: string[] = [];
-  const fetchImpl = (async (url: string) => {
+  const bodies: unknown[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
     calls.push(String(url));
-    const answer = answers.shift();
+    const fromGit = String(url) === GIT_URL;
+    if (fromGit) bodies.push(init?.body);
+    const answer = (fromGit ? git : api).shift() ?? 500;
     if (answer instanceof Error) throw answer;
     if (typeof answer === "number") return new Response("no", { status: answer });
-    return Response.json(answer);
+    return fromGit
+      ? new Response(lsRefs(...answer))
+      : Response.json(answer.map((tag) => ({ ref: `refs/tags/${tag}` })));
   }) as unknown as typeof fetch;
-  return { calls, fetchImpl };
+  return { calls, bodies, fetchImpl };
 }
 
 describe("desktop release files", () => {
@@ -85,6 +103,24 @@ describe("desktop release files", () => {
     expect(newestDesktopVersion(["agent-v1.0.0"])).toBeNull();
   });
 
+  test("reads ref names from a Git ls-refs response", () => {
+    expect(refsFromLsRefs(lsRefs("desktop-v0.1.9", "desktop-v0.1.10"))).toEqual([
+      "refs/tags/desktop-v0.1.9",
+      "refs/tags/desktop-v0.1.10",
+    ]);
+    expect(
+      refsFromLsRefs(
+        `${pkt(`${"b".repeat(40)} refs/tags/desktop-v1.0.0 peeled:${"c".repeat(40)}\n`)}0000`,
+      ),
+    ).toEqual(["refs/tags/desktop-v1.0.0"]);
+    expect(refsFromLsRefs("0000")).toEqual([]);
+    expect(() => refsFromLsRefs(`${pkt("ERR upload-pack: not our ref\n")}0000`)).toThrow(
+      "not our ref",
+    );
+    expect(() => refsFromLsRefs("<html>rate limited</html>")).toThrow("Malformed");
+    expect(() => refsFromLsRefs("00ffshort")).toThrow("Truncated");
+  });
+
   test("only GitHub release pages name a repository", () => {
     expect(githubRepositoryOf(RELEASES)).toBe("Cloudgeni-ai/opengeni");
     expect(githubRepositoryOf("https://downloads.example.com/releases")).toBeNull();
@@ -105,10 +141,7 @@ describe("desktop version resolver", () => {
 
   test("looks the newest release up once and reuses it while fresh", async () => {
     let clock = 0;
-    const github = fakeGitHub([
-      refs("desktop-v0.1.11", "desktop-v0.1.12"),
-      refs("desktop-v0.1.13"),
-    ]);
+    const github = fakeGitHub([["desktop-v0.1.11", "desktop-v0.1.12"], ["desktop-v0.1.13"]]);
     const resolve = createDesktopVersionResolver({
       releasesBase: RELEASES,
       fetchImpl: github.fetchImpl,
@@ -116,8 +149,9 @@ describe("desktop version resolver", () => {
       freshForMs: 1_000,
     });
     expect(await Promise.all([resolve(), resolve()])).toEqual(["0.1.12", "0.1.12"]);
-    expect(github.calls).toEqual([
-      "https://api.github.com/repos/Cloudgeni-ai/opengeni/git/matching-refs/tags/desktop-v",
+    expect(github.calls).toEqual([GIT_URL]);
+    expect(github.bodies).toEqual([
+      "0014command=ls-refs\n00010023ref-prefix refs/tags/desktop-v\n0000",
     ]);
     clock = 999;
     expect(await resolve()).toBe("0.1.12");
@@ -132,7 +166,7 @@ describe("desktop version resolver", () => {
 
   test("keeps serving the last known version when GitHub fails", async () => {
     let clock = 0;
-    const github = fakeGitHub([refs("desktop-v0.1.12"), 500, new Error("offline")]);
+    const github = fakeGitHub([["desktop-v0.1.12"], 500, new Error("offline")], [503, 403]);
     const resolve = createDesktopVersionResolver({
       releasesBase: RELEASES,
       fetchImpl: github.fetchImpl,
@@ -147,15 +181,16 @@ describe("desktop version resolver", () => {
     // The failed refresh backs off instead of asking again on every request.
     clock = 50;
     expect(await resolve()).toBe("0.1.12");
-    expect(github.calls).toHaveLength(2);
+    expect(github.calls).toEqual([GIT_URL, GIT_URL, API_URL]);
     clock = 110;
     expect(await resolve()).toBe("0.1.12");
-    expect(github.calls).toHaveLength(3);
+    await Bun.sleep(0);
+    expect(github.calls).toEqual([GIT_URL, GIT_URL, API_URL, GIT_URL, API_URL]);
   });
 
   test("answers 503 until a release exists, and backs off between lookups", async () => {
     let clock = 0;
-    const github = fakeGitHub([500, refs("agent-v1.0.0"), refs("desktop-v0.1.0")]);
+    const github = fakeGitHub([500, ["agent-v1.0.0"], ["desktop-v0.1.0"]], [500]);
     const resolve = createDesktopVersionResolver({
       releasesBase: RELEASES,
       fetchImpl: github.fetchImpl,
@@ -165,11 +200,31 @@ describe("desktop version resolver", () => {
     await expect(resolve()).rejects.toMatchObject({ status: 503 });
     clock = 50;
     await expect(resolve()).rejects.toMatchObject({ status: 503 });
-    expect(github.calls).toHaveLength(1);
+    expect(github.calls).toEqual([GIT_URL, API_URL]);
     clock = 100;
     await expect(resolve()).rejects.toMatchObject({ status: 503 });
     clock = 200;
     expect(await resolve()).toBe("0.1.0");
+  });
+
+  test("falls back to the REST API when the Git endpoint fails", async () => {
+    const github = fakeGitHub([403], [["desktop-v0.1.30", "desktop-v0.1.31"]]);
+    const resolve = createDesktopVersionResolver({
+      releasesBase: RELEASES,
+      fetchImpl: github.fetchImpl,
+    });
+    expect(await resolve()).toBe("0.1.31");
+    expect(github.calls).toEqual([GIT_URL, API_URL]);
+  });
+
+  test("a rate-limited REST API does not matter while Git answers", async () => {
+    const github = fakeGitHub([["desktop-v0.1.31"]], [403]);
+    const resolve = createDesktopVersionResolver({
+      releasesBase: RELEASES,
+      fetchImpl: github.fetchImpl,
+    });
+    expect(await resolve()).toBe("0.1.31");
+    expect(github.calls).toEqual([GIT_URL]);
   });
 
   test("a release host other than GitHub needs a pin", async () => {

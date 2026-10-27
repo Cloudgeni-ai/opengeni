@@ -4083,9 +4083,11 @@ that file on the current `desktop-v` release, for example
 `/desktop/latest/Opengeni-mac.dmg`), and `/desktop/latest` (the release page).
 The web app's account menu links to them. The current release is the newest
 stable `desktop-v` tag on the `OPENGENI_AGENT_RELEASES_BASE_URL` repository,
-cached for ten minutes; set `OPENGENI_DESKTOP_STABLE_VERSION` to pin a version,
-which a release host other than GitHub requires. Route `/desktop` to the `api`
-service in the ingress.
+listed over Git's smart HTTP protocol (not the rate-limited REST API, which is
+only a fallback) and cached for ten minutes; set
+`OPENGENI_DESKTOP_STABLE_VERSION` to pin a version, which a release host other
+than GitHub requires. The API needs outbound HTTPS to `github.com`. Route
+`/desktop` to the `api` service in the ingress.
 
 ### Enrolling a machine
 
