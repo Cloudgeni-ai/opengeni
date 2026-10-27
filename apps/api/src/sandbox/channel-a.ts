@@ -106,6 +106,7 @@ import {
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
   type ChannelAMachineAuthority,
+  type RunOnMachine,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
@@ -638,6 +639,71 @@ export async function withFormerConnectedMachine<T>(
       : {}),
   });
   return { reached: true, value: await fn(built.session as ChannelASession) };
+}
+
+/**
+ * Run a file operation on the machine a `run_on` exec's code runs on, for a
+ * tool call that code made through Codemode (its token names the machine).
+ * The caller resolves the machine with `resolveRunOnMachine`, the same access
+ * check every run_on op makes. Like run_on, this addresses the machine's
+ * enrollment itself (epoch 0) and never follows or changes the session's
+ * active sandbox, so a path resolves where the calling code runs.
+ */
+export async function withRunOnMachine<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext,
+  machine: RunOnMachine,
+  fn: (handle: { service: SandboxChannelAService; lease: null }) => Promise<T>,
+): Promise<T> {
+  const { db, settings, bus } = services;
+  const { sandbox, enrollment } = machine;
+  try {
+    ctx.waitSignal?.throwIfAborted();
+    const built = await buildSelfhostedBackendSession({
+      workspaceId: sandbox.workspaceId,
+      agentId: sandbox.enrollmentId,
+      connectionInstanceId: enrollment.connectionInstanceId,
+      workspaceRoot: enrollment.workspaceRoot,
+      relay: relayConfigFromSettings(settings),
+      controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
+      epoch: 0,
+      timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+      operationResourcePolicy: enrollment.operationPolicy,
+      operationResourcePolicySupported:
+        enrollment.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+      transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+      transactionalFsWriteMachineSupported:
+        enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+      browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+      runAsSupported: enrollment.agentCapabilities.runAs === true,
+      abandonCommand: directRequestAbandonCommand(db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
+      }),
+    });
+    const service = new SandboxChannelAService({
+      session: built.session as ChannelASession,
+      workspaceRoot: enrollment.workspaceRoot,
+      leaseEpoch: 0,
+      providerPathMode: "workspace-relative",
+      fileReadScope: "machine",
+      emit: async (events) => {
+        await appendAndPublishEvents(
+          db,
+          bus,
+          ctx.workspaceId,
+          ctx.session.id,
+          events.map((e) => ({ type: e.type as never, payload: e.payload })),
+        );
+      },
+    });
+    return await fn({ service, lease: null });
+  } catch (error) {
+    throw mapChannelAError(error, ctx.waitSignal);
+  }
 }
 
 /**

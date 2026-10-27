@@ -1340,22 +1340,28 @@ export async function runOnEnrollmentDirect(
   );
 }
 
+/** An enrolled machine a `run_on` op may reach, with its live connection. */
+export type RunOnMachine = {
+  sandbox: SandboxRecord & { enrollmentId: string };
+  enrollment: EnrollmentRecord & { connectionInstanceId: string; workspaceRoot: string };
+};
+
+export type RunOnMachineResolution =
+  | { ok: true; machine: RunOnMachine }
+  | { ok: false; reason: string; targetName?: string; code?: PersonalMachineRefusalCode };
+
 /**
- * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
- * (the design `run_on`). Only selfhosted targets are routable as a one-off here
- * (a Modal target is the session's group box, reached via the normal Channel-A /
- * turn path — `run_on` is for reaching a NON-active enrolled machine without
- * swapping). The op is fenced under the target's enrollment, addressed to its
- * agent subject; an offline machine surfaces a clear reason, never a wrong-box
- * landing.
+ * Whether this caller may reach `target` as a one-off, and its live connection:
+ * the access check every `run_on` op makes, and every tool that reads a file
+ * where a `run_on` exec's code runs. Only selfhosted targets qualify, and a
+ * personal machine needs the exact admitted attempt's per-chat permission
+ * (without being the active sandbox).
  */
-export async function runOnSandbox(
-  services: FleetServices,
+export async function resolveRunOnMachine(
+  services: Pick<FleetServices, "db">,
   ctx: FleetContext,
   target: string,
-  op: RunOnOp,
-  options: RunOnOptions = {},
-): Promise<RunOnResult> {
+): Promise<RunOnMachineResolution> {
   const sandbox = await getSandbox(
     services.db,
     ctx.subjectId
@@ -1368,18 +1374,11 @@ export async function runOnSandbox(
     target,
   );
   if (!sandbox) {
-    return {
-      target,
-      kind: op.kind,
-      ok: false,
-      reason: `sandbox ${target} not found in this workspace`,
-    };
+    return { ok: false, reason: `sandbox ${target} not found in this workspace` };
   }
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
     };
@@ -1387,9 +1386,7 @@ export async function runOnSandbox(
   if (sandbox.scope === "user") {
     if (!ctx.subjectId || !ctx.attemptAuthority) {
       return {
-        target,
         targetName: sandbox.name,
-        kind: op.kind,
         ok: false,
         reason: "personal Connected Machine use requires an exact admitted agent attempt",
       };
@@ -1408,9 +1405,7 @@ export async function runOnSandbox(
       });
       if (!authorized) {
         return {
-          target,
           targetName: sandbox.name,
-          kind: op.kind,
           ok: false,
           reason: "personal Connected Machine authority was not admitted for this attempt",
         };
@@ -1418,9 +1413,7 @@ export async function runOnSandbox(
     } catch (error) {
       const refusal = personalMachineRefusal(error);
       return {
-        target,
         targetName: sandbox.name,
-        kind: op.kind,
         ok: false,
         reason:
           refusal?.reason ?? "personal Connected Machine authority is not live for this attempt",
@@ -1441,22 +1434,59 @@ export async function runOnSandbox(
   );
   if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `sandbox ${target} is not enrolled/active`,
     };
   }
   if (!enrollment.workspaceRoot) {
     return {
-      target,
       targetName: sandbox.name,
-      kind: op.kind,
       ok: false,
       reason: `sandbox ${target} has not reported an absolute workspace root; reconnect it with a current agent`,
     };
   }
+  return {
+    ok: true,
+    machine: {
+      sandbox: { ...sandbox, enrollmentId: sandbox.enrollmentId },
+      enrollment: {
+        ...enrollment,
+        connectionInstanceId: enrollment.connectionInstanceId,
+        workspaceRoot: enrollment.workspaceRoot,
+      },
+    },
+  };
+}
+
+/**
+ * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
+ * (the design `run_on`). Only selfhosted targets are routable as a one-off here
+ * (a Modal target is the session's group box, reached via the normal Channel-A /
+ * turn path — `run_on` is for reaching a NON-active enrolled machine without
+ * swapping). The op is fenced under the target's enrollment, addressed to its
+ * agent subject; an offline machine surfaces a clear reason, never a wrong-box
+ * landing.
+ */
+export async function runOnSandbox(
+  services: FleetServices,
+  ctx: FleetContext,
+  target: string,
+  op: RunOnOp,
+  options: RunOnOptions = {},
+): Promise<RunOnResult> {
+  const resolved = await resolveRunOnMachine(services, ctx, target);
+  if (!resolved.ok) {
+    return {
+      target,
+      ...(resolved.targetName !== undefined ? { targetName: resolved.targetName } : {}),
+      kind: op.kind,
+      ok: false,
+      reason: resolved.reason,
+      ...(resolved.code !== undefined ? { code: resolved.code } : {}),
+    };
+  }
+  const { sandbox, enrollment } = resolved.machine;
   const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission | null> => {
     try {
       const current =

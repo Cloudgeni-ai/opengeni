@@ -2075,6 +2075,9 @@ async function delegatedAccessContext(
           ...(payload.executionGeneration
             ? { executionGeneration: payload.executionGeneration }
             : {}),
+          // The machine running the token holder's process (a `run_on` exec),
+          // when it is not the session's active sandbox.
+          ...(payload.executionSandboxId ? { executionSandboxId: payload.executionSandboxId } : {}),
         },
         ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
         ...(payload.serviceInitiatorContext
