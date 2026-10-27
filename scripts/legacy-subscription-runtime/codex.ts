@@ -64,10 +64,5 @@ export const LEGACY_CODEX_RUNTIME: LegacySubscriptionRetirement = {
       reason:
         "Exact routine-signature inventory for deployed role grants, never an executable decision read.",
     },
-    "packages/db/src/codex-subscription-core-cutover.ts": {
-      declarations: ["moveCodexCredentials"],
-      reason:
-        "0689 migration codec stage decodes legacy rows before its atomic scrub/receipt; never a request fallback.",
-    },
   },
 };

@@ -15,8 +15,7 @@ Start with [product integration](product-integration.md) for organization keys,
 tenant-to-workspace mapping, and explicit external-member onboarding. Typed
 SDK details live in the [SDK reference](../packages/sdk/README.md); the
 allowance schemas live in `packages/contracts/src/usage-allowances.ts`.
-Storage/counter lifecycle: `packages/db/src/usage-allowances.ts` and
-`packages/db/drizzle/0552_usage_allowances.sql`; HTTP authority:
+Storage/counter lifecycle: `packages/db/src/usage-allowances.ts`; HTTP authority:
 `apps/api/src/routes/usage-allowances.ts`.
 
 Accounting reads frozen, content-free attribution receipts for accepted turns,

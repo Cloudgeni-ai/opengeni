@@ -13,6 +13,13 @@ import { cn } from "../lib/cn";
 import { SecretRefText } from "./secret-ref-chip";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { reviewFacts } from "../approval-review-model";
+import {
+  DecisionActions,
+  DecisionButton,
+  DecisionMark,
+  decisionCardClass,
+  decisionCardPad,
+} from "./decision-card";
 
 export type ToolReviewDetailsLoader = (
   review: ToolActionReview,
@@ -64,7 +71,7 @@ const statusTone: Record<ToolReviewStatus, Tone> = {
   unavailable: "muted",
 };
 const toneText: Record<Tone, string> = {
-  waiting: "text-og-status-waiting",
+  waiting: "text-og-fg-muted",
   ok: "text-og-fg-muted",
   failed: "text-og-status-failed",
   muted: "text-og-fg-muted",
@@ -98,11 +105,13 @@ export function ToolReviewFrame({
 }: {
   tone: Tone;
   icon: ReactNode;
+  /** The state of the action ("Approval needed", "Approved · running"). */
   eyebrow: ReactNode;
   title: ReactNode;
   titleId?: string | undefined;
   subtitle?: ReactNode;
   children?: ReactNode;
+  /** Usually a `DecisionActions` row. */
   footer?: ReactNode;
   bare?: boolean | undefined;
 } & Omit<HTMLAttributes<HTMLElement>, "title">) {
@@ -115,68 +124,58 @@ export function ToolReviewFrame({
         "min-w-0 text-og-fg",
         !bare &&
           (waiting
-            ? "overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm"
-            : "overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1"),
+            ? decisionCardClass
+            : "og-root @container/decision overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1"),
         rest.className,
       )}
     >
-      <header className={cn("flex min-w-0 items-start gap-3", bare ? "pb-1" : "px-4 py-3")}>
-        <span
-          className={cn(
-            "mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md",
-            waiting
-              ? "bg-og-status-waiting/12 text-og-status-waiting"
-              : tone === "failed"
-                ? "bg-og-status-failed/10 text-og-status-failed"
-                : "bg-og-fg/5 text-og-fg-muted",
-          )}
-        >
-          {icon}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p
-            className={cn("m-0 text-og-xs font-medium", toneText[tone])}
-            role="status"
-            aria-live="polite"
-          >
-            {eyebrow}
-          </p>
+      <header
+        className={cn(
+          "flex min-w-0 items-start gap-3",
+          bare ? "pb-1" : cn(decisionCardPad, "pt-4", !children && !footer && "pb-4"),
+        )}
+      >
+        <DecisionMark tone={tone === "failed" ? "danger" : "neutral"}>{icon}</DecisionMark>
+        <div className="min-w-0 flex-1 pt-px">
           <h3
             tabIndex={-1}
             id={titleId}
-            className="m-0 mt-0.5 break-words text-og-md font-semibold leading-snug text-og-fg outline-hidden [overflow-wrap:anywhere]"
+            className="m-0 break-words text-og-md font-semibold leading-snug text-balance text-og-fg outline-hidden [overflow-wrap:anywhere]"
           >
             {title}
           </h3>
-          {subtitle ? (
-            <p className="m-0 mt-0.5 break-words text-og-xs text-og-fg-muted [overflow-wrap:anywhere]">
-              {subtitle}
-            </p>
-          ) : null}
+          <p className="m-0 mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-og-xs leading-5 text-og-fg-muted">
+            <span
+              className={cn("inline-flex items-center gap-1.5", toneText[tone])}
+              role="status"
+              aria-live="polite"
+            >
+              {waiting ? (
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 shrink-0 rounded-full bg-og-status-waiting"
+                />
+              ) : null}
+              {eyebrow}
+            </span>
+            {subtitle ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="min-w-0 break-words [overflow-wrap:anywhere]">{subtitle}</span>
+              </>
+            ) : null}
+          </p>
         </div>
       </header>
       {children ? (
         <div
-          className={cn(
-            "min-w-0",
-            bare ? "pt-2" : "px-4 pb-3",
-            !bare && "sm:pl-[3.75rem]", // Aligns with the title, past the icon.
-          )}
+          className={cn("min-w-0", bare ? "pt-2" : cn(decisionCardPad, "pt-3", !footer && "pb-4"))}
         >
           {children}
         </div>
       ) : null}
       {footer ? (
-        <footer
-          className={cn(
-            "flex flex-wrap items-center gap-x-3 gap-y-2",
-            bare
-              ? "pt-3"
-              : waiting
-                ? "border-t border-og-status-waiting/20 px-4 py-3"
-                : "border-t border-og-border px-4 py-3",
-          )}
-        >
+        <footer className={cn("min-w-0", bare ? "pt-3" : cn(decisionCardPad, "pb-4 pt-4"))}>
           {footer}
         </footer>
       ) : null}
@@ -283,13 +282,13 @@ function ReviewFacts({
         </div>
       ) : null}
       {shown.length > 0 ? (
-        <dl className="m-0 min-w-0 space-y-2">
+        <dl className="m-0 min-w-0 space-y-2.5 rounded-og-md bg-og-fg/[0.035] px-3.5 py-3">
           {shown.map((field) => (
             <div
               key={field.path}
-              className="grid min-w-0 gap-x-4 gap-y-0.5 sm:grid-cols-[minmax(0,9rem)_minmax(0,1fr)]"
+              className="grid min-w-0 gap-x-4 gap-y-0.5 @[30rem]/decision:grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)]"
             >
-              <dt className="m-0 break-words text-og-xs text-og-fg-muted sm:pt-px sm:text-og-sm">
+              <dt className="m-0 break-words text-og-xs text-og-fg-muted @[30rem]/decision:pt-px @[30rem]/decision:text-og-sm">
                 {field.label}
               </dt>
               <dd className="m-0 min-w-0 whitespace-pre-wrap break-words text-og-fg [overflow-wrap:anywhere]">
@@ -344,14 +343,9 @@ export function DeclineButton({
 }) {
   const t = useOpenGeniText();
   return (
-    <button
-      type="button"
-      disabled={busy}
-      onClick={onClick}
-      className="inline-flex min-h-9 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:border-og-border-strong hover:bg-og-hover disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-    >
+    <DecisionButton kind="secondary" disabled={busy} busy={submitting} onClick={onClick}>
       {submitting ? t("toolActionReview.declining") : (label ?? t("toolActionReview.decline"))}
-    </button>
+    </DecisionButton>
   );
 }
 
@@ -418,39 +412,39 @@ export function ToolActionReviewCard({
       data-review-status={review.status}
       footer={
         actionable ? (
-          <>
-            <div className="flex min-w-0 flex-1 basis-48 flex-wrap items-center gap-x-3 gap-y-1">
-              {detailsLink}
-              {reason ? (
-                <span className="min-w-0 text-og-xs leading-relaxed text-og-fg-subtle">
-                  {reason}
-                </span>
-              ) : null}
-            </div>
-            <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
-              {canReject ? (
-                <DeclineButton
-                  busy={busy}
-                  submitting={submitting === "reject"}
-                  label={rejectLabel}
-                  onClick={onReject!}
-                />
-              ) : null}
-              {canApprove ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={onApprove}
-                  className="inline-flex min-h-9 items-center justify-center gap-2 rounded-og-md border border-og-primary-border bg-og-primary px-3.5 py-1.5 text-og-sm font-medium text-og-primary-fg transition-colors hover:bg-og-primary-hover disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
-                >
-                  {submitting === "approve" ? (
-                    <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
+          <DecisionActions
+            lead={
+              detailsLink || reason ? (
+                <>
+                  {detailsLink}
+                  {reason ? (
+                    <span className="min-w-0 text-og-xs leading-relaxed text-og-fg-subtle">
+                      {reason}
+                    </span>
                   ) : null}
-                  {submitting === "approve" ? t("toolActionReview.approving") : review.approveLabel}
-                </button>
-              ) : null}
-            </div>
-          </>
+                </>
+              ) : null
+            }
+          >
+            {canReject ? (
+              <DeclineButton
+                busy={busy}
+                submitting={submitting === "reject"}
+                label={rejectLabel}
+                onClick={onReject!}
+              />
+            ) : null}
+            {canApprove ? (
+              <DecisionButton
+                kind="primary"
+                disabled={busy}
+                busy={submitting === "approve"}
+                onClick={onApprove}
+              >
+                {submitting === "approve" ? t("toolActionReview.approving") : review.approveLabel}
+              </DecisionButton>
+            ) : null}
+          </DecisionActions>
         ) : undefined
       }
     >

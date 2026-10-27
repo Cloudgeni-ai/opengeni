@@ -1695,7 +1695,7 @@ export { compactionSummary } from "./model-compaction-page";
  * A workspace's Defaults: what new work here starts with. Each follows the
  * organization's default until the workspace changes it, and says which.
  */
-export function WorkspaceDefaultsSection({
+function WorkspaceDefaultsSection({
   workspaceId,
   workspaceName = "this workspace",
   organizationName,

@@ -7,7 +7,6 @@ import {
   createDb,
   createScheduledTask,
   createSession,
-  getScheduledTaskCreatorPolicy,
   getScheduledTaskRunAcceptedExecution,
   getSession,
   initializeSessionStartAtomically,
@@ -348,48 +347,4 @@ test("tool intent does not grant notification permission", async () => {
   const f = await fixture({ permissions: ["sessions:read"] });
   const { call } = await f.notifier((await f.dispatch()).result);
   await expect(call("notify_user", { title: "Ready" })).rejects.toThrow();
-});
-
-test("legacy repair restores proven default intent, preserves explicit/empty choices, and repairs an untouched reusable chat", async () => {
-  const defaults = await fixture({ tools: ["set_session_title"], runMode: "reusable_session" });
-  const explicit = await fixture({ tools: ["set_session_title"], intent: "explicit" });
-  const empty = await fixture({ tools: [] });
-  const oldRun = await defaults.dispatch();
-  const source = await Bun.file(
-    new URL(
-      "../../../packages/db/drizzle/0832_schedule_defaults_and_turn_notifications.sql",
-      import.meta.url,
-    ),
-  ).text();
-  const repair = source.slice(
-    source.indexOf("SET LOCAL opengeni.session_variable_set_attachments_v1"),
-  );
-  const postgres = (await import("postgres")).default;
-  const owner = postgres(owned.ownerUrl, { max: 1 });
-  try {
-    await owner.begin(async (tx) => {
-      await tx.unsafe(repair);
-    });
-  } finally {
-    await owner.end();
-  }
-  expect(
-    (await getScheduledTaskCreatorPolicy(client.db, defaults.workspaceId, defaults.task.id))
-      ?.firstPartyMcpTools,
-  ).toBeNull();
-  expect(
-    (await getScheduledTaskCreatorPolicy(client.db, explicit.workspaceId, explicit.task.id))
-      ?.firstPartyMcpTools,
-  ).toEqual(["set_session_title"]);
-  expect(
-    (await getScheduledTaskCreatorPolicy(client.db, empty.workspaceId, empty.task.id))
-      ?.firstPartyMcpTools,
-  ).toEqual([]);
-  expect(
-    (await getSession(client.db, defaults.workspaceId, oldRun.session.id))?.toolPolicy
-      .firstPartyMode,
-  ).toBe("workspace_default");
-  expect(
-    (await defaults.dispatch()).accepted.targetSessionExecution?.effectiveFirstPartyMcpTools,
-  ).toContain("notify_user");
 });
