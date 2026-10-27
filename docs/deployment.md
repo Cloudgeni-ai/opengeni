@@ -1959,8 +1959,9 @@ only the process bundle, runtime assets and the exact installed dependency graph
 of its external packages (including optional native bindings and required peers).
 The worker retains its prebuilt workflows and managed Codemode client; API retains
 signed machine installers, the read-only artifact runtime, bundled database
-commands with the unchanged SQL ledger, and the stock catalog-import command and
-reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+commands with the unchanged SQL ledger, the stock catalog-import command, the
+`model-catalog:upsert` command and reviewed catalog/logo assets.
+Office/OCR/media, Docker and source-control tools
 are unchanged. Temporal retains only its loader-selected native platform binary;
 its Rust build tree and foreign binaries are not runtime dependencies. Source
 workflow compilation remains available but its compiler is loaded only on demand.
