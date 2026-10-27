@@ -5589,6 +5589,8 @@ export const englishMessages = {
   "timeline.toolStep.saveBotTemplate.running": "Saving a bot template",
   "timeline.toolStep.suggestBot.done": "Suggested a bot",
   "timeline.toolStep.suggestBot.running": "Suggesting a bot",
+  "timeline.toolStep.proposeBotTemplateUpdate.done": "Proposed a bot template update",
+  "timeline.toolStep.proposeBotTemplateUpdate.running": "Proposing a bot template update",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

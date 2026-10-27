@@ -113,6 +113,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "set_other_session_title" ||
       tool === "bot_template_save" ||
       tool === "bot_suggest" ||
+      tool === "bot_template_propose_update" ||
       tool === "notify_user" ||
       tool === "notification_withdraw" ||
       tool === "inbox_tidy" ||

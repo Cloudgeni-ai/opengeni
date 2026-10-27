@@ -500,4 +500,146 @@ describe("bots through the API (real PostgreSQL)", () => {
       (await callTool(botServer, "bot_suggest", { kind: "create", name: "Ops", reason: "x" })).body,
     ).toMatchObject({ code: "already_a_bot" });
   }, 180_000);
+
+  test("a bot proposes setup updates for its template, and its owner decides", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots template proposals");
+    const person = [
+      "workspace:read",
+      "sessions:read",
+      "sessions:create",
+      "sessions:control",
+    ] as Permission[];
+    const alice = await bearer(workspace, "user:alice", person);
+    const bob = await bearer(workspace, "user:bob", person);
+    const templates = `/v1/workspaces/${workspace.workspaceId}/bot-templates`;
+    const proposals = `/v1/workspaces/${workspace.workspaceId}/bot-template-proposals`;
+    const sessions = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    const template = (
+      await call(alice, "POST", templates, {
+        name: "SRE bot",
+        setupInstructions: "Install the on-call Skill.",
+      })
+    ).json.template;
+
+    // A chat started from the template is linked to it; an unknown one is refused.
+    expect(
+      (
+        await call(bob, "POST", sessions, {
+          initialMessage: "Install the on-call Skill.",
+          model: "scripted-model",
+          botTemplateId: crypto.randomUUID(),
+        })
+      ).status,
+    ).toBe(422);
+    const bot = await call(bob, "POST", sessions, {
+      initialMessage: "Install the on-call Skill.",
+      model: "scripted-model",
+      keepLive: true,
+      botTemplateId: template.id,
+      profile: { title: "SRE bot" },
+    });
+    expect(bot.status).toBe(202);
+    expect(bot.json.botTemplateId).toBe(template.id);
+    const botId = bot.json.id as string;
+    expect((await getSession(client.db, workspace.workspaceId, botId))?.botTemplateId).toBe(
+      template.id,
+    );
+
+    const server = buildOpenGeniMcpServer(deps, {
+      ...agentGrant(workspace, botId),
+      metadata: {
+        delegated: true,
+        sessionId: botId,
+        firstPartyMcpTools: ["bot_template_propose_update"],
+      },
+    });
+    expect((await callTool(server, "bot_template_propose_update", {})).body).toMatchObject({
+      status: "current",
+      templateId: template.id,
+      setupInstructions: "Install the on-call Skill.",
+    });
+    expect(
+      (
+        await callTool(server, "bot_template_propose_update", {
+          setupInstructions: "Install the on-call Skill.",
+          reason: "Nothing new.",
+        })
+      ).body,
+    ).toMatchObject({ status: "not_proposed", code: "unchanged" });
+    const first = await callTool(server, "bot_template_propose_update", {
+      setupInstructions: "Install the on-call Skill. Connect PagerDuty.",
+      reason: "This bot now pages through PagerDuty.",
+    });
+    expect(first.body).toMatchObject({
+      type: "bot_template_proposal",
+      status: "proposed",
+      proposal: { templateId: template.id, sessionId: botId, status: "pending" },
+    });
+    const second = await callTool(server, "bot_template_propose_update", {
+      setupInstructions: "Install the on-call Skill. Connect PagerDuty. Check alerts every hour.",
+      reason: "It now checks alerts every hour too.",
+    });
+    // One chat, one open proposal: the older one is superseded.
+    const pending = await call(bob, "GET", `${proposals}?sessionId=${botId}`);
+    expect(pending.json.proposals.map((proposal: { id: string }) => proposal.id)).toEqual([
+      second.body.proposal.id,
+    ]);
+    const all = await call(bob, "GET", `${proposals}?templateId=${template.id}&status=all`);
+    expect(
+      all.json.proposals.find((proposal: { id: string }) => proposal.id === first.body.proposal.id),
+    ).toMatchObject({ status: "superseded" });
+    expect((await call(bob, "GET", `${proposals}?status=bogus`)).status).toBe(422);
+
+    // Only whoever may change the template decides, against the version reviewed.
+    const accept = (auth: string, expectedUpdatedAt: string) =>
+      call(auth, "POST", `${proposals}/${second.body.proposal.id}/accept`, { expectedUpdatedAt });
+    expect((await accept(bob, template.updatedAt)).status).toBe(403);
+    expect((await accept(alice, new Date(0).toISOString())).status).toBe(409);
+    const accepted = await accept(alice, template.updatedAt);
+    expect(accepted.status).toBe(200);
+    expect(accepted.json.template.setupInstructions).toBe(
+      "Install the on-call Skill. Connect PagerDuty. Check alerts every hour.",
+    );
+    expect(accepted.json.proposal).toMatchObject({
+      status: "accepted",
+      decidedBySubjectId: "user:alice",
+    });
+    expect(
+      (await call(alice, "POST", `${proposals}/${second.body.proposal.id}/dismiss`)).status,
+    ).toBe(409);
+    expect((await call(alice, "POST", `${proposals}/${crypto.randomUUID()}/dismiss`)).status).toBe(
+      404,
+    );
+
+    // A chat saved as a template proposes for that one; a plain chat has none.
+    const plain = await call(bob, "POST", sessions, {
+      initialMessage: "Help with invoices",
+      model: "scripted-model",
+    });
+    const plainServer = buildOpenGeniMcpServer(deps, {
+      ...agentGrant(workspace, plain.json.id),
+      metadata: {
+        delegated: true,
+        sessionId: plain.json.id,
+        firstPartyMcpTools: ["bot_template_propose_update", "bot_template_save"],
+      },
+    });
+    expect(
+      (
+        await callTool(plainServer, "bot_template_propose_update", {
+          setupInstructions: "x",
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ status: "not_proposed", code: "no_template" });
+    const saved = await callTool(plainServer, "bot_template_save", {
+      name: "Invoice checker",
+      setupInstructions: "Check invoices against POs.",
+    });
+    expect((await callTool(plainServer, "bot_template_propose_update", {})).body).toMatchObject({
+      status: "current",
+      templateId: saved.body.template.id,
+    });
+  }, 180_000);
 });

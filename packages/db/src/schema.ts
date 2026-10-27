@@ -5090,6 +5090,8 @@ export const sessions = pgTable(
     avatar: jsonb("avatar").$type<SessionAvatar>(),
     // The newest bot suggestion in this chat (migration 1014); display state only.
     botSuggestion: jsonb("bot_suggestion").$type<SessionBotSuggestion>(),
+    // The bot template this chat was started from (migration 1015); a link only.
+    botTemplateId: uuid("bot_template_id"),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a

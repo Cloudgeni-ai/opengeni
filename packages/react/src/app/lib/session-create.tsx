@@ -262,6 +262,8 @@ export type NewSessionBotProfile = {
   name: string;
   description?: string | undefined;
   avatar?: import("@opengeni/sdk").SessionAvatar | null | undefined;
+  /** The template it starts from: links the chat so it can propose template updates. */
+  templateId?: string | undefined;
 };
 
 export type BuildCreateSessionRequestInput = {
@@ -392,6 +394,7 @@ export function buildCreateSessionRequest(
     ...(input.bot
       ? {
           keepLive: true,
+          ...(input.bot.templateId ? { botTemplateId: input.bot.templateId } : {}),
           profile: {
             title: input.bot.name,
             ...(input.bot.description ? { description: input.bot.description } : {}),

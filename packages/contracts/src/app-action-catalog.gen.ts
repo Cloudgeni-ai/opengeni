@@ -3,6 +3,17 @@ import type { ActionCatalogEntry } from "./app-action-catalog-types";
 
 export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
   {
+    "id": "acceptBotTemplateProposal",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/bot-template-proposals/:proposalId/accept",
+    "request": [
+      "AcceptBotTemplateProposalRequest"
+    ],
+    "response": [
+      "AcceptBotTemplateProposalResponse"
+    ]
+  },
+  {
     "id": "acceptOrganizationInvitation",
     "method": "POST",
     "path": "/v1/organization-invitations/:invitationId/accept",
@@ -2151,6 +2162,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "workspace:read"
+  },
+  {
+    "id": "dismissBotTemplateProposal",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/bot-template-proposals/:proposalId/dismiss",
+    "request": [],
+    "response": [
+      "BotTemplateProposal",
+      "BotTemplateProposalResponse"
+    ]
   },
   {
     "id": "downloadEditableArtifactMaterialization",
@@ -4935,6 +4956,23 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "AvailableOpenGeniSlackBots"
     ],
     "permission": "connections:read"
+  },
+  {
+    "id": "listBotTemplateProposals",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/bot-template-proposals",
+    "request": [
+      "BotTemplateProposalStatus"
+    ],
+    "query": [
+      "sessionId",
+      "status",
+      "templateId"
+    ],
+    "response": [
+      "BotTemplateProposal",
+      "ListBotTemplateProposalsResponse"
+    ]
   },
   {
     "id": "listBotTemplates",

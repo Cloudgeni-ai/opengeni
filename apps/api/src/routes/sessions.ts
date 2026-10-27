@@ -23,6 +23,7 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
+import { getBotTemplate, setSessionBotTemplate } from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
@@ -794,11 +795,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     }
     let session: Session;
+    let requestedBotTemplateId: string | null = null;
     try {
       const legacyFields = legacyVariableSetFields(payload);
       if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
       payload = withoutEmptyLegacyVariableSetFields(payload);
-      const requestedProfile = CreateSessionRequest.parse(payload).profile;
+      const parsedCreate = CreateSessionRequest.parse(payload);
+      const requestedProfile = parsedCreate.profile;
+      requestedBotTemplateId = parsedCreate.botTemplateId ?? null;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
       if (
@@ -859,6 +863,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           if (context) (payload as Record<string, unknown>).modelContext = context;
         }
       }
+      // A chat started from a bot template names one that exists here.
+      if (
+        requestedBotTemplateId &&
+        !(await getBotTemplate(db, workspaceId, requestedBotTemplateId))
+      ) {
+        throw new HTTPException(422, { message: "bot template not found" });
+      }
       // Checked before anything is created: an avatar the chat could not show
       // refuses the request instead of leaving a half-made chat.
       if (requestedProfile?.avatar) {
@@ -910,6 +921,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         };
       } catch (error) {
         deps.observability?.warn("session create profile write failed", {
+          sessionId: session.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    // The template this bot started from: a link for the template's proposals.
+    // Creation committed; a failure here leaves an ordinary unlinked chat.
+    if (requestedBotTemplateId) {
+      try {
+        if (
+          await setSessionBotTemplate(db, {
+            workspaceId,
+            sessionId: session.id,
+            templateId: requestedBotTemplateId,
+          })
+        ) {
+          session = { ...session, botTemplateId: requestedBotTemplateId };
+        }
+      } catch (error) {
+        deps.observability?.warn("session create bot template link failed", {
           sessionId: session.id,
           error: error instanceof Error ? error.message : String(error),
         });

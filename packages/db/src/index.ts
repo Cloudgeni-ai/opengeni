@@ -90911,6 +90911,7 @@ function mapSession(
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
     ...optionalBotSuggestion(row.botSuggestion),
+    ...(row.botTemplateId ? { botTemplateId: row.botTemplateId } : {}),
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),

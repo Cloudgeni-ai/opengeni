@@ -273,3 +273,306 @@ export async function listWorkspaceBotSessions(
     }));
   });
 }
+
+// --- Template links and proposals (migration 1015) -------------------------
+
+/**
+ * Link a chat to the bot template it was started from. A link, not activity:
+ * the chat's `updated_at` is left as it was.
+ */
+export async function setSessionBotTemplate(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; templateId: string | null },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const rows = await scoped
+      .update(schema.sessions)
+      .set({ botTemplateId: input.templateId, updatedAt: sql`${schema.sessions.updatedAt}` })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    return rows.length > 0;
+  });
+}
+
+/**
+ * The template a chat belongs to: the one it was started from, otherwise the
+ * newest one saved from it. Null when it has neither.
+ */
+export async function botTemplateForSession(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; startedFromTemplateId: string | null },
+): Promise<BotTemplateRecord | null> {
+  if (input.startedFromTemplateId) {
+    const started = await getBotTemplate(db, input.workspaceId, input.startedFromTemplateId);
+    if (started) return started;
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.botTemplates)
+      .where(
+        and(
+          eq(schema.botTemplates.workspaceId, input.workspaceId),
+          eq(schema.botTemplates.sourceSessionId, input.sessionId),
+        ),
+      )
+      .orderBy(desc(schema.botTemplates.createdAt), asc(schema.botTemplates.id))
+      .limit(1);
+    return row ? record(row) : null;
+  });
+}
+
+export interface BotTemplateProposalRecord {
+  id: string;
+  templateId: string;
+  sessionId: string;
+  baseUpdatedAt: Date;
+  setupInstructions: string;
+  reason: string;
+  proposedBySubjectId: string | null;
+  status: "pending" | "accepted" | "dismissed" | "superseded";
+  decidedBySubjectId: string | null;
+  decidedAt: Date | null;
+  createdAt: Date;
+}
+
+type ProposalRow = typeof schema.botTemplateProposals.$inferSelect;
+
+function proposalRecord(row: ProposalRow): BotTemplateProposalRecord {
+  return {
+    id: row.id,
+    templateId: row.templateId,
+    sessionId: row.sessionId,
+    baseUpdatedAt: row.baseUpdatedAt,
+    setupInstructions: row.setupInstructions,
+    reason: row.reason,
+    proposedBySubjectId: row.proposedBySubjectId,
+    status: row.status,
+    decidedBySubjectId: row.decidedBySubjectId,
+    decidedAt: row.decidedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+/** The proposal was already decided, so it cannot be decided again. */
+export class BotTemplateProposalStateError extends Error {
+  readonly name = "BotTemplateProposalStateError";
+  constructor(status: string) {
+    super(`This proposal was already ${status}.`);
+  }
+}
+
+/** The template changed after the person reviewed the proposal against it. */
+export class BotTemplateChangedError extends Error {
+  readonly name = "BotTemplateChangedError";
+  constructor() {
+    super("The bot template changed since you reviewed this proposal. Review it again.");
+  }
+}
+
+/**
+ * Record a proposal against the template as it is now. The same chat's older
+ * pending proposal for this template is superseded: one chat, one open
+ * proposal.
+ */
+export async function createBotTemplateProposal(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    templateId: string;
+    sessionId: string;
+    baseUpdatedAt: Date;
+    setupInstructions: string;
+    reason: string;
+    proposedBySubjectId: string | null;
+  },
+): Promise<BotTemplateProposalRecord> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    await scoped
+      .update(schema.botTemplateProposals)
+      .set({ status: "superseded", decidedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.botTemplateProposals.workspaceId, input.workspaceId),
+          eq(schema.botTemplateProposals.templateId, input.templateId),
+          eq(schema.botTemplateProposals.sessionId, input.sessionId),
+          eq(schema.botTemplateProposals.status, "pending"),
+        ),
+      );
+    const [row] = await scoped
+      .insert(schema.botTemplateProposals)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        templateId: input.templateId,
+        sessionId: input.sessionId,
+        baseUpdatedAt: input.baseUpdatedAt,
+        setupInstructions: input.setupInstructions,
+        reason: input.reason,
+        proposedBySubjectId: input.proposedBySubjectId,
+      })
+      .returning();
+    return proposalRecord(row!);
+  });
+}
+
+/**
+ * Proposals the subject may see (never ones from another person's private
+ * chat), newest first. `status` defaults to pending.
+ */
+export async function listBotTemplateProposals(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    templateId?: string | undefined;
+    sessionId?: string | undefined;
+    status?: BotTemplateProposalRecord["status"] | "all" | undefined;
+  },
+): Promise<BotTemplateProposalRecord[]> {
+  const status = input.status ?? "pending";
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const rows = await scoped
+      .select()
+      .from(schema.botTemplateProposals)
+      .where(
+        and(
+          eq(schema.botTemplateProposals.workspaceId, input.workspaceId),
+          input.templateId
+            ? eq(schema.botTemplateProposals.templateId, input.templateId)
+            : undefined,
+          input.sessionId ? eq(schema.botTemplateProposals.sessionId, input.sessionId) : undefined,
+          status === "all" ? undefined : eq(schema.botTemplateProposals.status, status),
+        ),
+      )
+      .orderBy(desc(schema.botTemplateProposals.createdAt), asc(schema.botTemplateProposals.id))
+      .limit(100);
+    return rows.map(proposalRecord);
+  });
+}
+
+/** One proposal the subject may see, or null. */
+export async function getBotTemplateProposal(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; proposalId: string },
+): Promise<BotTemplateProposalRecord | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.botTemplateProposals)
+      .where(
+        and(
+          eq(schema.botTemplateProposals.workspaceId, input.workspaceId),
+          eq(schema.botTemplateProposals.id, input.proposalId),
+        ),
+      )
+      .limit(1);
+    return row ? proposalRecord(row) : null;
+  });
+}
+
+/**
+ * Accept a pending proposal: replace the template's setup instructions, but
+ * only while the template is still the version the person reviewed. Null
+ * when the proposal or template no longer exists. The caller has already
+ * checked that the person may change the template.
+ */
+export async function acceptBotTemplateProposal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    proposalId: string;
+    expectedUpdatedAt: string;
+    decidedBySubjectId: string | null;
+  },
+): Promise<{ template: BotTemplateRecord; proposal: BotTemplateProposalRecord } | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [proposal] = await scoped
+      .select()
+      .from(schema.botTemplateProposals)
+      .where(
+        and(
+          eq(schema.botTemplateProposals.workspaceId, input.workspaceId),
+          eq(schema.botTemplateProposals.id, input.proposalId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!proposal) return null;
+    if (proposal.status !== "pending") throw new BotTemplateProposalStateError(proposal.status);
+    const [current] = await scoped
+      .select()
+      .from(schema.botTemplates)
+      .where(
+        and(
+          eq(schema.botTemplates.workspaceId, input.workspaceId),
+          eq(schema.botTemplates.id, proposal.templateId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) return null;
+    if (current.updatedAt.getTime() !== Date.parse(input.expectedUpdatedAt)) {
+      throw new BotTemplateChangedError();
+    }
+    const [template] = await scoped
+      .update(schema.botTemplates)
+      .set({ setupInstructions: proposal.setupInstructions, updatedAt: sql`now()` })
+      .where(eq(schema.botTemplates.id, current.id))
+      .returning();
+    const [decided] = await scoped
+      .update(schema.botTemplateProposals)
+      .set({
+        status: "accepted",
+        decidedBySubjectId: input.decidedBySubjectId,
+        decidedAt: sql`now()`,
+      })
+      .where(eq(schema.botTemplateProposals.id, proposal.id))
+      .returning();
+    return { template: record(template!), proposal: proposalRecord(decided!) };
+  });
+}
+
+/** Dismiss a pending proposal. Null when it does not exist; throws when already decided. */
+export async function dismissBotTemplateProposal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    proposalId: string;
+    decidedBySubjectId: string | null;
+  },
+): Promise<BotTemplateProposalRecord | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [proposal] = await scoped
+      .select()
+      .from(schema.botTemplateProposals)
+      .where(
+        and(
+          eq(schema.botTemplateProposals.workspaceId, input.workspaceId),
+          eq(schema.botTemplateProposals.id, input.proposalId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!proposal) return null;
+    if (proposal.status !== "pending") throw new BotTemplateProposalStateError(proposal.status);
+    const [decided] = await scoped
+      .update(schema.botTemplateProposals)
+      .set({
+        status: "dismissed",
+        decidedBySubjectId: input.decidedBySubjectId,
+        decidedAt: sql`now()`,
+      })
+      .where(eq(schema.botTemplateProposals.id, proposal.id))
+      .returning();
+    return proposalRecord(decided!);
+  });
+}

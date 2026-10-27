@@ -143,6 +143,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   set_other_session_title: { allOf: ["sessions:control"] },
   bot_template_save: { sessionRequired: true, allOf: ["sessions:create"] },
   bot_suggest: { sessionRequired: true, allOf: ["sessions:read"] },
+  bot_template_propose_update: { sessionRequired: true, allOf: ["sessions:read"] },
   interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },

@@ -875,6 +875,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   nameChat: "rename",
   saveBotTemplate: "rename",
   suggestBot: "rename",
+  proposeBotTemplateUpdate: "rename",
   notify: "bell",
   withdrawNotification: "bell",
   tidyInbox: "inbox",

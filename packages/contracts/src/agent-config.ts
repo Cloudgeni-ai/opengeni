@@ -397,6 +397,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   // Bot templates start new chats, like session_create.
   bot_template_save: "subagents",
   bot_suggest: "subagents",
+  bot_template_propose_update: "subagents",
   session_set_model: "subagents",
 
   interaction_discover: "browser",
