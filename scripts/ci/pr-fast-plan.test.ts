@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { PR_UNIT_FILE_CAP, selectPrFastPlan } from "./pr-fast-plan";
+import { existsSync } from "node:fs";
+import { PR_INVENTORY_TESTS, PR_UNIT_FILE_CAP, selectPrFastPlan } from "./pr-fast-plan";
 import { createImpactPlan } from "./impact";
 
 const plan = {
@@ -75,7 +76,82 @@ test("product plus release note selects units, but changeset cannot mask another
     expect(selectPrFastPlan(broad, ["packages/runtime"]).prAdmissionUnits.reason).toBe(
       "broad-impact-deferred-to-batch",
     );
-    expect(selectPrFastPlan(broad, ["packages/runtime"]).unitTests).toEqual([]);
+    // Only the inventory test for the changed workflow, never the capped units.
+    expect(selectPrFastPlan(broad, ["packages/runtime"]).unitTests).toEqual(
+      fence.startsWith(".github/") ? ["scripts/workflow-execution-graph.test.ts"] : [],
+    );
+  }
+});
+
+test("inventory tests run whenever their area changes, beyond the cap and broad deferral", () => {
+  for (const { test: path } of PR_INVENTORY_TESTS) expect(existsSync(path)).toBe(true);
+  const tests = Array.from(
+    { length: 80 },
+    (_, i) => `apps/api/test/${String(i).padStart(3, "0")}.test.ts`,
+  );
+  const inventory = [...tests, ...PR_INVENTORY_TESTS.map(({ test: path }) => path)];
+  const routes = selectPrFastPlan(
+    { ...plan, changedFiles: ["apps/api/src/app.ts"], unitTests: inventory },
+    ["apps/api", "packages/sdk", "scripts"],
+  );
+  expect(routes.unitTests[0]).toBe("apps/api/test/organization-mcp.test.ts");
+  expect(routes.unitTests).toHaveLength(PR_UNIT_FILE_CAP + 1);
+  expect(routes.prAdmissionUnits.inventoryTests).toEqual([
+    "apps/api/test/organization-mcp.test.ts",
+  ]);
+  const surface = selectPrFastPlan(
+    {
+      ...plan,
+      mode: "full",
+      changedFiles: ["scripts/public-api/surface.gen.json"],
+      unitTests: inventory,
+    },
+    dirs,
+  );
+  expect(surface.unitTests).toEqual([
+    "apps/api/test/organization-mcp.test.ts",
+    "packages/sdk/test/client-coverage.test.ts",
+  ]);
+  const migration = selectPrFastPlan(
+    {
+      ...plan,
+      mode: "full",
+      changedFiles: ["packages/db/drizzle/0999_x.sql"],
+      unitTests: inventory,
+    },
+    dirs,
+  );
+  expect(migration.unitTests).toEqual(["scripts/release-schema-contract.test.ts"]);
+  // Inventory tests need not be in the impact plan's list, only exist; docs
+  // plans never run units.
+  const web = selectPrFastPlan(
+    { ...plan, changedFiles: ["apps/web/src/main.tsx"], unitTests: tests },
+    dirs,
+  );
+  expect(web.unitTests).toEqual(["packages/sdk/test/browser-client-surface.test.ts"]);
+  expect(web.prAdmissionUnits.deferredCount).toBe(tests.length);
+  expect(
+    selectPrFastPlan({ ...plan, changedFiles: ["apps/web/src/main.tsx"] }, dirs, () => false)
+      .unitTests,
+  ).toEqual([]);
+  expect(
+    selectPrFastPlan({ ...plan, mode: "docs", changedFiles: [".github/README.md"] }, dirs)
+      .unitTests,
+  ).toEqual([]);
+});
+
+test("the production web bundle runs when the web app or its build inputs are affected", () => {
+  const web = (input: { mode?: "focused" | "full" | "docs"; affectedPackages?: string[] }) =>
+    selectPrFastPlan({ ...plan, ...input }, dirs).prWebBundle;
+  expect(web({ affectedPackages: ["@opengeni/react", "opengeni-web"] })).toBe(true);
+  expect(web({ affectedPackages: ["@opengeni/browser-extension"] })).toBe(true);
+  expect(web({ affectedPackages: ["@opengeni/compute"] })).toBe(false);
+  expect(web({ mode: "full", affectedPackages: [] })).toBe(true);
+  expect(web({})).toBe(true);
+  expect(web({ mode: "docs", affectedPackages: ["opengeni-web"] })).toBe(false);
+  // The real graph: packages/react and packages/sdk reach the web app.
+  for (const path of ["packages/react/src/index.ts", "packages/sdk/src/index.ts"]) {
+    expect(selectPrFastPlan(createImpactPlan([path]), dirs).prWebBundle).toBe(true);
   }
 });
 

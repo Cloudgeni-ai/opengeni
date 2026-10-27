@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   SUBSCRIPTION_RENAMED_POLICIES,
   SUBSCRIPTION_RENAMED_RELATIONS,
@@ -9,7 +11,12 @@ import {
   SUBSCRIPTION_RETIRED_ROUTINE_NAMES,
   SUBSCRIPTION_RETIRED_TRIGGERS,
 } from "../packages/db/src/runtime-posture";
-import { checkLegacySubscriptionSource } from "./check-no-legacy-subscription-runtime";
+import {
+  changedRuntimeSources,
+  checkLegacySubscriptionSource,
+  checkNoLegacySubscriptionRuntime,
+  guardInputFiles,
+} from "./check-no-legacy-subscription-runtime";
 import {
   LEGACY_CLAUDE_RUNTIME,
   LEGACY_CODEX_RUNTIME,
@@ -673,5 +680,86 @@ describe("M4 R shared pool entry", () => {
     `,
       ),
     ).toEqual([]);
+  });
+});
+
+describe("no-legacy subscription runtime guard: PR scope", () => {
+  const retired: LegacySubscriptionRetirement = {
+    id: "pool",
+    name: "Example",
+    identifiers: ["example_legacy_table"],
+    exceptions: {},
+  };
+
+  const inputs = guardInputFiles(process.cwd());
+
+  test("a focused plan scopes the scan to changed runtime sources", () => {
+    expect(
+      changedRuntimeSources(
+        {
+          mode: "focused",
+          changedFiles: [
+            "apps/api/src/app.ts",
+            "apps/api/test/app.test.ts",
+            "packages/core/src/x.integration.ts",
+            "packages/sdk/dist/index.js",
+            "packages/react/src/view.tsx",
+            "scripts/ci/impact.ts",
+            "docs/merge-batcher.md",
+            ".changeset/a.md",
+            "examples/demo/src/main.ts",
+          ],
+        },
+        inputs,
+      ),
+    ).toEqual(["apps/api/src/app.ts", "packages/react/src/view.tsx", "scripts/ci/impact.ts"]);
+    expect(changedRuntimeSources({ mode: "docs", changedFiles: ["docs/a.md"] }, inputs)).toEqual(
+      [],
+    );
+  });
+
+  test("the registry, engine, toolchain or a full plan require the whole tree", () => {
+    for (const path of [
+      "scripts/legacy-subscription-runtime/codex.ts",
+      "scripts/check-no-legacy-subscription-runtime.ts",
+      // Modules the registry is built from, found by following its imports.
+      "packages/db/src/runtime-posture.ts",
+      "packages/db/src/runtime-posture-legacy-routines.json",
+      "package.json",
+      "bun.lock",
+    ]) {
+      expect(
+        changedRuntimeSources(
+          { mode: "focused", changedFiles: ["apps/api/src/app.ts", path] },
+          inputs,
+        ),
+      ).toBeNull();
+    }
+    expect(
+      changedRuntimeSources({ mode: "full", changedFiles: ["apps/api/src/app.ts"] }, inputs),
+    ).toBe(null);
+    expect(changedRuntimeSources({ mode: "focused" }, inputs)).toBeNull();
+  });
+
+  test("a scoped scan reports changed files only and skips deleted ones", () => {
+    const root = mkdtempSync(join(tmpdir(), "legacy-subscription-scope-"));
+    try {
+      mkdirSync(join(root, "scripts"));
+      for (const file of ["apps/api/src/changed.ts", "packages/db/src/untouched.ts"]) {
+        mkdirSync(dirname(join(root, file)), { recursive: true });
+        writeFileSync(join(root, file), "sql`select * from example_legacy_table`;\n");
+      }
+      const files = (only: readonly string[] | null) =>
+        checkNoLegacySubscriptionRuntime(root, [retired], only)
+          .map((finding) => finding.file)
+          .sort();
+      expect(files(null)).toEqual(["apps/api/src/changed.ts", "packages/db/src/untouched.ts"]);
+      expect(files(["apps/api/src/changed.ts", "apps/api/src/deleted.ts"])).toEqual([
+        "apps/api/src/changed.ts",
+      ]);
+      expect(files([])).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

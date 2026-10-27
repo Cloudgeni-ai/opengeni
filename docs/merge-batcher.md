@@ -742,10 +742,15 @@ The cheap source contracts are the shared pending-changeset release plan
 (`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
 ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
 Site runtime check, the committed workflow execution graph (otherwise only a unit
-test that workflow-changing PRs defer to Batch), and the impact plan's guards
-except lint (its own step), `subscription-contract` (about 20 seconds) and the
-output-producing guards Batch also defers. A broken changeset or stale public API
-snapshot therefore fails its own PR instead of a batch of up to 15.
+test that workflow-changing PRs defer to Batch), and every impact-plan guard
+Batch source contracts run, except lint (its own step). The legacy subscription
+runtime scan reads only the PR's changed files there (the whole tree when its
+registry, engine or toolchain changes); Batch scans the whole tree. A broken
+changeset, stale public API snapshot or public-hygiene finding therefore fails
+its own PR instead of a batch of up to 15.
+When the web app or a workspace it builds from is affected (any broad impact
+included), the job also runs Batch's "Production web bundle" step unchanged, so
+the bundle's chunk guards fail the PR rather than a batch.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
 defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
@@ -753,7 +758,10 @@ trigger this deferral: the selector re-plans without them to confirm no other
 broad fence is hidden, then selects the capped direct-package units. The original
 impact planner and Batch plan remain unchanged. The retained PR plan records the selection
 reason and original, direct, selected and deferred counts; intentional deferral
-is not a claim that those tests passed. All selected tests must execute successfully
+is not a claim that those tests passed. Separately, `PR_INVENTORY_TESTS` in
+`scripts/ci/pr-fast-plan.ts` lists cross-package inventory tests (routes, SDK
+surfaces, workflow graph, release schema contract) that run whenever their area
+changes, outside the cap and broad deferral. All selected tests must execute successfully
 for the fast job and required aggregate to pass. A failed selected test is never
 converted into an intentional skip. Type selection is unchanged. Full guards
 and the full suite remain in Batch CI, whose impact plan is not capped.
