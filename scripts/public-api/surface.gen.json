@@ -20510,6 +20510,7 @@
         "$.dictationDefault.model": "string!",
         "$.dictationDefault.providerId": "string!",
         "$.language": "string? null",
+        "$.liveTranscript": "boolean?",
         "$.models": "array!",
         "$.models[]": "ref(RecordingTranscriptionModel)",
         "$.pinned": "boolean!"
