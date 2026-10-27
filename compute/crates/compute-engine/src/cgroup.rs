@@ -280,6 +280,16 @@ impl Cgroup {
         Ok(parse_memory_stats(&stat, pressure.as_deref()))
     }
 
+    /// How long, all told, some of the group's processes have waited for
+    /// memory (`some total` in `memory.pressure`), the kernel's reclaim and
+    /// its slowing of groups past `memory.high` included; `None` without
+    /// pressure stall information.
+    pub fn memory_waited(&self) -> io::Result<Option<Duration>> {
+        let pressure = fs::read_to_string(self.path.join("memory.pressure"))?;
+        let stats = parse_memory_stats("", Some(&pressure));
+        Ok(stats.pressure_some_us.map(Duration::from_micros))
+    }
+
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
     /// memory (zswap, never written to disk), file pages dropped.
     ///

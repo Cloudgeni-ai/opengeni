@@ -179,7 +179,17 @@ pick a VM.
   watermark and relief is already pausing and saving the sandboxes above
   their request, until it is back at the high watermark. Not
   `memory.max`: at it the kernel ends a VM, and slowing VMs down is the
-  better failure, as for `memory.low`. A capacity given above the limit
+  better failure, as for `memory.low`. The kernel slows every thread of
+  the VMs that takes more memory at the limit, not only guests: the VMM
+  threads that answer the agent and write snapshots too, and their
+  answers come late. So time a VMM's group waits for memory does not
+  count toward a request's deadline, up to two minutes of it a request,
+  as time it spends frozen does not: counted, a pause past the 10 s a
+  control request may take failed as if the VMM were stuck, and the
+  sandboxes relief was saving lost their running programs instead (three
+  in a run on a 32 GiB host). A VMM stuck while its group waits for good,
+  under a limit of its own its guest keeps pushing against, still fails
+  once those two minutes are spent. A capacity given above the limit
   is kept but warned about: requests within it could then be slowed at
   the limit. The VMMs' and pagers' own memory is not booked, so a host
   booked to its last byte with every guest at its request can reach the
