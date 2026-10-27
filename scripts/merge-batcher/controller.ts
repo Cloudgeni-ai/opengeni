@@ -272,13 +272,19 @@ function announcement(ejection: Ejection): Extract<Effect, { kind: "announce" }>
   const key = bindingKey(ejection.pull);
   // A merge conflict shares #6156's per-head key, so one head gets one notice.
   const conflict = ejection.reason === "merge-tree conflict against candidate predecessor";
+  // A Version PR is regenerated from main rather than rebased: a hand-merged
+  // Version head is no longer one generated commit and cannot be released.
+  const fix =
+    ejection.pull.headRef === "changeset-release/main"
+      ? "Main changed files this Version PR also changes after it was generated, so it cannot land as its exact reviewed delta. Run the Open Version PR workflow to regenerate it from current main; do not rebase or merge main into it. It re-queues automatically once required checks pass."
+      : "Rebase or merge main into it and push; it re-queues automatically once required checks pass.";
   return {
     kind: "announce",
     number: ejection.pull.number,
     key,
     ...(conflict ? { commentKey: `conflict:${ejection.pull.headSha}` } : {}),
     body: conflict
-      ? `Not queued: this PR conflicts with main, an earlier PR in this batch, or a batch ahead of it in the queue. Rebase or merge main into it and push; it re-queues automatically once required checks pass. Exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
+      ? `Not queued: this PR conflicts with main, an earlier PR in this batch, or a batch ahead of it in the queue. ${fix} Exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
       : `Merge batcher excluded exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
   };
 }

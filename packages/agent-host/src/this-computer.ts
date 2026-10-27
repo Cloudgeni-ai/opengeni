@@ -609,13 +609,14 @@ export class ThisComputer {
    * Whether the app should now start ("open") or stop ("stop") opening at
    * login, given whether this computer is connected; null when nothing changes.
    * A connected computer stays available after a restart, and one that was
-   * disconnected no longer opens the app at login.
+   * disconnected no longer opens the app at login. `wanted` is something else
+   * in the app that needs it running from login on, such as dictation shortcuts.
    */
-  openAtLoginChange(connected: boolean): "open" | "stop" | null {
-    connected = connected && !this.serviceBacked;
-    if (connected === this.state.openAtLogin) return null;
-    this.saveState({ openAtLogin: connected });
-    return connected ? "open" : "stop";
+  openAtLoginChange(connected: boolean, wanted = false): "open" | "stop" | null {
+    const open = (connected && !this.serviceBacked) || wanted;
+    if (open === this.state.openAtLogin) return null;
+    this.saveState({ openAtLogin: open });
+    return open ? "open" : "stop";
   }
 
   /**
