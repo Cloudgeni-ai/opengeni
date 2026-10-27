@@ -5,7 +5,10 @@ import { GracefulShutdownPeriodExpiredError, NativeConnection, Worker } from "@t
 import { createOpenGeniWorker } from "../src";
 import { TurnLifecycleMetrics } from "../src/observability-metrics";
 import { createWorkerHttpHandler } from "../src/http";
-import { createWorkerServiceLifecycle } from "../src/worker-service-lifecycle";
+import {
+  createWorkerServiceLifecycle,
+  WorkerForceStoppedError,
+} from "../src/worker-service-lifecycle";
 import {
   TURN_WORKER_ACTIVITY_METRICS as names,
   closeWorkerHttpAfterActivityExecution,
@@ -447,7 +450,14 @@ describe("SDK all-activity occupancy bridge", () => {
       expect((await fetch(`${baseUrl}/readyz`)).status).toBe(503);
       expect((await fetch(`${baseUrl}/metrics`)).status).toBe(200);
       f.execution.reject(new GracefulShutdownPeriodExpiredError("fixture shutdown period expired"));
-      await expect(running).rejects.toBeInstanceOf(GracefulShutdownPeriodExpiredError);
+      // The lifecycle keeps the host's force-stop intent and the SDK cause.
+      const stopped = await running.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(stopped).toBeInstanceOf(WorkerForceStoppedError);
+      expect((stopped as WorkerForceStoppedError).reason).toBe("shutdown_deadline");
+      expect((stopped as Error).cause).toBeInstanceOf(GracefulShutdownPeriodExpiredError);
       await lifecycle.close();
       expect(resourceCloses).toBe(1);
       expect(httpCloses).toBe(0);

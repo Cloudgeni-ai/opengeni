@@ -4,7 +4,7 @@ import { metadataWithTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@openg
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
-import * as admission from "../src/activities/agent-run-admission";
+import * as admission from "@opengeni/core";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";

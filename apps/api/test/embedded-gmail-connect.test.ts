@@ -60,9 +60,14 @@ afterAll(async () => {
   await fixture?.release();
 });
 
-test.each(["personal"] as const)(
-  "Gmail %s callback binds the exact attempt and preserves lifecycle authority",
-  async (ownership) => {
+// A personal sign-in must finish with the narrow grant it was started with,
+// not only with broad connections:write.
+test.each([
+  ["personal", "connections:write"],
+  ["personal", "connections:personal"],
+] as const)(
+  "Gmail %s callback with %s binds the exact attempt and preserves lifecycle authority",
+  async (ownership, setupPermission) => {
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
       accountExternalId: randomUUID(),
@@ -84,6 +89,16 @@ test.each(["personal"] as const)(
       name: "Fixture",
       prefix: "test",
       keyHash: createHash("sha256").update(key).digest("hex"),
+      permissions: ["workspace:read", "connections:read", setupPermission],
+    });
+    // A second key for the same person creates a custom-server fixture the
+    // narrow grant may not start, and reads results after the first is revoked.
+    const helperKey = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: grant.accountId,
+      name: "Helper",
+      prefix: "test",
+      keyHash: createHash("sha256").update(helperKey).digest("hex"),
       permissions: ["workspace:read", "connections:read", "connections:write"],
     });
     const secret = "gmail-callback-synthetic-state";
@@ -120,6 +135,7 @@ test.each(["personal"] as const)(
       ),
     };
     const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const helperHeaders = { ...headers, authorization: `Bearer ${helperKey}` };
     let exchanges = 0;
     let profileChecks = 0;
     let previewRequests = 0;
@@ -325,7 +341,7 @@ test.each(["personal"] as const)(
       };
       const wrongProviderResponse = await app.request(base, {
         method: "POST",
-        headers,
+        headers: helperHeaders,
         body: JSON.stringify({
           providerId: "mcp-bearer",
           ownership: "personal",
@@ -542,8 +558,25 @@ test.each(["personal"] as const)(
 
       const revoked = await begin();
       await revokeOrganizationApiKey(client.db, grant.accountId, apiKey.id);
-      await callback(revoked.state);
+      expect((await callback(revoked.state)).headers.get("location")).toBe(returnUrl);
+      // The grant check fails after the attempt is known: it settles as a
+      // retryable failure instead of waiting forever, and commits nothing.
+      const settled = await (
+        await app.request(`${base}/${revoked.attempt.id}`, { headers: helperHeaders })
+      ).json();
+      expect(settled).toMatchObject({
+        state: "failed",
+        revision: revoked.attempt.revision + 1,
+        credentialsCommitted: false,
+        error: { code: "state_invalid", retryable: true },
+      });
+      expect(settled.error.message).toBe(
+        "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      );
       await callback(state); // Receipt replay still requires live origin authority.
+      expect(
+        await (await app.request(`${base}/${attempt.id}`, { headers: helperHeaders })).json(),
+      ).toEqual(completed);
       expect(exchanges).toBe(acceptedExchanges);
     } finally {
       transport.mockRestore();

@@ -134,7 +134,8 @@
       "method": "GET",
       "path": "/v1/billing/checkout/:checkoutSessionId",
       "sdk": [
-        "OpenGeniClient.getBillingCheckout"
+        "OpenGeniClient.getBillingCheckout",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
@@ -9140,7 +9141,9 @@
       "sdk": [
         "OpenGeniClient.approveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9151,7 +9154,9 @@
       "sdk": [
         "OpenGeniClient.rejectWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9162,7 +9167,9 @@
       "sdk": [
         "OpenGeniClient.removeWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "RemoveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9173,7 +9180,9 @@
       "sdk": [
         "OpenGeniClient.restoreWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9184,7 +9193,9 @@
       "sdk": [
         "OpenGeniClient.saveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "SaveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -11130,6 +11141,20 @@
         "$.rationale": "string?"
       }
     },
+    "ApplyWorkspaceSkillRevisionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.removalOperationId": "string?",
+        "$.revisionId": "string!"
+      }
+    },
     "ApproveSlackUserLinkAccessRequest": {
       "io": [
         "input"
@@ -11772,7 +11797,10 @@
         "$.balanceMicros": "integer!",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
+        "$.heldCreditMicros": "integer?",
+        "$.heldGeneralCreditMicros": "integer?",
         "$.plan": "ref(BillingPlanBalance)? null",
+        "$.promotionDecision": "enum?=[\"\\\"denied\\\"\",\"\\\"eligible\\\"\",\"\\\"held\\\"\",\"\\\"verification_required\\\"\"]",
         "$.promotionalCredits": "array?",
         "$.promotionalCredits[]": "ref(PromotionalCreditBalance)",
         "$.updatedAt": "string!"
@@ -11854,7 +11882,7 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=wait\"]",
+        "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=viewport_reset\",\"type=wait\"]",
         "$|type=navigate": "object",
         "$|type=navigate.type": "const!=[\"\\\"navigate\\\"\"]",
         "$|type=navigate.url": "string!",
@@ -11869,6 +11897,8 @@
         "$|type=viewport.mobile": "boolean!",
         "$|type=viewport.type": "const!=[\"\\\"viewport\\\"\"]",
         "$|type=viewport.width": "integer!",
+        "$|type=viewport_reset": "object",
+        "$|type=viewport_reset.type": "const!=[\"\\\"viewport_reset\\\"\"]",
         "$|type=click": "object",
         "$|type=click.button": "enum?=[\"\\\"left\\\"\",\"\\\"middle\\\"\",\"\\\"right\\\"\"]",
         "$|type=click.locator": "ref(BrowserLocator)!",
@@ -11961,6 +11991,17 @@
         "$.type": "const!=[\"\\\"batch\\\"\"]"
       }
     },
+    "BrowserActionNote": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionIndex": "integer!",
+        "$.kind": "enum!=[\"\\\"network_busy\\\"\",\"\\\"observation_unavailable\\\"\"]",
+        "$.message": "string!"
+      }
+    },
     "BrowserActionReceipt": {
       "io": [
         "output"
@@ -11983,6 +12024,8 @@
         "$.error.details{}|4{}": "ref(__schema2)",
         "$.error.message": "string!",
         "$.error.retryable": "boolean!",
+        "$.notes": "array?",
+        "$.notes[]": "ref(BrowserActionNote)",
         "$.observation": "object! null",
         "$.observation.browserSessionId": "string!",
         "$.observation.changedRegions": "array!",
@@ -12148,6 +12191,7 @@
         "$|kind=element.kind": "const!=[\"\\\"element\\\"\"]",
         "$|kind=element.locator": "ref(BrowserDomReadLocator)!",
         "$|kind=element.maxChars": "integer?",
+        "$|kind=element.offset": "integer?",
         "$|kind=count": "object",
         "$|kind=count.expectedDocumentGeneration": "string!",
         "$|kind=count.expectedFrameId": "string!",
@@ -12569,6 +12613,7 @@
         "$.controller": "ref(InteractionControllerBinding)! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
+        "$.display": "enum?=[\"\\\"offscreen\\\"\",\"\\\"window\\\"\"]",
         "$.driverId": "string!",
         "$.engine": "enum!=[\"\\\"chrome\\\"\",\"\\\"chromium\\\"\",\"\\\"external\\\"\",\"\\\"firefox\\\"\",\"\\\"lightpanda\\\"\",\"\\\"webkit\\\"\"]",
         "$.engineVersion": "string! null",
@@ -13371,7 +13416,10 @@
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
+        "$.auth|mode=managedSession.passkeySignIn": "boolean!",
+        "$.auth|mode=managedSession.passkeySignUp": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
+        "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
         "$.azureOpenAIDeploymentIdentity": "boolean?",
@@ -13469,9 +13517,24 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
+      }
+    },
+    "ClientModelResidencyV1": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deploymentType": "ref(ModelDeploymentType)!",
+        "$.eu": "boolean!",
+        "$.evidenceSource": "ref(ModelResidencyEvidenceSource)!",
+        "$.geography": "ref(ModelProcessingGeography)!",
+        "$.regions": "array!",
+        "$.regions[]": "string"
       }
     },
     "ClientResumableVoiceInputConfig": {
@@ -14016,7 +14079,8 @@
         "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.unconfirmedInput": "const?=[\"true\"]"
       }
     },
     "ComputerActionRequest": {
@@ -15060,6 +15124,7 @@
         "$": "union=[\"1\",\"kind=gmail\",\"kind=mcp\",\"kind=webhook\",\"kind=workspace\"]",
         "$|kind=webhook": "object",
         "$|kind=webhook.adapter": "ref(WebhookEventAdapter)!",
+        "$|kind=webhook.format": "ref(WebhookFormat)?",
         "$|kind=webhook.kind": "const!=[\"\\\"webhook\\\"\"]",
         "$|kind=webhook.name": "string!",
         "$|kind=webhook.signingSecret": "string?",
@@ -15412,6 +15477,7 @@
         "$.metadata{}|3[]": "ref(__schema0)",
         "$.metadata{}|4": "object",
         "$.metadata{}|4{}": "ref(__schema0)",
+        "$.ownerName": "string?",
         "$.purpose": "ref(RecordingCapturePurpose)?",
         "$.recordingId": "string!",
         "$.startedAt": "string?",
@@ -15501,7 +15567,7 @@
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
         "$|1.name": "string!",
-        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$|1.pinnedAccounts": "array?",
         "$|1.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
         "$|1.pinnedAccountsRequired": "boolean?",
@@ -15733,7 +15799,7 @@
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.name": "string!",
-        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$.prompt": "string!",
         "$.runMode": "const?=[\"\\\"existing_session\\\"\"]",
         "$.schedule": "ref(ScheduledTaskScheduleSpec)!",
@@ -16540,6 +16606,7 @@
         "$.adapter": "ref(WebhookEventAdapter)! null",
         "$.awaitingSigningSecret": "boolean!",
         "$.createdAt": "string!",
+        "$.format": "ref(WebhookFormat)! null",
         "$.id": "string!",
         "$.kind": "ref(EventSourceKind)!",
         "$.lastDeliveryAt": "string! null",
@@ -17052,7 +17119,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
+        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_notes_save\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
       }
     },
     "ForkSessionRequest": {
@@ -19964,6 +20031,7 @@
         "$.excerpts[].text": "string!",
         "$.id": "string!",
         "$.indexStatus": "ref(KnowledgeIndexStatus)?",
+        "$.lastChangedAt": "string?",
         "$.latestRevisionId": "string!",
         "$.publishedRevisionId": "string! null",
         "$.revision": "object!",
@@ -20445,6 +20513,8 @@
         "$.dictationDefault": "object! null",
         "$.dictationDefault.model": "string!",
         "$.dictationDefault.providerId": "string!",
+        "$.language": "string? null",
+        "$.liveTranscript": "boolean?",
         "$.models": "array!",
         "$.models[]": "ref(RecordingTranscriptionModel)",
         "$.pinned": "boolean!"
@@ -21652,6 +21722,14 @@
         "$|kind=organization_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]"
       }
     },
+    "ModelDeploymentType": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"azure_data_zone\\\"\",\"\\\"azure_global\\\"\",\"\\\"azure_regional\\\"\",\"\\\"bedrock_geo_profile\\\"\",\"\\\"bedrock_global_profile\\\"\",\"\\\"bedrock_regional\\\"\",\"\\\"gateway\\\"\",\"\\\"provider_default\\\"\",\"\\\"self_hosted\\\"\",\"\\\"subscription\\\"\",\"\\\"unknown\\\"\"]"
+      }
+    },
     "ModelPricingScheduleV1": {
       "io": [
         "output"
@@ -21676,6 +21754,22 @@
         "$.inputMicrosPerMillionTokens": "integer!",
         "$.marginBps": "integer?",
         "$.outputMicrosPerMillionTokens": "integer!"
+      }
+    },
+    "ModelProcessingGeography": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"eu\\\"\",\"\\\"global\\\"\",\"\\\"other\\\"\",\"\\\"unknown\\\"\",\"\\\"us\\\"\"]"
+      }
+    },
+    "ModelResidencyEvidenceSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admin_declaration\\\"\",\"\\\"built_in_rule\\\"\",\"\\\"none\\\"\",\"\\\"operator_declaration\\\"\",\"\\\"provider_api\\\"\",\"\\\"provider_documentation\\\"\"]"
       }
     },
     "MoveDocumentRequest": {
@@ -23639,6 +23733,7 @@
         "$.eligibleModelIds": "array!",
         "$.eligibleModelIds[]": "string",
         "$.grantId": "string!",
+        "$.held": "boolean?",
         "$.label": "string!",
         "$.planCredit": "boolean?",
         "$.remainingMicros": "integer!"
@@ -24006,6 +24101,14 @@
         "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
       }
     },
+    "RecordingLiveProtocol": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"elevenlabs.scribe_realtime\\\"\",\"\\\"openai.realtime\\\"\"]"
+      }
+    },
     "RecordingLiveSegment": {
       "io": [
         "output"
@@ -24031,9 +24134,11 @@
         "$.audio.sampleRate": "integer!",
         "$.expiresAt": "string!",
         "$.model": "string!",
-        "$.protocol": "enum!=[\"\\\"elevenlabs.scribe_realtime\\\"\"]",
+        "$.protocol": "ref(RecordingLiveProtocol)!",
         "$.providerId": "string!",
-        "$.url": "string!"
+        "$.token": "string?",
+        "$.url": "string!",
+        "$.webrtcUrl": "string?"
       }
     },
     "RecordingMode": {
@@ -24388,6 +24493,18 @@
         "$": "object",
         "$.expectedUpdatedAt": "string?",
         "$.idempotencyKey": "string?"
+      }
+    },
+    "RemoveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!"
       }
     },
     "RenewSessionRealtimeRequest": {
@@ -25219,6 +25336,25 @@
         "$.expectedRevision": "integer?"
       }
     },
+    "SaveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deletions": "array?",
+        "$.deletions[]": "string",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.files": "array!",
+        "$.files[]": "ref(SkillFile)",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.scope": "enum?=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.skillId": "string!",
+        "$.stableKey": "string!"
+      }
+    },
     "ScheduledTask": {
       "io": [
         "output"
@@ -25484,7 +25620,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]"
+        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]"
       }
     },
     "ScheduledTaskPolicyDrift": {
@@ -26510,6 +26646,11 @@
         "$.ownerName": "string! null",
         "$.queuedTurnBlocked": "boolean!",
         "$.sandboxId": "string!",
+        "$.waitingMessages": "array?",
+        "$.waitingMessages[]": "object",
+        "$.waitingMessages[].isYou": "boolean!",
+        "$.waitingMessages[].messages": "integer!",
+        "$.waitingMessages[].name": "string! null",
         "$.waitingWork": "array?",
         "$.waitingWork[]": "object",
         "$.waitingWork[].isYou": "boolean!",
@@ -27873,6 +28014,16 @@
         "$.path": "string!"
       }
     },
+    "SkillFile": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.content": "string!",
+        "$.path": "string!"
+      }
+    },
     "SkillImportFileSummary": {
       "io": [
         "output"
@@ -28321,7 +28472,8 @@
         "$.receipt": "ref(SessionCommandReceipt)!",
         "$.replay": "boolean!",
         "$.routing": "ref(SessionPromptRouting)!",
-        "$.turn": "ref(SessionTurn)!"
+        "$.turn": "ref(SessionTurn)!",
+        "$.waitsForMachineOwner": "boolean?"
       }
     },
     "SubscriptionAccountReach": {
@@ -28421,7 +28573,7 @@
         "$": "object",
         "$.activeEpoch": "integer!",
         "$.activeSandboxId": "string! null",
-        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"personal_machine_not_permitted\\\"\",\"\\\"personal_machine_permission_required\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\"]",
+        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"home_unavailable_this_turn\\\"\",\"\\\"invalid_working_directory\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"personal_machine_not_permitted\\\"\",\"\\\"personal_machine_permission_required\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\",\"\\\"workspace_root_unavailable\\\"\"]",
         "$.reason": "string?",
         "$.swapped": "boolean!"
       }
@@ -29638,6 +29790,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.format": "ref(WebhookFormat)?",
         "$.name": "string?",
         "$.signingSecret": "string?",
         "$.status": "ref(AutomationSourceStatus)?",
@@ -31172,7 +31325,69 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+        "$": "enum=[\"\\\"custom\\\"\",\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+      }
+    },
+    "WebhookFormat": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actor": "string?",
+        "$.batch": "object?",
+        "$.batch.path": "string?",
+        "$.deliveryId": "ref(WebhookValueSource)?",
+        "$.eventId": "string?",
+        "$.occurredAt": "string?",
+        "$.preset": "string?",
+        "$.signature": "ref(WebhookSignatureFormat)!",
+        "$.subject": "string?",
+        "$.summary": "string?",
+        "$.type": "union!=[\"0\",\"1\",\"2\"]",
+        "$.type|0": "object",
+        "$.type|0.path": "string!",
+        "$.type|1": "object",
+        "$.type|1.header": "string!",
+        "$.type|2": "object",
+        "$.type|2.value": "string!",
+        "$.url": "string?"
+      }
+    },
+    "WebhookSignatureFormat": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"scheme=hmac_sha256\",\"scheme=standard_webhooks\",\"scheme=timestamped_hmac_sha256\",\"scheme=token\"]",
+        "$|scheme=standard_webhooks": "object",
+        "$|scheme=standard_webhooks.scheme": "const!=[\"\\\"standard_webhooks\\\"\"]",
+        "$|scheme=hmac_sha256": "object",
+        "$|scheme=hmac_sha256.encoding": "enum?=[\"\\\"base64\\\"\",\"\\\"hex\\\"\"]",
+        "$|scheme=hmac_sha256.header": "string!",
+        "$|scheme=hmac_sha256.prefix": "string?",
+        "$|scheme=hmac_sha256.scheme": "const!=[\"\\\"hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256": "object",
+        "$|scheme=timestamped_hmac_sha256.header": "string!",
+        "$|scheme=timestamped_hmac_sha256.scheme": "const!=[\"\\\"timestamped_hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256.toleranceSeconds": "integer?",
+        "$|scheme=token": "object",
+        "$|scheme=token.header": "string!",
+        "$|scheme=token.prefix": "string?",
+        "$|scheme=token.scheme": "const!=[\"\\\"token\\\"\"]"
+      }
+    },
+    "WebhookValueSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "object",
+        "$|0.path": "string!",
+        "$|1": "object",
+        "$|1.header": "string!"
       }
     },
     "WorkClaimDiscoverySummary": {
@@ -32300,6 +32515,7 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
@@ -32759,6 +32975,7 @@
         "$.members[]": "ref(MemberAllowanceUsage)",
         "$.nextCursor": "string! null",
         "$.period": "ref(UsageAllowanceWindow)!",
+        "$.unit": "const?=[\"\\\"usd_micros\\\"\"]",
         "$.workspace": "ref(WorkspaceAllowanceUsage)!"
       }
     },
@@ -32964,6 +33181,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",
@@ -33597,6 +33815,7 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isPresentedSessionToolCall": "value",
       "isPresentedSessionToolName": "value",
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
@@ -33930,6 +34149,7 @@
       "parseRetainedWorkspaceFileReference": "value",
       "parseSandboxFileArtifactReceipt": "value",
       "parseSandboxLink": "value",
+      "parseSessionReference": "value",
       "parseSseStream": "value",
       "parseToolDisplayMetadata": "value",
       "parseWorkspaceLiveEvent": "value",
@@ -35313,6 +35533,7 @@
       "BROWSER_FRAME_MAX_PIXELS": "value",
       "BrowserAction": "type",
       "BrowserActionBatch": "type",
+      "BrowserActionNote": "type",
       "BrowserActionReceipt": "type",
       "BrowserActionRequest": "type",
       "BrowserActionResolvedTarget": "type",
@@ -35761,6 +35982,10 @@
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
       "displaySystemAudioSource": "value",
+      "LiveFetch": "type",
+      "LiveMediaTrack": "type",
+      "LivePeerConnection": "type",
+      "LivePeerConnectionConstructor": "type",
       "LiveTranscriber": "type",
       "LiveTranscriberOptions": "type",
       "LiveTranscriptSegment": "type",
@@ -36165,6 +36390,7 @@
       "ComposerTranscriptionControl": "value",
       "ComposerTranscriptionControlProps": "type",
       "ComposerTranscriptionMessages": "type",
+      "ComposerVoiceInputOptions": "type",
       "composeSendInput": "value",
       "ConfirmState": "type",
       "CONNECTION_STATUS_META": "value",
@@ -36451,6 +36677,8 @@
       "PasswordStrengthLike": "type",
       "payerSummaryForModel": "value",
       "PayloadBlock": "value",
+      "PaymentPageActivity": "type",
+      "PaymentPageActivityProvider": "value",
       "PendingApproval": "type",
       "PendingHumanInputRequest": "type",
       "PendingPrompt": "type",
@@ -36906,6 +37134,16 @@
     "@opengeni/react/app.css": {
       "default": "value"
     },
+    "@opengeni/react/approval-review-model": {
+      "APP_ACTION_TOOL_NAME": "value",
+      "approvalAnswerLabels": "value",
+      "approvalArgumentsText": "value",
+      "approvalToolName": "value",
+      "formatApprovalToolName": "value",
+      "pendingApprovalReview": "value",
+      "reviewFacts": "value",
+      "VISIBLE_REVIEW_FIELDS": "value"
+    },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
       "ArtifactButton": "value",
@@ -37322,6 +37560,7 @@
       "ComposerTranscriptionControl": "value",
       "ComposerTranscriptionControlProps": "type",
       "ComposerTranscriptionMessages": "type",
+      "ComposerVoiceInputOptions": "type",
       "Confirmation": "value",
       "Controls": "value",
       "createVoiceRecordingManifest": "value",
@@ -37341,6 +37580,7 @@
       "ModelPolicyPickerProps": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "PauseButton": "value",
+      "PauseButtonSlot": "value",
       "PausedState": "value",
       "PersistVoiceRecordingChunkInput": "type",
       "PersistVoiceRecordingChunkResult": "type",
@@ -37467,6 +37707,43 @@
       "enableCodeEditor": "value",
       "languageForPath": "value",
       "registerCodeEditor": "value"
+    },
+    "@opengeni/react/in-chat-connect-model": {
+      "authNeededPresentation": "value",
+      "AuthNeededPresentation": "type",
+      "canFinishPreparedMcpSetup": "value",
+      "ConnectAttempt": "type",
+      "ConnectAttemptHints": "type",
+      "ConnectController": "type",
+      "ConnectNavigation": "type",
+      "ConnectSetupFlow": "type",
+      "ConnectSetupFlowOptions": "type",
+      "connectSetupStatus": "value",
+      "ConnectView": "type",
+      "ConnectWindowHost": "type",
+      "inChatConnectDecision": "value",
+      "InChatConnectDecision": "type",
+      "InChatConnectSource": "type",
+      "InChatConnectSupport": "type",
+      "IntegrationCapabilityAvailability": "type",
+      "IntegrationCapabilityConnect": "type",
+      "IntegrationCapabilityConnectInput": "type",
+      "isAgentCapabilityRequest": "value",
+      "isInChatConnectRequest": "value",
+      "isPreparedMcpSetup": "value",
+      "McpCapabilityConnect": "type",
+      "McpCapabilityConnectInput": "type",
+      "providerLabel": "value",
+      "reconnectCandidate": "value",
+      "showsMcpServerLabel": "value",
+      "useChatConnectionsAllowed": "value",
+      "useConnect": "value",
+      "useConnectSetupFlow": "value",
+      "useInChatConnectSupport": "value",
+      "useIntegrationCapabilityConnect": "value",
+      "useMcpCapabilityConnect": "value",
+      "usePreparedMcpSetupAccess": "value",
+      "usePreparedMcpSetupAttempt": "value"
     },
     "@opengeni/react/interaction": {
       "AttachedBrowsersClient": "type",
@@ -37612,6 +37889,11 @@
       "UseMachinesResult": "type",
       "WINDOW_LABEL": "value"
     },
+    "@opengeni/react/markdown-math": {
+      "mayContainMath": "value",
+      "PreparedMathMarkdown": "type",
+      "prepareMathMarkdown": "value"
+    },
     "@opengeni/react/meetings": {
       "createMeetingRecorderStore": "value",
       "DeleteMeetingDialog": "value",
@@ -37640,6 +37922,17 @@
       "useMeetingRecorderState": "value",
       "usePendingMeetingStart": "value",
       "VoiceActions": "type"
+    },
+    "@opengeni/react/meetings-recorder": {
+      "createMeetingRecorderStore": "value",
+      "MeetingRecorder": "type",
+      "MeetingRecorderProvider": "value",
+      "MeetingRecorderStore": "type",
+      "MeetingRecorderStoreProvider": "value",
+      "MeetingStartRequest": "type",
+      "useMeetingRecorder": "value",
+      "useMeetingRecorderState": "value",
+      "usePendingMeetingStart": "value"
     },
     "@opengeni/react/messages": {
       "createOpenGeniText": "value",
@@ -37784,10 +38077,12 @@
       "CodexRealtimeControl": "value",
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
+      "MicrophoneAccess": "type",
       "NewSessionRealtimeControl": "value",
       "prestartSessionRealtime": "value",
       "realtimeAppLanguage": "value",
       "realtimeConversationLanguage": "value",
+      "RealtimeLoadState": "type",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",
@@ -37812,9 +38107,13 @@
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
+      "meetingHereStatus": "value",
+      "MeetingHereStatus": "type",
       "meetingPhase": "value",
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
+      "meetingTitle": "value",
+      "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",
@@ -37850,7 +38149,8 @@
       "UseVoiceInputResult": "type",
       "versionSummary": "value",
       "VoiceInputRecordingsClient": "type",
-      "VoiceInputStatus": "type"
+      "VoiceInputStatus": "type",
+      "withoutLiveMicrophoneEchoes": "value"
     },
     "@opengeni/react/responsive.css": {
       "default": "value"
@@ -37859,6 +38159,7 @@
       "CLOUD_SANDBOX_LABEL": "value",
       "LOCAL_SANDBOX_LABEL": "value",
       "machineDisplayName": "value",
+      "machineNameTwinLabel": "value",
       "machineScopeLabel": "value",
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
@@ -38093,6 +38394,7 @@
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
       "sessionDisplayTitle": "value",
+      "sessionHasPendingWake": "value",
       "sessionHasUpcomingSchedule": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
@@ -38102,7 +38404,8 @@
       "SessionRecencyGroup": "type",
       "sessionRenameSeed": "value",
       "sessionRepoLabel": "value",
-      "SessionStatusTone": "type"
+      "SessionStatusTone": "type",
+      "withLineageAutomationFacts": "value"
     },
     "@opengeni/react/session-realtime": {
       "CODEX_LIVE_MODEL": "value",
@@ -38176,6 +38479,8 @@
       "OpenGeniProviderProps": "type",
       "OpenGeniViewerTarget": "type",
       "parseOpenGeniLink": "value",
+      "PaymentPageActivity": "type",
+      "PaymentPageActivityProvider": "value",
       "PendingPrompt": "type",
       "PersonalMachineExplanation": "value",
       "QueueSurface": "value",
@@ -38273,6 +38578,7 @@
     },
     "@opengeni/react/testing/meetings": {
       "createMeetingsFixture": "value",
+      "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
       "MeetingsFixture": "type"
@@ -42899,7 +43205,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -45422,7 +45728,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47739,7 +48045,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50210,7 +50516,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52499,7 +52805,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingCheckout": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingCheckoutStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBillingEntitlements": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingEntitlementsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

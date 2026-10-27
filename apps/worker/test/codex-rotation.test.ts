@@ -1,4 +1,4 @@
-import { codexSelectionDiagnostics } from "../src/activities/agent-turn/codex-selection-diagnostics";
+import { codexSelectionDiagnostics } from "@opengeni/db";
 import { describe, expect, test } from "bun:test";
 import type { CodexAccountStatus, CodexLeaseAccountStatus } from "@opengeni/db";
 import {

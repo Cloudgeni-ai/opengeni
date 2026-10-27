@@ -566,6 +566,14 @@ export type ComposerState = {
    * Send exactly when it is not `null`.
    */
   alternateSend?: ComposerBusySend | null | undefined;
+  /**
+   * The agent is working here: a turn runs or messages wait, so a Send takes
+   * its busy path. `false` when nothing is running or waiting, or the
+   * workstream is paused. Stock composers show Pause and the Queue and Steer
+   * wording only while this is true; when it is left out they keep showing
+   * them, as before.
+   */
+  working?: boolean | undefined;
   /** Send the draft the other way: Steer when Send queues, queue when Send steers. */
   sendAlternate?: ((text?: string) => Promise<boolean>) | undefined;
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
@@ -3116,6 +3124,7 @@ export function useComposer(
     busySend,
     singleSend,
     alternateSend: identityMatches ? alternateSend : null,
+    working: identityMatches && takesBusyPath(),
     sendAlternate: singleSend ? undefined : sendAlternate,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,

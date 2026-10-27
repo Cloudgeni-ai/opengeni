@@ -36,9 +36,13 @@ export function connectedMachineComputerAccessError(
     const reason = state.desktopUnavailableReason?.trim();
     const machine = machineLabel(machineName);
     if (reason) {
+      // A Linux machine names why it has no desktop (nobody signed in, Wayland,
+      // another user's screen), and it is still often a headless workstation
+      // rather than the person's own computer.
+      const hint = state.os === "linux" ? ` ${OTHER_COMPUTER_HINT}` : "";
       return {
         status: 409,
-        message: `Connected Machine desktop is unavailable on ${machine}. ${reason}`,
+        message: `Connected Machine desktop is unavailable on ${machine}. ${reason}${hint}`,
       };
     }
     if (state.os === "macos" || state.os === "windows") {

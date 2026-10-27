@@ -39,9 +39,12 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   knowledge_get: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_browse: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_retain_file: { sessionRequired: true, allOf: ["documents:search", "files:read"] },
-  // Recorded meetings, read as the person the session works for.
+  // Recorded meetings, read as the person the session works for. Saving notes
+  // follows the meeting: it succeeds only on a meeting that person can see,
+  // like knowledge writes, and never needs session orchestration rights.
   meetings_search: { sessionRequired: true, allOf: ["sessions:read"] },
   meeting_read: { sessionRequired: true, allOf: ["sessions:read"] },
+  meeting_notes_save: { sessionRequired: true, allOf: ["sessions:read"] },
   knowledge_retain_message: { sessionRequired: true, allOf: ["documents:search", "sessions:read"] },
   knowledge_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_archive: { sessionRequired: true, allOf: ["documents:search"] },
@@ -118,9 +121,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_get: { allOf: ["sessions:read"] },
   session_set_model: { allOf: ["sessions:control"] },
   session_events: { allOf: ["sessions:read"] },
-  // Blocking wait inside a running turn: the live attempt's own session is the
-  // self target, so the tool exists only for session-scoped grants.
-  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
+  // A bounded wait on named sessions. A live attempt also wakes for its own
+  // pending input; a sessionless caller (an operator, or a person's surface
+  // reached for a chat in another workspace) waits on the targets only.
+  session_wait: { allOf: ["sessions:read"] },
   command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   command_read: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
@@ -130,7 +134,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_target_set: { sessionRequired: true, allOf: ["sessions:read", "sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
   session_resume: { allOf: ["sessions:control"] },
-  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
+  // A live attempt sends a typed Agent Steer; a sessionless caller appends a
+  // human/API steer, as the REST steer route does.
+  session_steer: { allOf: ["sessions:control"] },
   // A live attempt may answer another session's structured human-input
   // request (never a tool approval, which stays human-only).
   session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },

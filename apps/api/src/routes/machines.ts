@@ -13,6 +13,11 @@
 //   GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h
 //     -> { samples: MetricSample[] }
 //     The downsampled (~1/min) history for ONE machine over a time window.
+//
+// Per-machine changes (command policy, screen control, privacy panes, agent
+// update) follow the machine's scope (../sandbox/machine-authority.ts): the
+// owner changes their own Only me machine; workspace machines need
+// enrollments:manage and organization machines also account:admin.
 
 import {
   ChangeMachineAudienceRequest,
@@ -45,13 +50,17 @@ import {
   grantHasAgentAttemptAuthority,
   mayStartOnlyMe,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
+import {
+  isAgentAttemptOnOwnSession,
+  machineSubjectForCaller,
+  sessionFleetContextForCaller,
+} from "../sandbox/agent-fleet-context";
 import {
   enableMachineScreenControl,
   enrollmentAccess,
@@ -67,8 +76,13 @@ import {
   machineAudienceRequestFor,
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
+import {
+  requireMachineAccessGrant,
+  requireMachineAudienceAuthority,
+  requireMachineScopeAuthority,
+} from "../sandbox/machine-authority";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -110,16 +124,24 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── GET /workspaces/:ws/machines (the dashboard list) ───────────────────────
   app.get("/v1/workspaces/:workspaceId/machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
-    assertSelfhostedEnabled();
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
+    // An agent attempt lists the machines of its own chat with the session
+    // read permission its sandboxes_list tool needs; everyone else needs
+    // enrollments:read.
+    const sessionGrant = sessionId
+      ? await requireAccessGrant(c, deps, workspaceId, "sessions:read")
+      : null;
+    const grant =
+      sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)
+        ? sessionGrant
+        : await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    assertSelfhostedEnabled();
     if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "sessionId must be a UUID" });
     }
     if (sessionId) {
-      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
       try {
         await requireSessionAuthorization(deps, grant, {
           sessionId,
@@ -144,7 +166,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        subjectId: grant.subjectId,
+        // An agent sees the machines of the person who started its turn, as
+        // its sandboxes_list tool does.
+        subjectId: sessionId
+          ? await machineSubjectForCaller(deps, grant, sessionId, grant.subjectId)
+          : grant.subjectId,
         sessionId,
       },
     );
@@ -179,12 +205,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // concurrency fence so two operators cannot silently overwrite each other.
   app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -196,20 +217,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "operation policy body must be valid JSON",
       });
     }
-    const parsed = UpdateMachineOperationPolicyRequest.safeParse(json);
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid machine operation policy",
-      });
-    }
-    const body = parsed.data;
+    const body = parseRequestBody(UpdateMachineOperationPolicyRequest, json, {
+      status: 400,
+      message: "invalid machine operation policy",
+    });
     const current = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      current.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, current.scope, "change");
     const updated = await updateEnrollmentOperationPolicy(db, {
       accountId: grant.accountId,
       workspaceId: current.workspaceId,
@@ -239,14 +252,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // person's full access, is refused: the change decides who else can use the
   // machine.
   async function requireAudienceCaller(c: Context, workspaceId: string) {
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
+    // Narrowing to Only me or sharing with the workspace changes who else can
+    // use the machine, so it stays with workspace machine managers.
+    requireMachineAudienceAuthority(authorization);
     if (grantHasAgentAttemptAuthority(grant)) {
       throw new HTTPException(403, {
         message:
@@ -308,27 +319,17 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────
   // Turn screen control on for one connected machine, in place (see
   // ../sandbox/screen-control.ts): record the consent, then have the live agent
-  // renew its credentials. Needs enrollments:manage, like connecting the
-  // machine; agents holding it call this too (or the
+  // renew its credentials. Follows the same scope rule as connecting the
+  // machine; agents holding enrollments:manage call this too (or the
   // connected_machine_enable_screen_control tool). No request body.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      enrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, enrollment.scope, "change");
     try {
       return c.json(
         await enableMachineScreenControl(
@@ -353,35 +354,24 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
-    const parsed = OpenMachinePrivacySettingsRequest.safeParse(
+    const parsed = parseRequestBody(
+      OpenMachinePrivacySettingsRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid privacy settings request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid privacy settings request" });
-    }
     const enrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      enrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, enrollment.scope, "change");
     if (enrollment.os !== "macos") {
       throw new HTTPException(422, { message: "privacy settings panes exist only on macOS" });
     }
     return c.json(
       await openMachinePrivacySettings(
         { db, settings, bus, observability: deps.observability },
-        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.data.pane },
+        { enrollment, access: enrollmentAccess(enrollment, grant), pane: parsed.pane },
       ),
     );
   });
@@ -392,22 +382,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // successor Hello drive the durable state to completion.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/update", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
     const visibleEnrollment = await requireScopedEnrollment(grant, enrollmentId);
-    if (
-      visibleEnrollment.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
-    }
+    requireMachineScopeAuthority(authorization, visibleEnrollment.scope, "change");
     const originWorkspaceId = visibleEnrollment.workspaceId;
     const live = await getLiveEnrollmentConnection(
       db,
@@ -471,12 +451,17 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     const body = await parseRequestJson(c, SwapActiveSandboxRequest);
-    const ctx = await buildFleetContextForSession(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      subjectId: grant.subjectId,
-    });
+    // An agent moves its own chat for the person who started its turn, exactly
+    // as its sandbox_swap tool does. Any other caller, including an agent
+    // repointing another chat it may control, moves it as its own subject.
+    const ctx = isAgentAttemptOnOwnSession(grant, sessionId)
+      ? await sessionFleetContextForCaller(deps, grant, sessionId, grant.subjectId)
+      : await buildFleetContextForSession(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        });
     ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {

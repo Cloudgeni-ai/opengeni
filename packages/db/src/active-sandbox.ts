@@ -5,6 +5,7 @@ import {
   withSessionActivityRlsContext,
   type Database,
 } from "./database";
+import { registerSessionWorkflowWakeInTransaction } from "./session-control";
 
 // ---- the per-session active-sandbox pointer (epoch-fenced swap) -----------
 export type ActiveSandboxPointer = {
@@ -70,8 +71,9 @@ export async function setActiveSandbox(
       const [session] = await scopedDb.execute<{
         active_epoch: number;
         active_turn_id: string | null;
+        temporal_workflow_id: string | null;
       }>(sql`
-        select active_epoch, active_turn_id from sessions
+        select active_epoch, active_turn_id, temporal_workflow_id from sessions
         where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
         for no key update
       `);
@@ -210,6 +212,26 @@ export async function setActiveSandbox(
         );
         if (preUse?.authorized !== true) {
           throw new Error("personal Connected Machine authority was not live after attach");
+        }
+      }
+      // Whether a queued message may start depends on the machine: one waiting
+      // for a personal machine's owner can run once the chat moves to a
+      // machine its sender may use, and one that now waits must stop keeping
+      // the chat busy. Either way the session re-reads its queue.
+      if (session.active_turn_id === null) {
+        const [queued] = await scopedDb.execute<{ present: boolean }>(sql`
+          select exists(select 1 from session_turns
+            where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+              and status = 'queued' and source in ('user', 'api')) as present
+        `);
+        if (queued?.present) {
+          await registerSessionWorkflowWakeInTransaction(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporal_workflow_id ?? `session-${input.sessionId}`,
+            reason: "machine_changed",
+          });
         }
       }
       return {

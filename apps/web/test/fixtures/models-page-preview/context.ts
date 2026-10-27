@@ -9,12 +9,16 @@
 // `azureAuth=entra_client_secret` (or `entra_deployment_identity`) starts the
 // Azure connection signed in with Microsoft Entra ID, and `azureIdentity=1`
 // offers this deployment's identity to the organization.
+// `failedCheck=1` (with `many=1`) fails every Codex account's live usage check:
+// each overview then carries the account's last saved reading, as the API
+// returns it, except Liv's, which has never been read.
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { createElement, type ReactNode } from "react";
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 
 const params = new URLSearchParams(window.location.search);
 const many = params.get("many") === "1";
+const failedCheck = params.get("failedCheck") === "1";
 const claudeOn = many || params.get("claude") === "1";
 const slow = params.get("slow") === "1";
 const azureAuth = params.get("azureAuth") ?? "api_key";
@@ -205,22 +209,27 @@ const organizationPools = many
       checkedAt: now,
     }
   : { pools: [] };
+const savedAt = new Date(Date.parse(now) - 2 * 60_000).toISOString();
+const codexReading = (index: number, fetchedAt: string) => ({
+  status: "ok",
+  planType: null,
+  fiveHour: null,
+  weekly: manyCodex[index]!.weekly,
+  limitReached: false,
+  fetchedAt,
+});
+const neverRead = names.length - 1;
 const codexOverview = (index: number) => ({
   accountId: id(index + 1),
-  usage: {
-    source: "provider",
-    fetchedAt: now,
-    stale: false,
-    error: null,
-    value: {
-      status: "ok",
-      planType: null,
-      fiveHour: null,
-      weekly: manyCodex[index]!.weekly,
-      limitReached: false,
-      fetchedAt: now,
-    },
-  },
+  usage: failedCheck
+    ? {
+        source: index === neverRead ? "none" : "cache",
+        fetchedAt: index === neverRead ? null : savedAt,
+        stale: false,
+        error: "unavailable",
+        value: index === neverRead ? null : codexReading(index, savedAt),
+      }
+    : { source: "provider", fetchedAt: now, stale: false, error: null, value: codexReading(index, now) },
   resetCredits: { source: "none", fetchedAt: null, stale: false, error: null, detailState: "unknown", detailsComplete: false, availableCount: null, credits: [] },
   canRedeem: false,
   canResumeRedemption: false,

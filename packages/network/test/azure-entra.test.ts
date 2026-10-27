@@ -260,4 +260,82 @@ describe("Microsoft Entra ID access tokens", () => {
     ).toBe(false);
     expect(azureEntraCredentialConfigured(undefined)).toBe(false);
   });
+
+  test("managed identity shares acquisition, refreshes before expiry, and discards refusals", async () => {
+    let clock = 0;
+    let requests = 0;
+    const source = createAzureEntraAccessTokenSource(
+      { source: "managed_identity", clientId: CLIENT },
+      {
+        now: () => clock,
+        managedIdentityClient: {
+          async acquireToken(request) {
+            expect(request.resource).toBe(AZURE_COGNITIVE_SERVICES_SCOPE);
+            expect(request.forceRefresh).toBe(true);
+            requests++;
+            return { accessToken: `managed-${requests}`, expiresOn: new Date(clock + 3_600_000) };
+          },
+        },
+      },
+    );
+    expect(await Promise.all([source(), source(), source()])).toEqual([
+      "managed-1",
+      "managed-1",
+      "managed-1",
+    ]);
+    clock = 54 * 60_000;
+    expect(await source()).toBe("managed-1");
+    clock = 55 * 60_000;
+    expect(await source()).toBe("managed-2");
+    source.discard("managed-1");
+    expect(await source()).toBe("managed-2");
+    source.discard("managed-2");
+    expect(await source()).toBe("managed-3");
+  });
+
+  test("managed identity honors refreshAfter and never returns expired tokens on failure", async () => {
+    let clock = 0;
+    let calls = 0;
+    const source = createAzureEntraAccessTokenSource(
+      { source: "managed_identity" },
+      {
+        now: () => clock,
+        managedIdentityClient: {
+          async acquireToken() {
+            if (++calls > 1) throw new Error(`SDK failure with ${SECRET}`);
+            return {
+              accessToken: "managed",
+              expiresOn: new Date(3_600_000),
+              refreshOn: new Date(600_000),
+            };
+          },
+        },
+      },
+    );
+    expect(await source()).toBe("managed");
+    clock = 600_000;
+    expect(await source()).toBe("managed");
+    expect(await source()).toBe("managed");
+    expect(calls).toBe(2);
+    clock = 3_600_000;
+    await expect(source()).rejects.toThrow("Could not acquire a managed identity token");
+    expect(calls).toBe(3);
+  });
+
+  test("managed identity caches are isolated by client and authentication kind", () => {
+    const system = sharedAzureEntraAccessTokenSource({ source: "managed_identity" });
+    expect(sharedAzureEntraAccessTokenSource({ source: "managed_identity" })).toBe(system);
+    const assigned = sharedAzureEntraAccessTokenSource({
+      source: "managed_identity",
+      clientId: CLIENT,
+    });
+    expect(assigned).not.toBe(system);
+    expect(
+      sharedAzureEntraAccessTokenSource({
+        tenantId: TENANT,
+        clientId: CLIENT,
+        clientSecret: SECRET,
+      }),
+    ).not.toBe(assigned);
+  });
 });

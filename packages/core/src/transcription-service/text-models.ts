@@ -21,10 +21,12 @@ import type {
 export function textModelCapabilities(limits: {
   maxDurationSeconds: number | null;
   maxFileBytes: number | null;
+  /** The model also transcribes audio as it streams, for the live transcript. */
+  live?: boolean;
 }): RecordingTranscriptionCapabilities {
   return {
     batch: true,
-    live: false,
+    live: limits.live === true,
     diarization: false,
     liveDiarization: false,
     multichannel: false,
@@ -52,6 +54,7 @@ export function deploymentTextModel(input: {
   pricing: VoiceInputPricing | null;
   maxDurationSeconds: number | null;
   maxFileBytes: number | null;
+  live?: boolean;
 }): RecordingTranscriptionModelSpec {
   return {
     model: input.model,

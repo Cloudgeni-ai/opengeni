@@ -323,6 +323,26 @@ describe("portable Skill routes", () => {
     }
     expect(await request("/skills/content").then((response) => response.json())).toEqual(before);
   });
+  test("an invalid save names the fields it is missing", async () => {
+    if (!available) return;
+    const response = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        skillId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+        scope: "team",
+        files: [{ path: "SKILL.md", content: skillMarkdown }],
+        reason: "Create test Skill",
+      }),
+    });
+    expect(response.status).toBe(422);
+    const message = await response.text();
+    expect(message).toStartWith("Invalid Skill request: ");
+    expect(message).toContain("scope: ");
+    expect(message).toContain("stableKey: ");
+  });
   test("shared content routes preserve folders, replay saves, reject stale heads and restore history", async () => {
     if (!available) return;
     const skillId = crypto.randomUUID();

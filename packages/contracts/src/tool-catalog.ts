@@ -118,6 +118,11 @@ export type McpAccountRouteLabel = {
   providerDomain: string;
   /** Present only when the connector has several accounts in the turn. */
   account?: string | undefined;
+  /**
+   * The kind of need the connector serves, its catalog category
+   * ("communication", "files"), when one is known. Never model-facing.
+   */
+  kind?: string | undefined;
 };
 
 /** The short account line for approvals: "Linear", or "Linear · alice@example.com". */

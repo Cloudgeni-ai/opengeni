@@ -35,7 +35,7 @@
 //   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
-//   /billing?checkout=success|cancelled      → Stripe return → default organization
+//   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
@@ -333,10 +333,11 @@ const identityLinkRoute = createRoute({
       : {},
   component: IdentityLink,
 });
-// Stripe checkout return target. The API bakes `/billing?checkout=…` into every
-// checkout session's success_url/cancel_url; this top-level route forwards the
-// shopper onto their default workspace's organization settings (where the
-// balance lives) so the redirect resolves instead of hitting the not-found page.
+// Stripe return target: the billing portal's default return, and checkouts
+// made before they defaulted to the checkout-complete page. This top-level
+// route forwards the shopper onto their default workspace's organization
+// billing (where the balance lives) so the redirect resolves instead of
+// hitting the not-found page.
 const billingReturnRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "billing",
@@ -1667,7 +1668,8 @@ function BillingReturnRoute() {
     <Navigate
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId }}
-      search={checkout ? { checkout } : {}}
+      // Billing, where the balance and this checkout's confirmation show.
+      search={{ section: "billing", ...(checkout ? { checkout } : {}) }}
       replace
     />
   );

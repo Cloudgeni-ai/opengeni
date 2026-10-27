@@ -10,7 +10,7 @@ import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
-import * as admission from "../src/activities/agent-run-admission";
+import * as admission from "@opengeni/core";
 import {
   createScheduledTaskActivities,
   scheduledSessionExecutionPolicyMetadata,

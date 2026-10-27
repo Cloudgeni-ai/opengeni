@@ -21,11 +21,18 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
+import {
+  plan,
+  latestRun,
+  infrastructureRetryReason,
+  settledCiFinished,
+  unseenRunHoldsSlot,
+  type Action,
+} from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 import { proveHeadRefresh } from "./head-refresh";
-import type { HeadRefresh } from "./model";
+import type { Ejection, HeadRefresh } from "./model";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -35,11 +42,14 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "cancel"; runs: Run[] }
+  | { kind: "announce"; number: number; body: string; key: string; commentKey?: string }
   | { kind: "park"; number: number; body: string; key: string };
+/** Final read-only validation found contention; no transaction was attempted. */
+export class ReplanRequired extends Error {}
+
 export interface Transaction {
   expectedState: string | null;
-  nextState: string;
   expectedLedger: Ledger;
   nextLedger: Ledger;
   now: string;
@@ -49,7 +59,12 @@ export interface Transaction {
 export interface Executor {
   capabilities: Capabilities;
   landingContract?: "exact-tested-snapshot";
-  prepareLedger?(ledger: Ledger, effect: Effect, now: string): Ledger;
+  prepareLedger?(
+    ledger: Ledger,
+    effect: Effect,
+    now: string,
+    conflicts?: Observation["conflicts"],
+  ): Ledger;
   maintain?(): Promise<string | null>;
   // Atomic Git lease/CAS. Strict adapters additionally fence admission/effects;
   // exact-tested-snapshot adapters explicitly reconcile non-atomic REST effects.
@@ -73,6 +88,10 @@ export class LiveReader implements Reader {
     const stateSha = refs.get(this.config.stateRef) ?? null;
     if (this.config.mode === "active" && !stateSha) requireInitializedState(null, emptyLedger());
     const observationWarnings: string[] = [];
+    if (this.config.maxInflight > this.config.speculationDepth)
+      observationWarnings.push(
+        "Configured max-inflight exceeds speculation depth; extra hosted slots cannot be filled by this chain",
+      );
     const queue = [...refs]
       .filter(([ref]) => ref.startsWith(`refs/heads/${this.config.branchPrefix}`))
       .filter(([ref]) => {
@@ -148,6 +167,8 @@ export class LiveReader implements Reader {
     // Bound historical provider lookups independently of cache cardinality.
     // Persist a round-robin cursor so restarts do not repeatedly sample only
     // the oldest refs. Unobserved no-run refs remain conservative reservations.
+    // Settled refs the ledger already records as finished need no lookup, so
+    // the bounded sample covers only refs whose outcome is still unknown.
     const historical = candidates
       .filter(
         (candidate) =>
@@ -156,12 +177,15 @@ export class LiveReader implements Reader {
           ledger.invalidated.includes(candidate.manifest.batchId),
       )
       .sort((a, b) => a.branch.localeCompare(b.branch));
+    const unresolved = historical.filter(
+      (candidate) => !settledCiFinished(ledger, candidate.manifest.batchId),
+    );
     const cursorKey = `history-cursor:${this.config.repository}:${this.config.branchPrefix}`;
     const savedCursor = await this.manifestCache.get<number>(cursorKey);
     const cursor = Number.isSafeInteger(savedCursor) && savedCursor! >= 0 ? savedCursor! : 0;
     const selected = new Set<string>();
-    for (let i = 0; i < Math.min(8, historical.length); i++)
-      selected.add(historical[(cursor + i) % historical.length]!.manifest.batchId);
+    for (let i = 0; i < Math.min(8, unresolved.length); i++)
+      selected.add(unresolved[(cursor + i) % unresolved.length]!.manifest.batchId);
     const archivedIds = new Set(historical.map((candidate) => candidate.manifest.batchId));
     for (const candidate of candidates) {
       const archived = archivedIds.has(candidate.manifest.batchId);
@@ -182,11 +206,11 @@ export class LiveReader implements Reader {
         if (refresh) candidate.headRefresh = refresh;
       }
     }
-    if (historical.length)
-      await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
-    if (historical.length > selected.size)
+    if (unresolved.length)
+      await this.manifestCache.set(cursorKey, (cursor + selected.size) % unresolved.length);
+    if (unresolved.length > selected.size)
       observationWarnings.push(
-        `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
+        `Historical CI scan sampled ${selected.size}/${unresolved.length} unresolved refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
     const failedRoot = candidates.some((candidate) => {
       const run = latestRun(candidate, this.config);
@@ -201,7 +225,10 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // A ready priority fix needs exact-base evidence to decide preemption.
+      ...(failedRoot || admission.priority?.length
+        ? { baseCI: await this.github.baseCI(baseSha) }
+        : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
@@ -210,10 +237,50 @@ export class LiveReader implements Reader {
       stateSha,
       ledger,
       observationWarnings,
-      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
+      // The planner separately counts live runs and durable missing-run
+      // reservations. This headroom gates only publication and retry; the
+      // planner lands a trusted green root regardless of it. Publication/retry
+      // recheck provider capacity at the effect boundary.
+      mainBusy:
+        this.config.mode === "shadow"
+          ? false
+          : await this.github.mainBusy(
+              "observe",
+              candidates.flatMap((candidate) => {
+                const reservations = candidate.runs
+                  .filter(
+                    (run) => run.workflow === this.config.workflow && run.status !== "completed",
+                  )
+                  .map((run) => ({
+                    branch: candidate.branch,
+                    headSha: candidate.manifest.tipSha,
+                    runId: run.id,
+                  }));
+                if (unseenRunHoldsSlot(candidate, ledger, this.config))
+                  return [
+                    ...reservations,
+                    { branch: candidate.branch, headSha: candidate.manifest.tipSha },
+                  ];
+                return reservations;
+              }),
+            ),
       headroom: this.github.lastHeadroom,
     };
   }
+}
+function announcement(ejection: Ejection): Extract<Effect, { kind: "announce" }> {
+  const key = bindingKey(ejection.pull);
+  // A merge conflict shares #6156's per-head key, so one head gets one notice.
+  const conflict = ejection.reason === "merge-tree conflict against candidate predecessor";
+  return {
+    kind: "announce",
+    number: ejection.pull.number,
+    key,
+    ...(conflict ? { commentKey: `conflict:${ejection.pull.headSha}` } : {}),
+    body: conflict
+      ? `Not queued: this PR conflicts with main, an earlier PR in this batch, or a batch ahead of it in the queue. Rebase or merge main into it and push; it re-queues automatically once required checks pass. Exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
+      : `Merge batcher excluded exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
+  };
 }
 export interface StepResult {
   mode: Config["mode"];
@@ -257,7 +324,13 @@ export class Controller {
     const checkpoint =
       this.config.mode === "active" &&
       (digest(stamp(records.stages)) !== digest(stamp(observation.ledger.stages)) ||
-        digest(records.missingRuns) !== digest(observation.ledger.missingRuns));
+        digest(records.missingRuns) !== digest(observation.ledger.missingRuns) ||
+        observation.conflicts?.some(
+          ({ number, headSha }) =>
+            !observation.ledger.effects[
+              digest({ kind: "comment", key: `conflict:${headSha}`, number })
+            ],
+        ));
     if (action.kind === "wait" && checkpoint)
       action = {
         kind: "record",
@@ -279,26 +352,49 @@ export class Controller {
       return result;
     }
     if (action.kind === "build") {
-      try {
-        result.manifest = await this.git.build(action.spec);
-        await this.journal.event(result.manifest, "builtAt", this.clock().toISOString());
-      } catch (error) {
-        if (!(error instanceof MergeConflict)) throw error;
-        const pull = action.spec.pulls.find((p) => p.number === error.number)!;
-        if (this.config.mode === "shadow") {
-          await this.journal.conflict(pull, observation.now);
-          return this.step();
+      // Drop every conflicting member in this step: each is ejected for its
+      // exact head with its comment staged in the same fenced transaction, and
+      // the rest are rebuilt as a canonical spec, so N conflicts cost no steps.
+      let spec = action.spec;
+      const ejections: Ejection[] = [];
+      while (spec.pulls.length) {
+        try {
+          result.manifest = await this.git.build(spec);
+          await this.journal.event(result.manifest, "builtAt", this.clock().toISOString());
+          break;
+        } catch (error) {
+          if (!(error instanceof MergeConflict)) throw error;
+          const pull = spec.pulls.find((p) => p.number === error.number)!;
+          if (this.config.mode === "shadow") {
+            await this.journal.conflict(pull, observation.now);
+            return this.step();
+          }
+          ejections.push({
+            pull,
+            batchId: digest(spec),
+            reason: "merge-tree conflict against candidate predecessor",
+            announced: false,
+          });
+          const pulls = spec.pulls.filter((p) => p.number !== pull.number);
+          if (!pulls.length) break;
+          spec = {
+            ...spec,
+            pulls,
+            createdAt: new Date(
+              Math.max(...pulls.map((p) => Date.parse(p.binding.at))),
+            ).toISOString(),
+          };
         }
-        ledger.ejected.push({
-          pull,
-          batchId: digest(action.spec),
-          reason: "merge-tree conflict against candidate predecessor",
-          announced: false,
-        });
-        result.reason = error.message;
       }
+      for (const ejection of ejections) {
+        ledger.ejected.push(ejection);
+        ledger =
+          this.executor?.prepareLedger?.(ledger, announcement(ejection), observation.now) ?? ledger;
+      }
+      if (ejections.length)
+        result.reason = `Merge conflict in ${ejections.map((e) => `PR #${e.pull.number}`).join(", ")}`;
       if (result.manifest) {
-        if (!action.publish) {
+        if (!action.publish && !ejections.length) {
           if (!checkpoint) {
             await this.stage(observation, result);
             return result;
@@ -306,8 +402,8 @@ export class Controller {
           // A locally built successor must not strand missing-history recovery
           // solely in the disposable journal. Persist monitoring under the same
           // fence, without publishing the speculative candidate.
-        } else {
-          bindings = action.spec.pulls;
+        } else if (action.publish) {
+          bindings = spec.pulls;
           effect = {
             kind: "publish",
             branch: `${this.config.branchPrefix}${result.manifest.batchId}`,
@@ -317,7 +413,10 @@ export class Controller {
         }
       }
     } else if (action.kind === "record") ledger = action.ledger;
-    else if (action.kind === "land") {
+    else if (action.kind === "abandon") {
+      ledger = action.ledger;
+      if (action.runs.length) effect = { kind: "cancel", runs: action.runs };
+    } else if (action.kind === "land") {
       const manifest = await this.git.inspect(action.candidate.manifest.tipSha);
       if (!(await this.git.ancestor(observation.baseSha, manifest.tipSha)))
         throw new Error("Landing would not fast-forward");
@@ -373,12 +472,7 @@ export class Controller {
       ledger.ejected = ledger.ejected.map((e) =>
         bindingKey(e.pull) === key ? { ...e, announced: true } : e,
       );
-      effect = {
-        kind: "announce",
-        number: action.ejection.pull.number,
-        key,
-        body: `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
-      };
+      effect = announcement(action.ejection);
     }
     if (this.config.mode === "active") {
       if (
@@ -403,17 +497,24 @@ export class Controller {
             sample[effect.kind === "land" ? "landedAt" : "publishedAt"] =
               this.clock().toISOString();
         }
-        ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
-        const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
-        await this.executor!.transact({
-          expectedState: observation.stateSha,
-          nextState,
-          expectedLedger: observation.ledger,
-          nextLedger: ledger,
-          now: observation.now,
-          bindings,
-          effect,
-        });
+        ledger =
+          this.executor?.prepareLedger?.(ledger, effect, observation.now, observation.conflicts) ??
+          ledger;
+        try {
+          await this.executor!.transact({
+            expectedState: observation.stateSha,
+            expectedLedger: observation.ledger,
+            nextLedger: ledger,
+            now: observation.now,
+            bindings,
+            effect,
+          });
+        } catch (error) {
+          if (!(error instanceof ReplanRequired)) throw error;
+          result.reason = error.message;
+          await this.stage(observation, result);
+          return result;
+        }
         if (effect.kind === "publish" || effect.kind === "land")
           await this.journal.event(
             effect.manifest,
@@ -483,15 +584,16 @@ export class FencedGitExecutor implements Executor {
     requireActiveCapabilities(this.capabilities);
     if (t.effect.kind === "land" && t.effect.headRefresh)
       throw new Error("This adapter does not implement verified head refresh landing");
-    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1 || t.nextState === t.expectedState)
+    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
       throw new Error("Invalid fence transition");
     if (
       t.expectedLedger.owner !== t.nextLedger.owner &&
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(t.now)
     )
       throw new Error("Live lease cannot be stolen");
+    const nextState = await this.writer.git.stateCommit(t.nextLedger, t.expectedState, t.now);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (t.effect.kind === "publish")
       updates.push({

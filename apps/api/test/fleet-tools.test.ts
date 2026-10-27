@@ -54,6 +54,11 @@ import {
   type FleetServices,
 } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
+import {
+  machineSubjectForCaller,
+  sessionFleetContextForCaller,
+} from "../src/sandbox/agent-fleet-context";
+import { listMachines } from "../src/sandbox/machines";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -695,6 +700,79 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     // Without the chat's permission the same request is refused.
     await revokeThisChat();
     await expect(agentRequest()).rejects.toThrow();
+  }, 60_000);
+
+  // The interaction tools move the chat and list its machines through the
+  // API with the agent's attempt token. Like sandbox_swap and sandboxes_list,
+  // they act for the person who started the turn, so that person's Only me
+  // machine is in reach (subject to this chat's permission), and never for the
+  // agent's own token subject.
+  test("an agent's API swap and machine list act for the person who started its turn", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      targetWorkspaceId,
+      subjectId,
+      machine,
+      session,
+      ctx,
+      services,
+      allowThisChat,
+    } = await seedPersonalMachineChat("none");
+    const agentGrant: AccessGrant = {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      subjectId: `agent:${crypto.randomUUID()}`,
+      permissions: ["sessions:read", "sessions:control"],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: session.id,
+        turnId: ctx.attemptAuthority!.turnId,
+        attemptId: ctx.attemptAuthority!.attemptId,
+        executionGeneration: ctx.attemptAuthority!.executionGeneration,
+      },
+    };
+    expect(
+      await machineSubjectForCaller({ db }, agentGrant, session.id, agentGrant.subjectId),
+    ).toBe(subjectId);
+    // Another chat's machines are not this attempt's to see as its person.
+    expect(
+      await machineSubjectForCaller({ db }, agentGrant, crypto.randomUUID(), agentGrant.subjectId),
+    ).toBe(agentGrant.subjectId);
+
+    const listedFor = async (listingSubjectId: string) =>
+      (
+        await listMachines(
+          { db, settings },
+          {
+            accountId,
+            workspaceId: targetWorkspaceId,
+            subjectId: listingSubjectId,
+            sessionId: session.id,
+          },
+        )
+      ).machines.map((entry) => entry.sandboxId);
+    expect(await listedFor(subjectId)).toContain(machine.sandboxId);
+
+    const agentCtx = await sessionFleetContextForCaller(
+      { db },
+      agentGrant,
+      session.id,
+      agentGrant.subjectId,
+    );
+    expect(agentCtx.subjectId).toBe(subjectId);
+    expect(agentCtx.attemptAuthority).toEqual(ctx.attemptAuthority);
+    // Before the owner allows this chat, the move is the refusal that shows
+    // them the card; afterwards it moves.
+    expect(await swapActiveSandbox(services, agentCtx, machine.sandboxId)).toMatchObject({
+      swapped: false,
+      code: "personal_machine_permission_required",
+    });
+    await allowThisChat();
+    expect(await swapActiveSandbox(services, agentCtx, machine.sandboxId)).toMatchObject({
+      swapped: true,
+      activeSandboxId: machine.sandboxId,
+    });
   }, 60_000);
 
   test("an agent can end a browser or computer on its owner's personal machine without the chat's permission", async () => {

@@ -50,11 +50,6 @@ function textSelectionModule(): TextSelectionModule | null {
   return module && typeof module.addListener === "function" ? module : null;
 }
 
-/** Whether this build can turn a text selection into an annotation. */
-export function nativeTextAnnotationAvailable(): boolean {
-  return textSelectionModule() !== null;
-}
-
 /**
  * Measures where each quote ends inside the source drawn for `sourceKey`;
  * null for a quote that is not drawn there (or without native measuring).

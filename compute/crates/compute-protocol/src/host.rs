@@ -217,6 +217,26 @@ pub const MIN_MEMORY_MIB: u32 = 128;
 /// The most virtual processors a sandbox may have.
 pub const MAX_VCPUS: u8 = 32;
 
+/// The longest disk a sandbox may ask for, in MiB: 1 TiB.
+pub const MAX_DISK_MIB: u32 = 1 << 20;
+
+/// The most private destinations a sandbox may ask to reach
+/// ([`SandboxConfig::reach`]).
+pub const MAX_REACH: usize = 8;
+
+/// Whether `name` can name what a host offers sandboxes to reach
+/// ([`SandboxConfig::reach`]): 1 to 63 lowercase letters, digits and
+/// inner hyphens, such as `previews`.
+#[must_use]
+pub fn is_offer_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
 /// The least processor time a sandbox may be guaranteed, in thousandths
 /// of a processor: what one `cpu.weight` step stands for.
 pub const MIN_CPU_REQUEST_MILLIS: u32 = 10;
@@ -234,6 +254,16 @@ pub const DEFAULT_CPU_REQUEST_MILLIS_PER_VCPU: u32 = 100;
 /// against it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImageId(pub [u8; 32]);
+
+impl ImageId {
+    /// The name of the pointer that keeps this image in a fleet's object
+    /// storage, which hosts store it under and the control service
+    /// forgets once nothing uses it (ADR 22).
+    #[must_use]
+    pub fn pointer(self) -> String {
+        format!("rootfs-{self}")
+    }
+}
 
 impl fmt::Display for ImageId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -316,6 +346,22 @@ pub struct SandboxConfig {
     /// host that does not have it yet fetches it from its store first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageId>,
+    /// How long its disk is, in MiB: its image's file system grown to this
+    /// length, or its image's own length when that is longer, since a file
+    /// system does not shrink. Omitted, its image's length. The host books
+    /// the whole length on a host while the sandbox runs, as for any disk;
+    /// a disk at rest holds only what its files use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mib: Option<u32>,
+    /// The private destinations it may reach besides the internet, by the
+    /// names of what hosts offer (`compute-host --offer`), sorted and each
+    /// once: it is placed only on a host that offers every one, which opens
+    /// their destinations, and answers their names, to it alone. Omitted,
+    /// none: it reaches only what its host opens to every sandbox
+    /// (`--reach`). A host of an earlier release, which offers nothing,
+    /// would ignore it, so such a sandbox reaches less, never more.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<String>,
     /// How the host reaches its guest's Opengeni agent, when it runs one
     /// ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)):
     /// the control service sets it for the host and owner epoch it gives the
@@ -336,6 +382,8 @@ impl SandboxConfig {
             cpu_request_millis: None,
             sleep,
             image: None,
+            disk_mib: None,
+            reach: Vec::new(),
             link: None,
         }
     }
@@ -345,6 +393,30 @@ impl SandboxConfig {
     pub fn with_image(mut self, image: ImageId) -> Self {
         self.image = Some(image);
         self
+    }
+
+    /// The same, with a disk of at least `disk_mib`.
+    #[must_use]
+    pub fn with_disk_mib(mut self, disk_mib: u32) -> Self {
+        self.disk_mib = Some(disk_mib);
+        self
+    }
+
+    /// The same, reaching what hosts offer as `reach` names, put in order.
+    #[must_use]
+    pub fn with_reach<I: IntoIterator<Item = S>, S: Into<String>>(mut self, reach: I) -> Self {
+        self.reach = reach.into_iter().map(Into::into).collect();
+        self.reach.sort_unstable();
+        self.reach.dedup();
+        self
+    }
+
+    /// The length its disk is made with when its image's disk is
+    /// `image_bytes` long.
+    #[must_use]
+    pub fn disk_bytes(&self, image_bytes: u64) -> u64 {
+        self.disk_mib
+            .map_or(image_bytes, |mib| image_bytes.max(u64::from(mib) << 20))
     }
 
     /// Whether `other` asks for the same sandbox: equal in everything but
@@ -359,6 +431,8 @@ impl SandboxConfig {
             cpu_request_millis,
             sleep,
             image,
+            disk_mib,
+            reach,
             link: _,
         } = self;
         *vcpus == other.vcpus
@@ -367,6 +441,8 @@ impl SandboxConfig {
             && *cpu_request_millis == other.cpu_request_millis
             && *sleep == other.sleep
             && *image == other.image
+            && *disk_mib == other.disk_mib
+            && *reach == other.reach
     }
 
     /// Guest memory in MiB it is guaranteed.
@@ -419,6 +495,23 @@ impl SandboxConfig {
             return Err(format!(
                 "cpu_request_millis must be between {MIN_CPU_REQUEST_MILLIS} and vcpus * 1000"
             ));
+        }
+        if let Some(mib) = self.disk_mib
+            && !(1..=MAX_DISK_MIB).contains(&mib)
+        {
+            return Err(format!("disk_mib must be between 1 and {MAX_DISK_MIB}"));
+        }
+        if self.reach.len() > MAX_REACH {
+            return Err(format!("reach may name at most {MAX_REACH} offers"));
+        }
+        if let Some(bad) = self.reach.iter().find(|name| !is_offer_name(name)) {
+            return Err(format!(
+                "reach {bad:?} is not an offer's name: 1 to 63 lowercase letters, digits and \
+                 inner hyphens"
+            ));
+        }
+        if !self.reach.is_sorted_by(|a, b| a < b) {
+            return Err("reach must be sorted, each name once".into());
         }
         self.sleep_policy()
     }
@@ -616,6 +709,34 @@ pub enum Request {
         /// optionally with its tag before the digest.
         image: String,
     },
+    /// Store a copy of a sandbox's disk as a sandbox image, from which
+    /// creates may start
+    /// ([ADR 22](../../docs/adr/0022-templates-saved-from-sandboxes.md)).
+    /// The sandbox must be saved here already, Saved or Archived, with no
+    /// step under way: its guest wrote its disks out before it was saved,
+    /// so the disk is whole without its memory. The host copies the disk
+    /// at once, sharing its blocks, so a wake right after changes nothing
+    /// in the copy, and stores the copy in the background. Answered at
+    /// once: with [`Reply::Capturing`] while the copy is stored (ask again
+    /// with the same `key` to learn how it went), with [`Reply::Captured`]
+    /// once it is, which later asks with that key get too, and with the
+    /// error of a store that failed, after which asking again copies
+    /// again. Refused with [`ErrorCode::Busy`] while the sandbox is awake,
+    /// waking, holds or is not saved here, with [`ErrorCode::Unavailable`]
+    /// by a host with no store or whose files cannot share blocks (a copy
+    /// would then hold up every other sandbox while it is made), and by a
+    /// host from before this request with [`ErrorCode::Invalid`].
+    Capture {
+        /// The sandbox.
+        id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+        /// Names this capture: a later ask with the same key learns how it
+        /// stands rather than copying again. At most 64 letters, digits,
+        /// `-` and `_`.
+        key: String,
+    },
 }
 
 /// One reply.
@@ -658,6 +779,15 @@ pub enum Reply {
         /// The digest of the image manifest built, for an index the one
         /// for this host's platform.
         digest: String,
+    },
+    /// The copy [`Request::Capture`] made is being stored: ask again.
+    Capturing,
+    /// The stored sandbox image [`Request::Capture`] made.
+    Captured {
+        /// Its id, which creates name it by.
+        image: ImageId,
+        /// Its length in bytes: the disk's when it was copied.
+        length: u64,
     },
     /// The request failed.
     Error {
@@ -1020,6 +1150,16 @@ pub fn step_name(step: Step) -> &'static str {
     }
 }
 
+/// Whether `key` may name a [`Request::Capture`]: 1 to 64 ASCII letters,
+/// digits, `-` and `_`, so it can also name the host's copy on disk.
+#[must_use]
+pub fn valid_capture_key(key: &str) -> bool {
+    (1..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,6 +1226,8 @@ mod tests {
     #[test]
     fn configs_are_validated() {
         let mut config = SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 2,
             memory_mib: 1024,
@@ -1103,6 +1245,82 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    /// A disk size is optional, at least 1 MiB and at most
+    /// [`MAX_DISK_MIB`]; it only ever lengthens the image's disk, it is
+    /// part of what makes a create the same sandbox, and a config without
+    /// one reads and writes as before.
+    #[test]
+    fn a_disk_size_lengthens_the_image_and_is_part_of_the_sandbox() {
+        let config = SandboxConfig::new(2, 1024, SleepConfig::default());
+        assert_eq!(config.disk_bytes(5 << 20), 5 << 20);
+        let sized = config.clone().with_disk_mib(16);
+        assert!(sized.validate().is_ok());
+        assert_eq!(sized.disk_bytes(5 << 20), 16 << 20);
+        assert_eq!(sized.disk_bytes(32 << 20), 32 << 20, "never shorter");
+        assert!(
+            config
+                .clone()
+                .with_disk_mib(MAX_DISK_MIB)
+                .validate()
+                .is_ok()
+        );
+        for wrong in [0, MAX_DISK_MIB + 1] {
+            let error = config.clone().with_disk_mib(wrong).validate().unwrap_err();
+            assert!(error.contains("disk_mib"), "{error}");
+        }
+
+        assert!(sized.same_sandbox(&sized.clone()));
+        assert!(!sized.same_sandbox(&config));
+        assert!(!sized.same_sandbox(&config.clone().with_disk_mib(17)));
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("disk_mib").is_none(), "{json}");
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read.disk_mib, None);
+        let json = serde_json::to_value(&sized).unwrap();
+        assert_eq!(json["disk_mib"], 16);
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read, sized);
+    }
+
+    /// What a sandbox reaches is a short, sorted list of offer names, part
+    /// of what makes a create the same sandbox; a config without one reads
+    /// and writes as before.
+    #[test]
+    fn reach_names_offers_in_order_and_is_part_of_the_sandbox() {
+        let config = SandboxConfig::new(2, 1024, SleepConfig::default());
+        let reaching = config
+            .clone()
+            .with_reach(["previews", "builds-2", "previews"]);
+        assert_eq!(reaching.reach, ["builds-2", "previews"]);
+        assert!(reaching.validate().is_ok());
+        assert!(!reaching.same_sandbox(&config));
+        assert!(!reaching.same_sandbox(&config.clone().with_reach(["previews"])));
+        assert!(reaching.same_sandbox(&reaching.clone()));
+
+        let wrong = |reach: &[&str]| {
+            let mut config = config.clone();
+            config.reach = reach.iter().map(|name| (*name).to_owned()).collect();
+            config.validate().unwrap_err()
+        };
+        for bad in ["", "Previews", "-a", "a-", "a.b", "a_b", &"a".repeat(64)] {
+            assert!(wrong(&[bad]).contains("not an offer's name"), "{bad:?}");
+        }
+        assert!(wrong(&["b", "a"]).contains("sorted"));
+        assert!(wrong(&["a", "a"]).contains("sorted"));
+        let many: Vec<String> = (0..=MAX_REACH).map(|n| format!("o{n}")).collect();
+        assert!(wrong(&many.iter().map(String::as_str).collect::<Vec<_>>()).contains("at most"));
+        assert!(is_offer_name(&"a".repeat(63)));
+        assert!(is_offer_name("k3s-api"));
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("reach").is_none(), "{json}");
+        let json = serde_json::to_value(&reaching).unwrap();
+        assert_eq!(json["reach"], serde_json::json!(["builds-2", "previews"]));
+        let read: SandboxConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(read, reaching);
+    }
+
     #[test]
     fn sleep_settings_round_trip_and_omit_disabled_rules() {
         assert_eq!(
@@ -1118,5 +1336,46 @@ mod tests {
         let parsed: SleepConfig = serde_json::from_str(r#"{"pause_after_ms":5}"#).unwrap();
         assert_eq!(parsed.rules().pause_after, Some(Duration::from_millis(5)));
         assert!(serde_json::from_str::<SleepConfig>(r#"{"pause":5}"#).is_err());
+    }
+
+    #[test]
+    fn captures_round_trip_and_name_their_copy_by_a_short_key() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"capture","id":"0193f3c27a1b7cde8f00112233445566","key":"t-1"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &request,
+            Request::Capture {
+                generation: None,
+                key,
+                ..
+            } if key == "t-1"
+        ));
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"op":"capture","id":"0193f3c27a1b7cde8f00112233445566","key":"t-1"}"#
+        );
+        let image = ImageId([7; 32]);
+        let reply = Reply::Captured {
+            image,
+            length: 4096,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(r#"{{"result":"captured","image":"{image}","length":4096}}"#)
+        );
+        assert_eq!(serde_json::from_str::<Reply>(&json).unwrap(), reply);
+        assert_eq!(
+            serde_json::to_string(&Reply::Capturing).unwrap(),
+            r#"{"result":"capturing"}"#
+        );
+
+        assert!(valid_capture_key("0193f3c27a1b7cde8f00112233445566"));
+        assert!(valid_capture_key("a_B-9"));
+        for bad in ["", "../x", "a b", "a/b", "é", &"x".repeat(65)] {
+            assert!(!valid_capture_key(bad), "{bad:?}");
+        }
     }
 }

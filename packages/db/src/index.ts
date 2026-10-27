@@ -4,6 +4,7 @@ import {
 } from "./provider-recovery-clock";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
 import {
@@ -22,6 +23,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./active-session-history";
+import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -120,6 +123,7 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  BROWSER_WAIT_HOLD_MAX_MS,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -134,6 +138,11 @@ import {
   workspaceSettingsAllowCreditModels,
   readTurnServingPolicyV1,
   AppShotCapture,
+  classifyPromptCacheWarmMiss,
+  parsePromptCacheObservation,
+  type PromptCacheCallSample,
+  type PromptCacheDiagnostics,
+  type PromptCacheObservation,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -159,6 +168,13 @@ import {
   turnHuman,
   inboxOrigin,
 } from "./inbox-execution-context";
+import {
+  notWaitingForMachineOwnerSql,
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
@@ -228,6 +244,7 @@ export {
   type SubscriptionCoreCodexRefreshResult,
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -340,6 +357,10 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
+  WORKSPACE_GOVERNANCE_NONE,
+  readWorkspaceGovernanceContext,
+  workspaceGovernanceContextItem,
   sessionTurnSurfaceOrNull,
   type SessionTurnSurface,
 } from "@opengeni/contracts";
@@ -919,6 +940,9 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_APP_ACTION_CALL_LEAF,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
   SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
@@ -1231,6 +1255,7 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
   });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
+export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
@@ -1413,6 +1438,36 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export {
+  DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
+  DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_LOG_INTERVAL_MS,
+  DATABASE_CREDENTIAL_METRICS,
+  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  DATABASE_LOGIN_ATTEMPT,
+  databaseCredentialEventAttributes,
+  databaseCredentialEventMessage,
+  databaseLoginAttemptOf,
+  databasePasswordFileOptions,
+  databasePasswordFileOptionsFromEnvironment,
+  rotatingDatabasePasswordFor,
+  databaseUrlPassword,
+  databaseUrlUser,
+  isDatabaseAuthenticationFailure,
+  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
+  RotatingDatabasePassword,
+  tagDatabaseLoginAttempt,
+  withDatabaseAuthenticationRetry,
+  type DatabaseAuthenticationRefusal,
+  type DatabaseCredentialEvent,
+  type DatabaseCredentialEventListener,
+  type DatabaseCredentialExhaustion,
+  type DatabaseCredentialObserver,
+  type DatabaseCredentialPosition,
+  type DatabasePasswordFiles,
+  type RotatingDatabasePasswordOptions,
+} from "./database-credentials";
 export type {
   SessionListChangeSource,
   SessionListDatabaseChange,
@@ -2232,6 +2287,35 @@ export async function resolveNamedManagedPersonalWorkspaceGrant(
   };
 }
 
+/**
+ * Whether this turn's app actions can change the workspace's settings right
+ * now: the turn may make changes (full access, or each change confirmed by the
+ * person who sent it), its access includes workspace:admin, and the person it
+ * acts as still holds the grant the settings routes accept (workspace:admin
+ * here, or ownership of this Personal workspace). The route still decides.
+ */
+export async function turnCanChangeWorkspaceSettings(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<boolean> {
+  const authority = await resolveSessionAppActionAuthority(db, input);
+  if (authority.kind === "unavailable" || authority.kind === "read_only") return false;
+  if (authority.kind === "confirm" && !authority.permissions.includes("workspace:admin")) {
+    return false;
+  }
+  const { subjectId } = authority;
+  return await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
+    const membership = await getWorkspaceGrant(tx, subjectId, input.workspaceId);
+    if (membership?.accountId === input.accountId) {
+      return membership.permissions.includes("workspace:admin");
+    }
+    return (
+      subjectId.startsWith("user:") &&
+      (await resolveNamedManagedPersonalWorkspaceGrant(tx, { ...input, subjectId })) !== null
+    );
+  });
+}
+
 export const allAccountPermissions: Permission[] = [
   "account:read",
   "account:admin",
@@ -2690,7 +2774,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
-  const subjectLabel = input.email || input.name;
+  const subjectLabel = accountContactEmail(input.email) || input.name;
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
@@ -3999,6 +4083,36 @@ export async function getManagedUserProfilesByIds(
       sql`, `,
     )})`,
   );
+}
+
+/**
+ * A workspace member's name as the workspace's people list shows it: their
+ * profile name, else the label their membership was given, else their email.
+ * Null when none is known.
+ */
+export async function workspaceMemberDisplayName(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<string | null> {
+  // A deployment without managed profiles still has membership labels.
+  const [profile] = input.subjectId.startsWith("user:")
+    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)]).catch(() => [])
+    : [];
+  const name = profile?.name?.trim();
+  if (name) return name;
+  const [membership] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb
+      .select({ subjectLabel: schema.workspaceMemberships.subjectLabel })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1),
+  );
+  return membership?.subjectLabel?.trim() || profile?.email?.trim() || null;
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
@@ -5973,6 +6087,8 @@ export type ModelCallFact = {
   equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   contextContributions: readonly ModelContextContributionSummary[] | null;
+  /** Prompt-cache observation and warm-miss classification, when recorded. */
+  promptCacheDiagnostics: PromptCacheDiagnostics | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -6012,6 +6128,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
         ? row.pricingSource
         : null,
     contextContributions: row.contextContributions,
+    promptCacheDiagnostics: row.promptCacheDiagnostics ?? null,
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -6092,6 +6209,12 @@ export async function recordModelCallFact(
     totalTokens?: number | null;
     /** Worker-measured timing of the call; absent for calls it did not stream. */
     timing?: ModelCallTiming | null;
+    /**
+     * What the worker observed about the call's prompt cache. When present
+     * (even null), the write classifies a warm-cache miss against the previous
+     * call of the same model in the session. Omitted by repair paths.
+     */
+    promptCache?: PromptCacheObservation | null;
     occurredAt?: Date;
     /**
      * The shared-core subscription connection that served the call (core
@@ -6175,6 +6298,22 @@ export async function recordModelCallFact(
           })
         : null;
       const occurredAt = input.occurredAt ?? new Date();
+      const promptCacheDiagnostics =
+        input.promptCache === undefined
+          ? null
+          : await promptCacheDiagnosticsForCall(scopedDb, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              model: input.model,
+              current: {
+                sourceKey: input.sourceKey,
+                inputTokens: input.inputTokens ?? null,
+                cachedTokens: input.cachedTokens ?? null,
+                connectionId: input.connectionId ?? null,
+                occurredAt,
+                observation: parsePromptCacheObservation(input.promptCache),
+              },
+            });
       const [row] = await scopedDb
         .insert(schema.modelCallFacts)
         .values({
@@ -6210,6 +6349,7 @@ export async function recordModelCallFact(
           contextContributions,
           connectionId: input.connectionId ?? null,
           ...modelCallTimingColumns(timing),
+          promptCacheDiagnostics,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -6238,6 +6378,7 @@ export async function recordModelCallFact(
             timeToFirstTokenMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTokenMs}, excluded.time_to_first_token_ms)`,
             timeToFirstTextMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTextMs}, excluded.time_to_first_text_ms)`,
             durationMs: sql`coalesce(${schema.modelCallFacts.durationMs}, excluded.duration_ms)`,
+            promptCacheDiagnostics: sql`coalesce(${schema.modelCallFacts.promptCacheDiagnostics}, excluded.prompt_cache_diagnostics)`,
           },
         })
         .returning();
@@ -6247,6 +6388,58 @@ export async function recordModelCallFact(
       return mapModelCallFact(row);
     },
   );
+}
+
+/**
+ * The call's prompt-cache observation plus its warm-miss classification
+ * against the previous call of the same model in the same session.
+ */
+async function promptCacheDiagnosticsForCall(
+  scopedDb: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    model: string;
+    current: PromptCacheCallSample;
+  },
+): Promise<PromptCacheDiagnostics | null> {
+  const [previous] = await scopedDb
+    .select({
+      sourceKey: schema.modelCallFacts.sourceKey,
+      inputTokens: schema.modelCallFacts.inputTokens,
+      cachedTokens: schema.modelCallFacts.cachedTokens,
+      connectionId: schema.modelCallFacts.connectionId,
+      occurredAt: schema.modelCallFacts.occurredAt,
+      promptCacheDiagnostics: schema.modelCallFacts.promptCacheDiagnostics,
+    })
+    .from(schema.modelCallFacts)
+    .where(
+      and(
+        eq(schema.modelCallFacts.workspaceId, input.workspaceId),
+        eq(schema.modelCallFacts.sessionId, input.sessionId),
+        eq(schema.modelCallFacts.model, input.model),
+        lt(schema.modelCallFacts.occurredAt, input.current.occurredAt),
+        ne(schema.modelCallFacts.sourceKey, input.current.sourceKey),
+      ),
+    )
+    .orderBy(desc(schema.modelCallFacts.occurredAt))
+    .limit(1);
+  const warmMiss = classifyPromptCacheWarmMiss(
+    previous
+      ? {
+          sourceKey: previous.sourceKey,
+          inputTokens: previous.inputTokens,
+          cachedTokens: previous.cachedTokens,
+          connectionId: previous.connectionId,
+          occurredAt: previous.occurredAt,
+          observation: parsePromptCacheObservation(previous.promptCacheDiagnostics),
+        }
+      : null,
+    input.current,
+  );
+  const observation = input.current.observation;
+  if (!observation && !warmMiss) return null;
+  return { ...observation, ...(warmMiss ? { warmMiss } : {}) };
 }
 
 export {
@@ -6427,6 +6620,7 @@ export async function applyCreditDebitUpToBalance(
         input.accountId,
         input.creditPolicyRevision,
         settledAt,
+        true,
       );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
@@ -6516,7 +6710,7 @@ export async function applyCreditDebitAfterUse(
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt),
+          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
@@ -7559,6 +7753,8 @@ export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
   name: string;
+  /** The catalog item's category ("communication", "files"), naming the need it serves. */
+  category?: string;
   url: string;
   allowedTools?: string[];
   timeoutMs?: number;
@@ -10000,7 +10196,8 @@ export async function upsertCapabilityCatalogItem(
         credentialFacts: values.credentialFacts,
         tier: values.tier,
         provenance: values.provenance,
-        logoAssetPath: values.logoAssetPath,
+        // A workspace item's logo comes from its server's advertised icon
+        // (setWorkspaceCapabilityCatalogItemLogo); editing the item keeps it.
         importBatchId: values.importBatchId,
         stale: values.stale,
         staleAt: values.staleAt,
@@ -10019,6 +10216,39 @@ export async function upsertCapabilityCatalogItem(
         throw new Error("Failed to upsert capability catalog item");
       }
       return mapCapabilityCatalogItem(row);
+    },
+  );
+}
+
+/**
+ * Sets the logo of a workspace-owned catalog item (a custom MCP server) to a
+ * stored `catalog-assets/...` key. Shared registry rows are never changed from a
+ * workspace connection. Returns whether a row changed.
+ */
+export async function setWorkspaceCapabilityCatalogItemLogo(
+  db: Database,
+  input: { accountId: string; workspaceId: string; id: string; logoAssetPath: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.capabilityCatalogItems)
+        .set({ logoAssetPath: input.logoAssetPath, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.id),
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            or(
+              isNull(schema.capabilityCatalogItems.logoAssetPath),
+              ne(schema.capabilityCatalogItems.logoAssetPath, input.logoAssetPath),
+            ),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return rows.length > 0;
     },
   );
 }
@@ -11368,6 +11598,7 @@ export async function listEnabledMcpCapabilityServers(
         capabilityId: item.id,
         id: mcpServerIdForCapability(item.id, metadata),
         name: item.name,
+        ...(item.category ? { category: item.category } : {}),
         url: item.endpointUrl,
         ...(allowedTools ? { allowedTools } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
@@ -25384,20 +25615,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
-        const [waitingPrompt] = stopped
-          ? await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1)
-          : [];
+        const waitingPrompt = stopped
+          ? await runnableQueuedTurnExists(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            })
+          : false;
         const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
@@ -26109,19 +26334,13 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       );
     }
   }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
+  const queued = turnWasCurrent
+    ? await runnableQueuedTurnExists(tx, {
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+      })
+    : false;
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
   const eventValues: SessionEventInsertWithPayload[] = [
@@ -31319,6 +31538,27 @@ export async function getSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
+export async function getSessionModelGate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "model" | "codexCompactionMode"> | null> {
+  const session = await readSession(db, workspaceId, sessionId, "model_gate");
+  return session
+    ? { model: session.model, codexCompactionMode: session.codexCompactionMode }
+    : null;
+}
+
+async function readSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  presentation: "full" | "model_gate",
+): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -31335,8 +31575,21 @@ export async function getSession(
       false,
     );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
-    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
+    const grouped =
+      presentation === "full"
+        ? await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id])
+        : null;
+    return await mapSessionWithControl(
+      scopedDb,
+      session,
+      grouped?.get(row.id) ?? [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      presentation,
+    );
   });
 }
 
@@ -33652,7 +33905,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{
     needsYouCount: number;
     groups: SessionListTotals["groups"];
-    sites: SiteConversationGroup[] | null;
+    sites: Array<SiteConversationGroup & { rankAt?: string | null }> | null;
   }>(
     db,
     sql`
@@ -33825,9 +34078,10 @@ async function sessionListTotalsInScope(
       }
     ), site_conv_totals as (
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
-        max(updated_at) as updated_at, max(created_at) as created_at,
+        min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
-          filter (where origin_title is not null))[1] as origin_title
+          filter (where origin_title is not null))[1] as origin_title,
+        max(updated_at) as activity_at
       from site_conv group by site_id, row_channel_id
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
@@ -33875,38 +34129,37 @@ async function sessionListTotalsInScope(
     ), site_keys as (
       select * from site_conv_totals
       union all
-      select site_id, channel_id, 0, null, null, null from site_home
+      select site_id, channel_id, 0, null, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
-      -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its newest published version (creation
-      -- is version 1) and the chats that published its versions (the chat
-      -- that created it and any used to edit it), as far as this viewer can
-      -- see them. Opening a Site is not activity, as opening a chat is not;
-      -- an open only lists it. Archive, restore, rollback and other updates
-      -- to the Site's record are not activity either, so they never lift a
-      -- Site for everyone. One extra row reports truncation.
+      -- conversations needs a live Site the viewer can see. A row's time is
+      -- the Site's newest published version (creation is version 1) and
+      -- nothing else: messages and turns in its conversations, or in the chat
+      -- that created or published it, never move it, nor does opening it (an
+      -- open only lists it). Archive, restore, rollback (Undo) and other
+      -- updates to the Site's record add no version, so they never lift it
+      -- either. A viewer who cannot read the Site sees no publishes, so its
+      -- row keeps the time its first conversation here started, which
+      -- messages do not change. Which rows the bound keeps is a separate
+      -- question: pinned rows first, then the later of the newest publish and
+      -- conversation activity, so a Site whose conversation runs or needs this
+      -- person is never cut for an old publish. One extra row reports
+      -- truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
-        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt",
+        greatest(site.published_at, key.activity_at, key.first_created_at) as "rankAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at,
-          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
-            join ${schema.sessions} source
-              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-            join ${schema.sessions} editor
-              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
-            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
-            as edited_at
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
@@ -33920,7 +34173,7 @@ async function sessionListTotalsInScope(
       -- This person's archived Sites leave their sidebar; pinned ones lead.
       where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 7 desc, 5 desc, 1, 2
+      order by 7 desc, 9 desc nulls last, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -33950,7 +34203,8 @@ async function sessionListTotalsInScope(
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
       coalesce((select jsonb_agg(to_jsonb(site_grouped)
-        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        order by site_grouped.pinned desc, site_grouped."rankAt" desc nulls last,
+          site_grouped."siteId", site_grouped."channelId")
         from site_grouped), '[]'::jsonb) as sites
   `,
   );
@@ -33963,21 +34217,37 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
-      ...site,
-      updatedAt: iso(site.updatedAt)!,
-      createdAt: iso(site.createdAt)!,
-      attentionSince: iso(site.attentionSince),
-      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
-      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
-    })),
+    // The bound keeps rows in rank order; the kept rows then sort by their
+    // time, the newest publish.
+    sites: sites
+      .slice(0, SITE_CONVERSATION_GROUP_LIMIT)
+      .map(({ pinned, pinnedAt, rankAt: _rankAt, ...site }) => ({
+        ...site,
+        updatedAt: iso(site.updatedAt)!,
+        createdAt: iso(site.createdAt)!,
+        attentionSince: iso(site.attentionSince),
+        // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+        ...(pinned ? { pinned: true as const, pinnedAt: iso(pinnedAt ?? null) } : {}),
+      }))
+      .sort(
+        (a, b) =>
+          compareCodePoints(b.updatedAt, a.updatedAt) ||
+          compareCodePoints(a.siteId, b.siteId) ||
+          // As SQL orders it: a Site's Default row (no project) last.
+          compareCodePoints(a.channelId ?? "\uffff", b.channelId ?? "\uffff"),
+      ),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
- * for a long time fall past it; the Artifacts page lists every Site.
+ * Bound on Site rows per read. Pinned rows are kept first, then by the later of
+ * the newest publish and conversation activity, so Sites nobody touched for a
+ * long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
@@ -37514,6 +37784,62 @@ type LineageIdRow = {
   cycle: boolean;
 };
 
+/** Descendants a lineage read lists: depth 5 and this many rows at most. */
+export const SESSION_TREE_DESCENDANT_LIMIT = 200;
+
+/**
+ * Descendants of a session, shallower before deeper and newest first within a
+ * level, so a long fleet loses its oldest grandchildren first. Returns one row
+ * more than the limit when there are more.
+ */
+async function selectSessionDescendantRows(
+  scopedDb: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<LineageIdRow[]> {
+  return (await scopedDb.execute(sql<LineageIdRow>`
+    with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+      select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and child.parent_session_id = ${sessionId}
+      union all
+      select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
+      from ${schema.sessions} child
+      join descendants on child.parent_session_id = descendants.id
+      where child.workspace_id = ${workspaceId}
+        and descendants.depth < 5
+        and not child.id = any(descendants.path)
+    )
+    select id, parent_session_id as "parentSessionId", depth, path, false as cycle
+    from descendants
+    order by depth, created_at desc, id desc
+    limit ${SESSION_TREE_DESCENDANT_LIMIT + 1}
+  `)) as LineageIdRow[];
+}
+
+/**
+ * A session and the descendants its lineage lists, in that order, or null when
+ * the session is not visible in the workspace. Ids only: callers authorize
+ * each session before using it.
+ */
+export async function listSessionTreeIds(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) return null;
+    const rows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
+    return [sessionId, ...rows.slice(0, SESSION_TREE_DESCENDANT_LIMIT).map((row) => row.id)];
+  });
+}
+
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
@@ -37530,7 +37856,7 @@ export async function getSessionLineage(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionLineage | null> {
-  const descendantLimit = 200;
+  const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -37579,25 +37905,7 @@ export async function getSessionLineage(
     }
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
-    const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
-        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
-        from ${schema.sessions} child
-        where child.workspace_id = ${workspaceId}
-          and child.parent_session_id = ${sessionId}
-        union all
-        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and descendants.depth < 5
-          and not child.id = any(descendants.path)
-      )
-      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
-      from descendants
-      order by depth, created_at desc, id desc
-      limit ${descendantLimit + 1}
-    `)) as LineageIdRow[];
+    const childRows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
     const truncated = childRows.length > descendantLimit;
     const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
@@ -37748,10 +38056,10 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
-   * Keep `agent.toolCall.created` rows of presented tools (see
-   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
-   * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY and
+   * Keep `agent.toolCall.created` rows of presented calls (see
+   * isPresentedSessionToolCall) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files, Skill
+   * changes and payment pages without loading every step. Excluded rows without a turn (PTY and
    * background command output) stay excluded: the sandbox dock reads them
    * itself. No effect unless `agent.toolCall.created` is excluded.
    */
@@ -37785,6 +38093,12 @@ const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap
   return [literal, `%\\_\\_${literal}`];
 });
 
+/** The same LIKE patterns for the app action call tool. */
+const APP_ACTION_CALL_NAME_PATTERNS = [SESSION_EVENT_APP_ACTION_CALL_LEAF].flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -37801,11 +38115,40 @@ function sessionEventExcludeTypesFilter(
     PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
     sql`, `,
   );
+  const appActionPatterns = sql.join(
+    APP_ACTION_CALL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
+  const toolName = sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name')`;
+  // An app action call's arguments are an object or its JSON text; only their
+  // top-level "id" counts, trimmed and matched exactly as presentedAppActionId does.
+  // Text is read as json (not jsonb) and skipped if it escapes a NUL, which
+  // Postgres can't turn into text: no stored call can make this query fail.
+  const payload = schema.sessionEvents.payload;
+  const actionId = sql`btrim(case jsonb_typeof(${payload} -> 'arguments')
+    when 'object' then ${payload} -> 'arguments' ->> 'id'
+    when 'string' then case
+      when (${payload} ->> 'arguments') is json object
+        and strpos(${payload} ->> 'arguments', ${"\\u0000"}::text) = 0
+      then (${payload} ->> 'arguments')::json ->> 'id' end
+  end, ${SESSION_EVENT_APP_ACTION_ID_SPACE}::text)`;
+  const presentedActions = sql.join(
+    SESSION_EVENT_PRESENTED_APP_ACTION_NAMES.map((name) => sql`${name}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
+      or(
+        sql`${toolName} like any (array[${patterns}])`,
+        // Payment pages: only app action calls (whose payload is their short
+        // arguments) are read past the name, for the action id.
+        and(
+          sql`${toolName} like any (array[${appActionPatterns}])`,
+          sql`${actionId} = any (array[${presentedActions}])`,
+        ),
+      ),
     ),
   )!;
 }
@@ -41183,6 +41526,33 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
+type SessionContextChannel = {
+  /** Error-message subject, for example "Skill catalog". */
+  label: string;
+  /** Turn metadata key freezing the snapshot for every attempt of the turn. */
+  metadataKey: string;
+  /** Literal content prefix that identifies this channel in stored history. */
+  contentPrefix: string;
+  read: (item: Record<string, unknown>) => string | null;
+  item: (text: string) => Record<string, unknown>;
+};
+
+const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
+  label: "Skill catalog",
+  metadataKey: "opengeniSkillCatalogHistoryId",
+  contentPrefix: SKILL_CATALOG_CONTEXT_PREFIX,
+  read: readSkillCatalogContext,
+  item: skillCatalogContextItem,
+};
+
+const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
+  label: "Workspace governance",
+  metadataKey: "opengeniWorkspaceGovernanceHistoryId",
+  contentPrefix: WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
+  read: readWorkspaceGovernanceContext,
+  item: workspaceGovernanceContextItem,
+};
+
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -41196,6 +41566,62 @@ export async function ensureSessionSkillCatalog(
     catalog: string;
   },
 ): Promise<string> {
+  const { catalog, ...scope } = input;
+  return (await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: catalog },
+    SKILL_CATALOG_CHANNEL,
+  ))!;
+}
+
+/**
+ * Persist the rendered workspace governance once per logical turn, as a
+ * history item before the turn that first sees a new value. Retries reuse the
+ * turn snapshot. Null means no governance applies: nothing is written unless
+ * earlier governance must be explicitly withdrawn. Returns the model-visible
+ * governance, or null when none is visible.
+ */
+export async function ensureSessionWorkspaceGovernance(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    governance: string | null;
+  },
+): Promise<string | null> {
+  const { governance, ...scope } = input;
+  const visible = await ensureSessionContextSnapshot(
+    db,
+    {
+      ...scope,
+      text: governance ?? WORKSPACE_GOVERNANCE_NONE,
+      omitWhenAbsent: governance === null,
+    },
+    WORKSPACE_GOVERNANCE_CHANNEL,
+  );
+  return visible === null || visible === WORKSPACE_GOVERNANCE_NONE ? null : visible;
+}
+
+async function ensureSessionContextSnapshot(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    text: string;
+    /** Write nothing when the session has no earlier item of this channel. */
+    omitWhenAbsent?: boolean;
+  },
+  channel: SessionContextChannel,
+): Promise<string | null> {
+  const lower = channel.label.toLowerCase();
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -41208,14 +41634,16 @@ export async function ensureSessionSkillCatalog(
           executionGeneration: input.expectedExecutionGeneration,
           attemptId: input.expectedAttemptId,
         });
-        if (!fence.allowed) throw new Error("Skill catalog attempt is fenced");
+        if (!fence.allowed) throw new Error(`${channel.label} attempt is fenced`);
         const scope = and(
           eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
           eq(schema.sessionHistoryItems.sessionId, input.sessionId),
         );
-        const frozen = fence.turn.metadata.opengeniSkillCatalogHistoryId;
-        if (frozen !== undefined && typeof frozen !== "string")
-          throw new Error("Invalid skill catalog receipt");
+        const frozen = fence.turn.metadata[channel.metadataKey];
+        if (frozen !== undefined && frozen !== false && typeof frozen !== "string")
+          throw new Error(`Invalid ${lower} receipt`);
+        // A turn frozen without any item of this channel keeps seeing none.
+        if (frozen === false) return null;
         const [previous] = await tx
           .select({
             id: schema.sessionHistoryItems.id,
@@ -41232,23 +41660,36 @@ export async function ensureSessionSkillCatalog(
                     eq(schema.sessionHistoryItems.active, true),
                     sql`${schema.sessionHistoryItems.item}->>'type' = 'message'`,
                     sql`${schema.sessionHistoryItems.item}->>'role' = 'developer'`,
-                    sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${SKILL_CATALOG_CONTEXT_PREFIX})`,
+                    sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${channel.contentPrefix})`,
                   ),
             ),
           )
           .orderBy(desc(schema.sessionHistoryItems.position))
           .limit(1);
-        const previousCatalog = previous
-          ? readSkillCatalogContext(
-              fromPostgresLosslessJson(previous.item, previous.itemCodecVersion),
-            )
+        const previousText = previous
+          ? channel.read(fromPostgresLosslessJson(previous.item, previous.itemCodecVersion))
           : null;
         if (frozen !== undefined) {
-          if (previousCatalog === null) throw new Error("Missing durable skill catalog snapshot");
-          return previousCatalog;
+          if (previousText === null) throw new Error(`Missing durable ${lower} snapshot`);
+          return previousText;
         }
         let historyId = previous?.id;
-        if (previousCatalog !== input.catalog) {
+        if (!previous && input.omitWhenAbsent) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn.metadata, [channel.metadataKey]: false },
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          return null;
+        }
+        if (previousText !== input.text) {
           const [boundary] = await tx
             .select({ position: schema.sessionHistoryItems.position })
             .from(schema.sessionHistoryItems)
@@ -41271,10 +41712,10 @@ export async function ensureSessionSkillCatalog(
               .limit(1);
             position = prior ? (prior.position + boundary.position) / 2 : boundary.position - 0.25;
             if (!(position < boundary.position) || (prior && !(position > prior.position)))
-              throw new Error("Skill catalog position exhausted");
+              throw new Error(`${channel.label} position exhausted`);
           } else {
             if (fence.turn.source !== "compaction")
-              throw new Error("Skill catalog requires durable accepted input");
+              throw new Error(`${channel.label} requires durable accepted input`);
             const [tail] = await tx
               .select({ position: schema.sessionHistoryItems.position })
               .from(schema.sessionHistoryItems)
@@ -41293,18 +41734,18 @@ export async function ensureSessionSkillCatalog(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 position,
-                item: skillCatalogContextItem(input.catalog),
+                item: channel.item(input.text),
               },
               "item",
               "itemCodecVersion",
             ),
           );
         }
-        if (!historyId) throw new Error("Missing skill catalog history identity");
+        if (!historyId) throw new Error(`Missing ${lower} history identity`);
         await tx
           .update(schema.sessionTurns)
           .set({
-            metadata: { ...fence.turn.metadata, opengeniSkillCatalogHistoryId: historyId },
+            metadata: { ...fence.turn.metadata, [channel.metadataKey]: historyId },
             updatedAt: new Date(),
           })
           .where(
@@ -41313,7 +41754,7 @@ export async function ensureSessionSkillCatalog(
               eq(schema.sessionTurns.id, input.turnId),
             ),
           );
-        return input.catalog;
+        return input.text;
       }),
   );
 }
@@ -41455,18 +41896,25 @@ export async function appendSessionHistoryItems(
     items: Array<{ position: number; item: Record<string, unknown> }>;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
+    /**
+     * Receives the stored footprint of the rows this call inserted, measured by
+     * PostgreSQL in the same statement, once the append has committed.
+     */
+    onAppendedFootprint?: (delta: ActiveSessionHistoryFootprint) => void;
   },
 ): Promise<boolean> {
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
+  let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
-  return await retryRlsPersistence(
+  const appended = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
+      appendedFootprint = null;
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
         rowProjection: "event",
         workspaceId: input.workspaceId,
@@ -41476,7 +41924,7 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
-      const saved =
+      const inserted =
         input.items.length === 0
           ? []
           : await tx
@@ -41514,7 +41962,40 @@ export async function appendSessionHistoryItems(
                 turnId: schema.sessionHistoryItems.turnId,
                 item: schema.sessionHistoryItems.item,
                 itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+                // Measured exactly as the active-history guard measures:
+                // bytes of the ordered JSON text, shape of the jsonb projection
+                // the insert trigger maintains.
+                jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
+                jsonNodes: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(session_history_items.item, 'strict $.**')
+                )`,
+                jsonProperties: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(
+                    session_history_items.item,
+                    'strict $.** ? (@.type() == "object")'
+                  ) as object_value
+                  cross join lateral jsonb_object_keys(object_value) as property
+                )`,
               });
+      // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
+      // add to the active footprint.
+      appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
+        (total, row) => ({
+          jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
+          rows: total.rows + 1,
+          jsonNodes: total.jsonNodes + Number(row.jsonNodes),
+          jsonProperties: total.jsonProperties + Number(row.jsonProperties),
+        }),
+        { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
+      );
+      const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
+        position,
+        turnId,
+        item,
+        itemCodecVersion,
+      }));
       // A position conflict is idempotent only when the exact conversation
       // item is already there. Never acknowledge a different item as saved.
       // Fresh inserts already return their durable representation. Re-reading
@@ -41576,6 +42057,10 @@ export async function appendSessionHistoryItems(
       return true;
     },
   );
+  // Assigned inside the retried transaction callback; the last attempt wins.
+  const delta = appendedFootprint as ActiveSessionHistoryFootprint | null;
+  if (appended && delta) input.onAppendedFootprint?.(delta);
+  return appended;
 }
 
 export type PendingSessionToolCallInput = {
@@ -42267,270 +42752,6 @@ export async function getActiveSessionHistoryItems(
   });
 }
 
-/**
- * Profiled upper envelope for one session's complete active, model-facing
- * transcript. Bytes alone do not bound the decoded object graph, so rows, JSON
- * nodes, and object properties are independently limited. Normal token-driven
- * compaction keeps active history far below these boundaries. The limits are a
- * final materialization guard: a corrupt/imported/pathological transcript fails
- * deterministically before a Postgres driver decodes it instead of using the
- * pod OOM killer as admission.
- */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
-
-export type ActiveSessionHistoryLimitKind =
-  | "json_bytes"
-  | "rows"
-  | "json_nodes"
-  | "json_properties";
-
-export class ActiveSessionHistoryLimitExceededError extends Error {
-  readonly code = "active_history_too_large";
-
-  constructor(
-    readonly actualBytes: number,
-    readonly maximumBytes: number,
-    readonly limitKind: ActiveSessionHistoryLimitKind = "json_bytes",
-    readonly actual: number = actualBytes,
-    readonly maximum: number = maximumBytes,
-  ) {
-    super(activeSessionHistoryLimitMessage(limitKind, actual, maximum));
-    this.name = "ActiveSessionHistoryLimitExceededError";
-  }
-}
-
-function activeSessionHistoryLimitMessage(
-  kind: ActiveSessionHistoryLimitKind,
-  actual: number,
-  maximum: number,
-): string {
-  if (kind === "json_bytes") {
-    return `Active session history is ${actual} UTF-8 JSON bytes, exceeding the ${maximum}-byte materialization limit.`;
-  }
-  const label =
-    kind === "rows"
-      ? "rows"
-      : kind === "json_nodes"
-        ? "decoded JSON nodes"
-        : "decoded JSON object properties";
-  return `Active session history has ${actual} ${label}; the materialization limit is ${maximum}.`;
-}
-
-/**
- * Memory-bounded active-history read for model input and compaction. PostgreSQL
- * first measures the complete logical window without returning any JSONB item,
- * then keyset-pages the admitted rows on the same repeatable-read snapshot.
- */
-export async function getActiveSessionHistoryItemsPaged(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
-  maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
-  maximumJsonProperties = ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
-): Promise<
-  Array<{
-    id: string;
-    position: number;
-    item: Record<string, unknown>;
-    providerArtifactInvalidatedAt: Date | null;
-  }>
-> {
-  if (
-    !Number.isSafeInteger(pageSize) ||
-    pageSize < 1 ||
-    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
-  ) {
-    throw new Error(
-      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
-    );
-  }
-  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
-    throw new Error("active session history JSON limit must be a positive safe integer");
-  }
-  for (const [name, value] of [
-    ["row", maximumRows],
-    ["JSON node", maximumJsonNodes],
-    ["JSON property", maximumJsonProperties],
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new Error(`active session history ${name} limit must be a positive safe integer`);
-    }
-  }
-
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      // Measure one logical JSON array. pg_column_size(jsonb) is deliberately
-      // insufficient because TOAST/compression could hide the decoded size.
-      const [size] = await scopedDb
-        .select({
-          bytes: sql<string>`case
-            when count(*) = 0 then 2
-            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
-          end`,
-          rows: sql<string>`count(*)`,
-        })
-        .from(schema.sessionHistoryItems)
-        .where(
-          and(
-            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-            eq(schema.sessionHistoryItems.sessionId, sessionId),
-            eq(schema.sessionHistoryItems.active, true),
-          ),
-        );
-      const actualBytes = Number(size?.bytes ?? 0);
-      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
-        throw new Error(
-          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
-        );
-      }
-      if (actualBytes > maximumJsonBytes) {
-        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
-      }
-      const actualRows = Number(size?.rows ?? 0);
-      if (!Number.isSafeInteger(actualRows) || actualRows < 0) {
-        throw new Error(
-          `Active session history row count is not a safe integer: ${String(size?.rows)}`,
-        );
-      }
-      if (actualRows > maximumRows) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "rows",
-          actualRows,
-          maximumRows,
-        );
-      }
-
-      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
-      // rejection work proportional to the admitted envelope.
-      const [nodeCount] = await rawRows<{ nodes: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as nodes
-          from (
-            select node
-            from session_history_items history
-            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonNodes + 1}
-          ) bounded_nodes
-        `,
-      );
-      const actualJsonNodes = Number(nodeCount?.nodes ?? 0);
-      if (!Number.isSafeInteger(actualJsonNodes) || actualJsonNodes < 0) {
-        throw new Error(
-          `Active session history JSON node count is not a safe integer: ${String(nodeCount?.nodes)}`,
-        );
-      }
-      if (actualJsonNodes > maximumJsonNodes) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_nodes",
-          actualJsonNodes,
-          maximumJsonNodes,
-        );
-      }
-
-      const [propertyCount] = await rawRows<{ properties: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as properties
-          from (
-            select property
-            from session_history_items history
-            cross join lateral jsonb_path_query(
-              history.item,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonProperties + 1}
-          ) bounded_properties
-        `,
-      );
-      const actualJsonProperties = Number(propertyCount?.properties ?? 0);
-      if (!Number.isSafeInteger(actualJsonProperties) || actualJsonProperties < 0) {
-        throw new Error(
-          `Active session history JSON property count is not a safe integer: ${String(propertyCount?.properties)}`,
-        );
-      }
-      if (actualJsonProperties > maximumJsonProperties) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_properties",
-          actualJsonProperties,
-          maximumJsonProperties,
-        );
-      }
-
-      const rows: Array<{
-        id: string;
-        position: number;
-        item: Record<string, unknown>;
-        providerArtifactInvalidatedAt: Date | null;
-      }> = [];
-      let afterPosition: number | null = null;
-      for (;;) {
-        const page: Array<{
-          id: string;
-          position: number;
-          item: Record<string, unknown>;
-          itemCodecVersion: number | null;
-          providerArtifactInvalidatedAt: Date | null;
-        }> = await scopedDb
-          .select({
-            id: schema.sessionHistoryItems.id,
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-            providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              ...(afterPosition === null
-                ? []
-                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
-            ),
-          )
-          .orderBy(schema.sessionHistoryItems.position)
-          .limit(pageSize);
-        rows.push(
-          ...page.map(({ itemCodecVersion, ...row }) => ({
-            ...row,
-            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
-          })),
-        );
-        if (rows.length === actualRows || page.length < pageSize) return rows;
-        const nextPosition = page.at(-1)!.position;
-        if (afterPosition !== null && nextPosition <= afterPosition) {
-          throw new Error("active session history keyset did not advance");
-        }
-        afterPosition = nextPosition;
-      }
-    },
-    { isolationLevel: "repeatable read" },
-  );
-}
-
 /** Bounded finalized voice turns used only to resume a later realtime call. */
 export async function getSessionRealtimeContinuityEntries(
   db: Database,
@@ -42692,12 +42913,29 @@ export type ApplyContextCompactionResult =
     }
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
+const RETAINED_ROW_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function retainedRowTurnId(
+  turnId: string | null | undefined,
+  sessionTurnIds: ReadonlySet<string>,
+): string | null {
+  return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
  * existing row. A paused, replaced, recovered, or terminal attempt cannot
  * mutate conversation truth.
+ *
+ * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
+ * retained message came from, so a later compaction can still pair a request
+ * with its own turn's answer. (Retained reply copies are passed as null and
+ * record their turn in the item, so turn-keyed readers such as message forks
+ * never see two rows of one reply.) An id that is not a turn of
+ * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(
   db: Database,
@@ -42709,12 +42947,19 @@ export async function applyContextCompaction(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
+    replacementTurnIds?: ReadonlyArray<string | null | undefined>;
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
+  if (
+    input.replacementTurnIds !== undefined &&
+    input.replacementTurnIds.length !== input.replacementItems.length
+  ) {
+    throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -42768,6 +43013,30 @@ export async function applyContextCompaction(
               eq(schema.sessionHistoryItems.active, true),
             ),
           );
+        const requestedTurnIds = [
+          ...new Set(
+            (input.replacementTurnIds ?? []).filter(
+              (turnId): turnId is string =>
+                typeof turnId === "string" && RETAINED_ROW_TURN_ID_PATTERN.test(turnId),
+            ),
+          ),
+        ];
+        const sessionTurnIds = new Set(
+          requestedTurnIds.length === 0
+            ? []
+            : (
+                await tx
+                  .select({ id: schema.sessionTurns.id })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                      eq(schema.sessionTurns.sessionId, input.sessionId),
+                      inArray(schema.sessionTurns.id, requestedTurnIds),
+                    ),
+                  )
+              ).map((row) => row.id),
+        );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
             withLosslessContentWriteVersion(
@@ -42775,7 +43044,7 @@ export async function applyContextCompaction(
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: null,
+                turnId: retainedRowTurnId(input.replacementTurnIds?.[index], sessionTurnIds),
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
                 active: true,
@@ -43100,12 +43369,14 @@ export async function recordSkippedContextCompaction(
 /**
  * Whether a Steer is waiting for this session's running turn: a queued prompt
  * marked `delivery: "steer"` (human, API, or a queue row an agent steered) or
- * a pending Agent Steer instruction. Steer admission leaves a live attempt
- * running, and the worker reads this before each model request: a pending
- * Steer is delivered at that model-step boundary by settling the running turn
- * `superseded` (reason `steer`, `atModelStep`), after the completed step's
- * tool calls and results are recorded, so nothing in flight is cut off. The
- * Steer then runs next on the same history.
+ * a pending Agent Steer instruction, or, while the running turn is a run of an
+ * automation whose overlap is `steer`, a pending later run of that same
+ * automation. Steer admission leaves a live attempt running, and the worker
+ * reads this before each model request: a pending Steer is delivered at that
+ * model-step boundary by settling the running turn `superseded` (reason
+ * `steer`, `atModelStep`), after the completed step's tool calls and results
+ * are recorded, so nothing in flight is cut off. The Steer then runs next on
+ * the same history.
  *
  * This unlocked read only decides whether that settlement is worth trying.
  * The settlement's `requirePendingSteer` precondition re-checks the same
@@ -43144,7 +43415,31 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  if (steerPrompt) return true;
+  if (steerPrompt) {
+    // A queued Steer that waits for the personal machine's owner cannot run,
+    // so it must not hand the owner's running turn over to it.
+    const owner = await sessionMachineOwnerSubject(db, {
+      accountId: null,
+      workspaceId,
+      sessionId,
+    });
+    if (owner === null) return true;
+    const [runnableSteer] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.status, "queued"),
+          ne(schema.sessionTurns.id, turnId),
+          sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          notWaitingForMachineOwnerSql(owner),
+        ),
+      )
+      .limit(1);
+    if (runnableSteer) return true;
+  }
   const [agentSteer] = await db
     .select({ id: schema.sessionSystemUpdates.id })
     .from(schema.sessionSystemUpdates)
@@ -43157,7 +43452,63 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  return agentSteer !== undefined;
+  if (agentSteer) return true;
+  return await pendingAutomationSteerExists(db, workspaceId, sessionId, turnId);
+}
+
+/**
+ * A later run of the automation that owns the running turn waits in the chat,
+ * and that automation hands its running turn over (`overlapPolicy: "steer"`).
+ * Only the automation's own turn yields: a person's turn, a goal continuation
+ * or another automation's run never matches, so they finish first and the run
+ * is delivered after them as usual. The waiting run must be deliverable as it
+ * stands (dispatched with its accepted execution, the claim's own preclaim
+ * rule), so a run the claim would refuse never ends the turn for nothing.
+ */
+async function pendingAutomationSteerExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  const turns = schema.sessionTurns;
+  const runs = schema.scheduledTaskRuns;
+  const tasks = schema.scheduledTasks;
+  const updates = schema.sessionSystemUpdates;
+  const [row] = await rawRows<{ present: number }>(
+    db,
+    sql`select 1 as present
+      from ${turns} running_turn
+      join ${runs} running_run
+        on running_run.workspace_id = running_turn.workspace_id
+        and running_run.id = running_turn.scheduled_task_run_id
+      join ${tasks} task
+        on task.workspace_id = running_run.workspace_id
+        and task.id = running_run.task_id
+      where running_turn.workspace_id = ${workspaceId}
+        and running_turn.session_id = ${sessionId}
+        and running_turn.id = ${turnId}
+        and task.overlap_policy = 'steer'
+        and task.status = 'active'
+        and task.deleted_at is null
+        and exists (
+          select 1
+          from ${updates} waiting
+          join ${runs} waiting_run
+            on waiting_run.workspace_id = waiting.workspace_id
+            and waiting_run.id = waiting.scheduled_task_run_id
+          where waiting.workspace_id = running_turn.workspace_id
+            and waiting.session_id = running_turn.session_id
+            and waiting.kind = 'scheduled_occurrence'
+            and waiting.state = 'pending'
+            and waiting_run.task_id = task.id
+            and waiting_run.id <> running_run.id
+            and waiting_run.status = 'dispatched'
+            and waiting_run.accepted_execution_snapshot is not null
+        )
+      limit 1`,
+  );
+  return row !== undefined;
 }
 
 /**
@@ -54669,6 +55020,63 @@ export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+/** A browser an agent session holds while it works or waits. */
+export type AgentHeldBrowserSession = {
+  accountId: string;
+  workspaceId: string;
+  browserSessionId: string;
+  /** The person to reach its controller as: the most recent person who
+   * started a turn of a holding session, or null when no person did. */
+  routeSubjectId: string | null;
+};
+
+const LIST_AGENT_HELD_BROWSER_SESSIONS =
+  "opengeni_private.list_agent_held_browser_sessions(integer, bigint)";
+
+/**
+ * The browsers that agent sessions hold right now, across workspaces: active,
+ * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
+ * that is still working (a turn queued, running, recovering, waiting for
+ * capacity or waiting on a person) or has an armed input wait. The same rule
+ * as the box release below; the API renews each one's hold on its controller.
+ * Most recently used first, at most `limit`.
+ *
+ * 1002 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this lists nothing. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function listAgentHeldBrowserSessions(
+  db: Database,
+  input: { limit: number },
+): Promise<AgentHeldBrowserSession[]> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${LIST_AGENT_HELD_BROWSER_SESSIONS})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return [];
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    browser_session_id: string;
+    route_subject_id: string | null;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_agent_held_browser_sessions(
+      ${input.limit}::integer, ${BROWSER_WAIT_HOLD_MAX_MS}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    browserSessionId: row.browser_session_id,
+    routeSubjectId: row.route_subject_id,
+  }));
+}
+
 /**
  * An idle browser or desktop does not keep its Modal box warm. Activity is
  * deliberate and durable: the newest of the interaction holder heartbeat and
@@ -54678,6 +55086,14 @@ const INTERACTION_HOLDER_RESOURCE =
  * tab or a closed view stops counting within seconds. An in-flight lifecycle
  * operation counts too. Interventions waiting for a person do not: a wait is
  * not use (see `sandboxGroupIdleForCommandContainmentTx`).
+ *
+ * One kind of pause does keep a browser: an agent session that
+ * created or is using it and is still working (a turn queued, running,
+ * recovering, waiting for capacity or waiting on a person) or deliberately
+ * waiting (an armed input wait) keeps it, page state and all, but never
+ * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
+ * browser's own controller keeps it by the same rule;
+ * `list_idle_interaction_leases` (migration 1002) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
@@ -54824,7 +55240,20 @@ export async function releaseIdleInteractionHolders(
       tx,
       sql`
       select id, lifecycle, controller_generation,
-        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true)
+          and not exists (
+            select 1 from browser_session_associations association
+            join sessions waiting on waiting.id = association.session_id
+              and waiting.workspace_id = association.workspace_id
+            where association.workspace_id = browser_sessions.workspace_id
+              and association.browser_session_id = browser_sessions.id
+              and association.relationship in ('created', 'using')
+              and (waiting.status in ('queued', 'running', 'requires_action', 'recovering',
+                  'waiting_capacity')
+                or waiting.input_wait_until > now())
+              and browser_sessions.last_used_at
+                > now() - (${BROWSER_WAIT_HOLD_MAX_MS}::bigint * interval '1 millisecond')
+          )) as idle,
         (placement_kind = 'sandbox_group'
           and controller_host_sandbox_group_id = ${input.sandboxGroupId}
           and placement_instance_id = ${lease.instance_id}
@@ -55361,6 +55790,74 @@ export async function summarizeSessionRecoveryBacklog(
       count: Number(row.count),
       scheduled: Number(row.scheduled),
       oldestOverdueSeconds: Number(row.oldest_overdue_seconds),
+    };
+  }
+  return summary;
+}
+
+/** What currently holds a durable queued turn, from its session's own state. */
+export const QUEUED_TURN_HOLDS = [
+  "ready",
+  "behind_active_turn",
+  "paused",
+  "failed",
+  "requires_action",
+  "waiting_capacity",
+  "cancelled",
+] as const;
+
+export type QueuedTurnHold = (typeof QUEUED_TURN_HOLDS)[number];
+
+export type QueuedTurnHoldSummary = {
+  count: number;
+  /** Age of the oldest queued turn in this class; 0 when the class is empty. */
+  oldestAgeSeconds: number;
+};
+
+const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
+
+/**
+ * Content-free cross-workspace classification of every `status = 'queued'`
+ * turn by what holds it (migration 0988). The classes sum to
+ * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
+ * the rest wait for a running turn, Resume, a new message, or a person.
+ *
+ * 0988 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this returns null. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function summarizeQueuedTurnsByHold(
+  db: Database,
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return null;
+  const summary = Object.fromEntries(
+    QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
+  ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const rows = await rawRows<{
+    hold: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select hold, count, oldest_age_seconds
+      from opengeni_private.summarize_queued_turns_by_hold()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.hold in summary)) continue;
+    summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
     };
   }
   return summary;
@@ -65384,12 +65881,15 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
 //
-// A personal machine belongs to the workspace it was first connected from, and
-// finalize_scoped_enrollment reuses the owner's enrollment for the same public
-// key wherever that is. Credentials and connection lookups are per workspace,
-// so a personal finalize from any other workspace is refused with
-// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
-// so nothing is written and a single-use token is not claimed.
+// A live personal machine belongs to the workspace it was connected from, and
+// finalize_scoped_enrollment reuses the owner's live enrollment for the same
+// public key wherever that is. Credentials and connection lookups are per
+// workspace, so a personal finalize from any other workspace while it is live
+// is refused with PersonalMachineConnectedElsewhereError (the machine serves
+// the owner's other workspaces through grants instead). The caller's
+// transaction rolls back, so nothing is written and a single-use token is not
+// claimed. Once removed, the machine can be connected again from any of the
+// owner's workspaces: a new enrollment is made there (0996).
 export class PersonalMachineConnectedElsewhereError extends Error {
   constructor() {
     super("this machine was first connected as a personal machine from another workspace");
@@ -70693,6 +71193,13 @@ export async function evaluateGoalContinuation(
         if (!row || row.status !== "active") {
           return { decision: "none" } as const;
         }
+        // A message waiting for the personal machine's owner is not queued
+        // work: the owner's goal keeps going beside it.
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -70704,6 +71211,7 @@ export async function evaluateGoalContinuation(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.sessionId, input.sessionId),
               inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .limit(1);
@@ -71045,6 +71553,11 @@ export async function materializeGoalContinuation(
             ),
           );
 
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -71063,6 +71576,8 @@ export async function materializeGoalContinuation(
                 "recovering",
                 "waiting_capacity",
               ]),
+              // Waiting messages never hold back the owner's goal.
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
@@ -74354,31 +74869,62 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
 }
 
 /** The session lock must already be held. Shared with pre-claim failure settlement
- * so a failed batch claim is attributed to the same logical turn. */
+ * so a failed batch claim is attributed to the same logical turn.
+ *
+ * On a personal machine, messages from anyone but its owner wait
+ * (`machine-owner-wait.ts`): they are never the head. `waiting` returns the
+ * ones sent before the owner's claimed head (queued ahead of it, or sent
+ * before an owner's Steer that jumped them), oldest first, which that turn
+ * takes in as context ahead of its own prompt. */
 async function selectQueuedSessionClaimBatch(
   tx: Database,
   session: typeof schema.sessions.$inferSelect,
   pendingAgentSteer: boolean,
-): Promise<Array<typeof schema.sessionTurns.$inferSelect>> {
+): Promise<{
+  batch: Array<typeof schema.sessionTurns.$inferSelect>;
+  waiting: Array<typeof schema.sessionTurns.$inferSelect>;
+}> {
+  const machineOwner = await sessionMachineOwnerSubject(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+  });
+  const waits =
+    machineOwner === null
+      ? sql`false`
+      : sql`coalesce(${waitsForMachineOwnerSql(machineOwner)}, false)`;
   // Only fetch full prompt/authority rows for the leading Steer run (or the
   // ordinary head). A long queue of later Sends must not inflate claim memory.
-  const previews = await rawRows<{ id: string; version: number }>(
+  // Waiting messages break that run, and only those sent before the head are
+  // taken in with it.
+  const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with ordered as (
-      select id, version, position, created_at,
-        row_number() over (order by position, created_at, id) as ordinal,
-        count(*) filter (where metadata->>'delivery' is distinct from 'steer')
-          over (order by position, created_at, id rows unbounded preceding) as sends
+    with candidates as (
+      select id, version, position, created_at, ${waits} as waits,
+        metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
         and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), ordered as (
+      select id, version, position, created_at, waits,
+        count(*) filter (where not waits) over run as runnable,
+        count(*) filter (where not waits and send) over run as sends,
+        count(*) filter (where waits) over run as waited
+      from candidates
+      window run as (order by position, created_at, id rows unbounded preceding)
+    ), head as (
+      select waited, created_at from ordered where not waits and runnable = 1
     )
-    select id, version from ordered where ordinal = 1 or sends = 0
+    select id, version, waits from ordered
+    where exists (select 1 from head) and (
+      (waits and (runnable = 0 or created_at < (select created_at from head)))
+      or (not waits and runnable = 1)
+      or (not waits and sends = 0 and waited = (select waited from head)))
     order by position, created_at, id`,
   );
-  if (previews.length === 0) return [];
+  if (previews.length === 0) return { batch: [], waiting: [] };
   const locked = await lockSessionEventWriteRows(tx, {
     workspaceId: session.workspaceId,
     controlLock: "already_locked",
@@ -74386,7 +74932,7 @@ async function selectQueuedSessionClaimBatch(
     turnIds: previews.map((turn) => turn.id),
   });
   const lockedById = new Map(locked.turns.map((turn) => [turn.id, turn]));
-  const queued = previews.map((preview) => {
+  const rows = previews.map((preview) => {
     const turn = lockedById.get(preview.id);
     if (
       !turn ||
@@ -74399,10 +74945,11 @@ async function selectQueuedSessionClaimBatch(
         "Queued claim selection changed under the session lock",
       );
     }
-    return turn;
+    return { turn, waits: preview.waits === true };
   });
+  const queued = rows.filter((row) => !row.waits).map((row) => row.turn);
   const first = queued[0];
-  if (!first) return [];
+  if (!first) return { batch: [], waiting: [] };
   const plainSteer = (turn: typeof first) =>
     turn.metadata?.delivery === "steer" &&
     turn.executionGeneration === 0 &&
@@ -74442,7 +74989,16 @@ async function selectQueuedSessionClaimBatch(
       break;
     batch.push(next);
   }
-  return batch;
+  // A waiting message whose history cannot be rendered stays queued rather
+  // than failing the owner's claim.
+  const waiting = rows
+    .filter((row) => row.waits && validHistory(row.turn))
+    .map((row) => row.turn)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+    );
+  return { batch, waiting };
 }
 
 /**
@@ -75791,11 +76347,12 @@ export async function claimSessionWorkForAttempt(
         // internal instruction is delivered as context on that same human turn
         // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
-        const queuedBatch = await selectQueuedSessionClaimBatch(
-          tx as unknown as Database,
-          session,
-          Boolean(pendingAgentSteer),
-        );
+        const { batch: queuedBatch, waiting: waitingMessages } =
+          await selectQueuedSessionClaimBatch(
+            tx as unknown as Database,
+            session,
+            Boolean(pendingAgentSteer),
+          );
         const queuedTurnRow = queuedBatch.at(-1);
         for (const member of queuedBatch) {
           await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, member);
@@ -76941,9 +77498,25 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
-        const historyTurns = [...queuedBatch.slice(0, -1), row];
+        // Messages that waited for this machine's owner come first, in the
+        // order they were sent, marked as such; then the claimed batch.
+        const waitingHistory = waitingMessages.map((waitingTurn) => ({
+          historyTurn: waitingTurn,
+          modelContext: [WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT, waitingTurn.modelContext?.trim()]
+            .filter(Boolean)
+            .join("\n\n"),
+          goalSnapshot: undefined,
+        }));
+        const historyTurns = [
+          ...waitingHistory,
+          ...[...queuedBatch.slice(0, -1), row].map((historyTurn) => ({
+            historyTurn,
+            modelContext: historyTurn.modelContext,
+            goalSnapshot: SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+          })),
+        ];
         await tx.insert(schema.sessionHistoryItems).values(
-          historyTurns.map((historyTurn, index) =>
+          historyTurns.map(({ historyTurn, modelContext, goalSnapshot }, index) =>
             withLosslessContentWriteVersion(
               {
                 accountId: session.accountId,
@@ -76958,8 +77531,8 @@ export async function claimSessionWorkForAttempt(
                       ? (historyTurn.resources as ResourceRef[])
                       : [],
                     TimelineAnnotations.parse(historyTurn.annotations),
-                    historyTurn.modelContext,
-                    SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+                    modelContext,
+                    goalSnapshot,
                     // Acceptance time, not claim time: a queued message keeps the
                     // moment the user sent it.
                     historyTurn.createdAt,
@@ -76974,7 +77547,9 @@ export async function claimSessionWorkForAttempt(
             ),
           ),
         );
-        const consumed = queuedBatch.slice(0, -1);
+        // Both the waiting messages and the batch's earlier members are
+        // delivered with this turn and never run on their own.
+        const consumed = [...waitingMessages, ...queuedBatch.slice(0, -1)];
         const consumedEvents: SessionEventInsertWithPayload[] = consumed.map((member, index) => ({
           accountId: session.accountId,
           workspaceId,
@@ -79007,18 +79582,13 @@ export async function peekSessionWork(
       throw new Error(`Session ${sessionId} has terminal active turn ${turn.id} (${turn.status})`);
     }
 
-    const [queued] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
-      .limit(1);
+    // A message waiting for the personal machine's owner is not work yet.
+    const queued = await runnableQueuedTurnExists(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      sources: ["user", "api"],
+    });
     if (queued || session.compactRequested) return runnable;
     const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
     const inputWaitPeek =
@@ -79876,7 +80446,7 @@ async function settleSessionWorkBeforeAttemptClaim(
               desc(schema.sessionSystemUpdates.id),
             )
             .limit(1);
-          const queuedBatch = await selectQueuedSessionClaimBatch(
+          const { batch: queuedBatch } = await selectQueuedSessionClaimBatch(
             tx as unknown as Database,
             session,
             Boolean(pendingAgentSteer),
@@ -80952,17 +81522,13 @@ export async function settleSessionIdleWithParentOutbox(
       ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
-      const [queued] = await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1);
+      // A message waiting for the personal machine's owner does not keep the
+      // chat busy: it is not work until the owner writes or the chat moves.
+      const queued = await runnableQueuedTurnExists(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+      });
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
@@ -82733,18 +83299,13 @@ export async function applySessionTurnSettlement(
 
       let effectiveSessionStatus = input.sessionStatus;
       if (input.sessionStatus === "idle" && input.activeTurnId === null) {
-        const [waitingPrompt] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-              inArray(schema.sessionTurns.source, ["user", "api"]),
-            ),
-          )
-          .limit(1);
+        // Messages waiting for the personal machine's owner leave it idle.
+        const waitingPrompt = await runnableQueuedTurnExists(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
       const now = new Date();
@@ -86173,18 +86734,14 @@ export async function markSessionWorkflowWakeDelivered(
                 return { action: "pending_admission", blocker: "pending_input_wait" } as const;
               }
             }
-            const [pendingPromptTurn] = await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1);
+            // A message waiting for the personal machine's owner is not
+            // undelivered work, so it must not keep the wake pending.
+            const pendingPromptTurn = await runnableQueuedTurnExists(tx as unknown as Database, {
+              accountId: null,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            });
             if (pendingPromptTurn) {
               return {
                 action: "pending_admission",
@@ -90241,6 +90798,7 @@ async function mapSessionWithControl(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
+  presentation: "full" | "model_gate" = "full",
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -90261,6 +90819,7 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
     // Temporal acknowledgement proves that a worker has admitted a turn.
@@ -91801,3 +92360,5 @@ export * from "./boot-connect";
 export * from "./teams-conversations";
 
 export * from "./teams-private-session";
+
+export { recordMachinePromotionProof } from "./promotion-abuse";

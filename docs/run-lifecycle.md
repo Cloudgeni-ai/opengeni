@@ -124,14 +124,17 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; slow and containment logs carry the same hashed attempt
 `correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Tool-writer logs also sample the fence's closed `writerKinds` set (tool call,
+shell session, pending shell start, remote operation) and registration count;
+command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The
-standalone host arms a 100-second exit backstop alongside Temporal's existing
-shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+standalone host arms its existing role-specific process-exit backstop alongside
+Temporal's shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
 retained-process proofs still govern its admission. Temporal force shutdown only
 rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
 service hosts own their fatality policy through `terminateWorker` or an equivalent
@@ -140,6 +143,10 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Host containment intent survives a Temporal finalization exception that masks
+its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
+exception as the cause, and the standalone entry point labels its nonzero exit
+as a force stop, not an unexplained fatal crash. No shutdown timing changes.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
 processes also block admission, even when their logical outcome is `completed`.
 The work peeker exposes the existing previous-attempt wait, and the final writer's
@@ -727,8 +734,10 @@ worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
-silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Pause stores only the open-suffix sentinel; the
+silently trims conversation truth for inference: proactive compaction runs when
+stored history reaches 60% of any of these limits, and a history already over
+them is only read as a bounded, payload-elided view for checkpointing (see
+[`context-compaction.md`](context-compaction.md)). Pause stores only the open-suffix sentinel; the
 approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
 65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
@@ -949,15 +958,20 @@ artifact API requests instead authorize from their ordinary authenticated access
 grant. Within governance, service-initiated goal continuations and compactions
 use the frozen causal human as the personal-preference subject while retaining
 their service initiator; pure service work has no personal-preference scope.
-Runtime composition is deterministic: core safety,
-organization/workspace/user preference descriptors plus organization/global,
-workspace, and role policy, then durable session instructions, tool/repository/
-skill substrate, and memory. Optional application `modelContext` is not part of
+Runtime composition is deterministic: core safety, durable session
+instructions, tool/repository/skill substrate, and memory form the system
+prompt. The rendered governance (organization/workspace/user preference
+descriptors plus organization/global, workspace, and role policy) is not part
+of the system prompt: it differs by initiator and changes between turns, so it
+is a durable developer history item written before the first turn that sees a
+new value, frozen for every attempt of that turn, and replaced by appending a
+newer item (see `docs/context-compaction.md`, "Prompt-cache stability").
+Optional application `modelContext` is not part of
 that prefix: claim stores it as a separate leading `input_text` part of the
 exact chronological user message. Standard timeline rendering omits it, while
 full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
-governance applies, the legacy prompt bytes remain unchanged.
+governance applies, no governance item is written.
 
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
@@ -1123,6 +1137,27 @@ waiter-local. Supervised cancellation preserves durable intent and its original
 writer; a bounded helper observation failure keeps the same helper UUID, cursor
 and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
+
+When a model-facing foreground wait returns an unavailable observation for a
+durably adoptable command, it commits the ordinary session background-command
+handoff **before** exposing its command UUID, just as it does for a running
+receipt. Only then does the turn fence remove its shell registration. Failed
+adoption, cancelled waits and worker-local handles keep their existing ownership
+rules. Setup/lifecycle calls still throw; nothing replays a Start or claims exit.
+The process holder and parent admission stay active and continue to block
+non-point-in-time capture until exact provider proof or the existing idle/deadline
+containment settles them. This prevents an unavailable observer from owning both
+an unfindable command ID and an unfinishable turn cleanup loop.
+
+An exact Modal router `FAILED_PRECONDITION` / `exec not found` response means
+observation state is unavailable, not that a process group has stopped. It is
+typed non-retryable read uncertainty, never Start replay or physical-loss proof.
+The reaper records `process_observation_unavailable` rather than generic
+`provider_error`; protected failure diagnostics retain the source/cause chain
+and numeric gRPC statuses, while public logs contain only the lookup key and
+bounded probe stage. Forgotten output cannot be reconstructed. The existing
+idle-command window, explicit disable switch and provider deadline remain
+unchanged; a successful containment still captures before stopping the box.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference, plus the first-party
@@ -1702,6 +1737,33 @@ timer, queue or preparation outlasted the window. A queued retry rejected before
 dispatch is not counted as an executed retry. Exhaustion retains the public
 `provider_unavailable` classification, selected maximum, actual retry count and
 `providerRecoveryExhaustedReason` (`deadline`, `retry_limit` or `invalid_clock`).
+
+**An unreachable model provider waits for the connection to return.** When the
+machine running the turn loses its internet connection, five quick retries
+cannot outlast it, and every running turn used to fail within about two
+minutes. A retryable `provider_unavailable` or `upstream_connectivity_unavailable`
+failure with no HTTP status, no request timeout and no function-tool origin
+selects the internal durable reason `provider_unreachable` when its cause chain
+shows the provider was never reached: a temporary name-resolution failure
+(`EAI_AGAIN`), no route (`ENETUNREACH`, `EHOSTUNREACH`, `ENETDOWN`), a refused
+connection (`ECONNREFUSED`, `ConnectionRefused`, `FailedToOpenSocket`, or the
+runtime's exact "Unable to connect" message), or the OpenAI SDK's opaque
+`Connection error.` with no code anywhere on the chain. A dropped or slow
+connection (`ECONNRESET`, `ETIMEDOUT`), a name that does not exist
+(`ENOTFOUND`), TLS failures and every HTTP status keep their existing policy.
+No-route codes are now retryable at all; before, they failed the turn at once.
+
+`provider_unreachable` allows at most **90 consecutive replacement attempts
+within six hours** of the first durable recovery checkpoint, with delays of
+5 s / 15 s / 30 s / 60 s / 120 s and then 300 s plus positive jitter. It uses the
+same durable count and clock as the other windowed policies, so a turn whose
+first failure was ordinary keeps that first clock. A failing model socket still
+switches to HTTP at the fifth recovery, as for ordinary failures. The public
+code stays `provider_unavailable`, a new message from the person ends the wait
+as for every recovery, and a completed model response clears the streak. A
+misconfigured local endpoint that refuses connections also waits up to six
+hours instead of failing within two minutes. Workers older than this policy
+treat the reason as an ordinary recovery and exhaust at five.
 
 The DB-only checkpoint-outage wire preserves the exact next overload count and
 bounded delay (including Retry-After); it cannot promote another cause to the
@@ -3706,14 +3768,10 @@ Numeric and string gRPC transport codes and bounded AggregateError causes
 dominate terminal sandbox hints; transient observation can never retire a live
 lease or authorize command replay.
 
-`modal-control-v1` is an explicit legacy reader for already launched commands;
-new starts never select it. Its batch API does not guarantee full replay, so
-historical missing output cannot be reconstructed or called complete. Never
-reinterpret its `tp-` execution IDs or batch indices as router UUIDs/byte offsets.
-The locator-schema rollout requires a maintenance worker cutover because old
-readers cannot parse the new discriminator. After old active locators have
-settled or passed the existing evidence-backed drain, remove the legacy live
-reader; historical records remain immutable and do not authorize execution.
+Modal commands use only the `modal-router-v1` locator. The earlier
+batch-index `modal-control-v1` reader has been removed; any historical exited
+row that still carries that locator is immutable evidence and never authorizes
+reading or execution.
 
 Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
 `/bin/true` invocation with no shell, user environment or command admission.
@@ -4088,12 +4146,18 @@ calls and Codemode use this path; third-party lookalike tools do not. Outside
 that owning context, native reads and background reconciliation refresh the
 stored snapshot. An empty running snapshot can therefore precede capture of
 bytes already produced by the process.
-If a live refresh encounters a recognized temporary transport failure, the
-runtime reauthorizes and rereads the API instead of discarding retained output.
-A still-running result reports `freshness.status: "refresh_unavailable"` and
-`retryable: true`; this is a freshness warning, not proof of command failure or
-completion. No provider operation is retried by this fallback. Authorization,
-consent, fencing, integrity, and unclassified errors still fail closed.
+If a live refresh encounters a recognized temporary failure, the runtime
+reauthorizes and rereads the API instead of discarding retained output.
+Recognized temporary failures are transport outages and a provider observation
+that missed its bounded read window when the provider marks another read of the
+same invocation safe. A `command_wait` keeps its requested wait and refreshes
+the same command again on its ordinary one-second cadence; that is a read, never
+a Start or stdin replay. A still-running result whose latest refresh failed
+reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
+a freshness warning, not proof of command failure or completion. Authorization,
+consent, fencing, integrity, unclassified errors, and observation failures that
+do not permit another read (for example, a provider that discarded the
+invocation's observation state) still fail closed.
 
 Typed runner failures are distinct from the process exit code: a runner may
 report an output/spool failure alongside exit code zero. Migration 0417 adds

@@ -91,4 +91,27 @@ describe("parseOpenGeniLink", () => {
     expect(isReservedOpenGeniLink(`https://external.test${path}`)).toBe(false);
     expect(isReservedOpenGeniLink(`/workspaces/${WS}/settings`)).toBe(false);
   });
+
+  test("a session reference names another chat in the same workspace", () => {
+    const upper = UUID.toUpperCase();
+    expect(parseOpenGeniLink(`session:${upper}`)).toEqual({
+      kind: "session",
+      sessionId: UUID,
+      workspaceId: null,
+    });
+    expect(parseOpenGeniLink(`SESSION:${UUID}`)).toEqual(parseOpenGeniLink(`session:${UUID}`));
+    expect(openGeniConsolePath(parseOpenGeniLink(`session:${UUID}`)!, WS)).toBe(
+      `/workspaces/${WS}/sessions/${UUID}`,
+    );
+    for (const href of [
+      "session:",
+      "session:not-an-id",
+      `session:${UUID}/events`,
+      `session:${UUID}x`,
+    ]) {
+      expect(parseOpenGeniLink(href)).toBeNull();
+      // A malformed reference is still reserved: it never navigates on the host origin.
+      expect(isReservedOpenGeniLink(href)).toBe(true);
+    }
+  });
 });

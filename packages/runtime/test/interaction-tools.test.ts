@@ -208,6 +208,92 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_act passes on a wait that ended on a page whose network stayed busy", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message:
+        "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+    };
+    let dispatched: unknown = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+          dispatched = request.action;
+          return {
+            ...browserReceipt(request.operationId, browserObservation(target)),
+            notes: [note],
+          };
+        },
+      }),
+    });
+    const caller = { kind: "model" as const, subjectId: "model:test" };
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/", waitUntil: "network_idle" },
+      },
+      { operationId: randomUUID(), caller },
+    );
+    expect(dispatched).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.test/" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", notes: [note] });
+    expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
+  });
+
+  test("browser_act says when the actions completed but the page after them was not read", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "observation_unavailable" as const,
+      message:
+        "all 2 actions completed, but the page could not be read after them, so this receipt has no outline; observe the tab to see the page now",
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => ({
+          ...browserReceipt(request.operationId, browserObservation(target)),
+          observation: null,
+          notes: [note],
+        }),
+      }),
+    });
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: {
+          type: "batch",
+          actions: [
+            { type: "fill", locator: { kind: "label", text: "Search" }, value: "report" },
+            { type: "press", key: "Enter" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect((result.content[0] as { text: string }).text).toBe(
+      `Action completed on tab ${target.id}.\nNote: ${note.message}.`,
+    );
+  });
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,
@@ -543,6 +629,124 @@ describe("interaction attempt tools", () => {
       { workspace: workspaceId, options: { includeDisconnected: false } },
       { workspace: workspaceId, options: { includeDisconnected: true } },
     ]);
+  });
+
+  test("discovery lists the person's computers and leaves out sessions on offline ones", async () => {
+    const windowsPc = randomUUID();
+    const linuxDesktop = randomUUID();
+    const machineView = (
+      sandboxId: string,
+      name: string,
+      os: string,
+      state: "online" | "offline",
+      active: boolean,
+    ) => ({
+      sandboxId,
+      enrollmentId: randomUUID(),
+      name,
+      kind: "selfhosted" as const,
+      state,
+      active,
+      isSessionGroup: false,
+      os,
+      arch: "x86_64",
+      hasDisplay: state === "online",
+    });
+    const stale = discoveredComputerSession(randomUUID(), sessionId);
+    stale.placement = { kind: "connected_machine", sandboxId: windowsPc };
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    // A machine missing from the list is not known to be offline: its session stays.
+    const unlistedMachine = discoveredComputerSession(randomUUID(), sessionId);
+    unlistedMachine.placement = { kind: "connected_machine", sandboxId: randomUUID() };
+    const machineRequests: unknown[] = [];
+    let machinesFail = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+          listComputerSessions: async () => ({
+            revision: 1,
+            sessions: [stale, home, unlistedMachine],
+          }),
+          listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        }),
+        listMachines: async (workspace, options) => {
+          machineRequests.push({ workspace, ...options });
+          if (machinesFail) throw new OpenGeniApiError(404, "not found");
+          return {
+            activeSandboxId: windowsPc,
+            activeEpoch: 3,
+            machines: [
+              {
+                ...machineView(randomUUID(), "Session sandbox", "linux", "online", false),
+                kind: "modal",
+                isSessionGroup: true,
+              },
+              machineView(linuxDesktop, "Linux desktop", "linux", "online", false),
+              machineView(windowsPc, "Windows PC", "win32", "offline", true),
+            ],
+          } as never;
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const discover = async (caller: "model" | "codemode") =>
+      await definitions[0]!.execute(
+        {},
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+
+    const model = await discover("model");
+    expect(model.isError).not.toBe(true);
+    expect(machineRequests).toEqual([{ workspace: workspaceId, sessionId }]);
+    const machines = [
+      {
+        name: "Windows PC",
+        os: "win32",
+        state: "offline",
+        hasDisplay: false,
+        placement: { kind: "connected_machine", sandboxId: windowsPc },
+        onThisMachine: true,
+      },
+      {
+        name: "Linux desktop",
+        os: "linux",
+        state: "online",
+        hasDisplay: true,
+        placement: { kind: "connected_machine", sandboxId: linuxDesktop },
+      },
+    ];
+    const compact = JSON.parse((model.content[0] as { text: string }).text) as {
+      machines: unknown[];
+      computers: Array<{ id: string }>;
+    };
+    expect(compact.machines).toEqual(machines);
+    expect(compact.computers.map((computer) => computer.id).sort()).toEqual(
+      [home.id, unlistedMachine.id].sort(),
+    );
+    expect((model.structuredContent as { machines: unknown[] }).machines).toEqual(machines);
+    expect((model.content[1] as { text: string }).text).toBe(
+      "Left out 1 browser and computer sessions on offline machines. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.",
+    );
+
+    // Code Mode keeps every record, with the machines.
+    const codemode = await discover("codemode");
+    const full = codemode.structuredContent as { machines: unknown[]; computers: unknown[] };
+    expect(full.machines).toEqual(machines);
+    expect(full.computers).toHaveLength(3);
+
+    // Without a machine list nothing is known to be offline, and the rest of
+    // the discovery still answers.
+    machinesFail = true;
+    const unlisted = await discover("model");
+    expect(unlisted.isError).not.toBe(true);
+    expect(unlisted.structuredContent).not.toHaveProperty("machines");
+    expect((unlisted.structuredContent as { computers: unknown[] }).computers).toHaveLength(3);
+    expect(unlisted.content).toHaveLength(1);
   });
 
   test("attached Chrome discovery lists lean profiles and hides bridges once one is connected", async () => {
@@ -1211,6 +1415,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([4, 5, 6]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         getBrowserSession: async () => session,
@@ -1232,7 +1437,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -1288,6 +1493,21 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The browser opened, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after its outline was read would
+    // pair one page's outline with another page's picture: leave it out.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, includeScreenshot: true },
+      context(),
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test.each([true, false])(
@@ -1682,10 +1902,65 @@ describe("interaction attempt tools", () => {
       });
       const message = (result.structuredContent as { error: { message: string } }).error.message;
       expect(message).toBe(
-        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
+        `API 404: BrowserSession not found. The browserSessionId you sent, ${mistyped}, is not ${browserSessionId}: they differ in 1 character. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
       );
     },
   );
+
+  test("an id two characters off an open BrowserSession is named as not that session", async () => {
+    const open = discoveredBrowserSession("44867760-0b48-4b43-aa93-91eb19c94f64", sessionId);
+    open.lifecycle = "active";
+    open.name = "Signup";
+    const sent = "44867760-0b48-4b43-aa89-91eb19c94f64";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId: sent, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      `API 404: BrowserSession not found. The browserSessionId you sent, ${sent}, is not ${open.id}: they differ in 2 characters. This chat's open BrowserSessions, most recently used first: ${open.id} "Signup". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+    );
+  });
+
+  test("a BrowserSession the API did not find is never listed as open", async () => {
+    const gone = discoveredBrowserSession(browserSessionId, sessionId);
+    gone.lifecycle = "active";
+    gone.name = "Research";
+    const other = discoveredBrowserSession(randomUUID(), sessionId);
+    other.lifecycle = "active";
+    other.name = "Other";
+    other.lastUsedAt = new Date(Date.parse(gone.lastUsedAt) - 60_000).toISOString();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [gone, other] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+    );
+  });
 
   test("a missing BrowserSession in a chat with no open browser says to open one", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
@@ -1774,6 +2049,323 @@ describe("interaction attempt tools", () => {
     expect(message).toBe(
       `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
     );
+  });
+
+  describe("a computerSessionId near an open one", () => {
+    const openId = "44867760-0b48-4b43-aa93-91eb19c94f64";
+    const observeWith = async (
+      sentId: string,
+      open: ReadonlyArray<{ id: string; name: string; lastUsedAt?: string }>,
+    ) => {
+      const sessions = open.map((entry) => {
+        const computer = discoveredComputerSession(entry.id, sessionId);
+        computer.lifecycle = "active";
+        computer.name = entry.name;
+        if (entry.lastUsedAt) computer.lastUsedAt = entry.lastUsedAt;
+        return computer;
+      });
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listComputerSessions: async () => ({ revision: 1, sessions }) as never,
+          observeComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+          captureComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_observe"],
+        permissions: ["sessions:read"],
+      });
+      const result = await definitions[0]!.execute(
+        { computerSessionId: sentId, targetId: "window-1" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test("is named as not that session", async () => {
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f65";
+      expect(await observeWith(sent, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("is named up to 8 differing characters, not at 9", async () => {
+      const eight = "44867760-0b48-4b43-aa93-91eb00000000";
+      const nine = "44867760-0b48-4b43-aa93-91e000000000";
+      expect(await observeWith(eight, [{ id: openId, name: "Desktop" }])).toContain(
+        `The computerSessionId you sent, ${eight}, is not ${openId}: they differ in 8 characters.`,
+      );
+      expect(await observeWith(nine, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("names the closest of two near sessions", async () => {
+      // Three characters off the sent id's target, and listed first.
+      const fartherId = "44867760-0b48-4b43-aa93-91eb19c94000";
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f6a";
+      const message = await observeWith(sent, [
+        { id: fartherId, name: "Newer", lastUsedAt: new Date().toISOString() },
+        { id: openId, name: "Older", lastUsedAt: new Date(Date.now() - 60_000).toISOString() },
+      ]);
+      expect(message).toContain(
+        `The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character.`,
+      );
+      expect(message).not.toContain(`is not ${fartherId}`);
+    });
+  });
+
+  describe("tools that name a session directly give the same hint", () => {
+    const browserMissing = () => new OpenGeniApiError(404, "BrowserSession not found");
+    const computerMissing = () => new OpenGeniApiError(404, "ComputerSession not found");
+    const openBrowser = () => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = "Research";
+      return browser;
+    };
+    const openComputer = () => {
+      const computer = discoveredComputerSession(randomUUID(), sessionId);
+      computer.lifecycle = "active";
+      computer.name = "Desktop";
+      return computer;
+    };
+    const run = async (
+      tool: string,
+      args: Record<string, unknown>,
+      transport: Parameters<typeof partialTransport>[0],
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport(transport),
+        workspaceId,
+        sessionId,
+        selectedTools: [
+          tool,
+          ...(tool.startsWith("interaction__cua_") ? ["computer_open", "computer_act"] : []),
+        ],
+        permissions: ["sessions:read", "sessions:control", "files:upload", "identities:write"],
+      });
+      const definition = definitions.find(
+        (candidate) => candidate.identity.toolName === tool || candidate.modelName === tool,
+      )!;
+      const result = await definition.execute(args, {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      });
+      expect(result).toMatchObject({ isError: true });
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test.each([
+      ["browser_clipboard", {}],
+      ["browser_downloads", { operation: "list" }],
+      [
+        "browser_download_save",
+        { downloadId: randomUUID(), destinationPath: "downloads/report.pdf" },
+      ],
+      ["browser_publish", { identityId: randomUUID(), expectedHeadGeneration: 0 }],
+      ["browser_lifecycle", { action: "suspend" }],
+      ["browser_lifecycle", { action: "end" }],
+    ] as const)("%s %j lists the open BrowserSessions to use instead", async (tool, args) => {
+      const open = openBrowser();
+      const message = await run(
+        tool,
+        { browserSessionId: randomUUID(), ...args },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+          listBrowserDownloads: async () => {
+            throw browserMissing();
+          },
+          saveBrowserDownload: async () => {
+            throw browserMissing();
+          },
+          publishBrowserRevision: async () => {
+            throw browserMissing();
+          },
+          suspendBrowserSession: async () => {
+            throw browserMissing();
+          },
+          endBrowserSession: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      // The id is required here, so there is no "omit it" alternative.
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+      );
+    });
+
+    test("browser_open attaching to a missing BrowserSession offers the open ones or a new one", async () => {
+      const open = openBrowser();
+      let sessions = [open];
+      const transport = {
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        getBrowserSession: async () => {
+          throw browserMissing();
+        },
+      };
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids, or omit browserSessionId to open or reuse one.`,
+      );
+      sessions = [];
+      expect(await run("browser_open", { browserSessionId: randomUUID() }, transport)).toBe(
+        "API 404: BrowserSession not found. This chat has no open BrowserSession; omit browserSessionId to open one.",
+      );
+    });
+
+    test("browser_open naming a missing linked computer gets only the computer hint, whatever the computer names say", async () => {
+      const browser = openBrowser();
+      const computer = openComputer();
+      // A name that reads like the browser's refusal must not make the
+      // computer's refusal look like a missing BrowserSession.
+      computer.name = "Lab: BrowserSession not found";
+      const message = await run(
+        "browser_open",
+        { browserSessionId: browser.id, linkedComputerSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: [computer] }) as never,
+          getBrowserSession: async () => {
+            throw computerMissing();
+          },
+          openBrowserSession: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Lab: BrowserSession not found". Use one of these ids.`,
+      );
+    });
+
+    test("browser_open naming a missing linked computer is answered from the API's own refusal", async () => {
+      const browser = openBrowser();
+      const computer = openComputer();
+      // The body the API sends when the linked ComputerSession does not exist.
+      const linkedMissing = () =>
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            error: {
+              status: 404,
+              code: "not_found",
+              message: "Linked ComputerSession not found",
+              retryable: false,
+              requestId: "request-1",
+            },
+          }),
+        );
+      for (const args of [
+        { linkedComputerSessionId: randomUUID() },
+        { browserSessionId: browser.id, linkedComputerSessionId: randomUUID() },
+      ]) {
+        const message = await run("browser_open", args, {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: [computer] }) as never,
+          getBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          createBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          openBrowserSession: async () => {
+            throw linkedMissing();
+          },
+        });
+        expect(message).toBe(
+          `API 404: Linked ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Desktop". Use one of these ids. Reference: request-1.`,
+        );
+      }
+    });
+
+    test("a missing session is recognised from the API's JSON refusal, flat or nested", async () => {
+      const open = openBrowser();
+      for (const body of [
+        JSON.stringify({ error: { code: "not_found", message: "BrowserSession not found" } }),
+        JSON.stringify({ code: "not_found", message: "BrowserSession not found" }),
+      ]) {
+        const message = await run(
+          "browser_clipboard",
+          { browserSessionId: randomUUID() },
+          {
+            listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+            readBrowserClipboard: async () => {
+              throw new OpenGeniApiError(404, body);
+            },
+          },
+        );
+        expect(message).toBe(
+          `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+        );
+      }
+    });
+
+    test("computer_open and computer_lifecycle name the open ComputerSessions", async () => {
+      const open = openComputer();
+      const transport = {
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        getComputerSession: async () => {
+          throw computerMissing();
+        },
+        endComputerSession: async () => {
+          throw computerMissing();
+        },
+      };
+      const listed = `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids`;
+      expect(await run("computer_open", { computerSessionId: randomUUID() }, transport)).toBe(
+        `${listed}, or omit computerSessionId to open or reuse one.`,
+      );
+      expect(
+        await run(
+          "computer_lifecycle",
+          { computerSessionId: randomUUID(), action: "end" },
+          transport,
+        ),
+      ).toBe(`${listed}.`);
+    });
+
+    test("a native computer tool naming a missing ComputerSession lists the open ones", async () => {
+      const open = openComputer();
+      const message = await run(
+        "interaction__cua_list_windows",
+        { computerSessionId: randomUUID() },
+        {
+          listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          callNativeComputerTool: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("a long label is cut by character, never inside an emoji", async () => {
+      const open = openBrowser();
+      // The cut falls exactly where a surrogate pair starts in UTF-16.
+      open.name = `${"x".repeat(58)}🧭🧭 and more`;
+      const message = await run(
+        "browser_clipboard",
+        { browserSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+          readBrowserClipboard: async () => {
+            throw browserMissing();
+          },
+        },
+      );
+      expect(message).toContain(`${open.id} "${"x".repeat(58)}🧭…"`);
+      expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+    });
   });
 
   test("an action never runs on a browser resumed while it was in flight", async () => {
@@ -2951,6 +3543,7 @@ describe("interaction attempt tools", () => {
     const image = new Uint8Array([1, 2, 3]);
     const order: string[] = [];
     let captureFails = false;
+    let capturedDocument: string | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
         actInBrowser: async (_workspaceId, _browserSessionId, value) => {
@@ -2966,7 +3559,7 @@ describe("interaction attempt tools", () => {
             controllerGeneration: target.controllerGeneration,
             targetId: target.id,
             targetGeneration: target.targetGeneration,
-            documentGeneration: target.documentGeneration!,
+            documentGeneration: capturedDocument ?? target.documentGeneration!,
             sequence: 1,
             mediaType: "image/jpeg",
             width: 1,
@@ -3026,6 +3619,22 @@ describe("interaction attempt tools", () => {
     expect((failed.content[1] as { text: string }).text).toBe(
       "The action ran, but its screenshot could not be captured: synthetic capture failure",
     );
+
+    // A tab that committed another document after the receipt's outline was
+    // read would pair one page's outline with another page's picture.
+    captureFails = false;
+    capturedDocument = "document-after-outline";
+    const moved = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, action, includeScreenshot: true },
+      { ...context, operationId: randomUUID() },
+    );
+    expect(moved.isError).toBeFalsy();
+    expect(moved.structuredContent).toMatchObject({ targetId: target.id, state: "completed" });
+    expect(moved.content).toHaveLength(2);
+    expect(moved.content[1]).toEqual({
+      type: "text",
+      text: "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.",
+    });
   });
 
   test("an open JavaScript dialog replaces a requested screenshot with what to do next", async () => {
@@ -3459,6 +4068,68 @@ describe("interaction attempt tools", () => {
     expect(second).not.toContain("Style");
     // And an action that changed nothing says so.
     expect(await act()).toContain("No element changed since");
+  });
+
+  test("a Computer click or key press the driver could not confirm that changed no element says it may not have taken effect", async () => {
+    const target = computerTarget();
+    const reading = {
+      ...computerObservation(target),
+      semantic: {
+        kind: "snapshot" as const,
+        roots: Array.from({ length: 8 }, (_, index) => ({
+          ref: `e${index + 1}`,
+          role: "button",
+          name: `Button ${index}`,
+          states: [],
+          actions: ["invoke"],
+        })),
+        nodeCount: 8,
+      },
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        // The driver reports raw input it could not confirm, as CUA does for
+        // a click or key press it only sent.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+          ...computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+          ...(value.action.type === "pointer" ||
+          (value.action.type === "keyboard" && value.action.value !== "pagedown")
+            ? { unconfirmedInput: true as const }
+            : {}),
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async (action: Record<string, unknown>) => {
+      const result = await definitions[0]!.execute(
+        {
+          computerSessionId,
+          targetId: target.id,
+          expectedTargetGeneration: target.targetGeneration,
+          expectedObservationId: "fenced",
+          action,
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return (result.content[0] as { text: string }).text;
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    const invoke = { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" };
+    // The first reading in this attempt is shown whole.
+    expect(await act(invoke)).not.toContain(line);
+    const click = await act({ type: "pointer", action: "click", x: 10, y: 10, frameId: "f_1" });
+    expect(click.split("\n")[1]).toBe(line);
+    expect(await act({ type: "keyboard", action: "press", value: "cmd+w" })).toContain(line);
+    // A key press the driver did not report as unconfirmed reads as before.
+    expect(await act({ type: "keyboard", action: "press", value: "pagedown" })).not.toContain(line);
+    // A semantic action that changed nothing reads as before.
+    const unchanged = await act(invoke);
+    expect(unchanged).toContain("No element changed since");
+    expect(unchanged).not.toContain(line);
   });
 
   test("a browser action's outline shows only what changed since the outline the model last saw", async () => {
@@ -6026,6 +6697,12 @@ describe("interaction attempt tools", () => {
     expect(agentView.nodes.length).toBeLessThanOrEqual(60);
     expect(agentView.omittedNodeCount).toBe(150 - agentView.nodes.length);
     expect(agentView.clippedFieldCount).toBeGreaterThan(0);
+    // A clipped name carries its full length.
+    expect(
+      (agentView.nodes as Array<{ ref: string; nameChars?: number }>).find(
+        (node) => node.ref !== "element-149",
+      )?.nameChars,
+    ).toBe(8_000);
     expect(Buffer.byteLength(JSON.stringify(compact.structuredContent))).toBeLessThan(17_000);
     const again = await definitions[0]!.execute({ browserSessionId, targetId: target.id }, context);
     expect(again.structuredContent).toEqual(compact.structuredContent);
@@ -6359,6 +7036,129 @@ describe("interaction attempt tools", () => {
       value: "user@example.test",
       attributes: { placeholder: "Enter email" },
     });
+  });
+
+  test("reads a long element value in pages: a truncated read says where to read on", async () => {
+    const target = browserTarget();
+    const full = "x".repeat(40_000);
+    const requests: Array<{ maxChars?: number; offset?: number }> = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserTargetState: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+        }),
+        readBrowserDom: async (_workspaceId, _browserSessionId, _targetId, request) => {
+          const element = request as { maxChars?: number; offset?: number };
+          requests.push({ maxChars: element.maxChars, offset: element.offset });
+          const rest = full.slice(element.offset ?? 0);
+          const value = rest.slice(0, element.maxChars ?? 4_096);
+          return {
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration,
+            frameId: "frame-2",
+            kind: "element",
+            count: 1,
+            text: "",
+            value,
+            attributes: {},
+            redacted: null,
+            truncated: value.length < rest.length,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_read"],
+      permissions: ["sessions:read"],
+    });
+    const read = async (offset?: number) =>
+      (
+        await definitions[0]!.execute(
+          {
+            browserSessionId,
+            targetId: target.id,
+            mode: "dom",
+            dom: {
+              kind: "element",
+              locator: { kind: "ref", ref: "e0000000c" },
+              maxChars: 32_768,
+              ...(offset !== undefined ? { offset } : {}),
+            },
+          },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        )
+      ).structuredContent as { value: string; truncated: boolean; nextOffset?: number };
+    const first = await read();
+    expect(first).toMatchObject({ truncated: true, nextOffset: 32_768 });
+    const second = await read(first.nextOffset);
+    expect(second.truncated).toBe(false);
+    expect(second.nextOffset).toBeUndefined();
+    expect(first.value + second.value).toBe(full);
+    expect(requests).toEqual([
+      { maxChars: 32_768, offset: undefined },
+      { maxChars: 32_768, offset: 32_768 },
+    ]);
+  });
+
+  test("browser_read dom offers no next page when only attributes were cut", async () => {
+    const target = browserTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserTargetState: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+        }),
+        readBrowserDom: async () => ({
+          browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          documentGeneration: target.documentGeneration,
+          frameId: "frame-2",
+          kind: "element",
+          count: 1,
+          text: "Open the report",
+          value: null,
+          attributes: { href: "https://example.test/" + "a".repeat(60) },
+          redacted: null,
+          truncated: true,
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_read"],
+      permissions: ["sessions:read"],
+    });
+    const result = (
+      await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          mode: "dom",
+          dom: {
+            kind: "element",
+            locator: { kind: "ref", ref: "e0000000c" },
+            attributes: ["href"],
+            maxChars: 64,
+          },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      )
+    ).structuredContent as { truncated: boolean; nextOffset?: number };
+    expect(result.truncated).toBe(true);
+    expect(result.nextOffset).toBeUndefined();
   });
 
   test("captures screenshots without accessibility scans and returns image content", async () => {
@@ -7424,6 +8224,301 @@ describe("open reuses only a session on the chat's current machine", () => {
       }
     });
   }
+
+  // Naming another of the person's machines moves the chat there in the same
+  // call, as sandbox_swap and then the open would, instead of failing with a
+  // request to swap first.
+  test("computer_open naming another machine moves the chat there and opens it", async () => {
+    const old = discoveredComputerSession(randomUUID(), sessionId);
+    old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+    const swaps: string[] = [];
+    let activeSandboxId: string = swappedMachine;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+          createComputerSession: async () => {
+            throw new Error("the session on that machine is reused");
+          },
+        }),
+        getSession: async () =>
+          ({ id: sessionId, sandboxGroupId: groupId, activeSandboxId }) as never,
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+          swaps.push(request.target);
+          activeSandboxId = request.target;
+          return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+    const result = await definitions[0]!.execute({ placement }, context());
+    expect(result.isError).not.toBe(true);
+    expect(swaps).toEqual([oldMachine]);
+    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(old.id);
+    // The result says the chat moved: its commands and files run there now.
+    const movedNote =
+      "This chat moved to the requested machine; its commands and files now run there too.";
+    expect(result.content.map((part) => (part as { text?: string }).text)).toContain(movedNote);
+
+    // Already there: no second move, and no moved note.
+    const again = await definitions[0]!.execute({ placement }, context());
+    expect(swaps).toEqual([oldMachine]);
+    expect(again.content.map((part) => (part as { text?: string }).text)).not.toContain(movedNote);
+  });
+
+  test("browser_open naming another machine moves the chat there before creating", async () => {
+    const swaps: string[] = [];
+    const createRequests: unknown[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          createBrowserSession: async (_workspaceId, request) => {
+            // The chat is on the machine before the session is created there.
+            expect(swaps).toEqual([oldMachine]);
+            createRequests.push(request);
+            return {
+              session: {
+                ...discoveredBrowserSession(randomUUID(), sessionId),
+                lifecycle: "starting",
+              },
+            } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+          swaps.push(request.target);
+          return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+    const result = await definitions[0]!.execute({ placement }, context());
+    expect(swaps).toEqual([oldMachine]);
+    expect(createRequests).toEqual([expect.objectContaining({ placement })]);
+    expect(result.content.map((part) => (part as { text?: string }).text)).toContain(
+      "This chat moved to the requested machine; its commands and files now run there too.",
+    );
+  });
+
+  // The move outlasts a failed open: the error says the chat moved, so the
+  // model does not assume it is still on its old machine.
+  for (const tool of ["computer_open", "browser_open"] as const) {
+    test(`${tool} that moved the chat and then failed says the chat moved`, async () => {
+      const swaps: string[] = [];
+      // One failed request the SDK may hand to more than one caller.
+      const shared = new OpenGeniApiError(409, "", {
+        code: "conflict",
+        retryable: false,
+        displayMessage: "That machine cannot start one now.",
+      });
+      const refused = async () => {
+        throw shared;
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            createComputerSession: refused,
+            createBrowserSession: refused,
+          }),
+          getSession: sessionRead(swappedMachine),
+          swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+            swaps.push(request.target);
+            return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+          },
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+      expect(swaps).toEqual([oldMachine]);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: "conflict",
+          retryable: false,
+          message:
+            "This chat moved to the requested machine; its commands and files now run there too. That machine cannot start one now.",
+        },
+      });
+      // The note is on a copy: the original error is unchanged.
+      expect(shared.message).toBe("That machine cannot start one now.");
+    });
+  }
+
+  // A read that times out or aborts throws a DOMException, whose message is
+  // read-only. The error is still a DOMException of that name, with the note.
+  test("an open that moved the chat and then timed out keeps the DOMException with the note", async () => {
+    const timeout = new DOMException("The operation timed out.", "TimeoutError");
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => {
+            throw timeout;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => ({
+          swapped: true,
+          activeSandboxId: request.target,
+          activeEpoch: 2,
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    let thrown: unknown;
+    try {
+      await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DOMException);
+    expect((thrown as DOMException).name).toBe("TimeoutError");
+    expect((thrown as DOMException).message).toBe(
+      "This chat moved to the requested machine; its commands and files now run there too. The operation timed out.",
+    );
+    expect(timeout.message).toBe("The operation timed out.");
+  });
+
+  test("an open that fails without moving the chat does not mention a move", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            throw new OpenGeniApiError(409, "", {
+              code: "conflict",
+              retryable: false,
+              displayMessage: "That machine cannot start one now.",
+            });
+          },
+        }),
+        getSession: sessionRead(oldMachine),
+        swapActiveSandbox: async () => {
+          throw new Error("already on that machine");
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      "That machine cannot start one now.",
+    );
+  });
+
+  test("a personal machine not yet allowed shows its card from computer_open in one call", async () => {
+    const posted: unknown[] = [];
+    let created = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            created += 1;
+            return { session: discoveredComputerSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: swappedMachine,
+          activeEpoch: 1,
+          code: "personal_machine_permission_required",
+          reason: "Its owner has not allowed this chat to use it yet.",
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+      postSetupCard: async (blocker, toolName, options) => {
+        posted.push({ code: blocker.code, toolName, ...options });
+        return { chatUrl: null };
+      },
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect(result.isError).toBe(true);
+    expect(created).toBe(0);
+    expect(posted).toEqual([
+      {
+        code: "personal_machine_permission_required",
+        toolName: "computer_open",
+        requestedSandboxId: oldMachine,
+      },
+    ]);
+    expect(JSON.stringify(result.structuredContent)).toContain(
+      "A card that fixes this is now posted in this chat",
+    );
+  });
+
+  test("any other refused move says why and opens nothing", async () => {
+    let created = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            created += 1;
+            return { session: discoveredComputerSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async () => ({
+          swapped: false,
+          activeSandboxId: swappedMachine,
+          activeEpoch: 1,
+          code: "offline_enrollment",
+          reason: "sandbox is offline; cannot attach to a non-online machine",
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+      postSetupCard: async () => {
+        throw new Error("no card for an offline machine");
+      },
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect(result.isError).toBe(true);
+    expect(created).toBe(0);
+    expect(JSON.stringify(result.structuredContent)).toContain(
+      "This chat could not move to that machine: sandbox is offline",
+    );
+  });
 
   // The chat's own sandbox group is usable from any route, so a session there
   // is reused while the chat works on a Connected Machine.

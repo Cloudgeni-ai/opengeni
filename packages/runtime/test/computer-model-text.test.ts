@@ -492,6 +492,49 @@ describe("computerObservationDiff", () => {
     );
   });
 
+  test("input the driver could not confirm that changed no element says it may not have taken effect", () => {
+    const unchanged = {
+      ...computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!,
+      capturedFrame: undefined,
+    };
+    const receipt = {
+      operationId: "op-1",
+      targetId: "window:1",
+      state: "completed",
+      error: null,
+      observation: unchanged,
+    };
+    const line =
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    expect(Buffer.byteLength(line)).toBe(133);
+    expect(
+      computerActionText({ ...receipt, unconfirmedInput: true as const })
+        .split("\n")
+        .slice(0, 2),
+    ).toEqual(["Action completed on window:1 (operation op-1).", line]);
+    // Input the driver confirmed, unconfirmed input that changed an element,
+    // and a failed action keep their text.
+    expect(computerActionText(receipt)).not.toContain(line);
+    const changed = {
+      ...computerObservationDiff(
+        reading("o_1", ribbon),
+        reading("o_2", [node("e10", "radio", "Style 0", { value: "1" }), ...ribbon.slice(1)]),
+      )!,
+      capturedFrame: undefined,
+    };
+    expect(
+      computerActionText({ ...receipt, observation: changed, unconfirmedInput: true as const }),
+    ).not.toContain(line);
+    expect(
+      computerActionText({
+        ...receipt,
+        state: "outcome_unknown",
+        error: { code: "driver_failed", message: "failed", retryable: false },
+        unconfirmedInput: true as const,
+      }),
+    ).not.toContain(line);
+  });
+
   test("keeps the whole reading when a diff would not help or could mislead", () => {
     const base = reading("o_1", ribbon);
     // Most elements are new: another view.

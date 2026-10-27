@@ -117,6 +117,29 @@ describe("decideScheduledTaskBlocker", () => {
     });
   });
 
+  test("an owner whose saved access changed pauses at once and is told to save it again", () => {
+    // The admission fence refuses the run, or the claim fence fails it after
+    // admission; both hold for every later run of the same saved revision.
+    for (const error of [
+      "scheduled_run_authority_proof_rejected",
+      "scheduled_causal_membership_changed",
+    ]) {
+      const refused = run("failed", { error });
+      const decision = decideScheduledTaskBlocker(facts([run("succeeded"), refused]));
+      expect(decision).toMatchObject({ kind: "block", state: "paused", reason: error });
+      if (decision.kind !== "block") throw new Error("expected a block");
+      expect(decision.message).toContain("The access it was saved with has changed");
+      expect(decision.message).toContain("open it and save it");
+    }
+    const refusal = run("failed", {
+      error: "scheduled_authority_unavailable",
+      admissionRefusal: { reason: "scheduled_authority_unavailable", retryable: false },
+    });
+    const decision = decideScheduledTaskBlocker(facts([refusal]));
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toContain("open it and save it");
+  });
+
   test("one ended chat does not block a schedule that starts a new chat each run", () => {
     const ended = run("skipped", { error: "session_cancelled", sessionId: chatId });
     expect(

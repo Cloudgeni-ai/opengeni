@@ -1,3 +1,5 @@
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import {
   assertEphemeralBrowserCreateEnabled,
@@ -142,6 +144,7 @@ import {
   listBrowserCapacitySuspendCandidates,
   BrowserCapacitySuspendClaimRejectedError,
   type BrowserCapacitySuspendClaim,
+  listAgentHeldBrowserSessions,
   listBrowserSessions,
   listAttachedBrowserDevices,
   interactionControllerGone,
@@ -161,12 +164,14 @@ import {
   recordLeaseControllerDataPlaneUrl,
   loadConnectionCredentialForBroker,
   startAuthRun,
+  recordBrowserSessionDisplay,
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
   readActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
   recordAuditEvent,
+  type AgentHeldBrowserSession,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -280,6 +285,7 @@ import {
   BROWSER_RECORDING_SAVE_RETRY_AFTER_MS,
   browserRecordingFailureStatus,
   browserRecordingOwner,
+  readyBrowserRecordingOutputs,
   stageBrowserRecordingBundle,
 } from "../browser-recording-save";
 import {
@@ -290,6 +296,7 @@ import {
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
+  activeRouteUnavailableError,
   wrongInteractionPlacementMessage,
   wrongPlacementInsteadOfOffline,
 } from "./interaction-placement-message";
@@ -300,6 +307,7 @@ import {
   type InteractionSecretsPort,
 } from "../interaction-secrets";
 import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -319,11 +327,56 @@ type BrowserPlacement = {
   attachedDeviceWorkspaceId?: string;
 };
 
+/**
+ * How long one renewal holds a browser. The renewal pump (`index.ts`) runs
+ * every `BROWSER_HOLD_RENEWAL_INTERVAL_MS`, well inside it, so a held browser
+ * stays held across a missed pass, and a browser whose session stopped is
+ * released at most this long plus the normal idle time later.
+ */
+export const BROWSER_HOLD_RENEWAL_MS = 5 * 60_000;
+
+/** How often the API renews the holds of the browsers agent sessions hold. */
+export const BROWSER_HOLD_RENEWAL_INTERVAL_MS = 2 * 60_000;
+
+/** At most this many browsers are renewed per pass, most recently used first. */
+const BROWSER_HOLD_RENEWAL_LIMIT = 500;
+
+/** Renewals sent at once. */
+const BROWSER_HOLD_RENEWAL_CONCURRENCY = 8;
+
+/** How long one renewal may take to reach its controller. */
+const BROWSER_HOLD_REQUEST_TIMEOUT_MS = 30_000;
+
+/** What one renewal pass did. */
+export type BrowserHoldRenewal = {
+  /** Browsers agent sessions hold right now. */
+  listed: number;
+  /** Of those, the browsers whose controllers hold them. */
+  held: number;
+  /** The pass reached its limit, so less recently used held browsers may
+   * have been left to their plain idle release. */
+  capped: boolean;
+};
+
+/**
+ * Whom a renewal reaches a browser's controller as. It has no request grant:
+ * the control plane sends it, as the person who most recently started a turn
+ * of the session holding the browser (null when no person did), with that
+ * person's own access to their machines and attached browsers. A hold only
+ * keeps what already runs, so this is the `browser.hold` operation's
+ * explicit exception (see `ChannelAOperation`).
+ */
+type BrowserHoldCaller = {
+  hold: "browser.hold";
+  accountId: string;
+  subjectId: string | null;
+};
+
 export function registerBrowserSessionRoutes(
   app: Hono,
   deps: ApiRouteDeps,
   options: { interactionSecrets?: InteractionSecretsPort | null } = {},
-): void {
+): { renewBrowserHolds: () => Promise<BrowserHoldRenewal> } {
   const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
@@ -706,6 +759,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: launch.result?.display ?? null,
               });
               stages.mark("activate");
               return activated;
@@ -1285,9 +1339,9 @@ export function registerBrowserSessionRoutes(
    * The browser host only uploads its frame bundle. That makes it a
    * recording, and the worker encodes its video, so no browser host and no
    * API request needs a video encoder. While the bundle is still uploading
-   * over a slow link, or its video is being made, this answers 202 with
-   * `retryAfterMs`; repeating the request with the same operationId joins
-   * that work instead of starting it again. */
+   * over a slow link, or its video is being made or not yet readable from
+   * storage, this answers 202 with `retryAfterMs`; repeating the request
+   * with the same operationId joins that work instead of starting it again. */
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
     async (context) => {
@@ -1421,12 +1475,17 @@ export function registerBrowserSessionRoutes(
             ? await getBrowserRecordingVideo(deps.db, actor)
             : null;
         if (!video) return progress("encoding");
-        const actionLog = await objectStorage.getObjectBytes(video.actionLogObjectKey);
-        if (!actionLog) {
-          throw new HTTPException(503, {
-            message: "browser recording action log is not available",
-          });
-        }
+        // Storage that replicates in the background can miss the worker's
+        // fresh writes for a while; until it shows both, keep answering 202.
+        const readable = await readyBrowserRecordingOutputs({
+          objectStorage,
+          videoKey: video.objectKey,
+          actionLogKey: video.actionLogObjectKey,
+          readyForMs: video.readyForMilliseconds,
+          signal: context.req.raw.signal,
+        });
+        if (!readable) return progress("encoding");
+        const actionLog = { bytes: readable.actionLog };
         await authorizeSourceSession(deps, grant, sourceSessionId, "session.control");
         const sourceSession = await requireSourceSession(deps, workspaceId, sourceSessionId);
         const videoPath =
@@ -2827,6 +2886,9 @@ export function registerBrowserSessionRoutes(
                 tokenGeneration: record.tokenGeneration,
               });
               let client: BrowserControlClient | undefined;
+              const resumed: {
+                result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null;
+              } = { result: null };
               try {
                 // The heartbeat covers everything after dispatch, including
                 // provisioning the controller.
@@ -2859,7 +2921,7 @@ export function registerBrowserSessionRoutes(
                       prepared.session.headless,
                       linkedComputer !== null,
                     );
-                    return await client.createSession({
+                    resumed.result = await client.createSession({
                       browserSessionId,
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
@@ -2870,6 +2932,7 @@ export function registerBrowserSessionRoutes(
                       ...(networkRoute ? { networkRoute } : {}),
                       restore: restore!,
                     });
+                    return resumed.result;
                   },
                 );
               } catch (error) {
@@ -2935,6 +2998,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: resumed.result?.display ?? null,
               });
             },
           );
@@ -3945,7 +4009,8 @@ export function registerBrowserSessionRoutes(
 
   async function withBrowserPlacement<T>(
     sourceSession: Session,
-    grant: AccessGrant,
+    /** A request's grant, or a renewal reaching the controller as a person. */
+    caller: AccessGrant | (BrowserHoldCaller & { subjectId: string }),
     expectedPlacement: InteractionPlacement | null,
     /** An existing session's attached profile workspace, which pins the
      *  profile copy its controller check uses. */
@@ -3959,7 +4024,14 @@ export function registerBrowserSessionRoutes(
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
       // Personal machines are controlled only for their owner, as everywhere else.
-      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
+      const viewer =
+        "hold" in caller
+          ? {
+              accountId: caller.accountId,
+              workspaceId: sourceSession.workspaceId,
+              subjectId: caller.subjectId,
+            }
+          : await attachedBrowserViewer(deps, caller, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
@@ -4047,18 +4119,19 @@ export function registerBrowserSessionRoutes(
       operation === "browser.read" ||
       operation === "browser.action" ||
       operation === "browser.control" ||
-      operation === "browser.attach"
+      operation === "browser.attach" ||
+      operation === "browser.hold"
         ? withChannelARead
         : withChannelA;
     try {
       return await runWithChannelA(
         channelServices,
         {
-          accountId: grant.accountId,
+          accountId: caller.accountId,
           workspaceId: sourceSession.workspaceId,
           session: sourceSession,
-          subjectId: grant.subjectId,
-          grant,
+          subjectId: caller.subjectId,
+          grant: "hold" in caller ? undefined : caller,
           waitSignal,
           operation,
           retryControllerTransport: operation === "browser.read" || operation === "browser.action",
@@ -4116,8 +4189,11 @@ export function registerBrowserSessionRoutes(
                   message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
                 });
               }
+              if ("hold" in caller) {
+                throw new BrowserSessionStateError("BrowserSession source placement changed");
+              }
               return await throwBrowserSourcePlacementChanged(
-                grant,
+                caller,
                 sourceSession.id,
                 expectedPlacement.sandboxId,
               );
@@ -4432,7 +4508,7 @@ export function registerBrowserSessionRoutes(
         workspaceId,
         browserSessionId,
         downloadId: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -4882,7 +4958,7 @@ export function registerBrowserSessionRoutes(
       ) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
-      await client.createSession({
+      const recovered = await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
         tokenGeneration: record.tokenGeneration,
@@ -4892,6 +4968,23 @@ export function registerBrowserSessionRoutes(
         ...(recoverWorkingDirectory ? { recoverExistingWorkingDirectory: true } : {}),
         ...(linkedComputer ? { linkedComputer } : {}),
         ...(networkRoute ? { networkRoute } : {}),
+      });
+      // A relaunch can land in another environment (for example after the
+      // agent restarted outside the desktop session), so store the display
+      // this launch reports rather than keeping the previous one. The browser
+      // is already recovered, so a failed write only leaves the old report.
+      await recordBrowserSessionDisplay(routeDeps.db, {
+        accountId: grant.accountId,
+        workspaceId: record.session.workspaceId,
+        browserSessionId: record.session.id,
+        controllerGeneration: binding.controllerGeneration,
+        display: recovered.display ?? null,
+      }).catch((error: unknown) => {
+        console.warn("browser.recovered_display_record_failed", {
+          browserSessionId: record.session.id,
+          controllerGeneration: binding.controllerGeneration,
+          failure: interactionFailure(error),
+        });
       });
     } catch (error) {
       console.error("browser controller recovery failed", {
@@ -5030,6 +5123,9 @@ export function registerBrowserSessionRoutes(
             placement.controllerHostSandboxGroupId,
           ).catch(() => undefined);
         };
+        const adopted: {
+          result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null;
+        } = { result: null };
         try {
           await withInteractionHolderHeartbeat(
             deps,
@@ -5051,7 +5147,7 @@ export function registerBrowserSessionRoutes(
                 record.session.headless,
                 linkedComputer !== null,
               );
-              await client.createSession({
+              adopted.result = await client.createSession({
                 browserSessionId,
                 controllerGeneration: binding.controllerGeneration,
                 tokenGeneration: record.tokenGeneration,
@@ -5091,6 +5187,7 @@ export function registerBrowserSessionRoutes(
             operationId,
             actorSubjectId: grant.subjectId,
             controller: binding,
+            display: adopted.result?.display ?? null,
           }),
         };
       },
@@ -5227,6 +5324,123 @@ export function registerBrowserSessionRoutes(
       record.controllerHostSandboxGroupId,
     );
   }
+
+  /**
+   * Renews the hold on every browser an agent session holds right now (see
+   * `listAgentHeldBrowserSessions`): each controller keeps its browser
+   * running, page state and all, at least `BROWSER_HOLD_RENEWAL_MS` after
+   * its renewal is sent (capped by the controller at `BROWSER_WAIT_HOLD_MAX_MS` after
+   * the browser's last use). Stateless: every pass asks the database which
+   * browsers are held, so a later turn that never touches the browser is held
+   * again, and once the session neither works nor waits the renewals stop and
+   * the hold lapses. Holds only extend, so overlapping passes (one per API
+   * process) cannot shorten one. Advisory and best effort: it never launches,
+   * recovers or counts as a use of a browser, never starts a sandbox, and a
+   * browser it cannot reach keeps its plain idle release.
+   */
+  async function renewBrowserHolds(): Promise<BrowserHoldRenewal> {
+    const browsers = await listAgentHeldBrowserSessions(deps.db, {
+      limit: BROWSER_HOLD_RENEWAL_LIMIT,
+    });
+    const renewal: BrowserHoldRenewal = {
+      listed: browsers.length,
+      held: 0,
+      capped: browsers.length >= BROWSER_HOLD_RENEWAL_LIMIT,
+    };
+    let next = 0;
+    const renewNext = async (): Promise<void> => {
+      for (let browser = browsers[next++]; browser; browser = browsers[next++]) {
+        if (await sendBrowserHold(browser)) renewal.held += 1;
+      }
+    };
+    await Promise.all(Array.from({ length: BROWSER_HOLD_RENEWAL_CONCURRENCY }, renewNext));
+    return renewal;
+  }
+
+  /** One browser's renewal; whether its controller holds it. Failures are
+   * logged, never thrown. */
+  async function sendBrowserHold(browser: AgentHeldBrowserSession): Promise<boolean> {
+    try {
+      return await holdBrowser(
+        {
+          hold: "browser.hold",
+          accountId: browser.accountId,
+          subjectId: browser.routeSubjectId,
+        },
+        browser.workspaceId,
+        browser.browserSessionId,
+      );
+    } catch (error) {
+      console.warn("browser.hold_failed", {
+        workspaceId: browser.workspaceId,
+        browserSessionId: browser.browserSessionId,
+        failure: interactionFailure(error),
+      });
+      return false;
+    }
+  }
+
+  async function holdBrowser(
+    caller: BrowserHoldCaller,
+    workspaceId: string,
+    browserSessionId: string,
+  ): Promise<boolean> {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: caller.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const binding = record.session.controller;
+    if (record.session.lifecycle !== "active" || !binding) return false;
+    const signal = AbortSignal.timeout(BROWSER_HOLD_REQUEST_TIMEOUT_MS);
+    const hold = async (placement: BrowserPlacement): Promise<boolean> =>
+      // Never touches the browser's own last use: the cap counts from it.
+      // The hold's end counts from the moment it is sent, so a pass slowed
+      // by other controllers or by routing never sends one already over.
+      await connectController(deps, caller, record, placement).holdForWait(
+        { browserSessionId, controllerGeneration: binding.controllerGeneration },
+        new Date(Date.now() + BROWSER_HOLD_RENEWAL_MS),
+      );
+    const cached = await cachedBrowserPlacement(record);
+    if (cached) return await hold(cached);
+    // Every other route reaches the controller as a person: with none, the
+    // browser keeps its plain idle release.
+    if (caller.subjectId === null) return false;
+    const placement = record.session.placement;
+    if (placement.kind === "sandbox_group" || placement.kind === "external_provider") {
+      // Only a box that is already running: a hold never starts one.
+      const sandboxGroupId = record.controllerHostSandboxGroupId;
+      const lease = sandboxGroupId
+        ? await readLease(deps.db, record.session.workspaceId, sandboxGroupId)
+        : null;
+      if (
+        !lease ||
+        (lease.liveness !== "warm" && lease.liveness !== "draining") ||
+        lease.instanceId !== binding.placementInstanceId
+      ) {
+        return false;
+      }
+    }
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== placement.sandboxId
+    ) {
+      return false;
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      { ...caller, subjectId: caller.subjectId },
+      placement,
+      record.deviceWorkspaceId,
+      binding.placementInstanceId,
+      "browser.hold",
+      signal,
+      hold,
+    );
+  }
+
+  return { renewBrowserHolds };
 }
 
 function sourcePlacementChangedApiError(interactionResource: "browser_session"): ApiHttpError {
@@ -5931,7 +6145,7 @@ async function provisionController(
 
 function connectController(
   deps: ApiRouteDeps,
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId">,
   record: BrowserSessionControlRecord,
   placement: BrowserPlacement,
 ): BrowserControlClient {
@@ -6168,16 +6382,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {
@@ -6293,6 +6505,19 @@ export function browserTabDiagnosisError(error: unknown): unknown {
       code: "conflict",
       message: error.error.message,
       retryable: false,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
+  // A controller conflict that can clear on its own (another debugger holding
+  // an attached tab, say) keeps its retry advice; a plain 409 would read as
+  // final to the caller.
+  if (code === "operation_conflict" && error.status === 409 && error.retryable) {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message: error.error.message,
+      retryable: true,
       outcomeUnknown: false,
     });
     failure.cause = error;
@@ -6968,6 +7193,8 @@ export function browserRouteError(error: unknown): HTTPException {
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
+  const routeUnavailable = activeRouteUnavailableError(error);
+  if (routeUnavailable) return routeUnavailable;
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });

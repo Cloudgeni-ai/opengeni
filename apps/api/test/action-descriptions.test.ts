@@ -4,11 +4,40 @@ import { actionDescription, DESCRIBED_ACTION_PATH } from "../src/mcp/action-desc
 import { describeAction, searchActions } from "../src/organization-mcp";
 
 describe("action descriptions", () => {
+  test("session discovery and describe explain the existing compact page query", () => {
+    const entry = ACTION_CATALOG.find((candidate) => candidate.id === "listSessionPage")!;
+    const description = describeAction(entry).description!;
+    expect(description).toContain('{"view":"page","projection":"summary","limit":50}');
+    expect(description).toContain("nextCursor as query.cursor");
+    expect(description).toContain("getSession");
+    expect(description).toContain("omit projection");
+    const found = searchActions({ query: "list chats", limit: 50, offset: 0 }).actions;
+    expect(found.find((action) => action.id === entry.id)?.description).toBe(description);
+    expect(actionDescription({ method: "POST", path: entry.path })).toBeUndefined();
+    expect(actionDescription({ method: "GET", path: `${entry.path}/:sessionId` })).toBeUndefined();
+  });
+
   test("every subscription, model and vault connection action has a description", () => {
     const missing = ACTION_CATALOG.filter(
       (entry) => DESCRIBED_ACTION_PATH.test(entry.path) && !actionDescription(entry),
     ).map((entry) => `${entry.method} ${entry.path}`);
     expect(missing).toEqual([]);
+  });
+
+  test("buying credits and reading the balance are found in the words people use", () => {
+    const found = (query: string) =>
+      searchActions({ query, limit: 20, offset: 0 }).actions.map((action) => action.id);
+    for (const query of ["buy credits", "add credits", "credits", "add money"]) {
+      expect([query, found(query)]).toEqual([
+        query,
+        expect.arrayContaining(["createBillingCheckout"]),
+      ]);
+    }
+    expect(found("balance")).toContain("getBilling");
+    expect(found("payment")).toContain("getBillingCheckout");
+    // Giving a workspace allowance credits is told apart from buying them.
+    const grant = ACTION_CATALOG.find((entry) => entry.id === "grantWorkspaceCredits")!;
+    expect(actionDescription(grant)).toContain("to buy credits use createBillingCheckout");
   });
 
   test("descriptions name the provider and the scope", () => {
@@ -39,6 +68,21 @@ describe("action descriptions", () => {
           "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     )!;
     expect(describeAction(entry).description).toContain("which models");
+  });
+
+  // A tool set to Ask blocks a Site; the agent finds the change by the words
+  // the person uses and makes it in the chat instead of naming the settings page.
+  test("tool approvals are found by the words people use", () => {
+    for (const query of ["tool approval", "send email permission", "integration tool permission"]) {
+      const found = searchActions({ query, limit: 5, offset: 0 }).actions;
+      const change = found.find((action) => action.id === "updateConnectorToolPermissions");
+      expect(change?.description).toContain("(Allow)");
+    }
+    const entry = ACTION_CATALOG.find(
+      (candidate) => candidate.id === "updateConnectorToolPermissions",
+    )!;
+    expect(describeAction(entry).description).toContain("A Site's own tool calls can't ask");
+    expect(describeAction(entry).input.some((input) => input.schema !== undefined)).toBe(true);
   });
 
   // Actions that change something but take no body: the path says it all.

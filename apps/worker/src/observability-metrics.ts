@@ -11,10 +11,13 @@ import {
 } from "@opengeni/contracts";
 import {
   ACTIVE_USER_WINDOWS,
+  QUEUED_TURN_HOLDS,
   type ActiveUserWindow,
   type CreditGrantTotals,
   type IdleInteractionInspection,
   type ModelCallTiming,
+  type QueuedTurnHold,
+  type QueuedTurnHoldSummary,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -23,6 +26,7 @@ import {
   type EventLogger,
 } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+import type { PromptCacheDiagnostics } from "@opengeni/contracts";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
   createTelemetryClock,
@@ -47,6 +51,7 @@ import {
   type SelfhostedOpObserver,
   type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
@@ -775,9 +780,38 @@ export class ModelRequestLifecycleMetrics {
 export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
   observability.setGauge({
     name: "opengeni_turns_queued",
-    help: "Current number of queued session turns.",
+    help: "Current number of durable queued session turns, including prompts held behind a running turn, a Pause, a failed turn or a required human action. Not a worker backlog; see opengeni_turns_queued_by_hold.",
     value,
   });
+}
+
+/**
+ * Split the durable queued-turn count by what holds each prompt. Only `ready`
+ * prompts are waiting for dispatch; an old `ready` prompt is a stranded queue.
+ * Every class is always published so an emptied class drops to 0.
+ */
+export function recordQueuedTurnHoldGauges(
+  observability: Observability,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
+): void {
+  // Null until a later migration grants 0988's withheld runtime EXECUTE:
+  // publish nothing rather than a misleading all-zero split.
+  if (!summary) return;
+  for (const hold of QUEUED_TURN_HOLDS) {
+    const entry = summary[hold];
+    observability.setGauge({
+      name: "opengeni_turns_queued_by_hold",
+      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity or cancelled.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.count ?? 0),
+    });
+    observability.setGauge({
+      name: "opengeni_turns_queued_oldest_age_seconds",
+      help: "Age in seconds of the oldest durable queued session turn in each hold class; 0 when the class is empty.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
+    });
+  }
 }
 
 /**
@@ -1121,7 +1155,7 @@ export function startSessionRecoveryMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("session recovery monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {
@@ -1211,7 +1245,7 @@ export function startContextCompactionPendingMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("context compaction monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {
@@ -1580,201 +1614,6 @@ export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
 
 export type SandboxCommandContainmentOutcome =
   (typeof SANDBOX_COMMAND_CONTAINMENT_OUTCOMES)[number];
-
-/**
- * Shared subscription core shadow (docs/subscription-accounts.md, SUB-COMPAT-03).
- * Every label is a closed set: provider, security parity, placement agreement,
- * contract requirement, skip reason and the legacy decision inputs present.
- */
-export const SUBSCRIPTION_CORE_SHADOW_PROVIDERS = ["codex", "xai", "claude"] as const;
-/** Is the account the legacy selector chose inside the core's eligible set? */
-export const SUBSCRIPTION_CORE_SHADOW_PARITY = [
-  "eligible",
-  "not_authorized",
-  "not_servable",
-  "unknown_connection",
-  "no_selection",
-] as const;
-/** How the core's decision compares with the legacy decision (would-switch). */
-export const SUBSCRIPTION_CORE_SHADOW_PLACEMENTS = [
-  "same_account",
-  "different_account",
-  "core_waits",
-  "core_runs_legacy_waits",
-  "both_wait",
-] as const;
-/** Requirements the reference checker can report, plus checker failure. */
-export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
-  "SUB-ACCESS-06",
-  "SUB-CREDITS-01",
-  "SUB-ELIG-01",
-  "SUB-ELIG-02",
-  "SUB-ELIG-03",
-  "SUB-ELIG-04",
-  "SUB-ELIG-05",
-  "SUB-FAIL-02",
-  "SUB-FAIL-03",
-  "SUB-FAIL-04",
-  "SUB-OWN-05",
-  "SUB-SEL-02",
-  "SUB-SEL-04",
-  "SUB-SET-06",
-  "SUB-STICK-02",
-  "SUB-WAIT-01",
-  "SUB-WAIT-02",
-  "other",
-  "checker_error",
-] as const;
-export const SUBSCRIPTION_CORE_SHADOW_SKIPS = [
-  "busy",
-  "no_session_actor",
-  "session_not_visible",
-  "timeout",
-  "cancelled",
-  "error",
-] as const;
-/**
- * Legacy decision inputs the Codex fleet shadow does not record (inventory
- * Part 3, answer (c)), counted when present in a compared decision.
- */
-export const SUBSCRIPTION_CORE_SHADOW_INPUTS = [
-  "manual_pin",
-  "policy_pin",
-  "last_account",
-  "rotation_off",
-  "rotation_on",
-  "organization_pool",
-  "personal_pool",
-  "codex_mode_override",
-  "model_policy",
-  "model_filtered",
-  "plan_excluded",
-  "model_cooldown",
-  "exhausted",
-  "unknown_quota",
-  "compaction_lock",
-  "lease_reused",
-  "truncated",
-] as const;
-
-export type SubscriptionCoreShadowProvider = (typeof SUBSCRIPTION_CORE_SHADOW_PROVIDERS)[number];
-export type SubscriptionCoreShadowParity = (typeof SUBSCRIPTION_CORE_SHADOW_PARITY)[number];
-export type SubscriptionCoreShadowPlacement = (typeof SUBSCRIPTION_CORE_SHADOW_PLACEMENTS)[number];
-export type SubscriptionCoreShadowSkip = (typeof SUBSCRIPTION_CORE_SHADOW_SKIPS)[number];
-export type SubscriptionCoreShadowInput = (typeof SUBSCRIPTION_CORE_SHADOW_INPUTS)[number];
-
-export type SubscriptionCoreShadowObservation =
-  | { outcome: "skipped"; reason: SubscriptionCoreShadowSkip }
-  | {
-      outcome: "compared";
-      parity: SubscriptionCoreShadowParity;
-      /** The first reason the legacy account is outside the eligible set. */
-      parityReason: string | null;
-      placement: SubscriptionCoreShadowPlacement;
-      violations: readonly string[];
-      inputs: readonly SubscriptionCoreShadowInput[];
-    };
-
-const SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET = new Set<string>(
-  SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS,
-);
-/** First reasons a legacy account is outside the eligible set (policy ineligibility). */
-export const SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS = [
-  "provider_disabled",
-  "organization_accounts_off",
-  "out_of_scope",
-  "personal_connections_disabled",
-  "personal_owner_inactive",
-  "personal_not_owners_work",
-  "personal_authority_missing",
-  "unhealthy",
-  "allocator_disabled",
-  "wrong_provider",
-  "model_unknown",
-  "model_not_allowed_by_workspace",
-  "model_not_entitled",
-  "model_not_allowed_by_connection",
-  "model_cooling_down",
-  "exhausted",
-] as const;
-const SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET = new Set<string>(
-  SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS,
-);
-
-const SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS = [
-  0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
-];
-
-export function recordSubscriptionCoreShadow(
-  observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
-  provider: SubscriptionCoreShadowProvider,
-  observation: SubscriptionCoreShadowObservation,
-  durationSeconds: number,
-): void {
-  observability.observeHistogram({
-    name: "opengeni_subscription_core_shadow_duration_seconds",
-    help: "Shared subscription core shadow comparison duration by provider, including skips.",
-    labels: { provider },
-    value: durationSeconds,
-    buckets: SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS,
-  });
-  if (observation.outcome === "skipped") {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_skips_total",
-      help: "Shadow comparisons not made, by fixed reason; placement is unaffected.",
-      labels: { provider, reason: observation.reason },
-    });
-    return;
-  }
-  observability.incrementCounter({
-    name: "opengeni_subscription_core_shadow_comparisons_total",
-    help: "Shadow comparisons by security parity of the legacy account and core placement agreement.",
-    labels: { provider, parity: observation.parity, placement: observation.placement },
-  });
-  if (observation.parityReason !== null) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_parity_failures_total",
-      help: "Legacy-selected accounts outside the core's eligible set, by first fixed reason.",
-      labels: {
-        provider,
-        reason: SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET.has(observation.parityReason)
-          ? observation.parityReason
-          : "other",
-      },
-    });
-  }
-  for (const requirement of new Set(observation.violations)) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_violations_total",
-      help: "Contract invariant violations of the core's own shadow decision, by requirement.",
-      labels: {
-        provider,
-        requirement: SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET.has(requirement)
-          ? requirement
-          : "other",
-      },
-    });
-  }
-  for (const input of observation.inputs) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_inputs_total",
-      help: "Legacy decision inputs present in compared shadow decisions, by fixed input.",
-      labels: { provider, input },
-    });
-  }
-}
-
-/** A shadow load that outlived its slot ceiling; its slot was given back. */
-export function recordSubscriptionCoreShadowStuckLoad(
-  observability: Pick<Observability, "incrementCounter">,
-  provider: SubscriptionCoreShadowProvider,
-): void {
-  observability.incrementCounter({
-    name: "opengeni_subscription_core_shadow_stuck_loads_total",
-    help: "Shadow world loads still unsettled at the slot ceiling; the slot was released.",
-    labels: { provider },
-  });
-}
 
 /** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
  * (idle browser saves prepared), `released` (holders released without a save). */
@@ -2192,6 +2031,66 @@ export function recordModelResponseUsage(
       labels: { ...base, payer: input.payer, pricing_source: input.pricingSource },
       amount: cost,
     });
+  }
+}
+
+/**
+ * Prompt-cache health of one recorded model call, for alerting:
+ *   - `opengeni_model_prompt_cache_warm_misses_total{provider,model,class}`
+ *     counts calls that read much less cache than the previous call of the
+ *     same model in the session made warm, by cause. `context_replaced` is
+ *     expected after compaction; `idle_gap` usually is; every other class
+ *     means a request rewrote a prefix the provider had cached.
+ *   - `opengeni_model_prompt_cache_missed_tokens_total{provider,model,class}`
+ *     the tokens those misses failed to read.
+ *   - `opengeni_model_thinking_blocks_dropped_total{provider,model,reason}`
+ *     signed thinking blocks the provider dropped before inference.
+ * Recorded after the fact write, which is fenced like the usage metrics.
+ */
+export function recordPromptCacheDiagnostics(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    diagnostics: PromptCacheDiagnostics | null;
+    cachedTokens?: number | null;
+  },
+): void {
+  const diagnostics = input.diagnostics;
+  if (!diagnostics) return;
+  try {
+    const model = boundedModelMetricLabel(observability, input.model);
+    const miss = diagnostics.warmMiss;
+    if (miss) {
+      const labels = { provider: input.provider, model, class: miss.class };
+      observability.incrementCounter({
+        name: "opengeni_model_prompt_cache_warm_misses_total",
+        help: "Model calls that read much less prompt cache than the previous call of the same model in the session made warm, by provider, catalog model and cause.",
+        labels,
+      });
+      const missed = nonnegativeSafeInteger(
+        miss.expectedCachedTokens - nonnegativeSafeInteger(input.cachedTokens ?? 0),
+      );
+      if (missed > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_prompt_cache_missed_tokens_total",
+          help: "Prompt tokens a warm prompt cache should have served but did not, by provider, catalog model and cause.",
+          labels,
+          amount: missed,
+        });
+    }
+    for (const [reason, count] of Object.entries(diagnostics.thinkingBlocksDropped ?? {})) {
+      const amount = nonnegativeSafeInteger(count);
+      if (amount > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_thinking_blocks_dropped_total",
+          help: "Signed thinking blocks the provider dropped from model requests before inference, by provider, catalog model and reason.",
+          labels: { provider: input.provider, model, reason },
+          amount,
+        });
+    }
+  } catch {
+    // The fact is already committed; metrics are best-effort only.
   }
 }
 

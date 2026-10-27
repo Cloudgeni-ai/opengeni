@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_guest::envd::InitData;
-use compute_protocol::host::{Id, LevelName, PriorityName, SandboxConfig};
+use compute_protocol::host::{Id, LevelName, PriorityName};
 use tokio::time::Instant;
 
 use super::lifecycle::{self, Due, OnConnect, OnPause, OnTimeout, Record, State};
 use super::wire::NewSandbox;
-use super::{Front, Refused};
+use super::{Front, Refused, Template};
 use crate::init::InitError;
-use crate::service::{Depth, Failure, new_id};
+use crate::service::{Depth, Failure, TEMPLATE_PREFIX, new_id};
 use crate::store::{LifecycleRow, Spec, Store, replace_lifecycle};
 
 /// How the hold an open stream keeps on its sandbox is named: this, then
@@ -94,12 +94,7 @@ pub async fn create<S: Store>(
     body: NewSandbox,
 ) -> Result<Created, Refused> {
     body.refuse_unoffered().map_err(Refused::invalid)?;
-    let template = front
-        .settings
-        .templates
-        .get(&body.template_id)
-        .ok_or_else(|| Refused::new(404, format!("template '{}' not found", body.template_id)))?
-        .clone();
+    let template = template(front, team, &body.template_id).await?;
     let timeout_ms = lifecycle::timeout_ms(body.timeout).map_err(Refused::invalid)?;
     let auto_pause = body.auto_pause.unwrap_or(false);
     let auto_resume = body.auto_resume.is_some_and(|resume| resume.enabled);
@@ -152,12 +147,11 @@ pub async fn create<S: Store>(
     let spec = Spec {
         image: template.image.clone(),
         // E2B's running sandbox sleeps and checkpoints like any other
-        // fleet sandbox whose create says nothing.
-        config: SandboxConfig::new(
-            template.vcpus,
-            template.memory_mib,
-            front.service.settings().sleep,
-        ),
+        // fleet sandbox whose create says nothing, and reaches every
+        // offer its team is given: E2B's API cannot name one.
+        config: template
+            .config(front.service.settings().sleep)
+            .with_reach(front.service.settings().reach_of(team)),
         agent: None,
     };
     let metadata: BTreeMap<String, String> = body.metadata.unwrap_or_default();
@@ -183,6 +177,31 @@ pub async fn create<S: Store>(
     })
     .await?;
     Ok(Created { id, record })
+}
+
+/// The template a create names by `key`: one of the fleet's, or else one
+/// of the team's saved from its sandboxes (a snapshot), by id or name,
+/// which creates start from booted afresh on its disk, shaped and
+/// guaranteed as the sandbox it was saved from.
+async fn template<S: Store>(front: &Front<S>, team: &str, key: &str) -> Result<Template, Refused> {
+    if let Some(template) = front.settings.templates.get(key) {
+        return Ok(template.clone());
+    }
+    let saved = front
+        .service
+        .template(team, key)
+        .await?
+        .ok_or_else(|| Refused::new(404, format!("template '{key}' not found")))?;
+    Ok(Template {
+        image: format!("{TEMPLATE_PREFIX}{}", saved.id),
+        vcpus: saved.vcpus,
+        memory_mib: saved.memory_mib,
+        memory_request_mib: saved.memory_request_mib,
+        cpu_request_millis: saved.cpu_request_millis,
+        // The captured image is as long as the disk it was captured from.
+        disk: None,
+        disk_mib: saved.disk_mib,
+    })
 }
 
 /// Gives envd its environment and token through the guest's gateway.

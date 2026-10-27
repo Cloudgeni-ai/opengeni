@@ -175,7 +175,12 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
         }
       }
 
-      if (receipt.operation === "session_steer") {
+      // An agent's steer is a system update followed by its update id; a
+      // sessionless (human/API) steer is a turn, like a sent message.
+      if (
+        receipt.operation === "session_steer" &&
+        receipt.resource.type === "session_system_update"
+      ) {
         if (receipt.updateId === undefined) {
           context.addIssue({
             code: "custom",

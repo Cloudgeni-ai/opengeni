@@ -16,10 +16,13 @@ import {
   connectSubscriptionCoreCodexConnection,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import type { ApiRouteDeps } from "@opengeni/core";
+import { getCapabilityCatalogItem } from "@opengeni/db";
+import { registerCatalogAssetRoutes } from "../src/routes/catalog-assets";
 import { registerCapabilityRoutes } from "../src/routes/capabilities";
 
 const DELEGATION_SECRET = "codex-apps-capabilities-route-secret";
@@ -379,6 +382,94 @@ describe("connector tool permissions API", () => {
       expect(invocations).toBe(0);
     } finally {
       await server.stop(true);
+    }
+  }, 60_000);
+});
+
+describe("connected MCP server icons", () => {
+  test("enabling a custom MCP server stores its advertised icon as the item's logo", async () => {
+    if (!available || !client) return;
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><rect/></svg>';
+    const mcp = startTestMcpServer({
+      serverIcons: [
+        // Unreachable https icons rank below the vector; the data URI wins.
+        { src: "https://icons.invalid/logo.png", sizes: ["16x16"] },
+        {
+          src: `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+          mimeType: "image/svg+xml",
+        },
+      ],
+    });
+    const objects = new Map<string, Uint8Array>();
+    const objectStorage = {
+      putObject: async (input: { key: string; body: Uint8Array }) => {
+        objects.set(input.key, input.body.slice());
+      },
+      getObjectBytes: async (key: string) => {
+        const bytes = objects.get(key);
+        return bytes ? { bytes, contentType: "application/octet-stream" } : null;
+      },
+    } as unknown as ApiRouteDeps["objectStorage"];
+    const iconSettings = { ...settings, integrationsEnabled: true };
+    const iconApp = new Hono();
+    registerCapabilityRoutes(iconApp, {
+      db: client.db,
+      settings: iconSettings,
+      objectStorage,
+    } as ApiRouteDeps);
+    registerCatalogAssetRoutes(iconApp, { settings: iconSettings, objectStorage } as ApiRouteDeps);
+    const capabilityId = `mcp:icons-${crypto.randomUUID()}`;
+    const item = {
+      accountId,
+      workspaceId,
+      id: capabilityId,
+      kind: "mcp" as const,
+      source: "manual",
+      name: "Icon fixture",
+      description: null,
+      category: "custom",
+      tags: [],
+      homepageUrl: null,
+      endpointUrl: mcp.url,
+      installUrl: null,
+      authModel: null,
+      metadata: { mcpServerId: `icons_${crypto.randomUUID().replaceAll("-", "")}` },
+    };
+    try {
+      await upsertCapabilityCatalogItem(client.db, item);
+      const bearer = await signDelegatedAccessToken(DELEGATION_SECRET, {
+        accountId,
+        workspaceId,
+        subjectId,
+        principalKind: "human_session",
+        permissions: ["workspace:read", "capabilities:manage"],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const enabled = await iconApp.request(
+        `http://x/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/enable`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+          body: JSON.stringify({ config: {}, metadata: {} }),
+        },
+      );
+      expect(enabled.status, await enabled.clone().text()).toBe(201);
+      const stored = await getCapabilityCatalogItem(client.db, workspaceId, capabilityId);
+      const logoAssetPath = stored?.logoAssetPath ?? "";
+      expect(logoAssetPath).toMatch(/^catalog-assets\/mcp-icons\/127\.0\.0\.1\/[0-9a-f]{24}\.svg$/);
+
+      const served = await iconApp.request(`http://x/v1/${logoAssetPath}`);
+      expect(served.status).toBe(200);
+      expect(served.headers.get("content-type")).toBe("image/svg+xml");
+      expect(await served.text()).toBe(svg);
+
+      // Editing the item (as setup does on every save) keeps the server's logo.
+      await upsertCapabilityCatalogItem(client.db, { ...item, name: "Icon fixture renamed" });
+      expect(
+        (await getCapabilityCatalogItem(client.db, workspaceId, capabilityId))?.logoAssetPath,
+      ).toBe(logoAssetPath);
+    } finally {
+      mcp.close();
     }
   }, 60_000);
 });

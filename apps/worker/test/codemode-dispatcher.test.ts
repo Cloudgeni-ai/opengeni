@@ -39,6 +39,7 @@ import {
   submitCodemodeOperation,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -746,6 +747,108 @@ describe("CodemodeAttemptDispatcher", () => {
           errorCode: "attempt_cancelled_during_execution",
         },
       },
+    });
+  });
+
+  async function settleThrownCall(thrown: unknown) {
+    const { scope, environment } = await fixture(async () => {
+      throw thrown;
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      const operation = await waitForTerminal(scope, operationId);
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      return { operation, output: toolEvents[1]?.payload };
+    } finally {
+      await dispatcher.close();
+    }
+  }
+
+  test("keeps the API's error when a started call fails with an outcome it cannot confirm", async () => {
+    if (!available) return;
+    // A mutating tool whose API call answered 500: the same error a direct
+    // call shows as "Error: API 500: ... Reference: <id>.".
+    const thrown = new OpenGeniApiError(
+      500,
+      JSON.stringify({
+        error: {
+          code: "internal_error",
+          message: "The workspace could not complete the request.",
+          retryable: true,
+          requestId: "c7e594c4-994f-4395-afa0-5f064c6d1d49",
+        },
+      }),
+      { mutation: true },
+    );
+    const expected =
+      "The tool failed after it started, so its side-effect outcome is unknown; inspect actual state before retrying. Error: API 500: The workspace could not complete the request. Reference: c7e594c4-994f-4395-afa0-5f064c6d1d49.";
+    const { operation, output } = await settleThrownCall(thrown);
+    expect(operation).toMatchObject({
+      state: "outcome_unknown",
+      errorCode: "internal_error",
+      errorMessage: expected,
+    });
+    expect(output).toMatchObject({
+      error: true,
+      output: {
+        isError: true,
+        content: [{ type: "text", text: expected }],
+        _meta: { codemodeState: "outcome_unknown", errorCode: "internal_error" },
+      },
+    });
+  });
+
+  test("keeps the SDK's transport error when a started call loses its response", async () => {
+    if (!available) return;
+    const thrown = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      correlationId: "0393a3c5-82f7-4f75-bd15-ea26b970449a",
+      outcomeUnknown: true,
+      mutation: true,
+      displayMessage: "The request could not be confirmed — reconcile before retrying.",
+    });
+    const { operation } = await settleThrownCall(thrown);
+    expect(operation).toMatchObject({
+      state: "outcome_unknown",
+      errorCode: "network_error",
+      errorMessage:
+        "The tool failed after it started, so its side-effect outcome is unknown; inspect actual state before retrying. Error: The request could not be confirmed — reconcile before retrying. Reference: 0393a3c5-82f7-4f75-bd15-ea26b970449a.",
+    });
+  });
+
+  test("keeps the generic text when a started call throws a non-public error", async () => {
+    if (!available) return;
+    const { operation } = await settleThrownCall(
+      new Error("internal detail that must not reach the model"),
+    );
+    expect(operation).toMatchObject({
+      state: "outcome_unknown",
+      errorCode: "tool_outcome_unknown",
+      errorMessage:
+        "Tool execution ended without a durable result. Its side-effect outcome is unknown; inspect actual state before retrying.",
     });
   });
 

@@ -77,6 +77,7 @@ for (const width of [1440, 390]) {
   await tab.navigate("http://127.0.0.1:3000/reports", { waitUntil: "network_idle" });
   await tab.screenshot({ saveTo: `shots/reports-${width}.jpg` });
 }
+await tab.act({ type: "viewport_reset" }); // Back to the window's own size and scale.
 
 const { downloads } = await browser.downloads.list();
 const completed = downloads.find((download) => download.status === "completed");

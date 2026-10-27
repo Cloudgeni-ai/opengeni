@@ -4,7 +4,11 @@ import { NativeConnection, Worker } from "@temporalio/worker";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
 import { createOpenGeniWorker } from "../src";
-import { createWorkerServiceLifecycle } from "../src/worker-service-lifecycle";
+import {
+  createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
+  WorkerForceStoppedError,
+} from "../src/worker-service-lifecycle";
 import {
   CONTROL_WORKER_SHUTDOWN_FORCE_MS,
   CONTROL_WORKER_SHUTDOWN_GRACE_MS,
@@ -13,6 +17,7 @@ import {
   armWorkerProcessExitDeadline,
   closeWithinBudget,
   resolveWorkerShutdownTiming,
+  runWorkerProcessEntrypoint,
 } from "../src/worker-shutdown";
 
 // Kubernetes termination grace rendered by the Helm chart for turn workers and
@@ -257,11 +262,73 @@ describe("shutdown phase telemetry", () => {
       closeOwnedResources: async () => undefined,
     });
 
-    await expect(lifecycle.run()).rejects.toBe(forced);
+    const error = await lifecycle.run().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkerForceStoppedError);
+    expect((error as Error).cause).toBe(forced);
     const phase = read().find((entry) => entry.surface === "worker_shutdown");
     expect(phase?.outcome).toBe("force_stopped");
     expect(JSON.stringify(read())).not.toContain("Timed out while waiting");
   });
+
+  test.each([true, false])(
+    "SDK finally masks force timeout: containment=%s keeps host intent and original cause",
+    async (contained) => {
+      const read = captureLogs();
+      const masked = Object.assign(
+        new Error("Worker still in use: Expected 1 reference, but got 2"),
+        {
+          name: "IllegalStateError",
+        },
+      );
+      let reject!: (error: Error) => void;
+      const running = new Promise<void>((_resolve, fail) => {
+        reject = fail;
+      });
+      const obs = structuredObservability();
+      const containment = createWorkerCleanupContainment({
+        drain: () => lifecycle.drain(),
+        observability: obs,
+      });
+      const lifecycle = createWorkerServiceLifecycle({
+        role: "turn",
+        observability: obs,
+        cleanupContainmentRequested: containment.requested,
+        worker: { run: () => running, shutdown() {} },
+        closeOwnedResources: async () => {},
+      });
+      const run = lifecycle.run().catch((error: unknown) => error);
+      if (contained) containment.request();
+      reject(masked);
+      const error = await run;
+      if (contained) {
+        expect(error).toBeInstanceOf(WorkerForceStoppedError);
+        expect((error as Error).cause).toBe(masked);
+        const logs: unknown[][] = [];
+        const stderr = spyOn(console, "error").mockImplementation((...args) => {
+          logs.push(args);
+        });
+        try {
+          let code: number | undefined;
+          await runWorkerProcessEntrypoint(
+            async () => {
+              throw error;
+            },
+            (value) => {
+              code = value;
+            },
+          );
+          expect(code).toBe(1);
+          expect(logs[0]?.[0]).toBe("[worker] force stop");
+        } finally {
+          stderr.mockRestore();
+        }
+      } else expect(error).toBe(masked);
+      expect(read().find((entry) => entry.surface === "worker_shutdown")?.outcome).toBe(
+        contained ? "force_stopped" : "failed",
+      );
+      expect(lifecycle.state()).toBe("failed");
+    },
+  );
 });
 
 describe("standalone process exit", () => {

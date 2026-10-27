@@ -191,7 +191,7 @@ message Capabilities {
   // one machine may host multiple Chrome profiles.
   bool browser_bridge = 11;
   // The runner enforces the optional per-connection operation memory policy on
-  // every contained exec/git child. A control plane must fail closed rather than
+  // every contained exec child. A control plane must fail closed rather than
   // send a configured policy to a runner that does not advertise this bit.
   bool operation_resource_policy = 12;
   // The runner additionally understands and enforces cpu_max_millicores. This is
@@ -217,7 +217,7 @@ message Capabilities {
   // Requires transactional_fs_write. Older runners require a nonzero session
   // epoch; callers MUST NOT invent one for a machine-addressed operation.
   bool transactional_fs_write_machine = 18;
-  // The runner honors `run_as` on exec, git, PTY open and file requests: it runs
+  // The runner honors `run_as` on exec, PTY open and file requests: it runs
   // as root on Linux and switches to the named user per request. False (absent)
   // runners MUST NOT receive a non-empty run_as.
   bool run_as = 19;
@@ -577,64 +577,6 @@ message FsRemoveRequest {
 }
 
 message FsRemoveResponse {}
-
-// =============================================================================
-// Git
-// =============================================================================
-
-// A single git operation. The agent runs git against the repo rooted at `cwd`
-// (or workspace_root) and returns structured results where it can, falling back
-// to raw stdout for pass-through subcommands.
-message GitRequest {
-  GitOp op = 1;
-  // Repo working directory; defaults to workspace_root.
-  string cwd = 2;
-  // Free-form args for ops that pass through (e.g. log/diff flags).
-  repeated string args = 3;
-  // Run as this local user (see ExecRequest.run_as).
-  string run_as = 4;
-}
-
-enum GitOp {
-  GIT_OP_UNSPECIFIED = 0;
-  GIT_OP_STATUS = 1;
-  GIT_OP_DIFF = 2;
-  GIT_OP_LOG = 3;
-  GIT_OP_ADD = 4;
-  GIT_OP_COMMIT = 5;
-  GIT_OP_BRANCH = 6;
-  GIT_OP_CHECKOUT = 7;
-  GIT_OP_PULL = 8;
-  GIT_OP_PUSH = 9;
-  // Any other subcommand, passed through verbatim via `args`.
-  GIT_OP_RAW = 15;
-}
-
-message GitResponse {
-  int32 exit_code = 1;
-  // Raw stdout/stderr for pass-through fidelity.
-  bytes stdout = 2;
-  bytes stderr = 3;
-  // Structured status, present for GIT_OP_STATUS.
-  GitStatus status = 4;
-}
-
-message GitStatus {
-  string branch = 1;
-  // The upstream tracking branch, if any.
-  string upstream = 2;
-  int32 ahead = 3;
-  int32 behind = 4;
-  repeated GitFileStatus files = 5;
-  bool clean = 6;
-}
-
-message GitFileStatus {
-  string path = 1;
-  // Two-letter porcelain code (e.g. " M", "??", "A ").
-  string code = 2;
-  bool staged = 3;
-}
 
 // =============================================================================
 // PTY (interactive terminal) — control ops; the bytes ride the stream plane
@@ -1435,11 +1377,11 @@ message ControlRequest {
   string request_id = 1;
   uint32 epoch = 2;
   // Per-connection policy snapshot attached to the operation request. It lives
-  // on the envelope so request/reply Git and replayable OpStart share one
+  // on the envelope so request/reply ops and replayable OpStart share one
   // contract. Absent means unrestricted by the control plane.
   OperationResourcePolicy resource_policy = 3;
-  reserved 13;
-  reserved "exec";
+  reserved 13, 21;
+  reserved "exec", "git";
   oneof op {
     PingRequest ping = 10;
     Hello hello = 11;
@@ -1451,7 +1393,6 @@ message ControlRequest {
     FsMoveRequest fs_move = 18;
     FsStatRequest fs_stat = 19;
     FsRemoveRequest fs_remove = 20;
-    GitRequest git = 21;
     PtyOpenRequest pty_open = 22;
     PtyWriteRequest pty_write = 23;
     PtyResizeRequest pty_resize = 24;
@@ -1484,8 +1425,8 @@ message ControlResponse {
   string request_id = 1;
   // Present when the op failed; when set, `result` is empty.
   AgentError error = 2;
-  reserved 13;
-  reserved "exec";
+  reserved 13, 21;
+  reserved "exec", "git";
   oneof result {
     PingResponse ping = 10;
     HelloAck hello = 11;
@@ -1497,7 +1438,6 @@ message ControlResponse {
     FsMoveResponse fs_move = 18;
     FsStatResponse fs_stat = 19;
     FsRemoveResponse fs_remove = 20;
-    GitResponse git = 21;
     PtyOpenResponse pty_open = 22;
     PtyWriteResponse pty_write = 23;
     PtyResizeResponse pty_resize = 24;

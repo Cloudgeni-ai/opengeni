@@ -19,6 +19,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
+import { requestValidationError } from "../http/request-body";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
@@ -165,7 +166,10 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
     const person = await requireOrganizationPerson(c, deps, true);
     const parsed = UpdateModelAccountPreferencesRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid model account preferences" });
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
+        message: "invalid model account preferences",
+      });
     }
     const result = await writeSubscriptionPersonPreferences(deps.db, {
       accountId: person.organizationId,

@@ -191,6 +191,11 @@ export class ManagedBrowserRunner {
   /** Set when this managed browser shares the machine's network because
    * isolating it is unavailable here; shown once to the agent at launch. */
   readonly networkNotice: string | null;
+  /** How a headed browser shows on the machine: in a native window, or
+   * offscreen with none. Null for a headless browser. It follows the same
+   * decision as the launch arguments, so it never claims a window Chrome was
+   * not given. */
+  readonly display: ManagedBrowserDisplay | null;
   readonly proxyCredentials: ManagedBrowserProxyCredentials | null;
   private readonly profileDirectory: string;
   private readonly workingDirectory: string;
@@ -258,6 +263,7 @@ export class ManagedBrowserRunner {
     this.chromeStderrDone = browserLaunch?.stderrDone ?? null;
     this.browserScope = browserLaunch?.scope ?? null;
     this.networkNotice = browserLaunch?.networkNotice ?? null;
+    this.display = managedBrowserDisplay(options);
   }
 
   static async create(options: ManagedBrowserRunnerOptions): Promise<ManagedBrowserRunner> {
@@ -565,7 +571,7 @@ export function managedChromeArguments(input: {
     // Headless Chrome elsewhere keeps WebGL through SwiftShader, as on Linux.
     ...(!input.windowed && input.platform !== "linux" ? ["--enable-unsafe-swiftshader"] : []),
     ...(input.proxyServer ? [`--proxy-server=${input.proxyServer}`] : []),
-    ...browserLaunchArguments(input.platform, input.additional, input.windowed),
+    ...browserLaunchArguments(input.platform, input.additional),
     // Chrome's sandbox cannot start as root or inside most containers.
     ...(input.sandboxUnavailable ? ["--no-sandbox"] : []),
     ...(input.smallSharedMemory ? ["--disable-dev-shm-usage"] : []),
@@ -897,8 +903,10 @@ async function chromeStderrDrainWrapper(
   const mkfifo =
     (await firstExecutableInPath(["mkfifo"])) ??
     (await firstExecutable(["/usr/bin/mkfifo", "/bin/mkfifo"]));
+  // Some distributions provide GNU tail separately from a generic implementation
+  // whose byte cap is incorrect for pipes/FIFOs (for example uutils 0.8.0).
   const tail =
-    (await firstExecutableInPath(["tail"])) ??
+    (await firstExecutableInPath(["gnutail", "tail"])) ??
     (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
   if (!mkfifo || !tail) throw new Error("managed Chrome requires mkfifo and tail");
   const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
@@ -1627,8 +1635,22 @@ async function boundedProcessOutput(
 }
 
 /** Whether this managed browser opens a native window. */
-function windowedBrowser(options: ManagedBrowserRunnerOptions): boolean {
+function windowedBrowser(
+  options: Pick<ManagedBrowserRunnerOptions, "headed" | "offscreen">,
+): boolean {
   return options.headed && options.offscreen !== true;
+}
+
+/** Where a headed managed browser is shown. */
+export type ManagedBrowserDisplay = "window" | "offscreen";
+
+/** The display a launch with these options gets: the same choice that adds
+ * or leaves out --headless=new in managedChromeArguments. */
+export function managedBrowserDisplay(
+  options: Pick<ManagedBrowserRunnerOptions, "headed" | "offscreen">,
+): ManagedBrowserDisplay | null {
+  if (!options.headed) return null;
+  return windowedBrowser(options) ? "window" : "offscreen";
 }
 
 /** Chrome's environment: only the machine basics a browser needs, the
@@ -1712,7 +1734,6 @@ function supportedTimezone(value: string): string {
 export function browserLaunchArguments(
   platform: NodeJS.Platform,
   additional: readonly string[] = [],
-  headed = false,
 ): string[] {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
@@ -1730,6 +1751,16 @@ export function browserLaunchArguments(
   if (validatedAdditional.length > 32) {
     throw new Error("too many browser launch arguments");
   }
+  // Chromium honors only the last `--enable-features` switch, so an additional
+  // one is folded into the managed switch instead of replacing it.
+  const enabledFeatures = ["CDPScreenshotNewSurface"];
+  const remainingAdditional = validatedAdditional.filter((argument) => {
+    if (!argument.startsWith("--enable-features=")) return true;
+    for (const feature of argument.slice("--enable-features=".length).split(",")) {
+      if (feature && !enabledFeatures.includes(feature)) enabledFeatures.push(feature);
+    }
+    return false;
+  });
   return [
     "--restore-last-session",
     // Compiled Chromium testing experiments can alter offscreen rendering.
@@ -1748,10 +1779,12 @@ export function browserLaunchArguments(
     // debugged. Managed browsers act for a signed-in person, and sites treat
     // that flag as a bot signal (rate-limited or refused logins).
     "--disable-blink-features=AutomationControlled",
-    // Chromium's presentation-fenced screenshot path can wait indefinitely for
-    // hidden headed tabs. Copy a freshly repainted surface without raising the
-    // browser or changing the shared desktop's active tab.
-    platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
+    // Chromium's presentation-fenced screenshot path waits for the redraw to
+    // be shown, which never happens for a tab another tab covers in its window
+    // (headed or headless), so captures of background agent tabs stalled.
+    // Copy a freshly repainted surface instead, without raising the browser or
+    // changing the window's active tab.
+    `--enable-features=${enabledFeatures.join(",")}`,
     platform === "linux" ? "--test-type" : null,
     // Linux machines that run managed browsers rarely have a GPU, and Chromium
     // turns WebGL off entirely on software rendering. Sites that need WebGL
@@ -1762,7 +1795,7 @@ export function browserLaunchArguments(
     platform === "linux" ? "--ignore-gpu-blocklist" : null,
     platform === "linux" ? "--enable-unsafe-swiftshader" : null,
     profileCryptoArgument,
-    ...validatedAdditional,
+    ...remainingAdditional,
   ].filter((value): value is string => value !== null);
 }
 

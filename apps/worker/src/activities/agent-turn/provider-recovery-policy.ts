@@ -24,6 +24,21 @@ export const MAX_AUTOMATIC_MCP_SERVICE_UNAVAILABLE_RECOVERIES = 30;
 export const MCP_SERVICE_UNAVAILABLE_RECOVERY_WINDOW_MS = 10 * 60_000;
 export const MCP_SERVICE_UNAVAILABLE_BACKOFF_MS = [5_000, 10_000, 15_000, 30_000] as const;
 
+/**
+ * The model provider could not be reached at all: its name did not resolve
+ * for now, there was no route, or the connection was refused. That is what a
+ * lost internet connection looks like, and five quick retries cannot outlast
+ * it. Keep the turn parked and retry at a calm pace for up to six hours from
+ * the first failure, so it continues by itself when the connection returns.
+ * A new message from the person still ends the wait at once.
+ */
+export const PROVIDER_UNREACHABLE_RECOVERY_CODE = "provider_unreachable";
+export const PROVIDER_UNREACHABLE_RECOVERY_WINDOW_MS = 6 * 60 * 60_000;
+export const PROVIDER_UNREACHABLE_BACKOFF_MS = [
+  5_000, 15_000, 30_000, 60_000, 120_000, 300_000,
+] as const;
+export const MAX_AUTOMATIC_PROVIDER_UNREACHABLE_RECOVERIES = 90;
+
 /** Recovery codes bounded by elapsed time from the first failure, not only by count. */
 export function windowedRecoveryPolicy(
   code: unknown,
@@ -38,6 +53,12 @@ export function windowedRecoveryPolicy(
     return {
       maxRecoveries: MAX_AUTOMATIC_MCP_SERVICE_UNAVAILABLE_RECOVERIES,
       windowMs: MCP_SERVICE_UNAVAILABLE_RECOVERY_WINDOW_MS,
+    };
+  }
+  if (code === PROVIDER_UNREACHABLE_RECOVERY_CODE) {
+    return {
+      maxRecoveries: MAX_AUTOMATIC_PROVIDER_UNREACHABLE_RECOVERIES,
+      windowMs: PROVIDER_UNREACHABLE_RECOVERY_WINDOW_MS,
     };
   }
   return null;

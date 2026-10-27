@@ -41,6 +41,7 @@ runVaultProviderContractSuite("Keeper adapter (fake KSM, SDK 17.6.0, read side)"
     listVaults: (ctx) => provider.listVaults(ctx),
     listItems: (ctx, vault) => provider.listItems(ctx, vault),
     readFields: (ctx, vault, item, fields) => provider.readFields(ctx, vault, item, fields),
+    readPasskeys: (ctx, vault, item) => provider.readPasskeys!(ctx, vault, item),
     writeItem: (ctx, vault, item) => provider.writeItem(ctx, vault, item),
     archiveItem: (ctx, vault, item) => provider.archiveItem(ctx, vault, item),
   };

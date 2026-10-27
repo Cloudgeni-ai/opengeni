@@ -24,6 +24,8 @@ export type ChatComposerMessages = {
   sendMessageAriaLabel: string;
   sendAndResumeAriaLabel: string;
   sendTitle: string;
+  /** Send tooltip while nothing is running or waiting: Send just sends. */
+  idleSendTitle?: string | undefined;
   /** Send tooltip while a busy Send steers (`busySend="steer"`). */
   steerSendTitle?: string | undefined;
   /**
@@ -106,6 +108,7 @@ export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessag
   sendMessageAriaLabel: t("composerMessages.sendMessage"),
   sendAndResumeAriaLabel: t("composerMessages.addMessageToQueue"),
   sendTitle: t("composerMessages.queueMessageEnterSteerWith"),
+  idleSendTitle: t("composerMessages.sendMessageEnter"),
   steerSendTitle: t("composerMessages.steerMessageEnterQueueWith"),
   steerLabel: t("composerMessages.steer"),
   steerTitle: t("composerMessages.steerReadsItSoon"),

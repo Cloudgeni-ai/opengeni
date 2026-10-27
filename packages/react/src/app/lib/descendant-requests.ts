@@ -178,12 +178,6 @@ export type DescendantRequestActivity = {
   requestSequences: ReadonlyMap<string, number>;
 };
 
-export const EMPTY_DESCENDANT_ACTIVITY: DescendantRequestActivity = {
-  approvals: [],
-  approvalSequence: null,
-  requestSequences: new Map(),
-};
-
 /**
  * Rebuild what a sub-session waits on from its newest request events (any
  * order). Uses the same approval projection as the sub-session's own page, so

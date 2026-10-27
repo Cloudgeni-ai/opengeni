@@ -1,6 +1,7 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { SKILL_MAX_FILES } from "./skill-files";
 export { parseSkillFrontmatter, readSkillMetadata } from "./skill-metadata";
 export * from "./skill-files";
 
@@ -32,6 +33,46 @@ export const SkillActor = /* @__PURE__ */ defineSchema(() =>
 );
 export type SkillActor = z.infer<typeof SkillActor>;
 export type SkillScope = "workspace" | "organization" | "user";
+
+/** Save a personal, workspace or organization Skill folder (`saveWorkspaceSkill`). */
+export const SaveWorkspaceSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.uuid(),
+      skillId: z.uuid(),
+      expectedRevisionId: z.uuid().nullable(),
+      expectedScopeVersion: z.number().int().nonnegative(),
+      scope: z.enum(["workspace", "organization", "user"]).default("workspace"),
+      stableKey: z.string().min(1).max(96),
+      files: z.array(SkillFile).max(SKILL_MAX_FILES),
+      deletions: z.array(z.string().min(1).max(512)).max(SKILL_MAX_FILES).default([]),
+      reason: z.string().min(1).max(2000),
+    })
+    .strict(),
+);
+export type SaveWorkspaceSkillRequest = z.infer<typeof SaveWorkspaceSkillRequest>;
+
+/** Approve, reject or restore one Skill revision. */
+export const ApplyWorkspaceSkillRevisionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      removalOperationId: z.uuid().optional(),
+      operationId: z.uuid(),
+      revisionId: z.uuid(),
+      expectedRevisionId: z.uuid().nullable(),
+      expectedScopeVersion: z.number().int().nonnegative(),
+      reason: z.string().min(1).max(2000),
+    })
+    .strict(),
+);
+export type ApplyWorkspaceSkillRevisionRequest = z.infer<typeof ApplyWorkspaceSkillRevisionRequest>;
+
+/** Permanently remove a Skill and all its saved revisions. */
+export const RemoveWorkspaceSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  ApplyWorkspaceSkillRevisionRequest.omit({ revisionId: true, removalOperationId: true }),
+);
+export type RemoveWorkspaceSkillRequest = z.infer<typeof RemoveWorkspaceSkillRequest>;
+
 export type SkillWriteContext = { accountId: string; workspaceId: string; actor: SkillActor };
 export type SkillSaveInput = SkillWriteContext & {
   operationId: string;

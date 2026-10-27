@@ -99,6 +99,26 @@ workspace, or selected ones). The connection then acts as that person:
   A personal API key (`ogp_…`) calls the same server as its owner, exactly
   like a connected agent with the key's access setting. Organization API keys
   may call it too and act as the organization.
+- Describe shows each action's input: `requestSchema` is the contract the
+  route validates its body with, and `queryParameters` lists the query
+  parameters it reads. Both are read from the route handlers when the catalog
+  is generated: a body or query parsed with `parseRequestBody`,
+  `parseRequestJson` or `parseRequestQuery` (`apps/api/src/http/request-body.ts`)
+  is found automatically, and the few handlers that delegate parsing to a
+  helper are listed in `ACTION_REQUEST_SCHEMAS`. Those helpers are also the
+  one way a route validates input, so an invalid request answers 400 or 422
+  with `validation_failed`, a message naming each bad field
+  (`Invalid Skill request: stableKey: …; scope: …`) and `details.issues`.
+- A route retired in favour of another answers 410 with code `gone` and
+  `details.replacement` (`routeRetired` in `apps/api/src/http/deprecation.ts`).
+  Its action is marked `retired`: search never returns it, and describe or
+  call names the replacement action without running anything. App actions in
+  chat count it as a read, so it never asks the person for a confirmation.
+- A call result holds at most 256 KiB. A JSON list larger than that keeps as
+  many whole items as fit (a top-level array, or the largest array in the
+  top-level object) with `truncated` counts and a hint naming the `offset`,
+  `limit` or `cursor` query parameters to call again with. Other bodies are
+  cut at the byte limit.
 - `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
   MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
   origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.
@@ -219,6 +239,25 @@ or admin manages.
   (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
   stay with the person). Nothing of the agent's own workspace scope carries
   into the action.
+- The ordinary session tools reach chats in the granter's other workspaces
+  through the same authority. `session_get`, `session_events`, `session_wait`,
+  `session_send_message`, `session_steer`, `session_pause` and
+  `session_resume` take an optional `workspaceId` (from the chat's link).
+  When it names another workspace, the tool runs there as the granter through
+  the workspace tool gateway's invoke action (`POST
+  /v1/workspaces/:workspaceId/tools/invoke`), which `admin_action_call`
+  already reaches, so the granter's live permissions apply and nothing more.
+  What it writes is the granter's (a message or steer is their human/API
+  prompt). Follow-up `nextAction` hints in the result carry the
+  `workspaceId`. A wait there does not end early for the caller's own pending
+  input but reports it when it returns.
+- Without full access, a session tool given another `workspaceId` says that
+  session tools reach only this workspace's chats and how full access is
+  given. With it, a chat that does not exist there and a workspace the
+  granter cannot use read the same (`Session not found or access denied`),
+  so nothing confirms a chat exists. A not-found-or-denied answer about this
+  workspace's chats adds how a chat in another workspace is reached, without
+  saying whether this one exists anywhere.
 
 Migrations `0692` and `0971` are rolling.
 
@@ -603,8 +642,8 @@ First-party Opengeni MCP company-profile tools (separate organization policy):
 
 First-party Opengeni MCP session monitoring tools (`sessions:read`):
 
-- `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
-- `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
+- `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. Each `sessions_list` row and `session_get` result (and `session_create`'s receipt `facts.chatUrl`) carries the chat's canonical `chatUrl`, built from `webBaseUrl` (falling back to `publicBaseUrl`) and the chat's own workspace, so agents never build links themselves; it is omitted when neither is configured. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
+- `session_wait` - one blocking call for a short in-turn wait (a sessionless caller waits on its targets only). It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
 - `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
 - `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. Its optional `reply` is the agent's complete message for the person: the worker shows it verbatim as the turn's answer once the wait is accepted (see [run lifecycle](run-lifecycle.md)). The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 

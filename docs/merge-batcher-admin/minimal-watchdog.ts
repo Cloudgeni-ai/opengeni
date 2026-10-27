@@ -86,7 +86,13 @@ export type Ports = {
   // a lost process/result must not cause automatic repeat of an unknown OFF.
   claim(): Promise<boolean>;
   off(): Promise<void>;
-  record(event: { outcome: "healthy" | "held" | "manual"; reason?: Reason }): Promise<void>;
+  // Existing claim may continue proof/reverse stages only, never another STOP.
+  resumeOff?(): Promise<void>;
+  record(event: {
+    outcome: "healthy" | "held" | "manual";
+    reason?: Reason;
+    recoveryError?: string;
+  }): Promise<void>;
 };
 export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual"> {
   await ports.verifyBinding();
@@ -102,6 +108,21 @@ export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual">
     return "healthy";
   }
   if (!(await ports.claim())) {
+    if (ports.resumeOff) {
+      try {
+        await ports.resumeOff();
+        await ports.record({ outcome: "manual", reason: cause });
+        return "manual";
+      } catch (error) {
+        await ports.record({
+          outcome: "held",
+          reason: cause,
+          recoveryError:
+            error instanceof Error ? error.message.slice(0, 500) : "Unknown recovery failure",
+        });
+        return "held";
+      }
+    }
     await ports.record({ outcome: "held", reason: cause });
     return "held";
   }

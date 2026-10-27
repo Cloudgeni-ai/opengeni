@@ -6,23 +6,29 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr as _;
+use std::time::Duration;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
 use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
-use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde_json::Value;
 use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
-    Spec, Store, StoreError, Write, admits, rule,
+    Admission, Admits, AgentRef, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked,
+    RequestRow, Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write,
+    admits, rule,
 };
-use crate::e2b::lifecycle::Record;
 
+mod connect;
 mod images;
+mod lifecycles;
 mod schema;
+mod templates;
+
+use connect::{OPEN_WITHIN, bounded};
 
 /// The advisory lock the leader holds for as long as its connection lives.
 const LEADER_LOCK: i64 = 7_231_402;
@@ -30,8 +36,6 @@ const LEADER_LOCK: i64 = 7_231_402;
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch";
-
-const LIFECYCLE_COLUMNS: &str = "id, team, record, version";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
@@ -99,22 +103,6 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
-}
-
-/// When a lifecycle is due, as a `bigint`: never is the largest one.
-fn due(record: &Record) -> i64 {
-    i64::try_from(record.due_ms()).unwrap_or(i64::MAX)
-}
-
-fn lifecycle_row(row: &Row) -> Result<LifecycleRow> {
-    let id: String = row.get(0);
-    let Json(record): Json<Record> = row.try_get(2).map_err(corrupt)?;
-    Ok(LifecycleRow {
-        id: Id::from_str(&id).map_err(corrupt)?,
-        team: row.get(1),
-        record,
-        version: small(row.get(3))?,
-    })
 }
 
 const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
@@ -286,6 +274,10 @@ impl PostgresStore {
     /// caller that adds what a connection string cannot carry safely, such
     /// as a password from a secret.
     ///
+    /// Connections are bounded against a network that drops them (see
+    /// the `connect` module). Waiting for a free pooled connection is not:
+    /// each connection in use is itself bounded.
+    ///
     /// # Errors
     ///
     /// When the database cannot be reached or its schema not brought up
@@ -295,6 +287,20 @@ impl PostgresStore {
         tls: Option<rustls::ClientConfig>,
         connections: usize,
     ) -> Result<Self> {
+        let store = Self::pooled(config, tls, connections, OPEN_WITHIN)?;
+        schema::migrate(&mut store.client().await?).await?;
+        Ok(store)
+    }
+
+    /// A store over a pool of up to `connections` to `config`'s database,
+    /// each opened within `open_within`, without touching the database.
+    fn pooled(
+        config: tokio_postgres::Config,
+        tls: Option<rustls::ClientConfig>,
+        connections: usize,
+        open_within: Duration,
+    ) -> Result<Self> {
+        let config = bounded(config);
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -308,11 +314,11 @@ impl PostgresStore {
         };
         let pool = Pool::builder(manager)
             .max_size(connections)
+            .runtime(Runtime::Tokio1)
+            .create_timeout(Some(open_within))
             .build()
             .map_err(database)?;
-        let store = Self { pool };
-        schema::migrate(&mut store.client().await?).await?;
-        Ok(store)
+        Ok(Self { pool })
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object> {
@@ -322,7 +328,10 @@ impl PostgresStore {
     /// Inserts `row`, for `row.team`'s create request `request_id` when
     /// given: then only while the request is not retired, with its row
     /// locked against [`Store::delete_retiring`], which retires it. Answers
-    /// how the write went and whether the request was live.
+    /// how the write went and whether the request was live. A sandbox
+    /// created from a team's template is inserted only while the template
+    /// is there, with its row locked against its delete, which a claim on
+    /// its image waits for.
     async fn insert_for(
         &self,
         row: &SandboxRow,
@@ -332,7 +341,7 @@ impl PostgresStore {
         // A retired request's row is locked by the delete that retires it,
         // so this waits for that delete and then reads the row again.
         let request = "request as (select 1 from compute_create_requests \
-             where team = $2 and request_id = $17 and gone_ms is null for share)";
+             where team = $2 and request_id = $18 and gone_ms is null for share)";
         let (request, live) = if request_id.is_some() {
             (
                 format!("{request}, "),
@@ -341,6 +350,7 @@ impl PostgresStore {
         } else {
             (String::new(), "")
         };
+        let template = row.spec.image.strip_prefix(TEMPLATE_PREFIX);
         let version = big(row.version)?;
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![
             &fields.id,
@@ -359,6 +369,7 @@ impl PostgresStore {
             &fields.created_ms,
             &version,
             &fields.whole,
+            &template,
         ];
         if let Some(request_id) = &request_id {
             params.push(request_id);
@@ -368,13 +379,17 @@ impl PostgresStore {
             .await?
             .query_one(
                 &format!(
-                    "with {request}{}, written as ( \
+                    "with {request}{}, gone as (select true as gone where $17::text is not null \
+                     and not exists (select 1 from compute_templates \
+                     where team = $2 and id = $17::text for share)), written as ( \
                      insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
                      select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
                      $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
                      $13::text, $14::bigint, $15::bigint, $16::bigint \
-                     where not exists (select 1 from owner where lost){live} \
-                     on conflict (id) do nothing returning 1) {WRITTEN}{}",
+                     where not exists (select 1 from owner where lost) \
+                     and not exists (select 1 from gone){live} \
+                     on conflict (id) do nothing returning 1) {WRITTEN}, \
+                     exists (select 1 from gone) as gone{}",
                     owner_lost(5),
                     if request_id.is_some() {
                         ", exists (select 1 from request) as live"
@@ -387,7 +402,12 @@ impl PostgresStore {
             .await
             .map_err(database)?;
         let live = request_id.is_none() || written.get::<_, bool>("live");
-        Ok((write_of(&written), live))
+        let write = if written.get::<_, bool>("gone") {
+            Write::TemplateGone
+        } else {
+            write_of(&written)
+        };
+        Ok((write, live))
     }
 
     /// Applies a registration that meets no live one, in `tx`.
@@ -460,7 +480,8 @@ impl PostgresStore {
              (id, name, info, epoch, state, renewals, seq, attempt, answer, capacity, changed) \
              values ($1, $2, $3, $4, 'live', 1, 0, $5, $6, $7, nextval('compute_changes')) \
              on conflict (id) do update set info = excluded.info, epoch = excluded.epoch, \
-             state = 'live', renewals = compute_hosts.renewals + 1, seq = 0, \
+             state = case when compute_hosts.drained then 'draining' else 'live' end, \
+             renewals = compute_hosts.renewals + 1, seq = 0, \
              attempt = excluded.attempt, answer = excluded.answer, \
              capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
             &[
@@ -582,18 +603,26 @@ impl Store for PostgresStore {
         rows.iter().map(host_row).collect()
     }
 
-    async fn renewals(&self) -> Result<Vec<(HostId, u64)>> {
+    async fn renewals(&self) -> Result<Vec<Counted>> {
         let rows = self
             .client()
             .await?
             .query(
-                "select id, renewals from compute_hosts where state <> 'lost'",
+                "select id, renewals, info->'boot' as boot from compute_hosts \
+                 where state <> 'lost'",
                 &[],
             )
             .await
             .map_err(database)?;
         rows.iter()
-            .map(|row| Ok((HostId(small(row.get(0))?), small(row.get(1))?)))
+            .map(|row| {
+                let boot: Option<Json<Value>> = row.try_get("boot").map_err(corrupt)?;
+                Ok(Counted {
+                    host: HostId(small(row.get(0))?),
+                    renewals: small(row.get(1))?,
+                    boot: boot.and_then(|Json(boot)| serde_json::from_value(boot).ok()),
+                })
+            })
             .collect()
     }
 
@@ -652,8 +681,12 @@ impl Store for PostgresStore {
             .client()
             .await?
             .execute(
-                "update compute_hosts set state = $3, changed = nextval('compute_changes') \
-                 where id = $1 and state = $2",
+                "update compute_hosts \
+                 set state = case when state = 'lost' then state else $3 end, \
+                 drained = $3 = 'draining', changed = nextval('compute_changes') \
+                 where id = $1 and (state = $2 \
+                 or (state = $3 and drained <> ($3 = 'draining')) \
+                 or (state = 'lost' and drained and $2 = 'draining' and $3 = 'live'))",
                 &[&big(host.0)?, &state_name(from), &state_name(to)],
             )
             .await
@@ -926,85 +959,23 @@ impl Store for PostgresStore {
     }
 
     async fn insert_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
-        let written = self
-            .client()
-            .await?
-            .execute(
-                "insert into compute_lifecycles (id, team, record, due_ms, version) \
-                 values ($1, $2, $3, $4, $5) on conflict (id) do nothing",
-                &[
-                    &row.id.to_string(),
-                    &row.team,
-                    &Json(&row.record),
-                    &due(&row.record),
-                    &big(row.version)?,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(written == 1)
+        self.insert_lifecycle_now(row).await
     }
 
     async fn lifecycle(&self, id: Id) -> Result<Option<LifecycleRow>> {
-        self.client()
-            .await?
-            .query_opt(
-                &format!("select {LIFECYCLE_COLUMNS} from compute_lifecycles where id = $1"),
-                &[&id.to_string()],
-            )
-            .await
-            .map_err(database)?
-            .as_ref()
-            .map(lifecycle_row)
-            .transpose()
+        self.lifecycle_now(id).await
     }
 
     async fn replace_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
-        let written = self
-            .client()
-            .await?
-            .execute(
-                "update compute_lifecycles set record = $2, due_ms = $3, version = version + 1 \
-                 where id = $1 and version = $4",
-                &[
-                    &row.id.to_string(),
-                    &Json(&row.record),
-                    &due(&row.record),
-                    &big(row.version)?,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(written == 1)
+        self.replace_lifecycle_now(row).await
     }
 
     async fn delete_lifecycle(&self, id: Id, version: u64) -> Result<bool> {
-        let deleted = self
-            .client()
-            .await?
-            .execute(
-                "delete from compute_lifecycles where id = $1 and version = $2",
-                &[&id.to_string(), &big(version)?],
-            )
-            .await
-            .map_err(database)?;
-        Ok(deleted == 1)
+        self.delete_lifecycle_now(id, version).await
     }
 
     async fn lifecycles(&self, team: &str) -> Result<Vec<LifecycleRow>> {
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where team = $1 order by id"
-                ),
-                &[&team],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_now(team).await
     }
 
     async fn lifecycles_due(
@@ -1013,28 +984,7 @@ impl Store for PostgresStore {
         after: Option<(u64, Id)>,
         limit: usize,
     ) -> Result<Vec<LifecycleRow>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        // The largest `bigint` is never (see `due`), so no time reaches it.
-        let now = i64::try_from(now_ms).unwrap_or(i64::MAX).min(i64::MAX - 1);
-        // Due times are never negative, so -1 comes before every row.
-        let (after_due, after_id) = after.map_or((-1, String::new()), |(due, id)| {
-            (i64::try_from(due).unwrap_or(i64::MAX), id.to_string())
-        });
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms <= $1 \
-                     and (due_ms, id collate \"C\") > ($2, $3) \
-                     order by due_ms, id collate \"C\" limit $4"
-                ),
-                &[&now, &after_due, &after_id, &limit],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_due_now(now_ms, after, limit).await
     }
 
     async fn lifecycles_paused(
@@ -1042,22 +992,7 @@ impl Store for PostgresStore {
         after: Option<Id>,
         limit: usize,
     ) -> Result<Vec<LifecycleRow>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let after = after.map_or_else(String::new, |id| id.to_string());
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms = $1 \
-                     and id collate \"C\" > $2 order by id collate \"C\" limit $3"
-                ),
-                &[&i64::MAX, &after, &limit],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_paused_now(after, limit).await
     }
 
     async fn image_built(&self, source: &str) -> Result<Option<ImageId>> {
@@ -1076,6 +1011,43 @@ impl Store for PostgresStore {
 
     async fn latest_built(&self, name: &str) -> Result<Option<ImageId>> {
         self.latest_built_now(name).await
+    }
+
+    async fn insert_template(&self, row: &TemplateRow) -> Result<Inserted> {
+        self.insert_template_now(row).await
+    }
+
+    async fn template(&self, team: &str, key: &str) -> Result<Option<TemplateRow>> {
+        self.template_now(team, key).await
+    }
+
+    async fn templates(&self, team: &str) -> Result<Vec<TemplateRow>> {
+        self.templates_now(team).await
+    }
+
+    async fn delete_template(&self, team: &str, id: &str) -> Result<bool> {
+        self.delete_template_now(team, id).await
+    }
+
+    async fn unused_images(&self, now_ms: u64, before_ms: u64) -> Result<Vec<ImageId>> {
+        self.unused_images_now(now_ms, before_ms).await
+    }
+
+    async fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> Result<bool> {
+        self.collect_image_now(image, before_ms, collector).await
+    }
+
+    async fn collecting(&self, image: ImageId, collector: &str) -> Result<bool> {
+        self.collecting_now(image, collector).await
+    }
+
+    async fn collected(&self, image: ImageId, collector: &str) -> Result<()> {
+        self.collected_now(image, collector).await
     }
 }
 

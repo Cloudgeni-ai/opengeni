@@ -4,6 +4,7 @@ import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
+  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../src/activities/mcp-account-routes";
@@ -195,6 +196,7 @@ describe("installed API Integration worker adapters", () => {
         mcpServers: [
           {
             id: item.serverId,
+            name: item.name,
             url: item.baseUrl,
             connectionRef: item.connectionRef!,
           },
@@ -260,6 +262,75 @@ describe("installed API Integration worker adapters", () => {
       expect(integrations.map((value) => value.serverId)).toEqual(
         bindings.map((binding) => binding.serverId),
       );
+      // Integration routes are labelled exactly like connector routes, so the
+      // model and people can tell the accounts apart, and the turn can name
+      // every connected account.
+      const labels = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings,
+        tools: routed.tools,
+      });
+      expect([...labels]).toEqual([...routed.accountLabels]);
+      expect(labels.get(bindings[0]!.serverId)).toEqual({
+        model: "Inventory API — Personal: Alice",
+        connector: "Inventory API",
+        providerDomain: item.providerDomain,
+        account: "Alice",
+      });
+      const single = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings: bindings.slice(0, 1),
+        tools: routed.tools,
+      });
+      expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("account");
+      expect(
+        apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
+      ).toEqual(new Map());
+      // A reviewed definition's catalog category names the need its accounts
+      // serve; a workspace definition's is unknown.
+      const outlook = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "microsoft-outlook-mail", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(outlook.get(bindings[0]!.serverId)?.kind).toBe("communication");
+      expect(labels.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // A reviewed definition without a chosen category has no kind, though
+      // its catalog entry shows the "productivity" fallback.
+      const uncategorized = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "unlisted-definition", definitionProvenance: "curated" },
+        ],
+        bindings,
+        tools: routed.tools,
+      });
+      expect(uncategorized.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // Connector routes take their catalog category; the default and the
+      // custom-server category say nothing.
+      for (const [category, kind] of [
+        ["files", "files"],
+        ["integrations", undefined],
+        ["custom", undefined],
+      ] as const) {
+        const categorized = expandMcpAccountRoutes({
+          settings: testSettings({
+            mcpServers: [
+              {
+                id: item.serverId,
+                name: item.name,
+                url: item.baseUrl,
+                connectionRef: item.connectionRef!,
+              },
+            ],
+          }),
+          tools: [{ kind: "mcp", id: item.serverId }],
+          bindings,
+          categories: new Map([[item.serverId, category]]),
+        });
+        expect(categorized.accountLabels.get(bindings[0]!.serverId)?.kind).toBe(kind);
+      }
       expect(() =>
         expandApiIntegrationAccountRoutes({
           integrations: [item],

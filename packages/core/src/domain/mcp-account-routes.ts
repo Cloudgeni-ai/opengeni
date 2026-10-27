@@ -5,12 +5,52 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
+import { integrationDefinitionCategory } from "./capabilities";
 
 const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
+
+/**
+ * The kind of need an account serves: its connector's catalog category. The
+ * catalog's default category ("integrations") and the one every custom server
+ * gets ("custom") say where a server came from, not what it is for, so they
+ * are no kind.
+ */
+export function connectedAccountKind(category: string | null | undefined): string | undefined {
+  return category && category !== "integrations" && category !== "custom" ? category : undefined;
+}
 
 /** "alice@example.com · Only me" → "alice@example.com". */
 export function accountIdentity(binding: McpConnectionAccountBinding): string {
   return binding.accountLabel.replace(ACCOUNT_SCOPE_SUFFIX, "") || binding.accountLabel;
+}
+
+/**
+ * The labels of one connector's accounts in a turn. People only need the
+ * account to tell several apart. Two accounts with the same identity (personal
+ * and workspace) keep their scope to stay distinct.
+ */
+function accountRouteLabels(
+  connector: string,
+  bindings: readonly McpConnectionAccountBinding[],
+  kind?: string,
+): McpAccountRouteLabel[] {
+  const identities = bindings.map(accountIdentity);
+  return bindings.map((binding, index) => {
+    const identity = identities[index]!;
+    const account =
+      bindings.length < 2
+        ? undefined
+        : identities.indexOf(identity) === identities.lastIndexOf(identity)
+          ? identity
+          : binding.accountLabel;
+    return {
+      model: `${connector} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`,
+      connector,
+      providerDomain: binding.providerDomain,
+      ...(account ? { account } : {}),
+      ...(kind ? { kind } : {}),
+    };
+  });
 }
 
 /** Expand only after canonical tool-policy admission. Aliases are execution
@@ -19,6 +59,8 @@ export function expandMcpAccountRoutes(input: {
   settings: Settings;
   tools: ToolRef[];
   bindings: readonly McpConnectionAccountBinding[] | null | undefined;
+  /** Catalog categories by canonical server ID, naming the need each connector serves. */
+  categories?: ReadonlyMap<string, string>;
 }): {
   settings: Settings;
   tools: ToolRef[];
@@ -75,34 +117,24 @@ export function expandMcpAccountRoutes(input: {
         (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
     );
     const connector = canonical.name ?? canonical.id;
-    // People only need the account to tell several apart. Two accounts with the
-    // same identity (personal and workspace) keep their scope to stay distinct.
-    const identities = usable.map(accountIdentity);
+    const labels = accountRouteLabels(
+      connector,
+      usable,
+      connectedAccountKind(input.categories?.get(canonical.id)),
+    );
     for (const [index, binding] of usable.entries()) {
       // Static headers can belong to the formerly selected account. Credentials
       // for account-qualified routes come exclusively from the native resolver.
       const { headers: _headers, ...config } = canonical;
-      const label = `${connector} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`;
-      const identity = identities[index]!;
-      const account =
-        usable.length < 2
-          ? undefined
-          : identities.indexOf(identity) === identities.lastIndexOf(identity)
-            ? identity
-            : binding.accountLabel;
+      const label = labels[index]!;
       servers.push({
         ...config,
         id: binding.serverId,
-        name: label,
+        name: label.model,
         connectionRef: structuredClone(binding.connectionRef),
       });
       tools.push({ ...tool, id: binding.serverId });
-      accountLabels.set(binding.serverId, {
-        model: label,
-        connector,
-        providerDomain: binding.providerDomain,
-        ...(account ? { account } : {}),
-      });
+      accountLabels.set(binding.serverId, label);
     }
   }
   return {
@@ -149,4 +181,36 @@ export function expandApiIntegrationAccountRoutes(input: {
         };
       });
   });
+}
+
+/**
+ * Account labels for the API integration routes `expandApiIntegrationAccountRoutes`
+ * selects, keyed by route server ID, labelled the same way as connector routes.
+ */
+export function apiIntegrationAccountLabels(input: {
+  integrations: readonly ApiIntegrationRuntime[];
+  bindings: readonly McpConnectionAccountBinding[] | null | undefined;
+  tools: readonly ToolRef[];
+}): ReadonlyMap<string, McpAccountRouteLabel> {
+  const labels = new Map<string, McpAccountRouteLabel>();
+  if (input.bindings == null) return labels;
+  const selected = new Set(input.tools.map((tool) => tool.id));
+  for (const integration of input.integrations) {
+    const usable = input.bindings.filter(
+      (binding) =>
+        binding.canonicalServerId === integration.serverId && selected.has(binding.serverId),
+    );
+    const routeLabels = accountRouteLabels(
+      integration.name,
+      usable,
+      connectedAccountKind(
+        integration.definitionProvenance === "curated"
+          ? integrationDefinitionCategory(integration.definitionId)
+          : undefined,
+      ),
+    );
+    for (const [index, binding] of usable.entries())
+      labels.set(binding.serverId, routeLabels[index]!);
+  }
+  return labels;
 }

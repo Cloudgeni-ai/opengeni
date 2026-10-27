@@ -330,15 +330,6 @@ async function deferCoreCompaction(
   return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
 }
 
-/** The session's active goal fence for a capacity waiter. */
-export async function activeGoalFence(
-  deps: Pick<CapacityPhaseDeps, "db" | "input">,
-): Promise<{ goalId: string | null; goalVersion: number | null }> {
-  const goal = await getSessionGoal(deps.db, deps.input.workspaceId, deps.input.sessionId);
-  const activeGoal = goal?.status === "active" ? goal : null;
-  return { goalId: activeGoal?.id ?? null, goalVersion: activeGoal?.version ?? null };
-}
-
 /**
  * Arm the session's core waiter for this attempt's turn and re-evaluate it at
  * once: a capacity change that committed before the waiter existed could not

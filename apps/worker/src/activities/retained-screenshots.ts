@@ -25,9 +25,15 @@ import {
   type Database,
   type RetainedScreenshotArtifact,
 } from "@opengeni/db";
-import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
+import {
+  ObjectBodyIncompleteError,
+  retryWhileMissing,
+  type ObjectStorage,
+} from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 const PNG_ALLOWED_CRITICAL_CHUNKS = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
@@ -39,6 +45,12 @@ const RETAINED_IMAGE_MARKER = "retained_artifact";
  * after it. Matches the model attachment projection's read concurrency.
  */
 export const RETAINED_SCREENSHOT_READ_CONCURRENCY = 8;
+/**
+ * Pauses before reading a found image again after its body failed. A dropped
+ * connection recovers within them; a replica that lost the image's data fails
+ * every read, and the image is then treated as no longer retained.
+ */
+export const RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS = [100, 400] as const;
 
 export type TypedScreenshotToolOutput = {
   callId: string;
@@ -768,7 +780,7 @@ export async function retainSessionScreenshot(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
     return unavailable(identity.artifactId, "storage_write_failed");
   }
@@ -809,7 +821,7 @@ export async function retainSessionScreenshot(input: {
         workspaceId: input.workspaceId,
         artifactId: identity.artifactId,
         settlementKey: identity.settlementKey,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }).catch(() => undefined);
     }
     return unavailable(identity.artifactId, "pending");
@@ -983,30 +995,27 @@ export async function materializeRetainedScreenshotHistory(input: {
   return await materializeRetainedScreenshotHistoryWithCache(input, new Map());
 }
 
-/** Expand durable markers in an SDK RunState immediately before resume. */
-export async function materializeRetainedScreenshotRunState(input: {
-  db: Database;
-  objectStorage: ObjectStorage | null;
-  workspaceId: string;
-  sessionId: string;
-  serialized: string;
-  now?: Date;
-}): Promise<string> {
-  const parsed = parseSerializedRunState(input.serialized);
-  if (!parsed) return input.serialized;
-  const cache = new Map<string, string | null>();
-  let changed = false;
-  await visitSerializedRunStateItemArraysAsync(parsed, async (items) => {
-    const materialized = await materializeRetainedScreenshotHistoryWithCache(
-      { ...input, history: items },
-      cache,
-    );
-    if (materialized.some((item, index) => item !== items[index])) {
-      items.splice(0, items.length, ...materialized);
-      changed = true;
+/**
+ * One retained image's stored bytes, or null when they are gone: missing after
+ * the visibility wait, or found but never delivered intact on any read.
+ */
+async function readRetainedImageObject(
+  storage: ObjectStorage,
+  objectKey: string,
+  artifactId: string,
+): Promise<{ bytes: Uint8Array } | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await retryWhileMissing(async () => storage.getObjectBytes(objectKey));
+    } catch (error) {
+      if (!(error instanceof ObjectBodyIncompleteError)) {
+        throw new RetainedAttachmentUnavailableError([artifactId], { cause: error });
+      }
+      const delayMs = RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined) return null;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-  });
-  return changed ? JSON.stringify(parsed) : input.serialized;
+  }
 }
 
 async function materializeRetainedScreenshotHistoryWithCache(
@@ -1027,7 +1036,11 @@ async function materializeRetainedScreenshotHistoryWithCache(
   // invalid) projects as the same neutral receipt as a withheld image. The
   // turn that captured it already saw its pixels; failing every later turn of
   // the session because the bytes are gone would leave it permanently stuck.
-  // Transient database or storage errors still throw so the turn retries.
+  // That includes an object the store still lists but whose bytes never arrive
+  // intact on repeated reads (its data was lost). Transient database or
+  // storage errors still throw so the turn retries; a storage error throws as
+  // RetainedAttachmentUnavailableError, so it is not mistaken for the model
+  // provider failing.
   const unretained = (artifactId: string) => {
     cache.set(artifactId, null);
     return null;
@@ -1106,8 +1119,10 @@ async function materializeRetainedScreenshotHistoryWithCache(
     receipt: RetainedArtifactMetadata,
     artifact: RetainedScreenshotArtifact,
   ): Promise<string | null> => {
-    const object = await retryWhileMissing(async () =>
-      input.objectStorage!.getObjectBytes(artifact.file.objectKey),
+    const object = await readRetainedImageObject(
+      input.objectStorage!,
+      artifact.file.objectKey,
+      receipt.artifactId,
     );
     if (!object) return unretained(receipt.artifactId);
     const bytes = object.bytes;
@@ -1283,43 +1298,6 @@ function visitSerializedRunStateItemArrays(
   ) {
     const output = (lastModelResponse as Record<string, unknown>).output;
     if (Array.isArray(output)) visitor(output as Array<Record<string, unknown>>);
-  }
-}
-
-async function visitSerializedRunStateItemArraysAsync(
-  root: Record<string, unknown>,
-  visitor: (items: Array<Record<string, unknown>>) => Promise<void>,
-): Promise<void> {
-  const originalInput = root.originalInput;
-  if (Array.isArray(originalInput)) {
-    await visitor(originalInput as Array<Record<string, unknown>>);
-  }
-  if (Array.isArray(root.generatedItems)) {
-    for (const wrapper of root.generatedItems) {
-      if (!wrapper || typeof wrapper !== "object" || Array.isArray(wrapper)) continue;
-      const record = wrapper as Record<string, unknown>;
-      const rawItem = record.rawItem;
-      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) continue;
-      const items = [rawItem as Record<string, unknown>];
-      await visitor(items);
-      if (items[0] !== rawItem) record.rawItem = items[0];
-    }
-  }
-  if (Array.isArray(root.modelResponses)) {
-    for (const response of root.modelResponses) {
-      if (!response || typeof response !== "object" || Array.isArray(response)) continue;
-      const output = (response as Record<string, unknown>).output;
-      if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
-    }
-  }
-  const lastModelResponse = root.lastModelResponse;
-  if (
-    lastModelResponse &&
-    typeof lastModelResponse === "object" &&
-    !Array.isArray(lastModelResponse)
-  ) {
-    const output = (lastModelResponse as Record<string, unknown>).output;
-    if (Array.isArray(output)) await visitor(output as Array<Record<string, unknown>>);
   }
 }
 

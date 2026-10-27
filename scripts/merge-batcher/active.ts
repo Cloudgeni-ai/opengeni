@@ -1,4 +1,5 @@
 import type { Effect, Executor, Transaction } from "./controller";
+import { ReplanRequired } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import {
   githubCapabilities,
@@ -21,8 +22,9 @@ import {
   type Run,
   type FollowupRequest,
   type FollowupPull,
+  type BatchReservation,
 } from "./model";
-import { latestRun, infrastructureRetryReason } from "./planner";
+import { latestRun, infrastructureRetryReason, unseenRunHoldsSlot } from "./planner";
 import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 import { proveHeadRefresh } from "./head-refresh";
 
@@ -32,18 +34,40 @@ export interface ActiveReads {
   baseCI(sha: string): Promise<import("./model").BaseCiEvidence>;
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
   runs(manifest: Manifest, branch: string): Promise<Run[]>;
+  observedRuns?(
+    manifest: Manifest,
+    branch: string,
+    archived: boolean,
+    allowRefresh?: boolean,
+  ): Promise<Run[]>;
   pullSnapshot(number: number): Promise<PullSnapshot>;
   hasComment(number: number, marker: string): Promise<boolean>;
   currentAttempt(run: Run): Promise<{ attempt: number; status: string }>;
-  mainBusy(): Promise<boolean>;
+  mainBusy(
+    purpose?: "publish" | "land" | "observe",
+    reservations?: BatchReservation[],
+  ): Promise<boolean>;
   findFollowup(request: FollowupRequest): Promise<FollowupPull | null>;
 }
 export interface ActiveWrites {
   disableAutoMerge?(number: number, headSha: string, parkedAt: string): Promise<void>;
   retry(run: Run): Promise<void>;
+  cancel?(run: Run): Promise<void>;
   announce(number: number, body: string): Promise<void>;
   createFollowup(request: FollowupRequest): Promise<void>;
 }
+/** Upper bound on comment effects processed in one maintenance tick. */
+export const COMMENTS_PER_TICK = 8;
+/** processEffect outcomes after which the same tick may drain another comment. */
+const COMMENT_DRAIN_CONTINUES = new Set([
+  "durable REST effect submitted",
+  "durable REST intent reconciled from provider evidence",
+  "base batch-suite evidence holds pending culprit announcement",
+]);
+const COMMENT_DRAIN_STOPS = new Set([
+  "REST effect deferred with bounded backoff",
+  "REST effect blocked by explicit provider rejection",
+]);
 interface State {
   sha: string | null;
   ledger: Ledger;
@@ -231,7 +255,20 @@ export class GitHubActiveExecutor implements Executor {
     await this.push([{ ref: this.writer.stateRef, expected: state.sha, next: sha }]);
     return { sha, ledger, main: state.main };
   }
-  prepareLedger(ledger: Ledger, effect: Effect, now: string): Ledger {
+  prepareLedger(
+    ledger: Ledger,
+    effect: Effect,
+    now: string,
+    conflicts: { number: number; headSha: string }[] = [],
+  ): Ledger {
+    for (const conflict of conflicts)
+      addComment(
+        ledger,
+        `conflict:${conflict.headSha}`,
+        conflict.number,
+        `Not queued: this PR conflicts with main at head ${conflict.headSha}. Rebase or merge main into it and push; it re-queues automatically once required checks pass.`,
+        now,
+      );
     if (effect.kind === "publish")
       for (const pull of effect.manifest.pulls)
         addComment(
@@ -259,6 +296,21 @@ export class GitHubActiveExecutor implements Executor {
         lastError: null,
       };
     }
+    if (effect.kind === "cancel")
+      for (const run of effect.runs) {
+        const id = digest({ kind: "cancel", id: run.id, attempt: run.attempt, head: run.headSha });
+        ledger.effects[id] ??= {
+          id,
+          kind: "cancel",
+          run,
+          batchId: run.branch.slice(this.config.branchPrefix.length),
+          status: "pending",
+          attempts: 0,
+          checks: 0,
+          nextAt: now,
+          lastError: null,
+        };
+      }
     if (effect.kind === "park") {
       const parked = ledger.parked?.find((item) => item.batchId === effect.key);
       if (parked) {
@@ -284,7 +336,13 @@ export class GitHubActiveExecutor implements Executor {
       );
     }
     if (effect.kind === "announce") {
-      const id = addComment(ledger, `ejection:${effect.key}`, effect.number, effect.body, now);
+      const id = addComment(
+        ledger,
+        effect.commentKey ?? `ejection:${effect.key}`,
+        effect.number,
+        effect.body,
+        now,
+      );
       ledger.ejected = ledger.ejected.map((item) =>
         bindingKey(item.pull) === effect.key
           ? { ...item, announced: ledger.effects[id]!.status === "done", effectId: id }
@@ -327,9 +385,48 @@ export class GitHubActiveExecutor implements Executor {
       }
     return ledger;
   }
+  private async slotReservations(ledger: Ledger): Promise<BatchReservation[]> {
+    const refs = await this.git.remoteRefs(this.writer.remote);
+    const prefix = `refs/heads/${this.config.branchPrefix}`;
+    const queue = [...refs].filter(
+      ([ref]) => ref.startsWith(prefix) && /^[a-f0-9]{64}$/.test(ref.slice(prefix.length)),
+    );
+    await this.git.fetch(
+      this.writer.remote,
+      queue.map(([, sha]) => sha),
+      "state",
+    );
+    const reservations: BatchReservation[] = [];
+    for (const [ref, sha] of queue) {
+      let manifest: Manifest;
+      try {
+        manifest = await this.git.inspect(sha);
+      } catch {
+        // Match candidate discovery: unrelated malformed refs are not trusted
+        // reservations. Any actual provider run still occupies a provider slot.
+        continue;
+      }
+      const branch = ref.slice("refs/heads/".length);
+      if (branch !== `${this.config.branchPrefix}${manifest.batchId}` || manifest.tipSha !== sha)
+        continue;
+      const archived =
+        ledger.landed.includes(manifest.batchId) || ledger.invalidated.includes(manifest.batchId);
+      const runs = this.reads.observedRuns
+        ? await this.reads.observedRuns(manifest, branch, archived, !archived)
+        : await this.reads.runs(manifest, branch);
+      const candidate = { manifest, branch, runs, containedInBase: false };
+      for (const run of runs.filter(
+        (item) => item.workflow === this.config.workflow && item.status !== "completed",
+      ))
+        reservations.push({ branch, headSha: sha, runId: run.id });
+      if (unseenRunHoldsSlot(candidate, ledger, this.config))
+        reservations.push({ branch, headSha: sha });
+    }
+    return reservations;
+  }
   async transact(t: Transaction): Promise<void> {
     requireInitializedState(t.expectedState, t.expectedLedger);
-    requireInitializedState(t.nextState, t.nextLedger);
+    requireInitializedState(t.expectedState, t.nextLedger);
     if (digest(t.expectedLedger.initialization) !== digest(t.nextLedger.initialization))
       throw new Error("Initialization provenance must remain unchanged");
     if (
@@ -337,17 +434,21 @@ export class GitHubActiveExecutor implements Executor {
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(this.now())
     )
       throw new Error("Cannot replace another controller's live lease");
-    if (
-      t.nextLedger.owner !== this.owner ||
-      t.nextLedger.epoch !== t.expectedLedger.epoch + 1 ||
-      Date.parse(t.nextLedger.expiresAt) <= Date.parse(this.now())
-    )
-      throw new Error("Expired or invalid prepared lease");
+    if (t.nextLedger.owner !== this.owner || t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
+      throw new Error("Invalid prepared lease owner/epoch");
     await this.options.refreshAuth?.();
     const effect = t.effect;
     if (effect.kind === "publish" || effect.kind === "land") {
-      if (await this.reads.mainBusy())
-        throw new Error("Full-main CI reserves headroom; replan without writes");
+      // Only publication starts CI, so only publication rechecks the Batch slot
+      // and complete provider inventory. Landing is a fast-forward of main to
+      // the exact tested tip that uses no runner: it never waits for headroom.
+      if (
+        effect.kind === "publish" &&
+        (await this.reads.mainBusy("publish", await this.slotReservations(t.expectedLedger)))
+      )
+        throw new ReplanRequired(
+          "Batch slot or complete inventory unavailable; replan without writes",
+        );
       const ready = await this.reads.ready();
       if (
         t.bindings.some(
@@ -399,8 +500,18 @@ export class GitHubActiveExecutor implements Executor {
           throw new Error("Latest exact workflow attempt is not verified green");
       }
     }
+    // Observation and final provider validation do not hold a remote lease.
+    // Stamp the lease only after those reads, then atomically acquire it with
+    // the original expected-state CAS. A competing owner/state change still
+    // rejects the entire transaction, including main/candidate updates.
+    const preparedAt = this.now();
+    const nextLedger = structuredClone(t.nextLedger);
+    nextLedger.expiresAt = new Date(
+      Date.parse(preparedAt) + this.config.leaseSeconds * 1000,
+    ).toISOString();
+    const nextState = await this.git.stateCommit(nextLedger, t.expectedState, preparedAt);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (effect.kind === "publish") {
       if (effect.branch !== `${this.config.branchPrefix}${effect.manifest.batchId}`)
@@ -450,6 +561,10 @@ export class GitHubActiveExecutor implements Executor {
     }
     if (effect.kind === "comment") return this.reads.hasComment(effect.number, effect.marker);
     if (effect.kind === "followup") return (await this.reads.findFollowup(effect.request)) !== null;
+    if (effect.kind === "cancel") {
+      const current = await this.reads.currentAttempt(effect.run);
+      return current.attempt !== effect.run.attempt || current.status === "completed";
+    }
     const run = await this.reads.currentAttempt(effect.run);
     return run.attempt > effect.run.attempt;
   }
@@ -460,6 +575,23 @@ export class GitHubActiveExecutor implements Executor {
       original.headRepository === request.sourceRepository &&
       original.headRef === request.sourceRef &&
       original.branchHeadSha === request.headSha
+    );
+  }
+  /**
+   * Only the abandoned candidate's own Batch CI may be cancelled: the run must
+   * be on that candidate's queue branch and workflow, and the candidate must
+   * be durably invalidated and never landed under the current lease.
+   */
+  private cancelApplicable(
+    effect: Extract<DurableEffect, { kind: "cancel" }>,
+    ledger: Ledger,
+  ): boolean {
+    return (
+      /^[a-f0-9]{64}$/.test(effect.batchId) &&
+      effect.run.branch === `${this.config.branchPrefix}${effect.batchId}` &&
+      effect.run.workflow === this.config.workflow &&
+      ledger.invalidated.includes(effect.batchId) &&
+      !ledger.landed.includes(effect.batchId)
     );
   }
   private async retryApplicable(manifest: Manifest, state: State): Promise<boolean> {
@@ -539,12 +671,22 @@ export class GitHubActiveExecutor implements Executor {
         });
         return "follow-up creation waits for current exact source snapshot";
       }
+      if (
+        effect.kind === "cancel" &&
+        (!this.writes.cancel || !this.cancelApplicable(effect, state.ledger))
+      ) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          lastError: "Cancel target is not an abandoned, unlanded candidate run; no POST issued",
+        });
+        return "obsolete priority cancellation suppressed";
+      }
       if (effect.kind === "rerun") {
         const current = await this.reads.currentAttempt(effect.run);
         if (
           current.attempt !== effect.run.attempt ||
           current.status !== "completed" ||
-          (await this.reads.mainBusy())
+          (await this.reads.mainBusy("publish", await this.slotReservations(state.ledger)))
         ) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
@@ -624,6 +766,13 @@ export class GitHubActiveExecutor implements Executor {
         });
         return "obsolete infrastructure retry suppressed after claim";
       }
+      if (effect.kind === "cancel" && !this.cancelApplicable(effect, beforePost.ledger)) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          lastError: "Cancel target changed after claim; no POST issued",
+        });
+        return "obsolete priority cancellation suppressed after claim";
+      }
       if (effect.kind === "followup") {
         if (await this.reads.findFollowup(effect.request)) {
           await this.patchEffect(effect.id, { status: "done", lastError: null });
@@ -641,7 +790,10 @@ export class GitHubActiveExecutor implements Executor {
       postStarted = true;
       if (effect.kind === "comment") await this.writes.announce(effect.number, effect.body);
       else if (effect.kind === "rerun") await this.writes.retry(effect.run);
-      else if (effect.kind === "disable-auto-merge") {
+      else if (effect.kind === "cancel") {
+        if (!this.writes.cancel) throw Error("Batch CI cancellation unavailable");
+        await this.writes.cancel(effect.run);
+      } else if (effect.kind === "disable-auto-merge") {
         if (!this.writes.disableAutoMerge) throw Error("Auto-merge mutation unavailable");
         await this.writes.disableAutoMerge(effect.number, effect.headSha, effect.parkedAt);
       } else await this.writes.createFollowup(effect.request);
@@ -842,6 +994,19 @@ export class GitHubActiveExecutor implements Executor {
     let state = await this.load();
     if (!this.available(state)) return null;
     const messages: string[] = [];
+    // A priority-abandoned candidate's Batch CI holds the slot until terminal,
+    // so its cancellation runs before the tick's other bounded effect work.
+    const cancel = Object.values(state.ledger.effects).find(
+      (item) =>
+        item.kind === "cancel" &&
+        !["done", "blocked"].includes(item.status) &&
+        Date.parse(item.nextAt) <= Date.parse(this.now()),
+    );
+    if (cancel) {
+      messages.push(await this.processEffect(state, cancel));
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ");
+    }
     // Explicit operator rollout ID only. Reading every open PR is independent
     // of admission/owner identity; the durable claim prevents repeated notices.
     if (this.config.onNoticeId && !state.ledger.onNotices?.[this.config.onNoticeId]) {
@@ -854,20 +1019,59 @@ export class GitHubActiveExecutor implements Executor {
       if (!this.available(state)) return "ON notice staged by current owner";
     }
     // Bound work per tick. Completed effects are immutable history; blocked
-    // effects remain visible without starving candidate planning.
-    const effect = Object.values(state.ledger.effects)
-      .sort(
-        (a, b) =>
-          Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
-          Number(b.kind === "followup") - Number(a.kind === "followup") ||
-          Date.parse(a.nextAt) - Date.parse(b.nextAt),
-      )
-      .find(
-        (item) =>
-          !["done", "blocked"].includes(item.status) &&
-          Date.parse(item.nextAt) <= Date.parse(this.now()),
-      );
+    // effects remain visible without starving candidate planning. Candidate
+    // reruns unblock the batch slot, so they go first; a rerun held by busy main
+    // is due again every tick, so it never uses up the tick's other effect.
+    const due = (ledger: Ledger) =>
+      Object.values(ledger.effects)
+        .sort(
+          (a, b) =>
+            Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
+            Number(b.kind === "followup") - Number(a.kind === "followup") ||
+            Number(b.kind === "rerun") - Number(a.kind === "rerun") ||
+            Date.parse(a.nextAt) - Date.parse(b.nextAt),
+        )
+        .filter(
+          (item) =>
+            !["done", "blocked"].includes(item.status) &&
+            Date.parse(item.nextAt) <= Date.parse(this.now()),
+        );
+    const effect = due(state.ledger)[0];
     if (effect) messages.push(await this.processEffect(state, effect));
+    const processed = new Set(effect ? [effect.id] : []);
+    if (effect?.kind === "rerun") {
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ") || null;
+      const next = due(state.ledger).find((item) => item.kind !== "rerun");
+      if (next) {
+        processed.add(next.id);
+        messages.push(await this.processEffect(state, next));
+      }
+    }
+    // Batch landings stage one comment per member, so one comment per tick
+    // falls behind. Drain further due comments up to a bounded total. Each one
+    // reloads state, rechecks the lease and goes through the same durable
+    // claim, final lease read and reconciliation as any other REST effect.
+    let comments = [...processed].filter(
+      (id) => state.ledger.effects[id]?.kind === "comment",
+    ).length;
+    // A provider error or throttle earlier in this tick also skips the drain.
+    if (messages.some((m) => COMMENT_DRAIN_STOPS.has(m))) comments = COMMENTS_PER_TICK;
+    while (comments < COMMENTS_PER_TICK) {
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ") || null;
+      const next = due(state.ledger).find(
+        (item) => item.kind === "comment" && !processed.has(item.id),
+      );
+      if (!next) break;
+      processed.add(next.id);
+      comments++;
+      const message = await this.processEffect(state, next);
+      messages.push(message);
+      // Throttling, provider errors or a changed claim end this tick's drain;
+      // the remaining backlog keeps its order for the next tick.
+      if (!COMMENT_DRAIN_CONTINUES.has(message)) break;
+    }
     state = await this.load();
     if (!this.available(state)) return messages.join("; ") || null;
     const entry = Object.entries(state.ledger.landings)

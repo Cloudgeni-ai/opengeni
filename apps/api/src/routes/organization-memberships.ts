@@ -93,13 +93,14 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { agentActingAsPerson, organizationSettingsPermission } from "../http/acting-person";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
-import { readRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -232,13 +233,11 @@ async function requireOrganizationAdministrator(
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, {
-      message: "invalid organization membership request",
-    });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "invalid organization membership request",
+  });
+  return parsed;
 }
 
 function parseId(schema: z.ZodString, value: string, label: string): string {
@@ -326,7 +325,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
             trialCreditModelIds: signupCreditModelIds(deps.settings),
             trialCreditsEnabled:
@@ -349,7 +348,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         CreateAdditionalOrganizationResponse.parse(
           await createAdditionalManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
             ...payload,
           }),
         ),
@@ -401,12 +400,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.get("/v1/organization-invitations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
-    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
-    if (!query.success) {
-      throw new HTTPException(422, {
-        message: "invalid organization invitation page",
-      });
-    }
+    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
+      status: 422,
+      message: "invalid organization invitation page",
+    });
     try {
       if (session.user.emailVerified) {
         await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
@@ -418,8 +415,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ListOrganizationInvitationsPageResponse.parse(
           await listSelfOrganizationInvitations(deps.db, {
             subjectId,
-            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
-            limit: query.data.limit,
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+            limit: query.limit,
           }),
         ),
       );
@@ -789,6 +786,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
+    // placeholder of an account without an email address.
+    if (payload.email.trim().toLowerCase().endsWith(".invalid")) {
+      throw new HTTPException(422, { message: "That email address can't receive invitations" });
+    }
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {
@@ -842,20 +844,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
-    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
-    if (!query.success) {
-      throw new HTTPException(422, {
-        message: "invalid organization invitation page",
-      });
-    }
+    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
+      status: 422,
+      message: "invalid organization invitation page",
+    });
     try {
       return context.json(
         ListOrganizationInvitationsPageResponse.parse(
           await listOrganizationInvitations(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
-            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
-            limit: query.data.limit,
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+            limit: query.limit,
           }),
         ),
       );

@@ -837,6 +837,7 @@ import {
   COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 function sessionListQuery(options: {
   siteAccessId?: string;
@@ -1214,6 +1215,13 @@ export type SteerMessageResult = {
   routing: SessionPromptRouting;
   /** Number of live attempts durably asked to stop by this atomic Steer. */
   interruptionCount: number;
+  /**
+   * The chat runs on another person's personal machine, so the message waits
+   * for its owner instead of steering: the owner's next message brings it to
+   * the agent, or it runs once the chat moves to a machine you may use. Older
+   * servers omit it.
+   */
+  waitsForMachineOwner?: boolean | undefined;
   /** True when this response came from the command's immutable idempotency receipt. */
   replay: boolean;
 };
@@ -1222,6 +1230,8 @@ export type TranscribeAudioInput = {
   audio: Blob | File | Uint8Array;
   mimeType: string;
   durationSeconds?: number | undefined;
+  /** ISO 639-1 or 639-3 code of what is spoken ("nb", "en"); omitted means detect. */
+  language?: string | undefined;
   signal?: AbortSignal | undefined;
 };
 
@@ -1388,6 +1398,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
+    if (input.language) form.append("language", input.language);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
@@ -8921,6 +8932,7 @@ export class OpenGeniClient {
     const query = new URLSearchParams();
     for (const key of [
       "sourceSessionId",
+      "includeSubSessions",
       "q",
       "kind",
       "sort",
@@ -11279,7 +11291,7 @@ export class OpenGeniClient {
    */
   async getBillingCheckout(
     checkoutSessionId: string,
-    options: { accountId?: string } = {},
+    options: { accountId?: string; signal?: AbortSignal } = {},
   ): Promise<BillingCheckoutStatus> {
     return await this.requestJson(
       "GET",
@@ -11288,6 +11300,7 @@ export class OpenGeniClient {
       {
         ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 
@@ -12399,12 +12412,6 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
         ? new Uint8Array(await body.arrayBuffer())
         : new Uint8Array(body);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const owned = Uint8Array.from(bytes);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

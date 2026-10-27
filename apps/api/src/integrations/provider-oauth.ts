@@ -46,7 +46,7 @@ import {
   type FetchLike,
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
-import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   microsoftAdminConsentUrl,
   microsoftAuthorizationNotGranted,

@@ -1186,8 +1186,11 @@ export class ThisComputer {
     workspaceId: string,
     options: ThisComputerConnectOptions,
   ): Promise<boolean> {
-    // A connection made without screen control can't give it.
-    if (options.screenControl && !this.state.screenControl && !this.serviceBacked) return false;
+    // A connection made without screen control gains it once the server
+    // records the consent. Setting the computer up anew instead can't work for
+    // a personal computer: the server refuses a second live connection of it.
+    const gainsScreenControl = options.screenControl && !this.state.screenControl;
+    if (gainsScreenControl && !this.serviceBacked && !this.deps.enableScreenControl) return false;
     const connections = await this.connections(true);
     const key = useKey(baseUrl, workspaceId);
     const origin = normalizeServerUrl(baseUrl);
@@ -1204,12 +1207,17 @@ export class ThisComputer {
       const reading = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);
       if (this.removedOnServer(reading, connection)) continue;
       try {
-        if (this.serviceBacked && options.screenControl) {
+        if (options.screenControl && (this.serviceBacked || gainsScreenControl)) {
           const machine = reading?.kind === "listed" ? reading.machine : null;
           if (!machine?.screenControl) {
             if (!this.deps.enableScreenControl)
               throw new Error("Couldn't verify screen-control access for the existing agent.");
-            await this.deps.enableScreenControl(accountId, workspaceId, connection.agentId);
+            // Where the connection was made: the machine is surely listed there.
+            await this.deps.enableScreenControl(
+              accountId,
+              connection.workspaceId,
+              connection.agentId,
+            );
           }
         }
         await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
@@ -1231,6 +1239,10 @@ export class ThisComputer {
         adopted: true,
         management: serviceBacked ? "service" : "app",
         screenControl: this.state.screenControl || options.screenControl,
+        // Newly given screen control: the app walks through its permissions.
+        ...(gainsScreenControl && !serviceBacked && this.deps.platform === "darwin"
+          ? { setupPending: true, askedAt: Date.now() }
+          : {}),
       });
       if (!serviceBacked && this.agent.state === "stopped") this.agent.start(connection.apiUrl);
       return true;

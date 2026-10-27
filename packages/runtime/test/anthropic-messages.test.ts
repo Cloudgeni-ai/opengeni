@@ -368,6 +368,58 @@ test("portable compaction's retained user/system inputs and user summary remain 
   expect(JSON.stringify(input)).toBe(before);
 });
 
+test("portable compaction's retained reply of a finished turn remains valid on Claude", () => {
+  const [t1, t2, t3] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  const history = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Task" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Child result" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Continuing" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Follow up" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Goal context" }] },
+  ];
+  const compacted = buildCompactionReplacementHistory(
+    history,
+    "Work already completed",
+    undefined,
+    undefined,
+    undefined,
+    { itemTurnIds: [t1, t1, t2, t2, t3, t3], activeTurnId: t3 },
+  );
+  // The finished "Task" turn keeps its last reply; the running turn does not.
+  expect(compacted.map((item) => item.role)).toEqual([
+    "user",
+    "assistant",
+    "system",
+    "user",
+    "system",
+    "user",
+  ]);
+  const input = compacted as ModelRequest["input"];
+  const before = JSON.stringify(input);
+  for (const streamed of [false, true]) {
+    const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, streamed);
+    expect(body.messages.map((message: any) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+    ]);
+    expect(body.messages[0].content.map((block: any) => block.text)).toEqual(["Task"]);
+    expect(body.messages[1].content.map((block: any) => block.text)).toEqual(["Working"]);
+    expect(body.messages[2].content.map((block: any) => block.text)).toEqual([
+      "Follow up",
+      compacted.at(-1)!.content,
+    ]);
+    expect(body.messages[3].content.map((block: any) => block.text)).toEqual([
+      "Child result",
+      "Goal context",
+    ]);
+    expectValidSystemPlacement(body.messages);
+  }
+  expect(JSON.stringify(input)).toBe(before);
+});
+
 test("system placement preserves assistant phases, tool pairing and exact signed thinking", () => {
   const thinking = { type: "thinking", thinking: "Thought", signature: "signature" };
   const input: ModelRequest["input"] = [

@@ -2,9 +2,10 @@ import { providerUsernameHint } from "@opengeni/vaults";
 import {
   type ProviderFieldMeta,
   type ProviderItemMeta,
+  type ProviderPasskeyMeta,
   type VaultFieldKind,
-  type VaultItemType,
 } from "./contract";
+import { protonPasskeyMeta } from "./passkeys";
 import {
   type ItemTypeMarker,
   decodeItemTypeMarker,
@@ -204,10 +205,6 @@ export function itemKindForVariant(variant: string): ItemTypeMarker {
   }
 }
 
-export function itemTypeForVariant(variant: string): VaultItemType {
-  return itemKindForVariant(variant).type;
-}
-
 /** `YYYY-MM-DDTHH:MM:SS` (UTC under TZ=UTC) to an ISO instant. */
 export function civilToIso(civil: string): string | null {
   const date = new Date(`${civil}Z`);
@@ -274,6 +271,7 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
   const content = item.content.content;
   const variant = variantName(content);
   const websites: string[] = [];
+  const passkeys: ProviderPasskeyMeta[] = [];
 
   if (typeof content === "object") {
     if ("Login" in content) {
@@ -288,6 +286,10 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
         });
       }
       websites.push(...login.urls.filter((url) => url.trim().length > 0));
+      for (const passkey of login.passkeys) {
+        const meta = protonPasskeyMeta(passkey);
+        if (meta) passkeys.push(meta);
+      }
     } else if ("SshKey" in content) {
       const ssh = content.SshKey;
       concealedText(collector, SSH_FIELD_IDS.privateKey, "private key", ssh.private_key);
@@ -369,6 +371,7 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
     })),
     version: item.modify_time,
     updatedAt: civilToIso(item.modify_time),
+    passkeys,
   };
   return { meta, fields: collector.fields };
 }

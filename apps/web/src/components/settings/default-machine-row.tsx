@@ -5,7 +5,7 @@ import { RowSelect } from "@opengeni/react/app/components/settings/row-select";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 
 export function DefaultMachineRow({ workspaceId }: { workspaceId: string }) {
@@ -13,7 +13,13 @@ export function DefaultMachineRow({ workspaceId }: { workspaceId: string }) {
   const workspace = context.workspaces.find((item) => item.id === workspaceId);
   const fleet = useWorkspaceMachines({ workspaceId });
   const [saving, setSaving] = useState(false);
-  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  // Like the workspace's other settings: its administrators, or the owner of a
+  // Personal workspace (who never holds workspace:admin there).
+  const canManage = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace ?? null,
+    context.managedSelfContext,
+  );
   const target = workspaceDefaultMachine(workspace?.settings);
   const backend = context.clientConfig.defaultSandboxBackend;
   const current =

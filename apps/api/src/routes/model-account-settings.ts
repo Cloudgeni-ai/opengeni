@@ -27,6 +27,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
+import { requestValidationError } from "../http/request-body";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
@@ -144,7 +145,10 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     const parsed = UpdateOrganizationModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid model account settings" });
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
+        message: "invalid model account settings",
+      });
     }
     const { expectedVersion, ...patch } = parsed.data;
     try {
@@ -216,7 +220,10 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = UpdateWorkspaceModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid model account settings" });
+      throw requestValidationError(parsed.error, "body", {
+        status: 422,
+        message: "invalid model account settings",
+      });
     }
     const { expectedVersion, ...patch } = parsed.data;
     try {

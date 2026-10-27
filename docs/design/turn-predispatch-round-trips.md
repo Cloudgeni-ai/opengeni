@@ -53,6 +53,24 @@ nested phases or subtract independent percentile populations.
 No durability transaction, dispatch fence, prompt/history projection, schema,
 description or input order changes. No authority cache, cap or throttle.
 
+## Additional admission and selected-Skill reads
+
+The late message-admission model gate uses a fresh scoped session read with the
+same cursor, control, input-wait, effective-policy and stored-row validation as
+the full session projection. It omits only connector metadata, dispatch-wait
+presentation and the current Codex display selection. The gate returns only
+the effective model and compaction mode; ordinary session reads keep their full
+projection. This does not reuse an earlier request snapshot or change the
+atomic prompt transaction.
+
+When the resolved bundled Skill selection explicitly excludes video generation,
+tool preparation skips the policy read whose only consumer was that bundled
+descriptor. Default selections and explicit video selections still read it.
+Agent construction retains its separate live video-policy and credential checks,
+including when the descriptor was excluded. Workspace Skill discovery is
+unchanged. These changes reduce database work without adding a cache, poller or
+service; they do not establish a production latency improvement.
+
 ## Measurements
 
 Baseline: `0eb7aa010e7cec8b2e6b328e55dd783356b5003b`. Real migrated PostgreSQL,

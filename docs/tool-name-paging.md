@@ -82,6 +82,11 @@ medians on one migrated fixture, not live latency, server CPU or memory savings.
 
 ## Verification
 
+For an explicit, paced online fill of historical identity projections, see
+[`event-identity-maintenance.md`](event-identity-maintenance.md). It is not run
+by migrations or requests and does not rewrite payloads or remove fallback
+support.
+
 With the repository's disposable real-PostgreSQL environment:
 
 ```sh

@@ -28,10 +28,11 @@ export function createVerificationClient(settings: Settings) {
       settings.azureOpenaiBaseUrl ||
       (settings.azureOpenaiEndpoint && settings.azureOpenaiDeployment)
     ) ||
-    !(settings.azureOpenaiApiKey || settings.azureOpenaiAdToken)
+    (settings.azureOpenaiAuthMode === "static" &&
+      !(settings.azureOpenaiApiKey || settings.azureOpenaiAdToken))
   )
     throw new CompactionVerificationError(
-      "Configure Azure with a base URL or endpoint/deployment, an API key or AD token, and a model.",
+      "Configure Azure with a base URL or endpoint/deployment, an API key, AD token or identity auth mode, and a model.",
     );
   return buildOpenAIClientFromSettings(settings);
 }

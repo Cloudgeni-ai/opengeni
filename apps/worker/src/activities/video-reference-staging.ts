@@ -1,8 +1,4 @@
-import {
-  GENERATED_VIDEO_MAX_BYTES,
-  type GenerateVideoToolInput,
-  type VideoGenerationRejectedCode,
-} from "@opengeni/contracts";
+import { type GenerateVideoToolInput, type VideoGenerationRejectedCode } from "@opengeni/contracts";
 import type { SealedVideoReference, SealedVideoReferenceRole } from "@opengeni/core";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
@@ -342,9 +338,3 @@ function shellQuote(value: string): string {
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? new Error("Video reference staging was cancelled");
 }
-
-export const VIDEO_REFERENCE_LIMITS = Object.freeze({
-  imageBytes: MAX_IMAGE_REFERENCE_BYTES,
-  videoBytes: MAX_VIDEO_REFERENCE_BYTES,
-  outputBytes: GENERATED_VIDEO_MAX_BYTES,
-});

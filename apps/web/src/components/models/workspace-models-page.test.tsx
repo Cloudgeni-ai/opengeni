@@ -687,6 +687,26 @@ test("workspace Models exposes a reloadable compaction page to admins and reader
 });
 
 describe("Codex rows", () => {
+  for (const saved of [true, false]) {
+    test(`an account whose live check failed reads like its page: saved reading ${saved}`, async () => {
+      const overview = overviewFor("acct-1", saved ? 75 : null);
+      const usage = overview.accounts["acct-1"]!.usage;
+      overview.accounts["acct-1"]!.usage = {
+        ...usage,
+        source: saved ? "cache" : "none",
+        error: "unavailable",
+      };
+      client.codexOverview.mockImplementation(async () => overview);
+      const view = await render();
+      try {
+        expect(view.container.textContent).toContain(saved ? "75% left" : "Usage unavailable");
+        expect(view.container.textContent).not.toContain("No usage yet");
+      } finally {
+        await cleanup(view);
+      }
+    });
+  }
+
   for (const outcome of ["weekly", "empty", "error"] as const) {
     test(`waits for the live overview without flashing cached limits: ${outcome}`, async () => {
       let resolve!: (value: CodexOverviewResponse) => void;
@@ -1533,6 +1553,49 @@ describe("One Models page for the organization and the workspace", () => {
         )!;
         if (count === 0) expect(row.textContent).not.toContain("usage limit reset");
         else expect(row.textContent).toContain("3 usage limit resets");
+      } finally {
+        await cleanup(view);
+      }
+    },
+  );
+
+  test.each([
+    { saved: true, row: "60% left this week" },
+    { saved: false, row: "Usage unavailable" },
+  ])(
+    "a failed live check shows the last saved reading on the row and the page alike: %j",
+    async ({ saved, row: rowText }) => {
+      organizationAdmin = true;
+      organizationList = true;
+      const account = codexAccount({ id: "org-1", label: "Company plan", source: "organization" });
+      const overview = overviewFor("org-1", saved ? 60 : null).accounts["org-1"]!;
+      // As the server answers when ChatGPT couldn't be asked: the saved reading, if any.
+      overview.usage = {
+        ...overview.usage,
+        source: saved ? "cache" : "none",
+        error: "unavailable",
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [account] };
+        }
+        if (method === "GET" && path.endsWith("/org-1/overview")) return overview;
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      const view = await render();
+      try {
+        const orgRow = [
+          ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+        ].find((candidate) => candidate.textContent?.includes("Company plan"))!;
+        expect(orgRow.textContent).toContain(rowText);
+        if (saved) expect(orgRow.textContent).not.toContain("Usage unavailable");
+        await act(async () => orgRow.querySelector<HTMLElement>("[data-row-action]")!.click());
+        await flush();
+        await flush();
+        const page = view.container.textContent ?? "";
+        expect(page).toContain("Couldn't check usage. Try again in a moment.");
+        if (saved) expect(page).toContain("Weekly60% left");
       } finally {
         await cleanup(view);
       }

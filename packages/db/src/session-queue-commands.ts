@@ -56,7 +56,6 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
-  rawRows,
   setSubjectRlsContext,
   type Database,
   type SessionActivityDatabase,
@@ -67,10 +66,16 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
+import {
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
+  AgentCommandAuthorityError,
   assertAgentCommandAuthorityInTransaction,
   autoResumeSessionBranchInTransaction,
   canonicalSessionCommandHash,
@@ -123,7 +128,8 @@ export type QueueCommandConflictCode =
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
   | "EDIT_SOURCE_CHANGED"
-  | "ONCE_ATTACHMENT_IMMUTABLE";
+  | "ONCE_ATTACHMENT_IMMUTABLE"
+  | "WAITING_FOR_MACHINE_OWNER";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -142,12 +148,11 @@ export class QueueCommandConflictError extends Error {
 }
 
 /**
- * A session that keeps personal memory (a private session, a user-scoped
- * memory session, or any session in a personal workspace) can only run work
- * caused by a verified human: its owner for a private session. Every turn
- * resolves that owner before the model runs, so admitting a prompt without
- * one only produces a turn that fails on start. Refuse it at admission with a
- * reason the caller can act on.
+ * A session that keeps personal memory (a private session or a user-scoped
+ * memory session) can only run work caused by a verified human: its owner for
+ * a private session. Every turn resolves that owner before the model runs, so
+ * admitting a prompt without one only produces a turn that fails on start.
+ * Refuse it at admission with a reason the caller can act on.
  */
 export class PersonalSessionInitiatorRequiredError extends Error {
   readonly name = "PersonalSessionInitiatorRequiredError";
@@ -160,29 +165,24 @@ export class PersonalSessionInitiatorRequiredError extends Error {
   }
 }
 
-/** Mirrors the personal-destination guard every agent attempt applies on start. */
-async function assertPersonalSessionInitiatorInTransaction(
-  db: SessionActivityDatabase,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
-    initiatingHumanSubjectId: string | null;
-  },
-): Promise<void> {
+/**
+ * Mirrors the personal-destination guard every agent attempt applies on start
+ * (`knowledge_resolve_actor` / `knowledge_learning_for_turn`, migration 0868).
+ * A personal workspace alone is not personal memory without a human: work
+ * there with no initiating human (a published Site's visitor, other service
+ * work) starts in the Workspace destination with learning off, so its
+ * follow-up prompts are admitted like its first one.
+ */
+function assertPersonalSessionInitiator(input: {
+  session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
+  initiatingHumanSubjectId: string | null;
+}): void {
   const subject = input.initiatingHumanSubjectId;
   const ownerMismatch =
     input.session.visibility === "user_private" && input.session.ownerSubjectId !== subject;
   if (subject && !ownerMismatch) return;
-  let personal =
+  const personal =
     input.session.visibility === "user_private" || input.session.memoryScope === "user";
-  if (!personal) {
-    const [row] = await rawRows<{ kind: string | null }>(
-      db,
-      sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
-    );
-    personal = row?.kind === "personal";
-  }
   if (personal) throw new PersonalSessionInitiatorRequiredError();
 }
 
@@ -224,6 +224,12 @@ export type SubmitHumanPromptResult = {
   wakeRevision: number;
   interruptionCount: number;
   workspaceControlEventId: string | null;
+  /**
+   * The chat runs on another person's personal machine, so this message waits
+   * for its owner instead of running (`machine-owner-wait.ts`). As decided at
+   * acceptance.
+   */
+  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -375,6 +381,7 @@ async function loadSubmittedHumanPromptReplay(
       typeof input.receipt.result.workspaceControlEventId === "string"
         ? input.receipt.result.workspaceControlEventId
         : null,
+    waitsForMachineOwner: input.receipt.result.waitsForMachineOwner === true,
     replay: true,
   };
 }
@@ -1859,7 +1866,7 @@ export async function steerQueuedTurnInTransaction(
       replay: true,
     };
   }
-  await lockSession(db, input.workspaceId, input.sessionId);
+  const lockedSession = await lockSession(db, input.workspaceId, input.sessionId);
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -1867,6 +1874,34 @@ export async function steerQueuedTurnInTransaction(
       targetSessionId: input.sessionId,
       action: "steer",
     });
+  }
+  // A message waiting for the personal machine's owner cannot run there, so
+  // it must not interrupt or replace the owner's work either.
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (machineOwner !== null) {
+    const [waiting] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+          waitsForMachineOwnerSql(machineOwner),
+        ),
+      )
+      .limit(1);
+    if (waiting) {
+      throw new QueueCommandConflictError(
+        "WAITING_FOR_MACHINE_OWNER",
+        "This message waits for the owner of the personal machine the chat runs on, so it cannot be sent now",
+        { queueVersion: lockedSession.queueVersion },
+      );
+    }
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -2087,6 +2122,65 @@ function turnMetadataRequestIdentity(
   return identity;
 }
 
+/** A turn's causal person, read the way the attempt admission trigger reads it. */
+function causalHuman(
+  initiatingHumanSubjectId: string | null | undefined,
+  initiatorKind: string | null | undefined,
+  initiatorSubjectId: string | null | undefined,
+): string | null {
+  return (
+    initiatingHumanSubjectId?.trim() ||
+    (initiatorKind === "subject" ? initiatorSubjectId?.trim() : undefined) ||
+    null
+  );
+}
+
+/**
+ * Whose message a prompt is, before any Steer or Resume decision: the edited
+ * queued message's sender for a queue edit, otherwise the command's actor.
+ */
+async function promptCausalHuman(
+  db: SessionActivityDatabase,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    sourceTurnId: string | null;
+    actorInitiator: FrozenTurnInitiator | null;
+  },
+): Promise<string | null> {
+  if (input.sourceTurnId) {
+    const [source] = await db
+      .select({
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        initiatorKind: schema.sessionTurns.initiatorKind,
+        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.sourceTurnId),
+        ),
+      )
+      .limit(1);
+    return source
+      ? causalHuman(
+          source.initiatingHumanSubjectId,
+          source.initiatorKind,
+          source.initiatorSubjectId,
+        )
+      : null;
+  }
+  const actor = input.actorInitiator;
+  if (!actor) return null;
+  return causalHuman(
+    actor.initiatingHumanSubjectId,
+    actor.initiator.kind,
+    actor.initiator.kind === "subject" ? actor.initiator.subjectId : null,
+  );
+}
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2293,6 +2387,33 @@ export async function submitHumanPromptInTransaction(
         });
   const isQueueEditSubmission = draft?.sourceTurnId !== null && draft?.sourceTurnId !== undefined;
 
+  // Only its owner can start work on a personal machine. Another person's
+  // message there waits for the owner (`machine-owner-wait.ts`): it is queued
+  // as a plain Send that never steers, interrupts or resumes anything, and the
+  // owner's next own message takes it in.
+  const actorInitiator =
+    input.delivery === "send" && draft?.sourceTurnId
+      ? null
+      : await frozenInitiatorForCommandActor(
+          db,
+          input.workspaceId,
+          input.actor,
+          input.subjectLabel,
+        );
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  const waitsForMachineOwner =
+    machineOwner !== null &&
+    (await promptCausalHuman(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceTurnId: draft?.sourceTurnId ?? null,
+      actorInitiator,
+    })) !== machineOwner;
+
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
   // instead of through the pending decision surface. Promote only that active
@@ -2302,14 +2423,15 @@ export async function submitHumanPromptInTransaction(
   // wait. An explicitly paused branch remains inert until Resume or an explicit
   // Steer; running, recovering, and capacity-waiting work also retain ordinary
   // queue semantics.
-  const effectiveDelivery =
-    input.delivery === "send" &&
-    (input.actor.type === "human" || input.actor.type === "operator") &&
-    !isQueueEditSubmission &&
-    before.state === "active" &&
-    session.status === "requires_action" &&
-    !session.admissionBlock &&
-    session.activeTurnId !== null
+  const effectiveDelivery = waitsForMachineOwner
+    ? "send"
+    : input.delivery === "send" &&
+        (input.actor.type === "human" || input.actor.type === "operator") &&
+        !isQueueEditSubmission &&
+        before.state === "active" &&
+        session.status === "requires_action" &&
+        !session.admissionBlock &&
+        session.activeTurnId !== null
       ? "steer"
       : input.delivery;
   const resumed =
@@ -2455,21 +2577,27 @@ export async function submitHumanPromptInTransaction(
       context: sourceTurn.initiatorContext ?? {},
     };
   } else {
-    frozenInitiator = await frozenInitiatorForCommandActor(
-      db,
-      input.workspaceId,
-      input.actor,
-      input.subjectLabel,
-    );
+    frozenInitiator =
+      actorInitiator ??
+      (await frozenInitiatorForCommandActor(
+        db,
+        input.workspaceId,
+        input.actor,
+        input.subjectLabel,
+      ));
   }
   const acceptedInitiatingHumanSubjectId = editedSourceTurn
     ? (editedSourceTurn.initiatingHumanSubjectId ??
       (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
-  await assertPersonalSessionInitiatorInTransaction(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
+  if (
+    waitsForMachineOwner !==
+    (machineOwner !== null && (acceptedInitiatingHumanSubjectId?.trim() || null) !== machineOwner)
+  ) {
+    throw new SessionControlInvariantError("Prompt sender changed during admission");
+  }
+  assertPersonalSessionInitiator({
     session: storedSession,
     initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
   });
@@ -2578,10 +2706,21 @@ export async function submitHumanPromptInTransaction(
       ? editedSourceModelContext
       : (input.modelContext ?? null);
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  // Messages waiting for the machine's owner are not ahead of anyone: the
+  // owner's message runs next and takes them in.
+  const queuedAhead =
+    machineOwner === null || existingQueued.length === 0
+      ? existingQueued.length > 0
+      : await runnableQueuedTurnExists(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
   const routing: SessionPromptRouting =
     effectiveDelivery === "steer"
       ? "accepted_for_steering"
-      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
+      : waitsForMachineOwner || before.state === "paused" || session.activeTurnId || queuedAhead
         ? "queued_for_execution"
         : "accepted_for_execution";
   let sequence = session.lastSequence;
@@ -2882,12 +3021,16 @@ export async function submitHumanPromptInTransaction(
   // intent) resumes in this same commit; a user/API/agent/limits pause is never
   // touched here. Goal row FOR UPDATE follows the session and turn locks above,
   // the order the claim transaction uses.
-  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    cause: { kind: "human_prompt", turnId },
-    now,
-  });
+  // A message waiting for the machine's owner is not input the goal can act
+  // on yet.
+  const goalAutoResumed = waitsForMachineOwner
+    ? null
+    : await autoResumeGoalPausedByCapInTransaction(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        cause: { kind: "human_prompt", turnId },
+        now,
+      });
   if (goalAutoResumed) {
     eventValues.push({
       accountId: input.accountId,
@@ -2912,9 +3055,12 @@ export async function submitHumanPromptInTransaction(
   );
   const noCurrentAfter =
     effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
-  const nextStatus = noCurrentAfter
-    ? "queued"
-    : (session.admissionBlock?.previousStatus ?? session.status);
+  // A waiting message is not work the chat can start, so it leaves the
+  // status alone.
+  const nextStatus =
+    noCurrentAfter && !waitsForMachineOwner
+      ? "queued"
+      : (session.admissionBlock?.previousStatus ?? session.status);
   if (nextStatus !== session.status) {
     eventValues.push({
       accountId: input.accountId,
@@ -3088,6 +3234,7 @@ export async function submitHumanPromptInTransaction(
       deferredUntilModelStep,
       workspaceControlEventId: resumed.workspaceControlEventId,
       routing,
+      ...(waitsForMachineOwner ? { waitsForMachineOwner: true } : {}),
       ...(input.turnExecutionPolicy
         ? {
             executionPolicy: turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId),
@@ -3114,6 +3261,7 @@ export async function submitHumanPromptInTransaction(
     wakeRevision,
     interruptionCount,
     workspaceControlEventId: resumed.workspaceControlEventId,
+    waitsForMachineOwner,
     replay: false,
   };
 }
@@ -3507,6 +3655,27 @@ export async function steerAgentSessionInTransaction(
     input.workspaceId,
     input.actor,
   );
+  // Only its owner can start work on a personal machine, so a Steer from
+  // anyone else's work could only stop the owner's turn and then never run.
+  // Refuse it before anything changes; a message waits for the owner instead.
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+  });
+  if (
+    machineOwner !== null &&
+    causalHuman(
+      sourceInitiator.initiatingHumanSubjectId,
+      sourceInitiator.initiator.kind,
+      sourceInitiator.initiator.kind === "subject" ? sourceInitiator.initiator.subjectId : null,
+    ) !== machineOwner
+  ) {
+    throw new AgentCommandAuthorityError(
+      "PERSONAL_MACHINE_OWNER_REQUIRED",
+      "The target session runs on another person's personal machine; only its owner can steer it",
+    );
+  }
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,

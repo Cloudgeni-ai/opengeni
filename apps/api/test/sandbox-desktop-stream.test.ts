@@ -238,12 +238,16 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
         viewerId: crypto.randomUUID(),
         lease,
         establish,
+        terminalInput: true,
       },
     );
     expect(terminal?.transport).toBe("relay-pty");
     expect(terminal?.url).toContain("relay.opengeni.test");
     expect(terminal?.leaseEpoch).toBe(lease.leaseEpoch);
-    expect((await verifyStreamToken(SECRET, terminal!.token))?.leaseEpoch).toBe(lease.leaseEpoch);
+    const terminalClaims = await verifyStreamToken(SECRET, terminal!.token);
+    expect(terminalClaims?.leaseEpoch).toBe(lease.leaseEpoch);
+    // terminal:attach lets the compute agent's relay forward this viewer's keystrokes.
+    expect(terminalClaims?.mode).toBe("control");
     const desktop = await mintDesktopStream(
       { db, settings },
       {
@@ -257,6 +261,7 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     );
     expect(desktop?.url).toContain("port=6080");
     expect(desktop?.resolution).toBeDefined();
+    expect((await verifyStreamToken(SECRET, desktop!.token))?.mode).toBe("view");
     expect(ports).toEqual([7681, 6080]);
     // The relay endpoint is not a provider tunnel: the lease records none.
     const after = await readLease(db, workspaceId, session!.sandboxGroupId);

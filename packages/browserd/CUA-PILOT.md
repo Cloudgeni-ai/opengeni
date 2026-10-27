@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`737e200fca49cbf6b0116f8acf7f52525aa45cef`: upstream `cua-driver-rs-v0.37.0`
+`ec193d141ae312656dda99c8cb1db348f7b55540`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -20,6 +20,9 @@ woke a 25 ms poll up to 150 ms late on a busy Mac), and a batch of background
 presses on one window makes that window key once instead of before every press.
 A press that puts the caret in a text field reports a confirmed effect when the
 field then holds the keyboard focus, instead of an unconfirmed click.
+It also carries the macOS follow-ups of `cu-macos-followups` (`03323b47`) and,
+on top, Return pressing the default button of a background app's sheet
+(`cu-sheet-default-button`).
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -45,6 +48,44 @@ presses it. An element of an unrelated window of the app is still refused, now
 naming the window it belongs to. An element scroll proves the pointer route
 before scrolling the element into view, and a wheel refused after that reveal
 reports a partial effect.
+On macOS a sheet (an Open or Save panel, an alert shown on a window) is read
+and used through the window it is attached to, also when that window leaves
+the sheet out of its own accessibility children (Firefox's windows keep only
+their own content there, so its file panel could not be read at all). Keys
+addressed to that window reach an alert or prompt sheet that holds the app's
+focus instead of being refused as `window_not_key`; an Open or Save panel
+(`open-panel`, `save-panel`) drops keys posted to a background app, so keys
+stay refused there and its controls take accessibility actions. A sheet on
+another window of the app is neither read nor given keys through this window.
+A sheet takes keys only when the app's focused element is the sheet or its
+top-level element is the sheet (AppKit names the host window as the
+`AXWindow` of a sheet's controls, and of a sheet with only buttons that holds
+the focus itself): a panel whose contents another process serves, as a file
+panel's are, shows no focused element, so keys stay refused there whatever
+the panel calls itself.
+Return (or Enter) without modifiers, addressed to a window of a background
+app whose focus is in a sheet attached to that window, presses the sheet's
+default button through accessibility: AppKit looks for the default button's
+key equivalent through the app's key window, which is nil while the app is not
+active, so a posted Return reaches the sheet and does nothing. It is posted as
+before when the app is active, a menu of the app is open, the focus is in a
+text area, or the sheet has no enabled default button, and always in an
+ordinary window, where a field with an action, a combo box, a table or a
+search field handles Return itself. The press is confirmed when the sheet
+leaves the app's focus; when the press does not complete and the sheet stays
+open, the result says it may not have been pressed. Escape needs nothing of
+the kind: it reaches the cancel button through the sheet's cancel operation.
+Finding the window a sheet belongs to is bounded by the window read's own
+deadline; a lookup cut short adds no sheet. Before background keys, each
+reading of the app's focus (its focused window, the window of its focused
+element, the sheet it may be) has 1 s in all; what it could not ask in time
+counts as unknown, and keys are refused. When the app named no focused
+window at all, the refusal says where keys would go is unknown
+(`key_focus_unknown`) instead of naming another window.
+When `set_value` refuses after opening a menu it could not tell for the
+select's, Escape follows `AXCancel` only while WindowServer still shows a menu
+window opened since, so it cannot land in the app's window; when a menu could
+not be seen to close, the refusal says it may still be open.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -86,6 +127,42 @@ of a change) is read again once quiet, at most three reads in all and not past
 that 1 s. Notifications of the process's other windows do not count (the iOS
 Simulator shows every booted device in one process). The read reports what it
 waited for as `settle`, with the number of reads.
+On macOS the requests that find the read window (the app's children and
+windows, and each one's role) are bounded by the read's `timeout_ms` too. An
+app that does not answer them in time (busy on its main thread, as some are
+while they show a menu) gets `degraded_reason` `ax_app_unresponsive` and an
+empty tree, keeps its last snapshot and element tokens, and Opengeni shows the
+reading as cut short because the app answered too slowly, with the screenshot,
+instead of failing it after 7 s. Refs of the last reading still act through
+it, but keys are refused on it, since it shows no focused element, and so are
+keys based on it once a later reading has answered. Top-level
+children the lookup had no time to ask about are left out of the walk, as they
+may be other windows. A web `<select>` in a WebKit view (apps that
+embed a WKWebView) lists its open menu in the window's tree with no parent and
+no window: the menu's items are now the window's to press through
+accessibility when the menu is open over that window (pointer and key input to
+them is refused with
+`element_in_open_menu`), and `set_value` chooses an option from that menu,
+whether it opened the menu itself or found it open, and closes a menu it
+opened even though the button always reads as not expanded. Neither the
+button's expanded nor focused state says whose menu is open, so a menu found
+open counts as the button's only when its chosen item (the one item it marks
+as chosen, or, in a menu that marks none, the one item reading as selected,
+which follows the highlight) matches what the button shows and lies over the
+button (AppKit lays the chosen item over its button); another select's menu
+open over it is not used. When `set_value` opened a menu and then refuses, it
+also closes any menu opened since, even one it could not tell for the
+button's. After pressing an item of such a menu, `set_value`
+reads the button's value back and fails plainly if it does not show the
+option.
+The walk asks an element once more when its one-request read times out with
+time left, and in a read with a time limit counts one that does not answer
+twice as unread, so the read reports truncation; a walk without a time limit
+keeps it as an empty row. WebKit times out the first request made of the
+element hosting a WKWebView's web content, which made the first read of such
+a window omit the whole page. The window-number request made of each of the
+app's windows while finding the target window is bounded by the same deadline,
+and none is made once it has passed: the windows left count as unread.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -177,6 +254,27 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   controls with upstream arguments and results. Foreground activation is explicit.
 - Background support depends on the target application's native controls. It
   does not make every desktop application fully operable in the background.
+- Mac background input never makes the window focused, so pages that need a
+  focused document (passkey and other WebAuthn prompts, some clipboard reads)
+  refuse what it sends. A background pixel click is delivered as an
+  accessibility press on the element under the point, once. When the element
+  lists no press and is part of Chromium's own window controls, which accept
+  any press and ignore it (a point on a tab hits the tab strip, not the tab),
+  the routed pixel click is sent instead; that click takes about 1.3 to 1.7 s
+  against about 0.7 s for the press. Chromium sometimes answers the hit test
+  for a point on a page with the window itself (seen in a background window
+  after switching tabs); the page then runs neither a press nor the routed
+  click, and the result reports the input as unconfirmed. Chromium lists no
+  AXPress on page elements in the accessibility mode the adapter enables, but
+  performs it on any of them; CUA reports such an app, and its page controls
+  (not its selects, which take set_value) are invoked by role. Keys for a shortcut
+  whose menu item is disabled while the app is in the background (Terminal's
+  Close Window) are reported as a likely no-op.
+- On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
+  click, double-click or key press the driver reports as unverifiable, with no
+  element changed after it, is reported as possibly not taken effect. The
+  native Linux helper (the default for Linux host desktops) does not report
+  unconfirmed input, so its results never carry that line.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
@@ -201,7 +299,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/737e200fca49cbf6b0116f8acf7f52525aa45cef/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ec193d141ae312656dda99c8cb1db348f7b55540/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

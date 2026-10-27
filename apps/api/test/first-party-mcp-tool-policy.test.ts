@@ -29,6 +29,9 @@ import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@ope
 import { buildOpenGeniMcpServer, slackBotFileContentResult } from "../src/mcp/server";
 import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
+import { ToolSearchIndex } from "../../../packages/runtime/src/tool-discovery-ranking";
+
+type SearchableTool = ConstructorParameters<typeof ToolSearchIndex>[0][number];
 
 const accountId = crypto.randomUUID();
 const workspaceId = crypto.randomUUID();
@@ -326,7 +329,7 @@ describe("first-party MCP tool visibility policy", () => {
     );
   });
 
-  test("session_wait needs caller-session context as well as sessions:read", () => {
+  test("session_wait needs sessions:read and also serves sessionless callers", () => {
     const scoped = grant(["sessions:read"], ["session_wait"]);
     const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
     expect(
@@ -336,7 +339,7 @@ describe("first-party MCP tool visibility policy", () => {
           metadata: sessionlessMetadata,
         }),
       ),
-    ).not.toContain("session_wait");
+    ).toContain("session_wait");
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), scoped))).toContain("session_wait");
     expect(
       registeredToolNames(
@@ -1666,6 +1669,54 @@ describe("app-action tools", () => {
         }),
       ),
     ).toEqual([]);
+  });
+
+  test("tool search finds a way to a chat in another workspace", async () => {
+    // The lazy pool a full-access agent searches: its default first-party
+    // tools plus the app-action tools, named as the runtime names them.
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
+      { appActions: { access, startedByPerson: true, fullAccess: true } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "admin-tool-search-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listedTools = (await client.listTools()).tools;
+      const pool = listedTools.map(
+        (tool) =>
+          ({
+            type: "function",
+            name: `opengeni__${tool.name}`,
+            description: tool.description ?? "",
+            parameters: tool.inputSchema,
+            strict: false,
+            needsApproval: async () => false,
+            invoke: async () => "",
+          }) as unknown as SearchableTool,
+      );
+      const index = new ToolSearchIndex(pool);
+      for (const query of ["read a chat in another workspace", "chat in a different workspace"]) {
+        const names = index.rank(query, 8).map((tool) => tool.name);
+        expect(names, query).toContain("opengeni__admin_actions_search");
+      }
+      // Session-shaped queries rank the session tools by name; those now
+      // reach another workspace themselves, through workspaceId.
+      const message = index
+        .rank("message a session in another workspace", 3)
+        .map((tool) => tool.name);
+      expect(message).toContain("opengeni__session_send_message");
+      for (const name of ["session_send_message", "session_get", "session_events"]) {
+        expect(
+          JSON.stringify(listedTools.find((tool) => tool.name === name)?.inputSchema),
+          name,
+        ).toContain("workspaceId");
+      }
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   });
 });
 

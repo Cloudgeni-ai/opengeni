@@ -109,6 +109,59 @@ describe("control reply recovery", () => {
     expect(probes).toBe(3);
   });
 
+  test("an older token stays usable when the caller's clock runs faster than the machine's", async () => {
+    // Time synchronization may steer two hosts' elapsed clocks apart by up to
+    // 500 ppm. Model the worst case with no network latency at all: the
+    // machine refuses any offset that would place the call after its present.
+    let callerNow = 1_000_000;
+    const machineNow = () => callerNow * (1 - 0.0005);
+    const clock = spyOn(performance, "now").mockImplementation(() => callerNow);
+    try {
+      const issued = new Map<string, number>();
+      const offsets: number[] = [];
+      const connection = {
+        supportsHeaders: true,
+        async request(target: string) {
+          if (target === subject) {
+            const reply = leaseReply();
+            const ping = ControlResponse.decode(reply.data).result;
+            if (ping?.$case === "ping")
+              for (const token of ping.ping.controlReplayTokens) issued.set(token, machineNow());
+            return reply;
+          }
+          const [token, age] = target.split(".replay.")[1]!.split(".");
+          offsets.push(Number(age));
+          if (issued.get(token!)! + Number(age) > machineNow()) {
+            return {
+              data: ControlResponse.encode(
+                ControlResponse.fromPartial({
+                  requestId: mutation.requestId,
+                  error: {
+                    code: ErrorCode.ERROR_CODE_PROTOCOL,
+                    message: "future offset",
+                    detail: { failure_code: "control_delivery_expired" },
+                  },
+                }),
+              ).finish(),
+            };
+          }
+          return { data: result };
+        },
+      };
+      const recovery = new ControlReplyRecovery();
+      const payload = ControlRequest.encode(mutation).finish();
+      await recovery.request(connection, subject, payload, 100);
+      // The same batch, one hundred seconds later: still inside its window.
+      callerNow += 100_000;
+      const reply = await recovery.request(connection, subject, payload, 100);
+      expect(ControlResponse.decode(reply.data).error).toBeUndefined();
+      // Understated by 1%, so the machine charges more elapsed time, never less.
+      expect(offsets.at(-1)).toBe(99_000);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test("wall-clock jumps and correction do not change lease identity or the retry budget", async () => {
     const realNow = Date.now();
     const wall = spyOn(Date, "now");

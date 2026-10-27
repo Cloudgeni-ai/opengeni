@@ -54,7 +54,7 @@ import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery, requestValidationError } from "../http/request-body";
 
 const ReadSettings = z
   .object({
@@ -69,6 +69,8 @@ const WriteSettings = ReadSettings.extend({
   settings: AgentLearningOverridePatch,
 });
 const Id = z.uuid();
+/** How every Knowledge route answers invalid input: 422, naming the fields. */
+const KNOWLEDGE_REQUEST = { status: 422, message: "Invalid Knowledge request" } as const;
 function knowledgeHttpError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof KnowledgeVectorFundingError)
@@ -101,10 +103,7 @@ function knowledgeHttpError(error: unknown): never {
       message: error.message,
       details: { code: error.code },
     });
-  if (error instanceof z.ZodError)
-    throw new HTTPException(422, {
-      message: error.issues[0]?.message ?? "Invalid Knowledge request",
-    });
+  if (error instanceof z.ZodError) throw requestValidationError(error, "body", KNOWLEDGE_REQUEST);
   const state = nestedPostgresSqlState(error);
   if (state === "40001" || state === "23505")
     throw new HTTPException(409, { message: "This item changed. Refresh it and try again." });
@@ -292,10 +291,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await listKnowledgeReviewBatches(
           deps.db,
           context,
-          KnowledgeReviewBatchListRequest.parse({
-            ...query,
-            ...(query.limit ? { limit: Number(query.limit) } : {}),
-          }),
+          parseRequestQuery(
+            KnowledgeReviewBatchListRequest,
+            { ...query, ...(query.limit ? { limit: Number(query.limit) } : {}) },
+            KNOWLEDGE_REQUEST,
+          ),
         ),
       );
     }),
@@ -318,10 +318,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await searchKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryListRequest.parse({
-            ...query,
-            ...(query.limit ? { limit: Number(query.limit) } : {}),
-          }),
+          parseRequestQuery(
+            KnowledgeEntryListRequest,
+            { ...query, ...(query.limit ? { limit: Number(query.limit) } : {}) },
+            KNOWLEDGE_REQUEST,
+          ),
           () => deps.getDocumentServices().embedder,
           deps.settings,
         ),
@@ -354,13 +355,16 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.get(`${base}/:entryId`, (c) =>
     run(c, false, async (context) => {
-      const options = z
-        .object({
-          revisionId: Id.optional(),
-          view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
-        })
-        .strict()
-        .parse(c.req.query());
+      const options = parseRequestQuery(
+        z
+          .object({
+            revisionId: Id.optional(),
+            view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
+          })
+          .strict(),
+        c.req.query(),
+        KNOWLEDGE_REQUEST,
+      );
       const entry = await getKnowledgeEntry(
         deps.db,
         context,

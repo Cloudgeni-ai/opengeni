@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { plan } from "./planner";
+import { plan, settledCiFinished } from "./planner";
 import { operatorOffIntervals } from "./operator-off";
 import {
   capacityDecision,
@@ -261,13 +261,25 @@ export class ObservationJournal {
           (!sample.ciStartedAt || run.startedAt < sample.ciStartedAt)
         )
           sample.ciStartedAt = run.startedAt;
-        if (run.completedAt && (!sample.ciCompletedAt || run.completedAt > sample.ciCompletedAt))
+        // Only a completed run proves Batch CI finished; settled batches with a
+        // recorded finish stop being re-read, so a rerun must not record one.
+        if (
+          run.status === "completed" &&
+          run.completedAt &&
+          (!sample.ciCompletedAt || run.completedAt > sample.ciCompletedAt)
+        )
           sample.ciCompletedAt = run.completedAt;
       }
       // Seeing main ancestry establishes containment, not its actual landing timestamp.
       sample.observedAt = o.now;
       data.stages[id] = sample;
-      if (!candidate.runs.length) {
+      // A settled batch the ledger records as finished has terminal evidence;
+      // its unloaded run history is not a missing run, and an earlier hold on
+      // it (not an operator release) no longer applies.
+      const finished = settledCiFinished(o.ledger, id);
+      if (finished && data.missing[id] && data.missing[id]!.status !== "released")
+        delete data.missing[id];
+      if (!candidate.runs.length && !finished) {
         const historical = candidate.containedInBase || o.ledger.landed.includes(id);
         const missing = data.missing[id] ?? {
           // Main containment cannot prove that a historical workflow is idle.

@@ -2,17 +2,21 @@ import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./m
 import {
   conversationTimeline,
   personalMachineCopy,
+  sessionAdmissionCopy,
   useSessionStart,
   type AgentMessageItem,
+  type AuthNeededItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
 import {
+  Component,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ErrorInfo,
   type ComponentRef,
   type ReactNode,
 } from "react";
@@ -54,6 +58,7 @@ import {
 import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
+import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
@@ -101,6 +106,14 @@ export interface NativeSessionScreenProps extends Omit<
   approvalMessages?: ApprovalStripProps["messages"];
   /** Reads the commands panel (the full client; omit to hide command details). */
   client?: OpenGeniClient | undefined;
+  /**
+   * Let people finish an agent's "connect your account" request in the chat,
+   * with the web conversation's cards: sign-in opens the system sign-in
+   * browser and comes back to the app, keys go into the secure field, and the
+   * agent continues once setup is done. Needs `client`; omit to show the
+   * request as a row.
+   */
+  inChatConnect?: NativeInChatConnectOptions | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
@@ -125,6 +138,7 @@ export function NativeSessionScreen({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   timelineMessages,
   renderComposer,
@@ -136,25 +150,70 @@ export function NativeSessionScreen({
   return (
     <SingleSendWording enabled={controller.composer.singleSend === true}>
       <NativeTimelineMessagesProvider messages={timelineMessages}>
-        <SessionScreenBody
-          controller={controller}
-          composer={composerSlots}
-          trailing={trailing}
-          topBar={topBar}
-          bottomInset={bottomInset}
-          keyboardBottomOffset={keyboardBottomOffset}
-          feedback={feedback}
-          humanInputMessages={humanInputMessages}
-          approvalMessages={approvalMessages}
-          client={client}
-          models={models}
-          renderComposer={renderComposer}
-          renderMessageActions={hostMessageActions}
-          {...timelineProps}
-        />
+        <SessionScreenBoundary sessionId={controller.sessionId}>
+          <SessionScreenBody
+            controller={controller}
+            composer={composerSlots}
+            trailing={trailing}
+            topBar={topBar}
+            bottomInset={bottomInset}
+            keyboardBottomOffset={keyboardBottomOffset}
+            feedback={feedback}
+            humanInputMessages={humanInputMessages}
+            approvalMessages={approvalMessages}
+            client={client}
+            inChatConnect={inChatConnect}
+            models={models}
+            renderComposer={renderComposer}
+            renderMessageActions={hostMessageActions}
+            {...timelineProps}
+          />
+        </SessionScreenBoundary>
       </NativeTimelineMessagesProvider>
     </SingleSendWording>
   );
+}
+
+/**
+ * One chat must never take the app down. In a release build React Native
+ * turns an uncaught render error into a fatal crash, so a failure while
+ * drawing this conversation shows the load-failure state with Try again
+ * instead, and the rest of the app keeps working.
+ */
+class SessionScreenBoundary extends Component<
+  { sessionId: string; children: ReactNode },
+  { error: Error | null; sessionId: string }
+> {
+  override state: { error: Error | null; sessionId: string } = {
+    error: null,
+    sessionId: this.props.sessionId,
+  };
+
+  static getDerivedStateFromError(error: unknown): { error: Error } {
+    return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+
+  static getDerivedStateFromProps(
+    props: { sessionId: string },
+    state: { error: Error | null; sessionId: string },
+  ): { error: Error | null; sessionId: string } | null {
+    // Another chat starts clean.
+    return props.sessionId === state.sessionId ? null : { error: null, sessionId: props.sessionId };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("Opengeni session screen failed to render", error, info.componentStack);
+  }
+
+  override render(): ReactNode {
+    if (!this.state.error) return this.props.children;
+    return (
+      <LoadFailure
+        message={this.state.error.message}
+        onRetry={() => this.setState({ error: null })}
+      />
+    );
+  }
 }
 
 function SessionScreenBody({
@@ -168,6 +227,7 @@ function SessionScreenBody({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   renderComposer,
   renderMessageActions: hostMessageActions,
@@ -202,6 +262,18 @@ function SessionScreenBody({
   const items = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
+  );
+  const stockAuthNeeded = useNativeInChatConnect({
+    client,
+    workspaceId: controller.workspaceId,
+    sessionId: controller.sessionId,
+    items,
+    options: inChatConnect,
+  });
+  const hostAuthNeeded = timelineProps.renderAuthNeeded;
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => hostAuthNeeded?.(item) ?? stockAuthNeeded?.(item),
+    [hostAuthNeeded, stockAuthNeeded],
   );
   const status = controller.sessionStatus;
   const paused = queue.effectiveControl?.state === "paused";
@@ -251,6 +323,7 @@ function SessionScreenBody({
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
+        renderAuthNeeded={renderAuthNeeded}
         renderUserAttachments={
           timelineProps.renderUserAttachments ??
           (client
@@ -285,6 +358,8 @@ function SessionScreenBody({
             {controller.admissionBlocked && !paused && controller.session.session ? (
               <StuckCard
                 session={controller.session.session}
+                client={controller.client}
+                workspaceId={controller.workspaceId}
                 busy={composer.resuming || control.controlling}
                 onSessionChanged={async () => {
                   await Promise.all([controller.session.refresh(), queue.refresh()]);
@@ -297,6 +372,7 @@ function SessionScreenBody({
                 respondingRequestId={humanInput.respondingRequestId}
                 error={humanInput.mutationError?.message}
                 messages={humanInputMessages}
+                renderMarkdown={timelineProps.renderMarkdown}
                 onSubmit={(requestId, response) =>
                   humanInput.respond(requestId, response).then(() => undefined)
                 }
@@ -538,10 +614,14 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
  */
 function StuckCard({
   session,
+  client,
+  workspaceId,
   busy,
   onSessionChanged,
 }: {
   session: Session;
+  client: OpenGeniNativeSessionController["client"];
+  workspaceId: string;
   busy: boolean;
   onSessionChanged: () => Promise<void>;
 }) {
@@ -550,7 +630,7 @@ function StuckCard({
   const t = useOpenGeniText();
   // The same state as the web notice: why the saved message didn't start, the
   // machines this person may move the chat to, and one fenced recheck.
-  const start = useSessionStart({ session, onSessionChanged });
+  const start = useSessionStart({ session, onSessionChanged, client, workspaceId });
   const [failed, setFailed] = useState(false);
   // The recheck is one fenced Resume outside the session control runner, so
   // the card holds its own pending state: busy while it runs, and a second tap
@@ -565,9 +645,9 @@ function StuckCard({
     start.needsDifferentMachine && start.machineAccess
       ? personalMachineCopy(t, start.machineAccess, { queued: true })
       : null;
-  const needsAccess =
-    reason?.reason === "initiator_membership_required" ||
-    reason?.reason === "personal_resource_grant_required";
+  // The web notice's words for the known refusal; the native stuck copy when
+  // the block is only known from its status event.
+  const copy = reason ? sessionAdmissionCopy(t, reason) : null;
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -584,7 +664,9 @@ function StuckCard({
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Icon name="circle-alert" size={16} color={c["status-failed"]} />
         <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
-          {machine ? t("sessionAdmission.needsDifferentMachineTitle") : m.stuckTitle}
+          {machine
+            ? t("sessionAdmission.needsDifferentMachineTitle")
+            : (copy?.title ?? m.stuckTitle)}
         </Text>
       </View>
       {machine ? (
@@ -637,8 +719,13 @@ function StuckCard({
             </Text>
           ) : null}
         </>
+      ) : copy ? (
+        <>
+          <Text style={textStyle}>{copy.body}</Text>
+          <Text style={textStyle}>{copy.next}</Text>
+        </>
       ) : (
-        <Text style={textStyle}>{needsAccess ? m.stuckAccessBody : m.stuckBody}</Text>
+        <Text style={textStyle}>{m.stuckBody}</Text>
       )}
       {failed ? (
         <Text

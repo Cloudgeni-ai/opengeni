@@ -175,7 +175,11 @@ access limitation. Missing publishing access itself still blocks publication.
    `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Execution still follows
-   normal tool approval rules; handle approval-required responses in the UI.
+   normal tool approval rules, but a Site can't ask the viewer to approve a
+   call, so a tool set to Ask fails there: show which tool needs Allow. When
+   that blocks the person you work for, offer to set it to Allow in the chat
+   with the integration's tool approval app action instead of describing the
+   setting.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal
@@ -183,8 +187,8 @@ access limitation. Missing publishing access itself still blocks publication.
 
 ## Completion gate (apps)
 
-This gate applies to apps. A simple page is done when its saved link is in
-the reply (see "Simple page" in SKILL.md).
+This gate applies to apps. A single-file Site is done when its saved link is in
+the reply (see "Single-file Site" in SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published

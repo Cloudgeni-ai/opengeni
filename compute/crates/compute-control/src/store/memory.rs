@@ -11,9 +11,11 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
-    admits, rule,
+    Admission, Admits, Collector, Counted, HostRow, Inserted, LifecycleRow, Linked, RequestRow,
+    Result, SandboxRow, Store, TemplateRow, Write, admits, rule,
 };
+
+mod templates;
 
 #[derive(Debug)]
 struct Host {
@@ -22,6 +24,9 @@ struct Host {
     answer: Vec<Ruling>,
     /// When it was given up on, while it is.
     gone_ms: Option<u64>,
+    /// Whether an operator drained it and has not undrained it since,
+    /// which outlasts its being given up on.
+    drained: bool,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +42,10 @@ struct Inner {
     built: HashMap<String, ImageId>,
     /// Which OCI image each name used, the latest last.
     image_uses: Vec<(String, String)>,
+    /// Templates by team, then id.
+    templates: BTreeMap<(String, String), TemplateRow>,
+    /// Every image captured for a template.
+    captured: HashMap<ImageId, templates::Captured>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -69,6 +78,9 @@ impl Inner {
     }
 
     fn insert(&mut self, row: &SandboxRow) -> Write {
+        if self.template_gone(row) {
+            return Write::TemplateGone;
+        }
         if self.owner_lost(row) {
             return Write::OwnerLost;
         }
@@ -147,7 +159,11 @@ impl MemoryStore {
             }
             rulings.push(ruling);
         }
-        let renewals = inner.hosts.get(&id).map_or(0, |host| host.row.renewals) + 1;
+        let (renewals, drained) = inner
+            .hosts
+            .get(&id)
+            .map_or((0, false), |host| (host.row.renewals, host.drained));
+        let renewals = renewals + 1;
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);
         inner.hosts.insert(
@@ -157,7 +173,11 @@ impl MemoryStore {
                     id,
                     info: register.info.clone(),
                     epoch,
-                    state: HostState::Live,
+                    state: if drained {
+                        HostState::Draining
+                    } else {
+                        HostState::Live
+                    },
                     renewals,
                     seq: 0,
                     capacity: register.capacity.clone(),
@@ -166,6 +186,7 @@ impl MemoryStore {
                 attempt: register.attempt,
                 answer: rulings.clone(),
                 gone_ms: None,
+                drained,
             },
         );
         Admission::Registered {
@@ -219,13 +240,17 @@ impl MemoryStore {
         rows
     }
 
-    fn renewals_now(&self) -> Vec<(HostId, u64)> {
+    fn renewals_now(&self) -> Vec<Counted> {
         let inner = self.lock();
         inner
             .hosts
             .values()
             .filter(|host| host.row.state != HostState::Lost)
-            .map(|host| (host.row.id, host.row.renewals))
+            .map(|host| Counted {
+                host: host.row.id,
+                renewals: host.row.renewals,
+                boot: host.row.info.boot.clone(),
+            })
             .collect()
     }
 
@@ -269,10 +294,18 @@ impl MemoryStore {
         let Some(entry) = inner.hosts.get_mut(&host) else {
             return false;
         };
-        if entry.row.state != from {
+        let undrained_while_lost = entry.row.state == HostState::Lost
+            && entry.drained
+            && from == HostState::Draining
+            && to == HostState::Live;
+        let marked_apart = entry.row.state == to && entry.drained != (to == HostState::Draining);
+        if entry.row.state != from && !undrained_while_lost && !marked_apart {
             return false;
         }
-        entry.row.state = to;
+        if !undrained_while_lost {
+            entry.row.state = to;
+        }
+        entry.drained = to == HostState::Draining;
         entry.row.changed = changed;
         inner.changes = changed;
         true
@@ -500,7 +533,7 @@ impl Store for MemoryStore {
         ready(Ok(self.hosts_changed_now(after)))
     }
 
-    fn renewals(&self) -> impl Future<Output = Result<Vec<(HostId, u64)>>> + Send {
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send {
         ready(Ok(self.renewals_now()))
     }
 
@@ -687,5 +720,59 @@ impl Store for MemoryStore {
             .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
             .flatten();
         ready(Ok(latest))
+    }
+
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send {
+        ready(Ok(self.lock().insert_template(row)))
+    }
+
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send {
+        ready(Ok(self.lock().template(team, key)))
+    }
+
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send {
+        ready(Ok(self.lock().templates(team)))
+    }
+
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().delete_template(team, id)))
+    }
+
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send {
+        ready(Ok(self.lock().unused_images(now_ms, before_ms)))
+    }
+
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collect_image(image, before_ms, collector)))
+    }
+
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collecting(image, collector)))
+    }
+
+    fn collected(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<()>> + Send {
+        self.lock().collected(image, collector);
+        ready(Ok(()))
     }
 }

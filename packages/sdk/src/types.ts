@@ -2104,7 +2104,7 @@ export type SiteConversationGroup = {
   title: string;
   /** Root conversations in the group; 0 for a Site with none yet. */
   conversations: number;
-  /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
+  /** When the Site last got a new published version (creation is the first); for a viewer who cannot read the Site, when its first conversation here started. Its conversations, the chats that made it and opening it never move it. */
   updatedAt: string;
   /** Creation time of the group's newest conversation, else of the Site. */
   createdAt: string;
@@ -3529,7 +3529,7 @@ export type ScheduledTaskStatus = "active" | "paused";
 
 export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
-export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
+export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one" | "steer";
 
 export type ScheduledTaskDayOfWeek =
   | "SUNDAY"
@@ -4031,6 +4031,7 @@ export type FirstPartyMcpToolName =
   | "knowledge_retain_file"
   | "meetings_search"
   | "meeting_read"
+  | "meeting_notes_save"
   | "knowledge_retain_message"
   | "knowledge_archive"
   | "instruction_policy_save"
@@ -5418,6 +5419,11 @@ export type ClientAuthConfig =
        * accounts can still sign in. Omitted (treat as true) by older deployments.
        */
       newSignupsEnabled?: boolean;
+      signupChallengeSiteKey?: string | undefined;
+      /** Sign in with a passkey, and add passkeys in Security; omitted (false) by older deployments. */
+      passkeySignIn?: boolean;
+      /** Create an account with only a name and a passkey; omitted (false) by older deployments. */
+      passkeySignUp?: boolean;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
@@ -7567,6 +7573,8 @@ export type SubmitComposerDraftResponse = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** As on `SteerMessageResult`. Older servers omit it. */
+  waitsForMachineOwner?: boolean | undefined;
   replay: boolean;
 };
 
@@ -9850,6 +9858,8 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   coversVoice?: boolean | undefined;
   /** Monthly scoped allowance; allocated before other promotions. */
   planCredit?: boolean | undefined;
+  /** Free funding unavailable for new admission under an active promotion hold. */
+  held?: boolean | undefined;
 };
 
 export type {
@@ -9872,6 +9882,9 @@ export type BillingBalance = {
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
+  heldCreditMicros?: number | undefined;
+  heldGeneralCreditMicros?: number | undefined;
+  promotionDecision?: "eligible" | "verification_required" | "held" | "denied" | undefined;
   plan?: BillingPlanBalance | null | undefined;
 };
 
@@ -10618,6 +10631,19 @@ export type SessionMachineAccess = {
    *  messages) waiting because only the machine's owner may start work on it,
    *  grouped by whose work it is. Older servers omit it. */
   waitingWork?: SessionWaitingWork[] | undefined;
+  /** Messages other people sent here that wait because only the machine's
+   *  owner may start work on it, grouped by sender. The owner's next message
+   *  brings them to the agent; moving the chat to a machine the sender may
+   *  use runs them. Older servers omit it. */
+  waitingMessages?: SessionWaitingMessages[] | undefined;
+};
+
+export type SessionWaitingMessages = {
+  /** The sender's display name, when known. */
+  name: string | null;
+  /** The caller sent them. */
+  isYou: boolean;
+  messages: number;
 };
 
 export type SessionWaitingWork = {
@@ -10697,6 +10723,9 @@ export type SwapActiveSandboxResponse = {
     | "offline_enrollment"
     | "unsupported_backend_context"
     | "transient_establishment"
+    | "home_unavailable_this_turn"
+    | "workspace_root_unavailable"
+    | "invalid_working_directory"
     | "concurrent_swap"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"

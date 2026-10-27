@@ -81,8 +81,9 @@ export function useReadyEventSources(workspaceId: string, enabled: boolean): Rea
 }
 
 /**
- * The brand logo for a source: its app's logo for GitHub, Slack, Gmail, Linear
- * and Sentry, the MCP server's own logo for an MCP source.
+ * The brand logo for a source: its app's logo for GitHub, Slack, Gmail, Linear,
+ * Sentry and apps with a webhook preset such as Tailscale, the MCP server's own
+ * logo for an MCP source.
  */
 export function useEventSourceLogo(): EventSourceLogoResolver {
   const { client, workspaceCapabilityCatalog } = useAppContext();

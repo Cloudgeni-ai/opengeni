@@ -6,9 +6,11 @@ import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import {
   CompactionNeededError,
   compactionThresholdTokens,
+  countModelInputImages,
   estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
+  type HistoryFootprintCompactionSignal,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -25,7 +27,19 @@ import {
 export type ContextRobustnessFilterOptions = {
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  /**
+   * Compaction triggers independent of provider tokens. Both are checked
+   * before every model request, through the same compaction signal.
+   */
+  historyFootprintCompaction?: HistoryFootprintCompactionOptions;
   throwOnCompactionNeeded?: boolean;
+};
+
+export type HistoryFootprintCompactionOptions = {
+  /** Stored active-history size at or over its compaction threshold, or null. */
+  storedFootprint?: () => HistoryFootprintCompactionSignal | null | undefined;
+  /** Compact before a request would carry this many images. */
+  imageThreshold?: number | null;
 };
 
 /**
@@ -137,6 +151,23 @@ export function contextRobustnessFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
+  const imageThreshold = options.historyFootprintCompaction?.imageThreshold;
+  // Items keep their identity across the SDK's per-call input rebuilds, so
+  // only items new to this request are walked.
+  const imageCounts = new WeakMap<object, number>();
+  const requestImageCount = (input: readonly unknown[]): number => {
+    let count = 0;
+    for (const item of input) {
+      if (!item || typeof item !== "object") continue;
+      let itemCount = imageCounts.get(item);
+      if (itemCount === undefined) {
+        itemCount = countModelInputImages(item);
+        imageCounts.set(item, itemCount);
+      }
+      count += itemCount;
+    }
+    return count;
+  };
   let previousRequest: {
     revision: number;
     instructionsTokens: number;
@@ -194,9 +225,28 @@ export function contextRobustnessFilterForSettings(
           signalSource: "provider",
         });
       }
+      const historyFootprint =
+        options.historyFootprintCompaction?.storedFootprint?.() ??
+        imageFootprint(requestImageCount(input), imageThreshold);
+      if (historyFootprint) {
+        throw new CompactionNeededError({
+          signalTokens,
+          thresholdTokens,
+          signalSource: "history_footprint",
+          historyFootprint,
+        });
+      }
     }
     return modelData.input === input ? modelData : { ...modelData, input };
   };
+}
+
+function imageFootprint(
+  images: number,
+  threshold: number | null | undefined,
+): HistoryFootprintCompactionSignal | null {
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 1) return null;
+  return images >= threshold ? { dimension: "images", actual: images, threshold } : null;
 }
 
 /**

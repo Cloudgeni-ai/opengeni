@@ -13,13 +13,10 @@ export const KEEPER_SDK_SHA256 = "94787ce51324f36c1b62d19ac29fbe3b9b206305695e50
 
 export type KeeperSdk = typeof KeeperSdkModule;
 export type KeeperRecord = KeeperSdkModule.KeeperRecord;
-export type KeeperFolder = KeeperSdkModule.KeeperFolder;
 export type KeeperFile = KeeperSdkModule.KeeperFile;
-export type KeeperSecrets = KeeperSdkModule.KeeperSecrets;
 export type KeyValueStorage = KeeperSdkModule.KeyValueStorage;
 export type SecretManagerOptions = KeeperSdkModule.SecretManagerOptions;
 export type KeeperQueryFunction = NonNullable<SecretManagerOptions["queryFunction"]>;
-export type KeeperHttpResponse = Awaited<ReturnType<KeeperQueryFunction>>;
 
 /**
  * Bounded log capture for one SDK instance. The SDK reports skipped records,

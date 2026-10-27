@@ -18,7 +18,12 @@ import {
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
 import { ActiveBackendUnresolvableError } from "./routing/backend-resolver";
-import { runRoutedToolCall } from "./routing/routed-call-scope";
+import {
+  newRoutedCallScope,
+  runRoutedToolCall,
+  settleRoutedCallNotStarted,
+  type RoutedCallScope,
+} from "./routing/routed-call-scope";
 import { createHash } from "node:crypto";
 import { sendCommandInput } from "./command-input";
 import {
@@ -311,6 +316,11 @@ type PendingShellStart = {
 export type TurnToolCancellationFence = {
   cancel(reason?: unknown): void;
   waitForQuiescence(): Promise<void>;
+  /** Content-free snapshot for slow/finalization containment diagnostics. */
+  outstandingWriters?(): Array<{
+    kind: "tool_call" | "shell_session" | "pending_shell_start" | "remote_operation";
+    count: number;
+  }>;
   runSandboxCommand(
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
@@ -335,6 +345,16 @@ export type TurnToolCancellationFence = {
    * requested wait.
    */
   setForegroundWaitYield(active: boolean): void;
+  /**
+   * Settle as not started every `exec_command` call of this attempt whose
+   * operations were all still waiting for, or had failed in, routed-sandbox
+   * resolution (for example while the sandbox was being created): nothing it
+   * asked of the sandbox was sent. Returns their call ids. From then on their
+   * operations are refused at resolution, so a sandbox that comes up later
+   * never runs them. An attempt that ends calls this before it records the
+   * outcome of its unfinished calls.
+   */
+  settleCommandCallsNotStarted?(): string[];
   /**
    * Remove every attempt-scoped secret file the wrapped sessions wrote
    * (`secretfile` paths, leftover env files). Called at attempt end after the
@@ -980,8 +1000,13 @@ export function isRouteMoveRefusal(error: unknown): boolean {
 /** A call refused by a route move before any of its operations resolved a
  * route started nothing: return that as its result, so the step settles with
  * a certain outcome for every call and the attempt ends at the next model
- * request. A refusal after the call already reached a route still fails. */
-function withRouteMoveContainment(tool: FunctionTool): FunctionTool {
+ * request. A refusal after the call already reached a route still fails.
+ * `scopeFor` gives each call's routed-call scope, so an attempt that ends can
+ * read and settle it. */
+function withRouteMoveContainment(
+  tool: FunctionTool,
+  scopeFor: (details: ToolCallDetails | undefined) => RoutedCallScope,
+): FunctionTool {
   return {
     ...tool,
     invoke: (runContext, input, details) =>
@@ -989,6 +1014,7 @@ function withRouteMoveContainment(tool: FunctionTool): FunctionTool {
         () => tool.invoke(runContext, input, details),
         isRouteMoveRefusal,
         () => ROUTE_MOVED_CALL_NOT_STARTED,
+        scopeFor(details),
       ),
   };
 }
@@ -1078,6 +1104,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly cutPolling: boolean;
   private readonly secretResolver: SecretResolver | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
+  /** Routed-call scopes of this attempt's `exec_command` calls, by call id. */
+  private readonly commandCallScopes = new Map<string, RoutedCallScope>();
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
@@ -1105,8 +1133,39 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     await this.ensureDrain();
   }
 
+  outstandingWriters(): ReturnType<NonNullable<TurnToolCancellationFence["outstandingWriters"]>> {
+    return [
+      { kind: "tool_call" as const, count: this.inFlight.size },
+      { kind: "shell_session" as const, count: this.shellSessions.size },
+      { kind: "pending_shell_start" as const, count: this.pendingShellStarts.size },
+      { kind: "remote_operation" as const, count: this.remoteExecs.size },
+    ].filter(({ count }) => count > 0);
+  }
+
   setForegroundWaitYield(active: boolean): void {
     this.foregroundWaitYield = active;
+  }
+
+  settleCommandCallsNotStarted(): string[] {
+    const settled: string[] = [];
+    for (const [callId, scope] of this.commandCallScopes) {
+      if (settleRoutedCallNotStarted(scope)) settled.push(callId);
+    }
+    return settled;
+  }
+
+  private routedCallScope(tool: FunctionTool, details: ToolCallDetails | undefined) {
+    const callId = details?.toolCall?.callId;
+    if (tool.name !== "exec_command" || typeof callId !== "string" || callId.length === 0) {
+      return newRoutedCallScope();
+    }
+    // A call id invoked again shares its scope: the id is settled as not
+    // started only if no invocation of it got past route resolution.
+    const existing = this.commandCallScopes.get(callId);
+    if (existing) return existing;
+    const scope = newRoutedCallScope();
+    this.commandCallScopes.set(callId, scope);
+    return scope;
   }
 
   async clearSecretFiles(): Promise<void> {
@@ -1560,7 +1619,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     const wrapped = structuralTools.map((tool) => {
       if (tool.type === "function")
-        return withRouteMoveContainment(this.wrapFunctionTool(tool as FunctionTool, session));
+        return withRouteMoveContainment(
+          this.wrapFunctionTool(tool as FunctionTool, session),
+          (details) => this.routedCallScope(tool as FunctionTool, details),
+        );
       if (tool.type === "apply_patch")
         return this.wrapApplyPatchTool(tool as ApplyPatchTool, session);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
@@ -2239,6 +2301,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
     }
+    if (this.cancelled) throw cancellationError(this.reason);
+    if (canAdoptInBackground && state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      // Returning an unknown observation is still a return-control boundary,
+      // just like a running receipt. Commit the same session ownership before
+      // exposing its UUID; otherwise command_read cannot find it and the turn
+      // finalizer waits forever for proof the observer cannot obtain. Adoption
+      // retains the process holder/admission and does NOT prove physical exit.
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
+        state.sessionId,
+        state.command,
+      );
+      this.shellSessions.delete(state.sessionId);
+    }
     if (observationFailure) {
       const commandId = state.processSession?.retainedProcessIdentity?.(state.sessionId)?.id;
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
@@ -2249,15 +2324,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // the turn fence: finalization must stop and settle it. Returning
       // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
-    }
-    if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
-      // A cancelled turn keeps the process on its fence so the drain stops it.
-      if (this.cancelled) throw cancellationError(this.reason);
-      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
-        state.sessionId,
-        state.command,
-      );
-      this.shellSessions.delete(state.sessionId);
     }
     return runningCommandBanner(
       state.sessionId,

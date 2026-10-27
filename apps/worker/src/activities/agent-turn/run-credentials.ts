@@ -55,7 +55,6 @@ import {
   withSandboxStartupPhases,
   type sandboxStartupPhaseObserver,
 } from "./sandbox-startup-phase";
-import { sandboxRunAs } from "@opengeni/runtime";
 
 import {
   assertGitHubResourcesRemainAuthorized,
@@ -522,7 +521,6 @@ async function prepareRunCredentialsObserved(
           if (!pendingBinding) {
             throw new Error("credential renewal produced no binding token");
           }
-          const runAs = sandboxRunAs(runSettings);
           const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
           if (!targetSandbox) {
             throw new Error("Git credential renewal has no exact sandbox lease target");
@@ -532,7 +530,6 @@ async function prepareRunCredentialsObserved(
             "gitCredentialRenewal",
             async () =>
               await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
-                ...(runAs ? { runAs } : {}),
                 ...(eventing.toolCancellationFenceRef.current
                   ? {
                       commandRunner:
@@ -599,7 +596,6 @@ async function prepareRunCredentialsObserved(
     };
     const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
       if (tokenSession) {
-        const runAs = sandboxRunAs(runSettings);
         const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
         if (!targetSandbox) {
           throw new Error("Codemode token renewal has no exact sandbox lease target");
@@ -609,7 +605,6 @@ async function prepareRunCredentialsObserved(
           "codemodeTokenRenewal",
           async () =>
             await refreshCodemodeTokenFile(tokenSession, material.token, {
-              ...(runAs ? { runAs } : {}),
               ...(sandboxCodemodeTokenFile
                 ? {
                     tokenFile: sandboxCodemodeTokenFile,

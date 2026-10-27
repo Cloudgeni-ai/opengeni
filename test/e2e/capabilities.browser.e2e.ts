@@ -972,7 +972,6 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
           member.startsWith("integration-account-facets-") ||
           member.startsWith("integration-facets-panel-") ||
           member.startsWith("custom-api-setup-dialog-") ||
-          member.startsWith("google-drive-folder-dialog-") ||
           member.startsWith("google-drive-knowledge-source-dialog-"),
       )
         ? cycle

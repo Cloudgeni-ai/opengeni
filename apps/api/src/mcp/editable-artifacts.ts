@@ -19,6 +19,7 @@ import * as z from "zod/v4";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { EditableArtifactQueryRequestSchema } from "./editable-artifact-query-schema";
+import { isRecord } from "@opengeni/contracts/values";
 
 const ArtifactId = z
   .string()
@@ -425,10 +426,6 @@ function jsonValue(value: unknown): unknown {
     return output;
   }
   throw new Error("Artifact result contains unsupported data");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readOnlyAnnotations(title: string) {

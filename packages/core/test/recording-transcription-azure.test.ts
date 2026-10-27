@@ -59,6 +59,26 @@ describe("Azure Speech recordings", () => {
     expect(() => parseAzureSpeechTranscript(null)).toThrow(RecordingTranscriptionError);
   });
 
+  test("reports no language for audio Azure heard no speech in", () => {
+    const result = parseAzureSpeechTranscript({
+      durationMilliseconds: 60_000,
+      phrases: [{ locale: "unk", words: [] }, { locale: "nb-NO" }],
+      combinedPhrases: [],
+    });
+    expect(result.languages).toEqual([]);
+    expect(result.words).toEqual([]);
+  });
+
+  test("keeps the language of a transcript whose phrases carry no words", () => {
+    const result = parseAzureSpeechTranscript({
+      durationMilliseconds: 5_123,
+      phrases: [{ locale: "en-US" }],
+      combinedPhrases: [{ text: "hello" }],
+    });
+    expect(result.languages).toEqual(["en-US"]);
+    expect(result.text).toBe("hello");
+  });
+
   test("sends Norwegian as Bokmål and keeps other languages to their base", () => {
     expect(azureSpeechLocale("no")).toBe("nb");
     expect(azureSpeechLocale("nor")).toBe("nb");

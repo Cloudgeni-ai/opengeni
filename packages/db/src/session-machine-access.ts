@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { SessionMachineAccess } from "@opengeni/contracts";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
+import { machineOwnerLookupGranted } from "./machine-owner-wait";
 
 /** Explanation only; never adds the machine to discovery or authorizes its use. */
 export async function getSessionMachineAccess(
@@ -15,7 +16,16 @@ export async function getSessionMachineAccess(
         ${input.sessionId}::uuid) as result
     `,
     );
-    return row?.result ? SessionMachineAccess.parse(row.result) : null;
+    if (!row?.result) return null;
+    const access = SessionMachineAccess.parse(row.result);
+    // Messages only wait once the runtime can look up the machine's owner
+    // (`machine-owner-wait.ts`); until then they still run and are refused, so
+    // saying they wait would be wrong.
+    if (access.waitingMessages?.length && !(await machineOwnerLookupGranted(tx))) {
+      const { waitingMessages: _withheld, ...rest } = access;
+      return rest;
+    }
+    return access;
   });
 }
 

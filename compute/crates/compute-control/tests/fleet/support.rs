@@ -4,7 +4,7 @@
 //! adopted, archiving on a hand-off, claiming the archive on an adopt), or
 //! as a test tells them to.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,10 +19,10 @@ use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    Answer, Answered, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH, RENEW_PATH,
-    ReadyClones, Register, Registered, Renew, Renewed, Verdict,
+    Answer, Answered, Boot, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH,
+    RENEW_PATH, ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
-use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request};
+use compute_protocol::host::{ErrorCode, Id, ImageId, LevelName, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject as _;
@@ -230,7 +230,7 @@ pub async fn counted(fleet: &Fleet, host: &FakeHost) -> bool {
         .await
         .unwrap()
         .iter()
-        .any(|(counted, _)| *counted == compute_fleet::HostId(host.id()))
+        .any(|counted| counted.host == compute_fleet::HostId(host.id()))
 }
 
 /// Waits until the service gives up on `host`, and returns when it did.
@@ -424,6 +424,13 @@ impl Fleet {
         host
     }
 
+    /// As [`Self::host`], for a host that offers sandboxes `offers`.
+    pub async fn host_offering(&self, name: &str, offers: &[&str]) -> FakeHost {
+        let host = FakeHost::start_offering(self, name, roomy(), offers).await;
+        self.sees(&host).await;
+        host
+    }
+
     /// Waits until this replica's view has `host` under its current
     /// registration.
     pub async fn sees(&self, host: &FakeHost) {
@@ -512,6 +519,10 @@ struct HostInner {
     held: Mutex<HashMap<Id, u64>>,
     /// How many times each OCI image was asked to be built.
     prepares: Mutex<HashMap<String, u32>>,
+    /// The sandboxes it holds saved, which it may capture.
+    saved: Mutex<HashSet<Id>>,
+    /// How many times each capture key was asked.
+    captures: Mutex<HashMap<String, u32>>,
     saves: AtomicU64,
     seen: Mutex<Vec<Seen>>,
     behaviour: Mutex<Behaviour>,
@@ -526,6 +537,10 @@ struct HostInner {
     /// the request as expired, as a real host does; 0 never refuses.
     window: AtomicU64,
     attempt: AtomicU64,
+    /// What it offers sandboxes to reach, as it registers.
+    offers: Vec<String>,
+    /// The boot of its machine it names when it registers.
+    boot: Mutex<Boot>,
 }
 
 /// A host that registers with the service and answers its requests.
@@ -546,6 +561,16 @@ impl FakeHost {
     /// Starts a host named `name` reporting `capacity`, and has it
     /// register; it renews until told to stop.
     pub async fn start(fleet: &Fleet, name: &str, capacity: Capacity) -> Self {
+        Self::start_offering(fleet, name, capacity, &[]).await
+    }
+
+    /// As [`Self::start`], for a host that offers sandboxes `offers`.
+    pub async fn start_offering(
+        fleet: &Fleet,
+        name: &str,
+        capacity: Capacity,
+        offers: &[&str],
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let http = reqwest::Client::builder()
@@ -567,6 +592,8 @@ impl FakeHost {
             seq: AtomicU64::new(0),
             held: Mutex::new(HashMap::new()),
             prepares: Mutex::new(HashMap::new()),
+            saved: Mutex::new(HashSet::new()),
+            captures: Mutex::new(HashMap::new()),
             saves: AtomicU64::new(0),
             seen: Mutex::new(Vec::new()),
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
@@ -576,6 +603,11 @@ impl FakeHost {
             check_open: AtomicBool::new(false),
             window: AtomicU64::new(0),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
+            offers: offers.iter().map(|offer| (*offer).to_owned()).collect(),
+            boot: Mutex::new(Boot {
+                id: format!("boot-{:016x}", u64::from_le_bytes(random)),
+                nth: 3,
+            }),
         });
         let acceptor = TlsAcceptor::from(Arc::new(fleet.pki.host_server(name)));
         let mut host = Self {
@@ -600,6 +632,22 @@ impl FakeHost {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch.load(Ordering::SeqCst)
+    }
+
+    /// The boot of its machine it names when it registers.
+    #[must_use]
+    pub fn boot(&self) -> Boot {
+        self.inner.boot.lock().unwrap().clone()
+    }
+
+    /// Has its machine restart, as far as the boot it names goes: it
+    /// names another, counted next, from its next registration, which it
+    /// returns.
+    pub fn restart(&self) -> Boot {
+        let mut boot = self.inner.boot.lock().unwrap();
+        boot.id.push_str("-again");
+        boot.nth += 1;
+        boot.clone()
     }
 
     /// Registers anew, as a restarted agent does: a new attempt, listing
@@ -770,6 +818,7 @@ pub fn op_name(request: &Request) -> &'static str {
         Request::HandOff { .. } => "hand_off",
         Request::Adopt { .. } => "adopt",
         Request::Sleep { .. } => "sleep",
+        Request::Capture { .. } => "capture",
         _ => "other",
     }
 }
@@ -800,6 +849,8 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             memory_mib: 64 * 1024,
             cpu_millis: 64_000,
             disk_mib: 1 << 20,
+            offers: inner.offers.clone(),
+            boot: Some(inner.boot.lock().unwrap().clone()),
         },
         capacity: inner.capacity.lock().unwrap().clone(),
         held,
@@ -1032,6 +1083,15 @@ pub fn built_from(source: &str) -> ImageId {
     ImageId(*blake3::hash(source.as_bytes()).as_bytes())
 }
 
+/// The stored image an ordinary host captures sandbox `id` as.
+#[must_use]
+pub fn captured_from(id: Id) -> ImageId {
+    ImageId(*blake3::hash(format!("capture of {id}").as_bytes()).as_bytes())
+}
+
+/// The length of every disk an ordinary host captures: 3 GiB and a byte.
+pub const CAPTURED_LENGTH: u64 = (3 << 30) + 1;
+
 /// What an ordinary host answers.
 async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
     let owner_epoch = envelope.sent.owner_epoch.unwrap_or(0);
@@ -1041,17 +1101,29 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             inner.held.lock().unwrap().insert(*id, owner_epoch);
             Reply::Done
         }
-        Request::Wake { id, .. } if holds(id) => Reply::Woken {
-            waited_us: 5,
-            during: None,
-            generation: 1,
-        },
-        Request::Connect { id, .. } if holds(id) => Reply::Connected {
-            waited_us: 5,
-            connect_us: 3,
-            generation: 1,
-        },
-        Request::Sleep { id, .. } if holds(id) => Reply::Done,
+        Request::Wake { id, .. } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Woken {
+                waited_us: 5,
+                during: None,
+                generation: 1,
+            }
+        }
+        Request::Connect { id, .. } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Connected {
+                waited_us: 5,
+                connect_us: 3,
+                generation: 1,
+            }
+        }
+        Request::Sleep { id, level, .. } if holds(id) => {
+            if matches!(level, LevelName::Saved | LevelName::Archived) {
+                inner.saved.lock().unwrap().insert(*id);
+            }
+            Reply::Done
+        }
+        Request::Capture { id, key, .. } if holds(id) => capture(inner, *id, key).await,
         Request::Status => status(inner),
         // The first ask starts the build; later ones find it stored.
         Request::Prepare { image } => {
@@ -1109,6 +1181,46 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             Err(why) => error(ErrorCode::Stale, &why.to_string()),
         },
         _ => Reply::Done,
+    }
+}
+
+/// How an ordinary host answers a capture of `id` it holds: refused while
+/// awake; once saved, the first ask with a key stores the image, and
+/// later ones learn it is stored.
+async fn capture(inner: &HostInner, id: Id, key: &str) -> Reply {
+    if !inner.saved.lock().unwrap().contains(&id) {
+        return error(ErrorCode::Busy, "it is awake");
+    }
+    let asked = {
+        let mut captures = inner.captures.lock().unwrap();
+        let asked = captures.entry(key.to_owned()).or_default();
+        *asked += 1;
+        *asked
+    };
+    let image = captured_from(id);
+    if asked > 1 {
+        return Reply::Captured {
+            image,
+            length: CAPTURED_LENGTH,
+        };
+    }
+    let stamp = Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save: 1,
+    };
+    match inner.archive.begin(&image.pointer(), stamp).await {
+        Ok(Begun::Publish(publication)) => {
+            let stored = inner
+                .archive
+                .publish(publication, b"a captured disk".to_vec())
+                .await;
+            match stored {
+                Ok(()) => Reply::Capturing,
+                Err(why) => error(ErrorCode::Internal, &why.to_string()),
+            }
+        }
+        Ok(Begun::Stored(_)) => Reply::Capturing,
+        other => error(ErrorCode::Internal, &format!("not stored: {other:?}")),
     }
 }
 

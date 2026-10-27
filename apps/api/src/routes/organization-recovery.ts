@@ -31,6 +31,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
+import { parseRequestBody } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 const RecoveryOperationId = z.string().uuid();
@@ -91,13 +92,11 @@ async function requireRecoveryIdentity(
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, {
-      message: "Invalid organization recovery request",
-    });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid organization recovery request",
+  });
+  return parsed;
 }
 
 function parseId(schema: z.ZodString, value: string, label: string): string {

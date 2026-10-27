@@ -74,7 +74,12 @@ the caller's retry budget reads wall time: clock skew, jumps and corrections do
 not poison this transport. The call offset is elapsed caller time since receiving
 the batch, anchored at the receiver's issuance time. This conservatively includes
 return-path latency in the call budget, but not idle prefetch age. Future offsets
-are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+are refused. Because the two hosts' elapsed clocks tick at slightly different
+rates, the caller understates the offset by 1%: a caller clock running a little
+faster than the receiver's would otherwise produce future offsets for older
+tokens. The understatement only makes the receiver charge more elapsed time, so
+deadlines come sooner, never later; the caller stops retrying the delivery by the
+same amount sooner. Receipt expiry is the earlier of the batch deadline and the fixed
 call offset plus lifetime. Streamed exec uses its existing relative timeout from
 that same call offset; delivery or retries cannot reset the deadline.
 The absolute exec deadline remains only for legacy one-shot peers. This does not
@@ -214,6 +219,21 @@ its inventory is asked again on a later pass, as when it is offline, and when
 the reconciler cannot read which kind of runner it is, it leaves the command
 for a later pass and records nothing. A Connected Machine never sleeps, so its
 answered queries continue on each pass as before.
+
+A runner lists only operations it knows, so a command whose start never
+reached it (sent while it was offline), or that it no longer holds, would
+never be reported and would stay running forever. So when a Connected Machine
+runner reports its inventory again, the first page of each report makes the
+running commands left to that exact process due again (outcome
+`runner_reported`). The next reconciler pass asks the runner, which is
+talking: an operation it does not know answers lost and the command settles
+lost, never as a success; one it runs continues as before. A compute runner's
+report does not do this, since its running commands are never polled.
+Migration 0984 creates the database function behind this with its runtime
+grant withheld for one release (see
+[expand/contract migrations](migrations-expand-contract.md)), and makes the
+commands already stuck this way due once while it runs. Until a later
+migration grants it, a report skips the re-arm.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
@@ -720,6 +740,42 @@ owner:
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+
+In a chat on a personal machine, only the owner's own messages start work. A
+message somebody else sends there (through the API, an agent acting for them,
+or an integration) is accepted and kept, but it waits for the owner instead of
+becoming the chat's next turn:
+
+- It is never claimed while the chat stays on that machine, never steers (it
+  cannot interrupt the owner's running turn) and does not count as pending
+  work, so the chat stays idle or keeps running the owner's turn. The send
+  result reports `waitsForMachineOwner: true`, and the operator
+  `session_send_message` tool returns a warning saying so.
+- The owner's next own turn takes the waiting messages in, oldest first, as
+  history ahead of the owner's prompt, each with a short note that it waited
+  for the owner. The agent sees what the other person wrote, and the owner's
+  message says what to do with it. The taken-in rows end as superseded by that
+  turn and never run again.
+- Moving the chat to another machine wakes it, so waiting messages the new
+  machine may run start as their own turns.
+- Steering a waiting message returns `409 WAITING_FOR_MACHINE_OWNER`. An
+  agent's steer into such a chat for anyone but the owner is refused before
+  anything changes (`personal_machine_owner_required`).
+- `get_session_machine_access` lists whose messages wait (`waitingMessages`),
+  and the console explains them in one notice that needs no action.
+
+Whether a message waits is decided live from the chat's current machine
+(`opengeni_private.session_machine_owner_subject_v1`), with the same causal person the attempt
+admission trigger reads. That lookup authorizes nothing; the trigger stays the
+only authority. The console still warns other people before they send. Updates
+from other people's work (agent messages and worker results) keep their own
+waiting-work path, which the owner continues explicitly.
+
+The lookup takes effect one release after it ships: migration 0978 creates it
+without runtime `EXECUTE`, and a later migration grants it once the previous
+release knows it. Until then the lookup reports no personal machine, so nothing
+waits, `waitingMessages` is omitted, and a message from someone other than the
+owner is still refused when it is claimed.
 
 On macOS, the enrollment display offer is independent of Screen Recording
 permission. A detected display keeps the existing screen-control consent option
@@ -1265,8 +1321,22 @@ interrupted/outcome-unknown rather than replayed automatically.
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
 workspace—even on a different Opengeni deployment—adds an independent link and
-preserves all existing links. There are two enrollment paths. Both require the
-caller to hold `enrollments:manage`.
+preserves all existing links. There are two enrollment paths. Both follow the
+machine's scope (`apps/api/src/sandbox/machine-authority.ts`, the one rule for
+every enrollment and per-machine write):
+
+- **Only me** (`user`): any teammate with `enrollments:read`, signed in as
+  themselves. The owner is always the caller. A credential acting for a person
+  (a delegated bearer, a connected agent, an organization key acting as a user)
+  keeps needing `enrollments:manage`, so a read-only delegation never connects
+  a machine; keys, services and agents acting as themselves are refused.
+- **This workspace**: `enrollments:manage`.
+- **Organization**: `enrollments:manage` and `account:admin`.
+
+The same rule covers declining a pairing code and, for an existing machine,
+removal, command policy, screen control, macOS privacy panes and agent updates.
+`list_scoped_enrollments` returns an Only me machine only to its owner, so a
+teammate reaches only their own. Refusals are plain sentences.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1568,7 +1638,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
-  on a question is moved and keeps the question;
+  on a question is moved and keeps the question. No machine is promoted: every
+  reachable machine gets the same quiet button (only a machine that just
+  connected from the card's own dialog gets the primary one), because the card
+  can't know which computer the person means;
+- ends the card with an **Another computer** row (its own list, after the
+  machines and any screen control and Chrome rows) whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't connected yet is a
+  peer of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts
@@ -1600,15 +1677,19 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   that was offline, comes online the same dialog shows its name, **Connected**
   and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
   chat** (the same attach path as the list). Closing the dialog stops the watch;
-- once a machine with a screen is reachable (the chat's own machine first),
-  offers the
+- once this chat runs on a reachable machine with a screen, shows that
+  machine's screen control and offers the
   [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
-  stops after ten minutes or when the inventory is not readable.
+  stops after ten minutes or when the inventory is not readable. Before the
+  chat runs on a machine these rows stay hidden, so steps about a machine the
+  person may not mean don't compete with choosing or connecting the right one.
 
-Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
-moving the chat needs `sessions:control`. The card says who can act otherwise.
+Reading the list needs `enrollments:read`; connecting follows the scope rule
+above (every teammate connects an Only me machine; This workspace needs
+`enrollments:manage`); moving the chat needs `sessions:control`. The card says
+who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
 
 Embedded products supply `SessionConversation.computerConnection` (also through
@@ -1624,7 +1705,8 @@ Screen-control consent lives on the enrollment row and in the credentials the
 machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
-(`enrollments:manage`; `account:admin` for organization machines; no body)
+(the scope rule above: the owner for an Only me machine, `enrollments:manage`
+for a workspace machine, also `account:admin` for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -1974,7 +2056,7 @@ expecting transactional support. Changing transport limits is not required.
 
 ## Run as another local user
 
-Exec (including op-stream and background commands), git, PTY open and every file
+Exec (including op-stream and background commands), PTY open and every file
 request, transactional uploads included, carry an optional `run_as`: a local user
 name, else a decimal uid, which must exist in the machine's password database.
 The agent honors it only when it advertises `Capabilities.run_as`, which it does

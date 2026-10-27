@@ -292,6 +292,27 @@ export interface DesktopWindowCapture {
   height: number;
 }
 
+/**
+ * Other apps' audio, as mono float samples; the app leaves its own sounds out.
+ * Part of the desktop bridge, or on its own as `window.opengeniSystemAudio` in
+ * any app that hosts Opengeni pages (see {@link getDesktopSystemAudio}).
+ */
+export interface DesktopSystemAudio {
+  /**
+   * Start recording. Resolves once audio flows; rejects with a
+   * {@link DesktopSystemAudioError}. Starting again ends the page's previous
+   * capture.
+   */
+  start(): Promise<{ captureId: string; sampleRate: number }>;
+  stop(captureId: string): Promise<void>;
+  /** Samples arrive about ten times a second, silence included. */
+  onSamples(listener: (captureId: string, samples: Float32Array) => void): Unsubscribe;
+  /** The capture ended: stopped (error null) or failed. */
+  onEnded(
+    listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
+  ): Unsubscribe;
+}
+
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
   readonly version: number;
@@ -383,21 +404,7 @@ export interface DesktopBridge {
    * Other apps' audio, as mono float samples. With the `systemAudio`
    * capability. The app leaves its own sounds out.
    */
-  readonly systemAudio?: {
-    /**
-     * Start recording. Resolves once audio flows; rejects with a
-     * {@link DesktopSystemAudioError}. Starting again ends the page's previous
-     * capture.
-     */
-    start(): Promise<{ captureId: string; sampleRate: number }>;
-    stop(captureId: string): Promise<void>;
-    /** Samples arrive about ten times a second, silence included. */
-    onSamples(listener: (captureId: string, samples: Float32Array) => void): Unsubscribe;
-    /** The capture ended: stopped (error null) or failed. */
-    onEnded(
-      listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
-    ): Unsubscribe;
-  };
+  readonly systemAudio?: DesktopSystemAudio;
   /**
    * Call detection. With the `meetingDetection` capability. While on, the
    * app shows a notification when a call app (Zoom, Teams, Slack, Meet in a
@@ -433,6 +440,30 @@ export interface DesktopBridge {
     /** Switches or the system's answers changed. */
     onChange(listener: () => void): Unsubscribe;
   };
+}
+
+/**
+ * The global an app's preload defines when it records other apps' audio for
+ * the Opengeni pages it shows, without being an Opengeni desktop shell: an
+ * Electron app that embeds Opengeni's meetings. `@opengeni/desktop` has the
+ * main-process side and the preload helper that defines it.
+ */
+export const DESKTOP_SYSTEM_AUDIO_GLOBAL = "opengeniSystemAudio";
+
+/** Other apps' audio from the app this page runs in, or null outside one that can record it. */
+export function getDesktopSystemAudio(
+  bridge: DesktopBridge | null = getDesktopBridge(),
+): DesktopSystemAudio | null {
+  if (bridge?.capabilities.includes("systemAudio") && bridge.systemAudio) return bridge.systemAudio;
+  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_SYSTEM_AUDIO_GLOBAL];
+  if (!candidate || typeof candidate !== "object") return null;
+  const audio = candidate as Partial<DesktopSystemAudio>;
+  return typeof audio.start === "function" &&
+    typeof audio.stop === "function" &&
+    typeof audio.onSamples === "function" &&
+    typeof audio.onEnded === "function"
+    ? (audio as DesktopSystemAudio)
+    : null;
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */

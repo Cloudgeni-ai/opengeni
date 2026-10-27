@@ -1,11 +1,12 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
+
+import { parseRequestQuery } from "./http/request-body";
 
 type AssociatedInteractionSession = {
   associations: ReadonlyArray<{ sessionId: string; relationship: string }>;
@@ -27,17 +28,15 @@ export function parseInteractionSessionListQuery(query: Record<string, string>):
   associatedSessionId?: string;
   includeTerminal?: boolean;
 } {
-  const parsed = InteractionSessionListQuery.safeParse(query);
-  if (!parsed.success) {
-    throw new HTTPException(400, { message: "Invalid interaction session list query" });
-  }
+  const parsed = parseRequestQuery(InteractionSessionListQuery, query, {
+    status: 400,
+    message: "Invalid interaction session list query",
+  });
   return {
-    ...(parsed.data.associatedSessionId
-      ? { associatedSessionId: parsed.data.associatedSessionId.toLowerCase() }
+    ...(parsed.associatedSessionId
+      ? { associatedSessionId: parsed.associatedSessionId.toLowerCase() }
       : {}),
-    ...(parsed.data.includeTerminal
-      ? { includeTerminal: parsed.data.includeTerminal === "true" }
-      : {}),
+    ...(parsed.includeTerminal ? { includeTerminal: parsed.includeTerminal === "true" } : {}),
   };
 }
 

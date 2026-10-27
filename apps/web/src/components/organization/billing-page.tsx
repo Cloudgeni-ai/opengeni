@@ -334,6 +334,7 @@ function BillingOverview({
               loading={visibleBillingLoading}
               hasError={Boolean(visibleBillingError)}
               showPlanCredit={showPlans}
+              supportEmail={clientConfig.supportEmail}
             />
             {visibleBillingError ? (
               <BillingLoadFailure

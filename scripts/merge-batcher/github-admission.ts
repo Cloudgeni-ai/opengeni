@@ -4,6 +4,22 @@ import type { ReadyEvent, Admission } from "./evidence";
 // Exact companion to the reviewed App-only ruleset. This is a routing fence,
 // never a hosted test result; all actual CI requirements remain mandatory.
 export const appOnlyGuidanceContext = "merge-batcher: run gh pr merge --auto (or add queue-ready)";
+/** Main-fix priority lane label. Ordering/preemption only; never admission evidence. */
+export const priorityLabel = "queue-priority";
+
+/**
+ * The label must be present now AND its latest actual timeline label event
+ * must be an add. A label without a readable LabeledEvent is not honoured.
+ */
+export function priorityActive(
+  labelPresent: boolean,
+  events: { id: string; at: string; enabled: boolean }[],
+): boolean {
+  const latest = events
+    .filter((e) => Number.isFinite(Date.parse(e.at)))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compareText(b.id, a.id))[0];
+  return labelPresent && latest?.enabled === true;
+}
 
 export interface RequiredCheck {
   context: string;

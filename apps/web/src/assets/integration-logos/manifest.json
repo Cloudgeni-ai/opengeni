@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "integration": "slack",
+      "file": "slack.png",
+      "sourceUrl": "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png",
+      "sourceLicense": "Slack mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "atlassian",
+      "file": "atlassian.png",
+      "sourceUrl": "https://wac-cdn.atlassian.com/assets/img/favicons/atlassian/favicon.png",
+      "sourceLicense": "Atlassian mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "google-drive",
+      "file": "google-drive.png",
+      "sourceUrl": "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png",
+      "sourceLicense": "Google Drive mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "microsoft-teams",
+      "file": "microsoft-teams.svg",
+      "sourceUrl": "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/teams_48x1.svg",
+      "sourceLicense": "Microsoft Teams mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "onedrive",
+      "file": "onedrive.svg",
+      "sourceUrl": "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/onedrive_48x1.svg",
+      "sourceLicense": "Microsoft OneDrive mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    },
+    {
+      "integration": "outlook-mail",
+      "file": "outlook-mail.svg",
+      "sourceUrl": "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/outlook_48x1.svg",
+      "sourceLicense": "Microsoft Outlook mark; nominative integration use",
+      "modifications": "None; byte-identical copy of the file previously hotlinked."
+    }
+  ]
+}

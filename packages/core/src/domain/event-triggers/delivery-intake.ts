@@ -7,7 +7,7 @@ import { boundEvent } from "./normalize";
 import { readSlackDelivery } from "./slack-events";
 import {
   retainedWebhookHeaders,
-  webhookAdapter,
+  webhookAdapterFor,
   WebhookBodyError,
   type WebhookAdapterReading,
 } from "./webhook-adapters";
@@ -39,7 +39,7 @@ function readSourceDelivery(
     case "slack":
       return readSlackDelivery(input);
     case "webhook":
-      return webhookAdapter(source.adapter ?? "standard").read(input);
+      return webhookAdapterFor(source).read(input);
     default:
       throw new Error(`${source.kind} deliveries are not read from HTTP requests`);
   }
@@ -52,7 +52,7 @@ export function retainedSourceHeaders(
 ): Record<string, string> {
   switch (source.kind) {
     case "webhook":
-      return retainedWebhookHeaders(source.adapter ?? "standard", headers);
+      return retainedWebhookHeaders(webhookAdapterFor(source), headers);
     case "github": {
       const kept: Record<string, string> = {};
       for (const name of GITHUB_RETAINED_HEADERS) {

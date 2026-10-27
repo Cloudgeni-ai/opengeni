@@ -19,6 +19,7 @@ import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
+import { parseRequestBody } from "../http/request-body";
 
 // Native app sign-in (RFC 8252 shape: authorization code + PKCE over a custom
 // scheme). The app opens `/native-sign-in` in the system auth browser; the
@@ -162,10 +163,11 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
       managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
     });
-    const parsed = AuthorizeBody.safeParse(await context.req.json().catch(() => null));
-    if (!parsed.success)
-      throw new HTTPException(400, { message: "Invalid native sign-in request" });
-    const body = parsed.data;
+    const parsed = parseRequestBody(AuthorizeBody, await context.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid native sign-in request",
+    });
+    const body = parsed;
     if (
       !nativeAppRedirectAllowed(
         body.redirectUri,
@@ -317,13 +319,15 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.put(`${base}/push-device`, async (context) => {
     const id = await appSessionId(context.req.header("authorization"));
-    const parsed = PushDeviceBody.safeParse(await context.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "Invalid push registration" });
-    if (!deps.settings.nativeAppIds.includes(parsed.data.appId)) {
+    const parsed = parseRequestBody(PushDeviceBody, await context.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid push registration",
+    });
+    if (!deps.settings.nativeAppIds.includes(parsed.appId)) {
       throw new HTTPException(400, { message: "Unregistered native app" });
     }
     return context.json({
-      device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed.data }),
+      device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed }),
     });
   });
 

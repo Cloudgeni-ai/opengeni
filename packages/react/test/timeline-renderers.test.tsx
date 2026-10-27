@@ -2341,6 +2341,41 @@ describe("TimelineRow — connection recovery", () => {
     await r.unmount();
   });
 
+  test("an agent's request to connect a new account offers to connect, never to reconnect", async () => {
+    // The stock conversation's fallback row for an agent's catalog request
+    // (for example in an embedded chat that cannot show the connect card).
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          source: "capability",
+          reason: "expired",
+          providerDomain: "calendar.example.com",
+          capability: {
+            id: "mcp:example-calendar",
+            name: "Example Calendar",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale: "To read your calendar for this week.",
+            requiredVariables: [],
+          },
+        })}
+        onReconnect={() => {}}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Connect Example Calendar");
+    expect(text).toContain("No access has been granted");
+    expect(text).not.toMatch(/reconnect/i);
+    expect(
+      [...r.container.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Connect",
+      ),
+    ).toBe(true);
+    await r.unmount();
+  });
+
   test("says a missing connection starts a new-message retry rather than replaying the call", async () => {
     const r = await renderComponent(<TimelineRow item={authNeededItem()} />);
     await flush();

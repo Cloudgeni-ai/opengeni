@@ -52,11 +52,6 @@ export function ToolOutputPreviewProvider({
   );
 }
 
-/** The row's output preview, when its output is not exact. */
-export function useToolOutputPreview(): ToolOutputPreview | null {
-  return useContext(ToolOutputPreviewContext);
-}
-
 /**
  * A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set.
  * `"interrupted"` is a calm neutral tone for cancelled items — no dot, same

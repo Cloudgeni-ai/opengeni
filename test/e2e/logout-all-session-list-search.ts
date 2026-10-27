@@ -36,10 +36,26 @@ const LOGOUT_ALL_SESSION_LIST_READS: readonly ReadShape[] = [
   },
   // The global pin shortcut section.
   { required: { view: ["page"], limit: ["1"], pinsOnly: ["true"] }, optional: SUMMARY },
+  // The current global pin section also lists Site conversation pins as rows
+  // (#5556).
+  {
+    required: {
+      view: ["page"],
+      limit: ["1"],
+      pinsOnly: ["true"],
+      ...SUMMARY,
+      siteConversations: ["include"],
+    },
+  },
   // The current rail root page: totals for the hierarchy, pins read separately.
+  // Since #5556 it nests Site conversations under their Site rows.
   {
     required: { ...ACTIVE_ROOTS, ...SUMMARY, limit: ROOT_LIMITS },
-    optional: { includeTotals: ["true"], includePinned: ["false"] },
+    optional: {
+      includeTotals: ["true"],
+      includePinned: ["false"],
+      siteConversations: ["group"],
+    },
   },
   // The current Default project window.
   {

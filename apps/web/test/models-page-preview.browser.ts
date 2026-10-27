@@ -104,6 +104,13 @@ try {
     await noOverflow();
     await shot("many");
 
+    // Live usage checks failed: each row shows its last saved reading, as the
+    // account's page does; only the account never read is unavailable.
+    await open("many=1&failedCheck=1");
+    await page.getByText("90% left this week").first().waitFor({ state: "attached" });
+    await noOverflow();
+    await shot("failed-check");
+
     assert(errors.length === 0, `page errors: ${errors.join("; ")}`);
     await page.close();
   }

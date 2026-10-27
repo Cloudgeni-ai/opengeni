@@ -49,6 +49,12 @@ export type OpenGeniNativeSessionClient = SessionClientLike &
 export interface OpenGeniNativeSessionController {
   sessionId: string;
   workspaceId: string;
+  /**
+   * The client this controller reads and writes through. Surfaces drawn from
+   * the controller pass it to shared hooks explicitly: the native screens do
+   * not require an `OpenGeniProvider` above them.
+   */
+  client: OpenGeniNativeSessionClient;
   session: ReturnType<typeof useSession>;
   events: SessionEvent[];
   timeline: TimelineItem[];
@@ -243,6 +249,7 @@ export function useOpenGeniNativeSession(input: {
   return {
     sessionId: input.sessionId,
     workspaceId: input.workspaceId,
+    client: input.client,
     session,
     events: events.events,
     timeline: events.timeline,

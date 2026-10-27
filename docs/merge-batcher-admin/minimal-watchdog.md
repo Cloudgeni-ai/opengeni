@@ -41,10 +41,10 @@ deadline. Do not widen watchdog grace to mask incompatible runtime scheduling.
 Deploy the paired supervisor before this watchdog, and roll back the watchdog
 before rolling back to a supervisor without these fields.
 
-The trigger cannot declare safety from status flags. Only unchanged OFF may
+The trigger cannot declare safety from status flags. Only reviewed OFF may
 declare Manual after its verified STOP/drain/reconciliation and exact saved-policy
-restoration. Unknown effects, failed drain, rules drift or unavailable proof keep
-protections and report held. No automatic ON, retry of an uncertain OFF, candidate
+restoration. Possible ref-write effects, failed drain, rules drift or unavailable proof keep
+protections and report held. No automatic ON, replay of a STOP, candidate
 deletion, CI cancellation or readiness edits.
 
 Explicit STOP/crash detection is next five-minute tick plus scheduler/dispatch
@@ -64,8 +64,28 @@ directory across executions. Before provider implementation/deployment, pin the
 portable copy of the existing OFF bundle and its receipt retention. The wrapper
 uses one Cloud Storage `ifGenerationMatch=0` claim object per explicitly assigned
 activation ID and exact plan digest. Only a definitive 412 is treated as another
-owner; timeout/other errors hold without OFF. One winner may invoke OFF; an unfinished claim must hold across restart,
-not expire and replay an unknown write. Preserve the originals and all resulting
+owner; timeout/other errors hold without OFF. One winner may invoke STOP. Before every
+explicit STOP, OFF atomically replaces its current-attempt pointer under the existing
+plan lock; old attempt directories and outcomes remain unchanged. A subsequent tick may only
+continue that attempt: read its original exited-writer witness, verify the same
+stopped service generation/image/control twice around read-only durable-state
+reconciliation, then use the existing exact reverse stages. It never expires,
+deletes or replaces the claim, calls STOP again, or rewrites the original outcome.
+The existing plan lock excludes concurrent reverse invocations. A missing STOP
+receipt, live writer, changed generation/control, possible ref-write effect or abandoned
+lock remains held; elapsed time alone is not proof. Thus a transient reconciliation
+read failure can recover on the next five-minute tick without replaying controls.
+The tracked settlement reader uses the same authenticated `gh api` path as the
+existing stages and Git blob reads rather than the Contents API's inline-size limit.
+REST-only comment, rerun, followup-PR and auto-disable effects cannot update main,
+state or candidate refs, so their pending/unknown status does not block Manual.
+Their uncertainty remains in the ledger and they are never replayed by recovery.
+Unknown kinds or possible ref-write effects still block. Resume errors are recorded
+in the held outcome. Cloud project and region come from pinned operator config.
+The packager records both the original operator-reader hash and the substituted
+tracked reader hash in `source-manifest.json`; the STOP contract and image manifest
+must pin the substituted hash, including `resume-stop.ts` in the image file list.
+Preserve the originals and all resulting
 receipts. This must be a small provider wrapper, not the deferred generic journal
 or hydration implementation. No provider claim is qualified by the in-memory test.
 
@@ -90,7 +110,7 @@ an independent VM operator. Before manual OFF, pause the Scheduler and reconcile
 all running Job executions, or acquire the same create-only activation claim as
 the watchdog. An existing/uncertain claim is not permission to steal ownership.
 Do not race two OFF operators or remove a claim after a timeout. After successful
-OFF, pause the schedule: later ticks otherwise report held on the retained claim.
+OFF, pause the schedule: later ticks otherwise reverify the retained stopped proof.
 Held outcomes need the rollout's alert destination and operator response; a stopped
 watchdog cannot announce its own absence. A missed-run sweep remains out of scope.
 

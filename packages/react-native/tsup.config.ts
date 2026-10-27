@@ -23,6 +23,7 @@ export default defineConfig({
     "src/adapters.ts",
     "src/expo.ts",
     "src/recordings/index.ts",
+    "src/meetings/index.ts",
     "src/webrtc.ts",
     "src/ui/index.ts",
     "src/timeline/index.ts",

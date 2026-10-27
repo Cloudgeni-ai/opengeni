@@ -282,17 +282,6 @@ export type EditableArtifactRouteScope = Readonly<{
 
 export type EditableArtifactRouteActor = EditableArtifactActor;
 
-/**
- * Authenticated transport context. Until a distinct editable-artifact
- * capability is introduced, the existing workspace `artifacts:read` and
- * `artifacts:publish` capabilities intentionally gate read and write here too;
- * the application still performs the durable per-artifact authorization.
- */
-export type EditableArtifactRouteAuthority = Readonly<{
-  scope: EditableArtifactRouteScope;
-  actor: EditableArtifactRouteActor;
-}>;
-
 export type MintEditableArtifactLiveTicketOutput = Readonly<{
   artifactId: string;
   modality: EditableArtifactModality;

@@ -16,6 +16,7 @@ import {
   CdpTransportError,
   CdpSessionDetachedError,
   CdpProtocolError,
+  CdpResponseRefusedError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -185,6 +186,15 @@ describe("BrowserControlServer", () => {
       error: new CdpSessionDetachedError("Page.getFrameTree"),
     },
     {
+      // The target state route is as read-only as an observation.
+      operation: "targetState" as const,
+      label: "observation",
+      suffix: "/state",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
+    {
       operation: "listTargets" as const,
       label: "target inventory",
       suffix: "",
@@ -253,6 +263,50 @@ describe("BrowserControlServer", () => {
       );
     },
   );
+
+  test("classifies a page read whose tab debugging ended as a retryable observation failure", async () => {
+    let failing = false;
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/dom-read`;
+        const body = {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          expectedFrameId: "frame-1",
+        };
+        failing = true;
+        const failed = await request(server, path, { method: "POST", token: viewToken, body });
+        expect(failed.status).toBe(503);
+        expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        });
+        expect(attempts).toBe(1);
+        failing = false;
+        expect(
+          (await request(server, path, { method: "POST", token: viewToken, body })).status,
+        ).toBe(200);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (failing && name === "readDom") {
+            attempts++;
+            throw new CdpSessionDetachedError("DOM.resolveNode");
+          }
+        },
+      },
+    );
+  });
 
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
@@ -504,6 +558,39 @@ describe("BrowserControlServer", () => {
         expect(failure.error).toEqual({ code, message, retryable: true });
       },
       { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
+  test("a screenshot too large to transfer says so and names a smaller capture", async () => {
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const screenshot = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/screenshot`,
+          { token: viewToken },
+        );
+        expect(screenshot.status).toBe(400);
+        const failure = (await screenshot.json()) as { error: unknown };
+        expect(failure.error).toEqual({
+          code: "invalid_action",
+          message:
+            "the page's screenshot is too large to transfer; capture the viewport instead of the full page, or use JPEG",
+          retryable: false,
+        });
+      },
+      {
+        screenshotError: new CdpResponseRefusedError(
+          "Page.captureScreenshot",
+          "too_large",
+          40 * 1024 * 1024,
+        ),
+      },
     );
   });
 
@@ -795,8 +882,10 @@ describe("BrowserControlServer", () => {
       expect(acted.status).toBe(200);
       const actedBody = await json(acted);
       expect(actedBody.data.state).toBe("completed");
-      // Callers that did not ask for resolved targets may parse strictly.
+      // Callers that did not ask for resolved targets or notes may parse
+      // strictly.
       expect(actedBody.data).not.toHaveProperty("targets");
+      expect(actedBody.data).not.toHaveProperty("notes");
       const traced = await json(
         await request(
           server,
@@ -813,6 +902,34 @@ describe("BrowserControlServer", () => {
           name: "Close",
           container: { role: "dialog", name: "Edit item" },
         },
+      ]);
+      expect(traced.data).not.toHaveProperty("notes");
+      const noted = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(noted.data.targets).toHaveLength(1);
+      expect(noted.data.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "network_busy",
+          message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+        },
+      ]);
+      // Each note kind goes only to callers whose receipt version knows it.
+      const newer = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect((newer.data.notes as Array<{ kind: string }>).map((note) => note.kind)).toEqual([
+        "network_busy",
+        "observation_unavailable",
       ]);
 
       // Protected fill is gone; logins use ordinary fill actions.
@@ -1384,6 +1501,71 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a wait hold is admin-only, exact-generation and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`;
+      const until = new Date(Date.now() + 30 * 60_000).toISOString();
+      const hold = async (token: string, body: unknown) =>
+        await request(server, path, { method: "POST", token, body });
+      // Nothing is running yet: the hold never launches a browser.
+      const before = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect(before.status).toBe(200);
+      expect((await json(before)).data).toEqual({ held: false });
+      await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(
+        (await hold(controlToken, { controllerGeneration: reference.controllerGeneration, until }))
+          .status,
+      ).toBe(401);
+      const held = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect((await json(held)).data).toEqual({ held: true });
+      const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
+      expect((await json(stale)).data).toEqual({ held: false });
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until: new Date().toISOString(),
+      });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            endsWaitUntil: until,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until: "tomorrow",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            extra: true,
+          })
+        ).status,
+      ).toBe(400);
+    });
+  });
+
   test("keeps encrypted state capture behind exact admin authority and replays its receipt", async () => {
     let uploads = 0;
     await withServer(
@@ -1507,7 +1689,14 @@ async function withServer(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1582,7 +1771,14 @@ function fakeDriver(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "readDom"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1655,6 +1851,7 @@ function fakeDriver(
       return observation();
     },
     async targetState() {
+      options.beforeDriverOperation?.("targetState");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1665,6 +1862,7 @@ function fakeDriver(
       };
     },
     async readDom(_targetId, domRequest) {
+      options.beforeDriverOperation?.("readDom");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
@@ -1685,6 +1883,16 @@ function fakeDriver(
         role: "button",
         name: "Close",
         container: { role: "dialog", name: "Edit item" },
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "network_busy",
+        message: "page loaded; its network was still busy after 30 s, so the wait ended there",
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "observation_unavailable",
+        message: "the action completed, but the page could not be read after it",
       });
       return observation();
     },

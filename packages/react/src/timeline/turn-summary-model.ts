@@ -135,10 +135,21 @@ export function formatElapsed(t: OpenGeniText, durationMs: number): string {
       ? t("timeline.turnSummaryModel.minutesSeconds", { minutes: totalMinutes, seconds })
       : t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
   }
-  const hours = Math.floor(totalMinutes / 60);
-  return t("timeline.turnSummaryModel.hoursMinutes", {
-    hours,
-    minutes: String(totalMinutes % 60).padStart(2, "0"),
+  return formatHoursOrDays(t, totalMinutes);
+}
+
+/** "1h 05m" below a day, "2d 03h" from a day on, so long waits stay readable. */
+function formatHoursOrDays(t: OpenGeniText, totalMinutes: number): string {
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return t("timeline.turnSummaryModel.hoursMinutes", {
+      hours: totalHours,
+      minutes: String(totalMinutes % 60).padStart(2, "0"),
+    });
+  }
+  return t("timeline.turnSummaryModel.daysHours", {
+    days: Math.floor(totalHours / 24),
+    hours: String(totalHours % 24).padStart(2, "0"),
   });
 }
 
@@ -264,12 +275,7 @@ export function formatDurationFacet(
   if (totalMinutes < 60) {
     return t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
   }
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return t("timeline.turnSummaryModel.hoursMinutes", {
-    hours,
-    minutes: String(minutes).padStart(2, "0"),
-  });
+  return formatHoursOrDays(t, totalMinutes);
 }
 
 function hasFacetContent(content: ReactNode): boolean {

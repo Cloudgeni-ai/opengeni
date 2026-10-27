@@ -11,6 +11,7 @@ import {
   agentErrorToControlError,
 } from "../src/sandbox/selfhosted/control-rpc";
 import { OpStreamUnavailableError } from "../src/sandbox/selfhosted/op-transport";
+import { ProviderCommandObservationUnavailableError } from "../src/sandbox/provider-command-session";
 
 const commandId = "6cfa95ae-29cc-48cb-9ab1-2613d15f1dde";
 const receipt = (terminal = false, chunks: unknown[] = []): AttemptToolResult => ({
@@ -19,6 +20,13 @@ const receipt = (terminal = false, chunks: unknown[] = []): AttemptToolResult =>
 
 const snapshot = (result: AttemptToolResult) =>
   JSON.parse((result.content[0] as { text: string }).text);
+
+const observationUnavailable = (readRetryAllowed: boolean) =>
+  new ProviderCommandObservationUnavailableError(
+    { kind: "modal-router-v1" } as never,
+    new Error("Modal command read access budget exhausted"),
+    readRetryAllowed,
+  );
 
 test("temporary live transport failure preserves retained output after API reauthorization", async () => {
   for (const error of [
@@ -44,6 +52,7 @@ test("temporary live transport failure preserves retained output after API reaut
       draining: true,
     }),
     Object.assign(new Error("connection reset"), { code: "ECONNRESET" }),
+    observationUnavailable(true),
   ]) {
     const calls: string[] = [];
     const args = { commandId, cursor: "unchanged", maxOutputBytes: 64, waitSeconds: 45 };
@@ -116,9 +125,83 @@ test("terminal API result after refresh failure stays authoritative without stal
   expect(snapshot(result).freshness).toBeUndefined();
 });
 
+test("a provider read that missed its window returns the durable receipt, never a tool error", async () => {
+  const calls: string[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(false);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      throw observationUnavailable(true);
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:0"]);
+  expect(result.isError).toBeUndefined();
+  expect(snapshot(result)).toMatchObject({
+    terminal: false,
+    chunks: [],
+    freshness: { status: "refresh_unavailable", retryable: true },
+  });
+  expect(JSON.stringify(result)).not.toContain("observation unavailable");
+  expect(JSON.stringify(result)).not.toContain("budget exhausted");
+});
+
+test("command_wait keeps its requested wait through a failed refresh", async () => {
+  const calls: string[] = [];
+  let refreshes = 0;
+  let terminal = false;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 5 },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(terminal, terminal ? ["tail"] : []);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      if (++refreshes === 1) throw observationUnavailable(true);
+      terminal = true;
+      return true;
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:0", "api:1", "refresh", "api:0"]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["tail"] });
+  expect(snapshot(result).freshness).toBeUndefined();
+});
+
+test("command_wait reports refresh_unavailable only when no refresh succeeds before its deadline", async () => {
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 2 },
+    call: async (readArgs) => {
+      if (readArgs.waitSeconds === 1) await Bun.sleep(400);
+      return receipt(false);
+    },
+    refresh: async () => {
+      refreshes++;
+      throw observationUnavailable(true);
+    },
+  });
+  expect(refreshes).toBeGreaterThan(1);
+  expect(snapshot(result)).toMatchObject({
+    terminal: false,
+    freshness: { status: "refresh_unavailable", retryable: true },
+    timedOut: true,
+  });
+});
+
 test("integrity, consent, fencing, unsupported and unknown refresh errors still fail closed", async () => {
   for (const error of [
     new Error("provider temporarily offline"),
+    // The provider discarded the invocation's observation state, or a mixed
+    // fault graph carries no proof that another read is safe.
+    observationUnavailable(false),
+    new Error("wrapped", { cause: observationUnavailable(true) }),
     new OpStreamUnavailableError("unsupported", "runner"),
     new SelfhostedControlError({
       message: "bad digest",

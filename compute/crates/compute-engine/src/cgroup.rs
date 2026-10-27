@@ -125,11 +125,46 @@ impl Cgroup {
     /// is left out, so only differences between readings of the same
     /// processes mean anything.
     pub fn io_bytes(&self) -> io::Result<u64> {
-        let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
         let mut total = 0_u64;
+        self.each_io(|counters| {
+            total = total.saturating_add(parse_io_bytes(counters)?);
+            Ok(())
+        })?;
+        Ok(total)
+    }
+
+    /// What the group's processes have written through `write(2)` and its
+    /// kin: the bytes (`wchar` in `/proc/<pid>/io`, every thread counted)
+    /// and the calls (`syscw`), and the bytes of the pages they dirtied
+    /// for files (`write_bytes`). A call counts once it returns; a page
+    /// counts as it is dirtied, so also one dirtied without a write call,
+    /// as a hole punched over part of a block zeroes the rest of that
+    /// block. For a Firecracker VMM that covers every write and discard
+    /// its synchronous block devices make, besides its tap's and part of
+    /// its vsock's traffic (see [`Self::io_bytes`]). A process that ends
+    /// between listing and reading is left out, so only differences
+    /// between readings of the same processes mean anything.
+    pub fn writes(&self) -> io::Result<Writes> {
+        let mut total = Writes::default();
+        self.each_io(|counters| {
+            let found = parse_writes(counters)?;
+            total = Writes {
+                bytes: total.bytes.saturating_add(found.bytes),
+                calls: total.calls.saturating_add(found.calls),
+                dirtied: total.dirtied.saturating_add(found.dirtied),
+            };
+            Ok(())
+        })?;
+        Ok(total)
+    }
+
+    /// Calls `take` with the `/proc/<pid>/io` counters of each of the
+    /// group's processes, skipping one that ends meanwhile.
+    fn each_io(&self, mut take: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+        let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
         for pid in procs.split_whitespace() {
             match fs::read_to_string(format!("/proc/{pid}/io")) {
-                Ok(counters) => total = total.saturating_add(parse_io_bytes(&counters)?),
+                Ok(counters) => take(&counters)?,
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound
                         || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
@@ -137,7 +172,7 @@ impl Cgroup {
                 Err(error) => return Err(error),
             }
         }
-        Ok(total)
+        Ok(())
     }
 
     /// Stops the kernel from compressing or swapping out any more of the
@@ -307,6 +342,48 @@ impl Cgroup {
             Err(error) => return Err(error),
         };
         Ok(Freezer::parse(asked, &events))
+    }
+
+    /// Whether the group's processes are held frozen: the kernel reports
+    /// it frozen, or it or a group above it asks for a freeze (one still
+    /// completing, or one a process leaving the group interrupts, holds
+    /// the rest all the same). A group that does not exist is not.
+    pub fn is_held_frozen(&self) -> io::Result<bool> {
+        let freezer = self.freezer()?;
+        if freezer.empty {
+            return Ok(false);
+        }
+        if freezer.frozen || freezer.asked {
+            return Ok(true);
+        }
+        // Up to the root group, the only one without a freezer of its own.
+        let mut above = self.path.parent();
+        while let Some(group) = above {
+            match fs::read_to_string(group.join("cgroup.freeze")) {
+                Ok(value) if value.trim() == "1" => return Ok(true),
+                Ok(_) => above = group.parent(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    /// The groups directly inside this one; none if it is gone.
+    pub fn children(&self) -> io::Result<Vec<Self>> {
+        let entries = match fs::read_dir(&self.path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                children.push(Self::at(entry.path()));
+            }
+        }
+        Ok(children)
     }
 
     /// Moves process `pid` into the group.
@@ -588,15 +665,50 @@ fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu.stat has no usage_usec"))
 }
 
+/// What processes have written through `write(2)` and its kin, and the
+/// file pages they dirtied; see [`Cgroup::writes`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Writes {
+    /// Bytes written.
+    pub bytes: u64,
+    /// Write calls that returned.
+    pub calls: u64,
+    /// Bytes of the file pages dirtied, by write calls or otherwise: a
+    /// page dirtied again before it is written out counts once.
+    pub dirtied: u64,
+}
+
+impl Writes {
+    /// What was written since `earlier`, a reading of the same processes.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            bytes: self.bytes.saturating_sub(earlier.bytes),
+            calls: self.calls.saturating_sub(earlier.calls),
+            dirtied: self.dirtied.saturating_sub(earlier.dirtied),
+        }
+    }
+}
+
+/// The value of counter `name` (with its colon) in `/proc/<pid>/io`.
+fn io_counter(counters: &str, name: &str) -> io::Result<u64> {
+    counters
+        .lines()
+        .find_map(|line| line.strip_prefix(name))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("io has no {name}")))
+}
+
+fn parse_writes(counters: &str) -> io::Result<Writes> {
+    Ok(Writes {
+        bytes: io_counter(counters, "wchar:")?,
+        calls: io_counter(counters, "syscw:")?,
+        dirtied: io_counter(counters, "write_bytes:")?,
+    })
+}
+
 fn parse_io_bytes(counters: &str) -> io::Result<u64> {
-    let field = |name: &str| {
-        counters
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("io has no {name}")))
-    };
-    Ok(field("rchar:")?.saturating_add(field("wchar:")?))
+    Ok(io_counter(counters, "rchar:")?.saturating_add(io_counter(counters, "wchar:")?))
 }
 
 /// Refuses VM groups at `relative` (below the cgroup v2 root) that lie
@@ -728,6 +840,56 @@ mod tests {
         assert!(Freezer::parse(false, "").empty);
     }
 
+    /// A group with processes is held frozen once the kernel says it is,
+    /// or while it or a group above it asks for a freeze, even one that
+    /// reads `frozen 0` because a process in it is ending.
+    #[test]
+    fn a_group_is_held_frozen_by_its_own_freeze_or_one_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("vms");
+        let vm = parent.join("vm");
+        std::fs::create_dir_all(&vm).unwrap();
+        let set = |path: &Path, freeze: &str, events: &str| {
+            std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
+            std::fs::write(path.join("cgroup.events"), events).unwrap();
+        };
+        let group = Cgroup::at(&vm);
+        set(&parent, "0", "populated 1\nfrozen 0\n");
+        set(&vm, "0", "populated 1\nfrozen 0\n");
+        assert!(!group.is_held_frozen().unwrap(), "running");
+        set(&parent, "1", "populated 1\nfrozen 0\n");
+        assert!(group.is_held_frozen().unwrap(), "the group above asks");
+        set(&vm, "0", "populated 1\nfrozen 1\n");
+        assert!(group.is_held_frozen().unwrap());
+        set(&parent, "0", "populated 1\nfrozen 0\n");
+        set(&vm, "1", "populated 1\nfrozen 0\n");
+        assert!(
+            group.is_held_frozen().unwrap(),
+            "its own freeze, still completing"
+        );
+        set(&vm, "1", "populated 0\nfrozen 1\n");
+        assert!(!group.is_held_frozen().unwrap(), "nothing left to hold");
+        assert!(!Cgroup::at(parent.join("gone")).is_held_frozen().unwrap());
+
+        let names = |group: &Cgroup| {
+            let mut names: Vec<_> = group
+                .children()
+                .unwrap()
+                .iter()
+                .map(|child| child.path().file_name().unwrap().to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        std::fs::create_dir(parent.join("other")).unwrap();
+        assert_eq!(
+            names(&Cgroup::at(&parent)),
+            ["other", "vm"],
+            "groups, not files"
+        );
+        assert_eq!(names(&Cgroup::at(parent.join("gone"))), [""; 0]);
+    }
+
     #[test]
     fn reads_processor_time_from_cpu_stat() {
         let stat = "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\n";
@@ -855,5 +1017,84 @@ mod tests {
                         write_bytes: 0\ncancelled_write_bytes: 0\n";
         assert_eq!(parse_io_bytes(counters).unwrap(), 1234);
         assert!(parse_io_bytes("rchar: 5\n").is_err());
+    }
+
+    #[test]
+    fn reads_writes_from_proc_io() {
+        let counters = "rchar: 1000\nwchar: 234\nsyscr: 7\nsyscw: 3\nread_bytes: 4096\n\
+                        write_bytes: 8192\ncancelled_write_bytes: 0\n";
+        let writes = parse_writes(counters).unwrap();
+        assert_eq!(
+            writes,
+            Writes {
+                bytes: 234,
+                calls: 3,
+                dirtied: 8192,
+            }
+        );
+        assert!(parse_writes("wchar: 5\n").is_err());
+        assert!(parse_writes("wchar: 5\nsyscw: 1\n").is_err());
+        let earlier = Writes {
+            bytes: 34,
+            calls: 1,
+            dirtied: 4096,
+        };
+        assert_eq!(
+            writes.since(earlier),
+            Writes {
+                bytes: 200,
+                calls: 2,
+                dirtied: 4096,
+            }
+        );
+        assert_eq!(earlier.since(writes), Writes::default());
+    }
+
+    /// A hole punched over part of a block a file shares takes a new block
+    /// for the rest of it: a page dirtied with no write call, which only
+    /// the dirtied pages count. Runs where `COMPUTE_TEST_SHARED_EXTENTS_DIR`
+    /// names a directory whose files share extents; a gate that lists
+    /// `shared-extents` in `COMPUTE_TEST_REQUIRE` fails it instead of
+    /// skipping.
+    #[test]
+    fn a_partial_discard_of_shared_blocks_counts_as_dirtied() {
+        use rustix::fs::{FallocateFlags, fallocate, ioctl_ficlone};
+        use std::os::unix::fs::FileExt;
+
+        const BLOCK: u64 = 4096;
+        const BLOCKS: u64 = 1024;
+        let Some(dir) = std::env::var_os("COMPUTE_TEST_SHARED_EXTENTS_DIR") else {
+            let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+            assert!(
+                !required
+                    .split(',')
+                    .any(|need| need.trim() == "shared-extents"),
+                "a required test cannot run: COMPUTE_TEST_SHARED_EXTENTS_DIR is not set"
+            );
+            eprintln!("skipped: COMPUTE_TEST_SHARED_EXTENTS_DIR is not set");
+            return;
+        };
+        let dir = tempfile::tempdir_in(dir).unwrap();
+        let original = fs::File::create_new(dir.path().join("original")).unwrap();
+        original
+            .write_all_at(&vec![1_u8; usize::try_from(BLOCKS * BLOCK).unwrap()], 0)
+            .unwrap();
+        original.sync_all().unwrap();
+        let copy = fs::File::create_new(dir.path().join("copy")).unwrap();
+        ioctl_ficlone(&copy, &original).unwrap();
+
+        let own = || parse_writes(&fs::read_to_string("/proc/self/io").unwrap()).unwrap();
+        let before = own();
+        for block in 0..BLOCKS {
+            let flags = FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE;
+            fallocate(&copy, flags, block * BLOCK + 512, 512).unwrap();
+        }
+        let after = own().since(before);
+        // Other tests of this process may write meanwhile, but none
+        // dirties less.
+        assert!(
+            after.dirtied >= BLOCKS * BLOCK,
+            "{BLOCKS} partial discards dirtied only {after:?}"
+        );
     }
 }

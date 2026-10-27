@@ -155,6 +155,23 @@ describe("MCP mutation receipt contract", () => {
         resource: { type: "session_system_update", id: sessionCreateCompatibility.id },
       }),
     ).toThrow();
+
+    // A sessionless (human/API) steer is a turn: no update id to follow.
+    expect(
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_steer",
+        resource: { type: "session_turn", id: sessionCreateCompatibility.id },
+      }),
+    ).not.toHaveProperty("updateId");
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_steer",
+        resource: { type: "session_turn", id: sessionCreateCompatibility.id },
+        updateId: sessionCreateCompatibility.id,
+      }),
+    ).toThrow();
   });
 
   test("rejects success-shaped receipts for noncommitted operations", () => {

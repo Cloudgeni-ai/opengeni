@@ -87,7 +87,7 @@ import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { SystemAudioCaptures, systemAudioUsable } from "./system-audio";
+import { handleSystemAudioIpc, SystemAudioCaptures, systemAudioUsable } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
@@ -181,8 +181,6 @@ export class DesktopShell {
   private readonly appShots: AppShots;
   /** Other apps' audio for the web app's meeting recorder. */
   private readonly systemAudio: SystemAudioCaptures;
-  /** Pages whose system audio captures end when they navigate or close. */
-  private readonly systemAudioPages = new WeakSet<WebContents>();
   /** Offers to record when a call starts, and to stop when it ends. */
   private readonly meetings: MeetingDetection;
   /** Pages that report whether they record, cleared when they navigate or close. */
@@ -444,8 +442,14 @@ export class DesktopShell {
     // which macOS would ask the person about (the app ships no Bluetooth
     // usage description; see web-permissions.ts).
     app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
-    // Without it Windows shows no notifications for the installed app.
-    if (process.platform === "win32") app.setAppUserModelId(config.appId);
+    // Without it Windows shows no notifications for the installed app. A run
+    // from source gets its own ID: Electron then adds a Start-menu shortcut
+    // for its own binary, and two shortcuts with one ID make Windows show the
+    // installed app's notifications as "Electron" and open the development
+    // build when they are clicked.
+    if (process.platform === "win32") {
+      app.setAppUserModelId(app.isPackaged ? config.appId : `${config.appId}.dev`);
+    }
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
@@ -1281,26 +1285,10 @@ export class DesktopShell {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
       }
     });
-    ipcMain.handle(DESKTOP_IPC.systemAudioStart, async (event) => {
-      this.senderAccount(event);
-      const page = event.sender;
-      if (!this.systemAudioPages.has(page)) {
-        this.systemAudioPages.add(page);
-        const end = () => this.systemAudio.stopFor(page);
-        page.once("destroyed", end);
-        page.on("did-start-navigation", (details) => {
-          if (details.isMainFrame && !details.isSameDocument) end();
-        });
-      }
-      try {
-        return { ok: true as const, ...(await this.systemAudio.start(page)) };
-      } catch (error) {
-        return { ok: false as const, error };
-      }
-    });
-    ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
-      this.senderAccount(event);
-      if (typeof captureId === "string") this.systemAudio.stop(captureId, event.sender);
+    handleSystemAudioIpc({
+      ipcMain,
+      captures: this.systemAudio,
+      allow: (event) => void this.senderAccount(event),
     });
     handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
     handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));
@@ -1591,11 +1579,4 @@ export function cookieFromHeader(url: string, header: string): CookiesSetDetails
     }
   }
   return details;
-}
-
-export function showSimpleNotification(title: string, body: string, onClick?: () => void): void {
-  if (!Notification.isSupported()) return;
-  const notification = new Notification({ title, body });
-  if (onClick) notification.on("click", onClick);
-  notification.show();
 }

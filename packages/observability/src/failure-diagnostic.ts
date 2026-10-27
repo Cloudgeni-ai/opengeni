@@ -12,6 +12,7 @@ const CODES = [
   "db_failure",
   "retained_process_fenced",
   "retained_process_proof_failed",
+  "retained_process_observation_failed",
   "mcp_orchestration_failed",
 ] as const;
 const STAGES = [
@@ -25,6 +26,7 @@ const STAGES = [
   "session_attempts.claim",
   "failure_settlement",
   "sandbox_retained_processes.proof",
+  "sandbox_retained_processes.observation",
   "mcp.session_create",
   "mcp.session_send_message",
   "mcp.session_steer",
@@ -50,6 +52,8 @@ const ERROR_NAMES = new Set([
   "DrizzleQueryError",
   "SessionEventPersistenceError",
   "SandboxWorkspaceMutationFencedError",
+  "ProviderCommandObservationUnavailableError",
+  "ClientError",
 ]);
 
 // Human-reviewed code locations, not a regex permission to publish any path.
@@ -176,6 +180,7 @@ function errorKind(error: unknown): string {
 export function failureDiagnostic(input: FailureDiagnosticInput, revision?: string) {
   const causes: Array<{
     kind: string;
+    providerStatus?: number;
     frames: Array<{ locationHash: string; source?: string; line: number; column: number }>;
   }> = [];
   const pgContext: Array<{ functionName: string; line: number }> = [];
@@ -187,6 +192,15 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
     const kind = errorKind(error);
+    const numericCode = own(error, "code");
+    // Only numeric gRPC status codes; no provider details, URLs or command text.
+    const providerStatus =
+      typeof numericCode === "number" &&
+      Number.isInteger(numericCode) &&
+      numericCode >= 0 &&
+      numericCode <= 16
+        ? numericCode
+        : undefined;
     const driverCode = kind === "PostgresError" ? own(error, "code") : undefined;
     if (!causeSqlState && typeof driverCode === "string" && /^[0-9A-Z]{5}$/.test(driverCode)) {
       causeSqlState = driverCode;
@@ -227,6 +241,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
         : [];
     causes.push({
       kind,
+      ...(providerStatus === undefined ? {} : { providerStatus }),
       frames,
     });
     error = own(error, "cause");

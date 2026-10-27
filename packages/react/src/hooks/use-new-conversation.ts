@@ -330,6 +330,8 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     hasDraftContent: () => textRef.current.length > 0 || filesRef.current.attachments.length > 0,
     send: submit,
     steer: submit,
+    // Nothing runs before the conversation exists: Send just sends.
+    working: false,
     sending,
     canSend:
       available &&

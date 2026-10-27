@@ -177,10 +177,6 @@ export function pickProgress(state: PickState): PickProgress {
   };
 }
 
-export function usePickProgress(): PickProgress {
-  return pickProgress(usePickState());
-}
-
 function describeAlternative(key: SectionKey, id: ForkAlternativeId): string {
   const name = alternativeMeta(key, id)?.name;
   return name ? `${alternativeLetter(id)} - ${name}` : alternativeLetter(id);

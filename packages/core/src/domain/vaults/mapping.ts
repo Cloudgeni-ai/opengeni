@@ -229,7 +229,9 @@ export function toVaultItemSummary(row: VaultItemRow, key: Uint8Array | null): V
     websites: row.websites ?? [],
     username: usernameOf(row, key),
     hasTotp: row.fields.some((field) => field.kind === "totp"),
-    hasPasskey: row.type === "passkey",
+    // A hosted passkey item, or a connected item (a password manager login)
+    // that holds a passkey.
+    hasPasskey: row.type === "passkey" || (row.providerPasskeys?.length ?? 0) > 0,
     expiresAt: row.expiresAt,
     archivedAt: row.archivedAt,
     lastUsedAt: row.lastUsedAt,
@@ -263,6 +265,7 @@ export function toVaultItem(row: VaultItemRow, key: Uint8Array | null): VaultIte
     return field ? decryptOrNull(key, field.valueEncrypted) : null;
   };
   const credentialId = row.type === "passkey" ? (textField("credentialid") ?? "") : "";
+  const providerPasskey = row.type === "passkey" ? null : (row.providerPasskeys?.[0] ?? null);
   return {
     ...toVaultItemSummary(row, key),
     fields: row.fields.map((field) => toVaultItemField(row, field, key)),
@@ -276,7 +279,16 @@ export function toVaultItem(row: VaultItemRow, key: Uint8Array | null): VaultIte
             leasedUntil: row.passkeyLeasedUntil,
             lastUsedAt: row.lastUsedAt,
           }
-        : null,
+        : providerPasskey
+          ? {
+              rpId: providerPasskey.rpId,
+              userName: providerPasskey.userName,
+              credentialIdSuffix: providerPasskey.credentialId.slice(-8),
+              signCount: Number(row.passkeySignCount ?? 0),
+              leasedUntil: row.passkeyLeasedUntil,
+              lastUsedAt: row.lastUsedAt,
+            }
+          : null,
     aliases: row.aliases ?? [],
     primaryFieldId: row.primaryFieldId,
     createdBySubjectId: row.createdBySubjectId,

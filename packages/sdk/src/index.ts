@@ -258,6 +258,7 @@ export {
   SESSION_EVENT_CONVERSATION_FILTER_VERSION,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
+  isPresentedSessionToolCall,
   isPresentedSessionToolName,
   isSessionModelResponsePhase,
 } from "@opengeni/contracts/session-history";
@@ -458,6 +459,7 @@ export {
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,
+  parseSessionReference,
   parseSandboxLink,
   SESSION_SCOPE_HEADER,
 } from "./message-links";

@@ -418,7 +418,9 @@ describe("embedding host session authorization routes", () => {
       { headers: { authorization: value.authorization } },
     );
     expect(malformedPageResponse.status).toBe(400);
-    expect(await malformedPageResponse.text()).toBe("invalid goal revision page query");
+    expect(await malformedPageResponse.text()).toStartWith(
+      "invalid goal revision page query: limit: ",
+    );
 
     await shared.admin`
       insert into session_goals (account_id, workspace_id, session_id, text)

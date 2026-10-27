@@ -21,7 +21,8 @@ import {
 import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@opengeni/contracts";
 import packageManifest from "../package.json" with { type: "json" };
 import { compactOutput, parseListOptions } from "./catalog-discovery";
-import { parseToolArguments } from "./tool-arguments";
+import { readToolArguments } from "./tool-argument-source";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -32,7 +33,7 @@ function usage(exitCode = 1): void {
     "  ogtool list [--full | --json]",
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
-    "  ogtool call <tool-path-or-model-name> [json-object] [--full] [--save-image <path>]",
+    "  ogtool call <tool-path-or-model-name> [json-object | @file | -] [--full] [--save-image <path>]",
     "  ogtool read <operation-id>",
     "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
@@ -40,11 +41,14 @@ function usage(exitCode = 1): void {
     "  ogtool --version",
     "",
     "list returns all authorized tools by default; --limit/--offset are opt-in slices",
+    "call reads its arguments inline, from a file with @path, or from stdin with -;",
+    "  use a file or stdin for large arguments",
     "call omits a text block that only repeats structuredContent; --full prints the exact result",
     "call writes images (such as screenshots) to files and prints their paths instead of base64;",
     "  --save-image saves the result's single image at that path and never overwrites",
     "  if the call completes but its image cannot be saved, the result is still printed",
     "  with imageSaveError and the exit code is 4; do not repeat that call",
+    "  an error result (isError) prints as the answer, saves no file and exits 0",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -269,7 +273,7 @@ export async function imageSaveFailureOutput(
       ...printed,
       imageSaveError: {
         operationId,
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         note: "The call completed; only saving its image failed. Do not repeat the call.",
       },
     } as AttemptToolResult,
@@ -344,17 +348,20 @@ async function main(): Promise<void> {
     const { full, saveTo, rest } = callFlags(args);
     const [name, rawArguments] = rest;
     if (!name) throw new Error("tool path or model name is required");
-    const argumentsValue = parseToolArguments(rawArguments);
+    const argumentsValue = await readToolArguments(rawArguments);
     const catalog = await client.catalog();
     const entry = resolveTool(catalog, name);
     if (saveTo !== undefined) preflightImagePath(saveTo);
     const operationId = randomUUID();
     const result = await client.call(entry.identity, argumentsValue, { operationId });
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    const saveImage = result.isError === true ? undefined : saveTo;
     let printed: AttemptToolResult;
     try {
       printed = await materializeCallImages(result, {
         full,
-        ...(saveTo === undefined ? {} : { saveTo }),
+        ...(saveImage === undefined ? {} : { saveTo: saveImage }),
       });
     } catch (error) {
       process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));
@@ -400,6 +407,6 @@ void main().catch((error: unknown) => {
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)
       : null;
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${errorMessage(error)}\n`);
   process.exitCode = code === "tool_outcome_unknown" ? 3 : 1;
 });

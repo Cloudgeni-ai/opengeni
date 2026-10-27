@@ -20,10 +20,7 @@ import {
 import { isModalCommandObservationTransportError } from "./modal-command-observation-errors";
 import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { classifyProviderSandboxFailure } from "../provider-errors";
-import {
-  ModalCommandControl as LegacyControl,
-  commandControlPlane,
-} from "./modal-legacy-command-control";
+import { commandControlPlane } from "./modal-command-client";
 import {
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
@@ -32,7 +29,7 @@ import {
 } from "./modal-command-router-wire";
 import { collectModalRawOutputPage, type ModalRawOutputPage } from "./modal-command-raw-page";
 
-export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
+export { modalCommandAbortMiddleware } from "./modal-command-client";
 export type ModalProviderCommand = SandboxProviderCommand;
 export type ModalProviderOutputPage = ProviderCommandOutput;
 
@@ -122,8 +119,7 @@ export class ModalExecReadinessProbeLostError extends Error {
   }
 }
 
-/** New commands use replayable task-router byte offsets. Legacy identifiers
- * never cross that protocol boundary and are never used for new starts. */
+/** Commands use replayable task-router byte offsets. */
 export class ModalCommandControl {
   private readonly routers = new Map<string, Promise<RouterEntry>>();
   private readonly routerLookups = new Map<Promise<RouterEntry>, RouterLookup>();
@@ -133,7 +129,6 @@ export class ModalCommandControl {
   private readonly taskIds = new Map<string, Promise<string>>();
   private readonly controlHelpers = new Map<string, ControlHelper>();
   private readonly client: ReturnType<typeof commandControlPlane>;
-  private readonly legacy: LegacyControl;
   private closed = false;
 
   private constructor(
@@ -143,7 +138,6 @@ export class ModalCommandControl {
     private readonly environment: Record<string, string> | (() => Record<string, string>),
   ) {
     this.client = commandControlPlane(client);
-    this.legacy = LegacyControl.forSandbox(client, sandboxIdentity, root, environment);
   }
 
   static forSandbox(
@@ -755,12 +749,11 @@ export class ModalCommandControl {
     SandboxProviderCommand.parse(command);
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
-    if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
     return (await this.readNative(command, waitMs, signal)).output;
   }
 
   /** Native capture plumbing only. Raw bytes are acquired by the same joined
-   * read/poll path as read(); no legacy locator or new command is admitted. */
+   * read/poll path as read(); no new command is admitted. */
   async readRaw(
     command: ModalRouterProviderCommand,
     waitMs: number,
@@ -830,6 +823,17 @@ export class ModalCommandControl {
           );
         } catch (error) {
           signal?.throwIfAborted();
+          if (isModalRouterExecNotFound(error)) {
+            // The router has discarded this invocation's observation state.
+            // That is not proof its process group stopped, nor authority to
+            // replay Start. Keep the locator/cursors for ordinary retained
+            // ownership and lifecycle containment, without a hot read retry.
+            throw new ProviderCommandObservationUnavailableError(
+              structuredClone(command),
+              error,
+              false,
+            );
+          }
           if (!budget.signal.aborted && !isModalCommandObservationTransportError(error)) {
             // Containment is not retry permission. A structural provider fault
             // dominates nested missing-handle prose, but mixed/unreadable
@@ -1008,7 +1012,6 @@ export class ModalCommandControl {
     SandboxProviderCommand.parse(command);
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
-    if (command.kind === "modal-control-v1") return await this.legacy.write(command, chars, index);
     await this.withRouter(command.taskId, undefined, (router) =>
       router.write(command, index, Buffer.from(chars)),
     );

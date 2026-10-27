@@ -43,15 +43,6 @@ export function bundleKindLabel(kind: BundleKind): string {
   }
 }
 
-export function bundleProvenanceLabel(provenance: BundleProvenance): string {
-  switch (provenance) {
-    case "built_in":
-      return "Curated by Opengeni";
-    case "installed_from_source":
-      return "Imported from source";
-  }
-}
-
 function bundleProvenanceSpokenLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
@@ -71,15 +62,6 @@ export function bundleAccessibleDetail(
 ): string {
   const kindLabel = bundleKindLabel(kind);
   return provenance ? `${kindLabel}, ${bundleProvenanceSpokenLabel(provenance)}` : kindLabel;
-}
-
-/** Catalog rows show only the description; kind and provenance live in the detail. */
-export function bundleRowDescription(
-  _kind: BundleKind,
-  _provenance: BundleProvenance | null,
-  description: string,
-): string {
-  return description.trim();
 }
 
 /** Up to two letters from the bundle's own name; the last-resort mark. */
@@ -137,7 +119,7 @@ export function catalogSkillBundleRow(
     kind: "skill",
     provenance: options.provenance,
     name: item.name,
-    description: bundleRowDescription("skill", options.provenance, description),
+    description: description.trim(),
     accessibleDetail: bundleAccessibleDetail("skill", options.provenance),
     mark: mark(item.name, options.logoSrc),
     chip,
@@ -164,7 +146,7 @@ export function importedSkillBundleRow(
   const chip: IntegrationChip = { label: "Installed", tone: "ok" };
   const name = skill.name;
   const rawDescription = skill.description ?? "";
-  const description = bundleRowDescription("skill", "installed_from_source", rawDescription);
+  const description = rawDescription.trim();
   return {
     // Namespaced so it can never collide with the catalog Skill row of the
     // same capability id.
@@ -234,7 +216,7 @@ export function pluginBundleRow(
     kind: "plugin",
     provenance: "installed_from_source",
     name: plugin.name,
-    description: bundleRowDescription("plugin", "installed_from_source", rawDescription),
+    description: rawDescription.trim(),
     accessibleDetail: bundleAccessibleDetail("plugin", "installed_from_source"),
     mark: mark(plugin.name, null),
     chip,

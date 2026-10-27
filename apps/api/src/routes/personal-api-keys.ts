@@ -26,6 +26,8 @@ import { z } from "zod";
 
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parseRequestBody } from "../http/request-body";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
    Personal API keys: keys that act as the person who created them. A script
@@ -58,13 +60,12 @@ export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.post("/v1/organizations/:organizationId/personal-api-keys", async (c) => {
     requireSameOriginBrowserMutation(c, deps);
     const { context, organizationId } = await requireOrganizationPerson(c, deps, true);
-    const parsed = CreatePersonalApiKeyRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid personal API key",
-      });
-    }
-    const body = parsed.data;
+    const parsed = parseRequestBody(
+      CreatePersonalApiKeyRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid personal API key" },
+    );
+    const body = parsed;
     const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null;
     if (expiresAt && expiresAt.getTime() <= Date.now()) {
       throw new HTTPException(400, { message: "Choose an expiry date in the future." });
@@ -174,11 +175,4 @@ function generatePersonalApiKeyToken(): string {
   return `${PERSONAL_API_KEY_TOKEN_PREFIX}${Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("")}`;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

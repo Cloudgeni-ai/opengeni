@@ -145,7 +145,7 @@ unbounded.
 | `warnings` | Bounded operational warnings, never request or entity bodies. |
 | `facts` | At most 16 bounded scalar operation facts. Nested entities and arbitrary JSON are forbidden. |
 | `id`, `rootSessionId`, `nestedAgentDepth`, `effectiveMaxNestedAgentDepth` | Required only for `session_create`. These bounded top-level compatibility aliases preserve the generated session identity and immutable descendant-policy lineage without returning the full session. `id` is validated to equal `resource.id`. |
-| `updateId` | Required only for `session_steer`; a bounded compatibility alias validated to equal `resource.id`. |
+| `updateId` | Required only for an agent `session_steer` (a `session_system_update`); a bounded compatibility alias validated to equal `resource.id`. A sessionless steer returns a `session_turn` without it. |
 | `nextAction` | A safe explicit read/follow-up tool plus at most eight bounded scalar arguments. |
 
 The schema is intentionally strict and intrinsically bounded: resource strings,
@@ -270,7 +270,7 @@ session orchestration remain available as bounded compatibility aliases:
 
 - `session_create` preserves `id`, `rootSessionId`, `nestedAgentDepth`, and
   `effectiveMaxNestedAgentDepth` at the top level;
-- `session_steer` preserves top-level `updateId`.
+- An agent `session_steer` preserves top-level `updateId`.
 
 The versioned compatibility path is:
 

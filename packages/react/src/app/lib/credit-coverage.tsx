@@ -32,16 +32,24 @@ export function creditBalanceSplit(
   balance: BillingSummary["balance"],
 ): { generalMicros: number; scopedMicros: number } | null {
   const scopedMicros = (balance.promotionalCredits ?? []).reduce(
-    (total, grant) => total + Math.max(0, grant.remainingMicros),
+    (total, grant) => total + (grant.held ? 0 : Math.max(0, grant.remainingMicros)),
     0,
   );
   if (scopedMicros <= 0) return null;
   const general = balance.generalBalanceMicros ?? balance.balanceMicros - scopedMicros;
-  return { generalMicros: Math.max(0, general), scopedMicros };
+  return {
+    generalMicros: Math.max(0, general - (balance.heldGeneralCreditMicros ?? 0)),
+    scopedMicros,
+  };
 }
 
 /** "$0.00 for any model · $100.00 for selected models", or null without scoped credit. */
 export function creditBalanceSplitLabel(balance: BillingSummary["balance"]): string | null {
+  const held = balance.heldCreditMicros ?? 0;
+  if (held > 0) {
+    const available = Math.max(0, balance.balanceMicros - held);
+    return `${formatMoneyMicros(available, balance.currency)} available · ${formatMoneyMicros(held, balance.currency)} free credit on hold`;
+  }
   const split = creditBalanceSplit(balance);
   if (!split) return null;
   return `${formatMoneyMicros(split.generalMicros, balance.currency)} for any model · ${formatMoneyMicros(split.scopedMicros, balance.currency)} for selected models`;

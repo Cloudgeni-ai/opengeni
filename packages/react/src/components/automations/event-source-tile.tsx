@@ -10,16 +10,19 @@ import {
   eventSourceChoiceName,
   eventSourceProviderDomain,
   type EventSourceChoice,
+  type EventSourceChoiceSubject,
 } from "./event-source-model";
 
 /** Resolves the brand logo for a source (a provider domain), when the host has one. */
 export type EventSourceLogoResolver = (source: EventSourceLogoSubject) => string | null | undefined;
 
-export type EventSourceLogoSubject = Pick<EventSource, "kind" | "adapter" | "name" | "mcp">;
+export type EventSourceLogoSubject = Pick<EventSource, "kind" | "adapter" | "name" | "mcp"> &
+  Pick<EventSourceChoiceSubject, "format">;
 
 /**
  * Logos from a capability catalog: the app's own logo for GitHub, Slack,
- * Gmail, Linear and Sentry, and the MCP server's logo for an MCP source.
+ * Gmail, Linear, Sentry and apps with a webhook preset such as Tailscale, and
+ * the MCP server's logo for an MCP source.
  * Build it once per catalog.
  */
 export function eventSourceLogoResolver(
@@ -75,7 +78,6 @@ export function EventSourceTile({
     <LogoTile
       size={size}
       src={src}
-      fit="contain"
       name={Glyph ? source.name : eventSourceChoiceName(t, choice)}
       icon={Glyph ? <Glyph /> : undefined}
       className={className}

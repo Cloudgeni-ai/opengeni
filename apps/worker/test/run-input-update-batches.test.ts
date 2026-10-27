@@ -3,6 +3,14 @@ import * as db from "@opengeni/db";
 import { prepareRunInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { turnInput } from "../src/activities/run-input";
 
+function activeHistoryRead(items: db.ActiveSessionHistoryRow[]): db.ActiveSessionHistoryRead {
+  return {
+    items,
+    footprint: { jsonBytes: 0, rows: items.length, jsonNodes: 0, jsonProperties: 0 },
+    recovery: null,
+  };
+}
+
 describe("turn input update batches", () => {
   for (const triggerType of [
     "user.message",
@@ -31,13 +39,16 @@ describe("turn input update batches", () => {
         { deliveredHistoryItemId: firstBatchId } as never,
         { deliveredHistoryItemId: firstBatchId } as never,
       ]);
-      const loadHistory = spyOn(db, "getActiveSessionHistoryItemsPaged").mockResolvedValue(
-        history.map((item, position) => ({
-          id: position === 1 ? firstBatchId : position === 4 ? secondBatchId : crypto.randomUUID(),
-          position,
-          item,
-          providerArtifactInvalidatedAt: null,
-        })),
+      const loadHistory = spyOn(db, "readActiveSessionHistory").mockResolvedValue(
+        activeHistoryRead(
+          history.map((item, position) => ({
+            id:
+              position === 1 ? firstBatchId : position === 4 ? secondBatchId : crypto.randomUUID(),
+            position,
+            item,
+            providerArtifactInvalidatedAt: null,
+          })),
+        ),
       );
       const envelope = spyOn(db, "getSandboxSessionEnvelope").mockResolvedValue(null);
       const suffix = spyOn(db, "listTurnOpenSuffixToolCalls").mockResolvedValue([

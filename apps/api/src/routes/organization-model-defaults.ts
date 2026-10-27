@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parseRequestBody } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 
@@ -64,15 +65,14 @@ export function registerOrganizationModelDefaultsRoutes(app: Hono, deps: ApiRout
     requireSameOriginBrowserMutation(c, deps);
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const parsed = UpdateOrganizationModelDefaultsRequest.safeParse(
+    const parsed = parseRequestBody(
+      UpdateOrganizationModelDefaultsRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid organization model defaults" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid organization model defaults" });
-    }
     const { settings } = await deps.resolveCatalogSettings();
     const canonical = (id: string) => canonicalizeConfiguredModelId(settings, id);
-    const patch = parsed.data;
+    const patch = parsed;
     try {
       return c.json(
         OrganizationModelDefaults.parse(

@@ -12,8 +12,8 @@ import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 //       spec mandates (a parse must never run for an unauthorized caller).
 //   (2) FLAG-GATE: every new handler asserts sandboxOwnershipEnabled (via
 //       assertOwnershipEnabled) so the routes are inert until the flag flips.
-//   (3) EXPLICIT 400 ON PARSE FAIL: the mutating viewer handlers use safeParse +
-//       an explicit HTTPException(400) — never a raw ZodError → 500.
+//   (3) EXPLICIT 400 ON PARSE FAIL: the mutating viewer handlers use parseRequestBody
+//       with an explicit 400 — never a raw ZodError → 500.
 //   (4) NEGOTIATION SHAPE: the negotiation read returns a coherent
 //       SessionCapabilities (every capability present with availability + a
 //       typed reason; cold lease degrades the desktop with lease_cold).
@@ -68,7 +68,7 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
       expect(body).toContain("assertOwnershipEnabled");
       // No Zod parse precedes requireAccessGrant.
       const parseAt = Math.min(
-        ...[".parse(", ".safeParse("]
+        ...[".parse(", ".safeParse(", "parseRequestBody(", "parseRequestJson("]
           .map((p) => body.indexOf(p))
           .filter((i) => i >= 0)
           .concat([Number.MAX_SAFE_INTEGER]),
@@ -79,11 +79,11 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
     });
   }
 
-  test("the mutating viewer handlers use safeParse + explicit HTTPException(400), never a raw ZodError", () => {
+  test("the mutating viewer handlers validate with parseRequestBody and an explicit 400, never a raw ZodError", () => {
     for (const route of [NEW_ROUTES[1]!, NEW_ROUTES[2]!]) {
       const body = handlerBody(sessionsRoute, route.method, route.path);
-      expect(body).toContain(".safeParse(");
-      expect(body).toContain("HTTPException(400");
+      expect(body).toContain("parseRequestBody(");
+      expect(body).toContain("status: 400");
     }
   });
 
@@ -93,6 +93,21 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
     const gate = sessionsRoute.slice(sessionsRoute.indexOf("function assertOwnershipEnabled"));
     expect(gate.slice(0, 400)).toContain("HTTPException(404");
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
+  });
+
+  test("every terminal mint grants typing from terminal:attach, never from desktop control", () => {
+    // The relay forwards keystrokes only for a `control` token. Each terminal
+    // mint must pass the route's terminal:attach verdict, or every terminal
+    // silently becomes read-only.
+    const body = handlerBody(sessionsRoute, "post", NEW_ROUTES[1]!.path);
+    expect(body).toContain('requirePermission(grant, "terminal:attach")');
+    const mints = body.split("mintTerminalStream(").slice(1);
+    expect(mints.length).toBeGreaterThanOrEqual(2);
+    for (const mint of mints) {
+      const call = mint.slice(0, mint.indexOf("});"));
+      expect(call).toContain('terminalInput: hasPermission(grant.permissions, "terminal:attach")');
+      expect(call).not.toContain("streamControlEnabled");
+    }
   });
 });
 

@@ -1,3 +1,8 @@
+import {
+  oauthSignupChallengeVerified,
+  runWithSignupChallenge,
+  verifySignupChallenge,
+} from "./auth/signup-challenge";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
@@ -141,6 +146,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
   databaseContentionHttpError,
@@ -153,6 +159,7 @@ import {
 } from "./http/api-error";
 import {
   isRequestBodyValidationError,
+  parseRequestBody,
   requestBodyValidationHttpError,
   tagRequestJsonParseErrors,
 } from "./http/request-body";
@@ -247,6 +254,7 @@ import {
   prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  requireWorkspaceToolApprovalAuthorization,
   workspaceToolGatewayDeclarations,
   workspaceToolGatewayServerTiming,
 } from "./workspace-tool-gateway";
@@ -325,7 +333,7 @@ import { registerPersonalApiKeyRoutes } from "./routes/personal-api-keys";
 import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
-import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
+import { registerBrowserSessionRoutes, type BrowserHoldRenewal } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { createVaultInteractionSecretsPort } from "./interaction-secrets-vault";
 import { registerGitHubRoutes } from "./routes/github";
@@ -390,6 +398,12 @@ import {
   registerManagedSignInMethodRoutes,
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
+import {
+  managedPasskeySignInOffered,
+  managedPasskeySignUpOffered,
+  refreshManagedPasskeysOffered,
+  registerManagedPasskeyRoutes,
+} from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -490,6 +504,9 @@ function signedStateSecret(
 export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
+  /** One pass renewing the holds of the browsers agent sessions hold; the
+   * server runs it on a timer (see `startBrowserHoldRenewalPump`). */
+  renewBrowserHolds: () => Promise<BrowserHoldRenewal>;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
@@ -1183,11 +1200,25 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   registerManagedSignInMethodRoutes(app, routeDeps);
+  registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      let signupChallengeVerified = false;
+      if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
+        const state = new URL(c.req.url).searchParams.get("state");
+        const stored = state
+          ? await (await managedAuth.$context).internalAdapter.findVerificationValue(state)
+          : null;
+        if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
+          signupChallengeVerified = oauthSignupChallengeVerified(
+            stored.value,
+            oauthCallbackProvider,
+          );
+        }
+      }
       if (
         pathname === "/v1/auth/sign-up/email" &&
         c.req.method === "POST" &&
@@ -1198,6 +1229,19 @@ export function createAppComposition(deps: AppDependencies): {
         // the user-create hook remain the backstop for every other path.
         return managedAuthNewSignupsPausedResponse();
       }
+      if (
+        deps.settings.signupChallengeEnabled &&
+        pathname === "/v1/auth/sign-up/email" &&
+        c.req.method === "POST"
+      ) {
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        await verifySignupChallenge(deps.settings, input?.signupChallengeToken);
+        signupChallengeVerified = true;
+      }
+      let signupProviderRequest = c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1216,6 +1260,19 @@ export function createAppComposition(deps: AppDependencies): {
             403,
           );
         }
+      }
+      if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
+        const body = await c.req.raw.clone().json();
+        const verified = deps.settings.signupChallengeEnabled && Boolean(body.signupChallengeToken);
+        if (verified) await verifySignupChallenge(deps.settings, body.signupChallengeToken);
+        body.additionalData = {
+          ...body.additionalData,
+          opengeniSignupChallenge: verified
+            ? { provider: body.provider, expiresAt: Date.now() + 600_000 }
+            : null,
+        };
+        delete body.signupChallengeToken;
+        signupProviderRequest = new Request(c.req.raw, { body: JSON.stringify(body) });
       }
       if (oauthCallbackProvider) {
         const connectResponse = await handleManagedSignInConnectCallback(
@@ -1252,9 +1309,14 @@ export function createAppComposition(deps: AppDependencies): {
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
               oauthCallbackProvider,
-              async () => await managedAuth.handler(c.req.raw),
+              async () =>
+                await runWithSignupChallenge(signupChallengeVerified, () =>
+                  managedAuth.handler(signupProviderRequest),
+                ),
             )
-          : await managedAuth.handler(c.req.raw);
+          : await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(signupProviderRequest),
+            );
       }
       requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
@@ -1279,7 +1341,9 @@ export function createAppComposition(deps: AppDependencies): {
           attempt.transactionId,
           oauthCallbackProvider,
           async () => {
-            const response = await managedAuth.handler(isolated.request);
+            const response = await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(isolated.request),
+            );
             return {
               response,
               authSessionId: currentManagedAuthCreatedSessionId(),
@@ -1347,9 +1411,14 @@ export function createAppComposition(deps: AppDependencies): {
           deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
         providerResponse = discardProviderSession
           ? await runManagedAuthDiscardedProviderSession(
-              async () => await managedAuth.handler(providerRequest),
+              async () =>
+                await runWithSignupChallenge(signupChallengeVerified, () =>
+                  managedAuth.handler(providerRequest),
+                ),
             )
-          : await managedAuth.handler(providerRequest);
+          : await runWithSignupChallenge(signupChallengeVerified, () =>
+              managedAuth.handler(providerRequest),
+            );
       }
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
@@ -1543,6 +1612,7 @@ export function createAppComposition(deps: AppDependencies): {
             },
           }
         : undefined;
+    await refreshManagedPasskeysOffered(deps);
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1620,7 +1690,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(
-          deps.settings,
+          deps,
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
@@ -2014,8 +2084,7 @@ export function createAppComposition(deps: AppDependencies): {
             : operation === "manifest"
               ? ToolGatewayManifestRequest
               : ToolGatewayTargetApprovalRequest;
-      if (!schema.safeParse(body).success)
-        throw new HTTPException(400, { message: "Invalid targeted tool request" });
+      parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
       let outcome: "ok" | "failed" = "failed";
@@ -2106,14 +2175,14 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid tool gateway call" });
-    }
+    const parsed = parseRequestBody(ToolGatewayCallRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid tool gateway call",
+    });
     const { response, timing } = await callWorkspaceToolGatewayForCaller(
       routeDeps,
       authorization,
-      parsed.data,
+      parsed,
       {
         attestations: toolGatewayCatalogAttestations,
         ...(routeDeps.observability ? { observability: routeDeps.observability } : {}),
@@ -2138,10 +2207,12 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid tool gateway approval" });
-    }
+    const parsed = parseRequestBody(
+      ToolGatewayApprovalRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid tool gateway approval" },
+    );
+    requireWorkspaceToolApprovalAuthorization(authorization);
     const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
     try {
       return c.json(
@@ -2149,7 +2220,7 @@ export function createAppComposition(deps: AppDependencies): {
           prepared,
           authorization.grant,
           routeDeps.db,
-          parsed.data,
+          parsed,
           undefined,
           routeDeps.observability,
         ),
@@ -2223,15 +2294,15 @@ export function createAppComposition(deps: AppDependencies): {
     if (!isCodemodeGrant(grant)) {
       throw new HTTPException(403, { message: "Codemode access denied" });
     }
-    const parsed = CodemodeCallRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "Invalid Codemode call" });
-    }
+    const parsed = parseRequestBody(CodemodeCallRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid Codemode call",
+    });
     try {
       const submission = await submitAndDispatchCodemodeCall(
         routeDeps,
         grant,
-        parsed.data,
+        parsed,
         c.req.raw.signal,
       );
       const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
@@ -2290,8 +2361,9 @@ export function createAppComposition(deps: AppDependencies): {
             }
           : {}),
       }),
+    log: (event, fields) => console.warn(event, fields),
   });
-  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  const browserSessionRoutes = registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);
@@ -2423,6 +2495,7 @@ export function createAppComposition(deps: AppDependencies): {
             })
           : (sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
+            insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
             scheduledTaskTargetAccessHttpError(rawError) ??
@@ -2481,7 +2554,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(envelope, status as ContentfulStatusCode);
   });
 
-  return { app, routeDeps };
+  return { app, routeDeps, renewBrowserHolds: browserSessionRoutes.renewBrowserHolds };
 }
 
 function rejectionLogAttributes(rejection: HttpRejectionFacts) {
@@ -2622,13 +2695,22 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
+function clientAuthConfig(
+  deps: Pick<AppDependencies, "settings" | "db">,
+  newSignupsEnabled: boolean,
+) {
+  const settings = deps.settings;
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
+      passkeySignIn: managedPasskeySignInOffered(deps),
+      passkeySignUp: managedPasskeySignUpOffered(deps, newSignupsEnabled),
+      ...(settings.signupChallengeEnabled
+        ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
+        : {}),
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)
@@ -2950,6 +3032,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 403) return "forbidden";
   if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
+  if (status === 410) return "gone";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";
   if (status === 502 || status === 503 || status === 504) return "upstream_unavailable";

@@ -99,7 +99,8 @@ import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -355,7 +356,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });
@@ -372,7 +373,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       });
     }
   });
@@ -419,7 +420,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (installationId === null || repositoryId === null) {
         throw new HTTPException(400, { message: "invalid GitHub repository identity" });
       }
-      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListGitHubRepositoryBranchesQuery, c.req.query());
       try {
         return c.json(
           await listWorkspaceGitHubRepositoryBranches(deps, {
@@ -522,6 +523,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       public: payload.public,
       includeCiPermissions: payload.includeCiPermissions,
       setupUrl: `${baseUrl}/v1/github/setup`,
+      webhookBaseUrl: settings.webhookBaseUrl,
     });
     const organization = payload.organization?.trim();
     return c.json({

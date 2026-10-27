@@ -92,8 +92,13 @@ sandboxes created at once all pay it at the same time.
   and memory, whatever its request: before the claim is recorded, the
   clone's VM is given the request's guarantees (`cpu.weight` at once,
   `memory.low` from its first resume, which is when a VM gets it), and its
-  fill's memory limit is lifted. These are the only VM settings a claim
-  changes; sleep settings and the rest
+  fill's memory limit is lifted. A create that asks for a longer disk
+  (`disk_mib`) has the clone's disk lengthened and its paused guest told
+  the new length through its VMM, which it takes up, growing its file
+  system, as it next runs; a template's copy for a fresh create is
+  lengthened the same way, its guest told before the first wake's resume.
+  So templates stay per image and shape whatever disk a create asks for.
+  These are the only VM settings a claim changes; sleep settings and the rest
   live in the record, and the identity and reseed contract is unchanged,
   since the guest still learns who it is at that resume. A clone whose VM
   cannot take them is removed, and the create starts without a ready clone.

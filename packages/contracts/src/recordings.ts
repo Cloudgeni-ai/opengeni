@@ -267,7 +267,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
@@ -304,6 +305,13 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
           "track numbers must be unique",
         ),
       transcription: RecordingTranscriptionRequest.optional(),
+      /**
+       * The person recording's name, as your app knows it. With computer or
+       * tab audio beside the microphone, the microphone is theirs and is
+       * named with this in the transcript, unless Opengeni already has a name
+       * for them (their profile or membership label).
+       */
+      ownerName: z.string().trim().min(1).max(200).optional(),
     })
     .strict(),
 );
@@ -688,6 +696,50 @@ const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
 
 /**
+ * True when a recording's microphone is the person recording it: computer
+ * or tab audio sits beside it, so everyone else is on that track. A
+ * microphone alone (a phone, a room) may hear several people.
+ */
+export function recordingMicrophoneIsOwner(
+  tracks: readonly { source: RecordingTrackSource }[],
+): boolean {
+  return (
+    tracks.some((track) => track.source === "microphone") &&
+    tracks.some((track) => track.source === "system")
+  );
+}
+
+/** What an unnamed speaker label stands for, for clients that word it in the reader's language. */
+export type RecordingSpeakerDefault =
+  | { kind: "speaker"; number: number }
+  | { kind: "microphone" }
+  | { kind: "system" }
+  | { kind: "track"; number: number }
+  | { kind: "label"; label: string };
+
+/**
+ * What a speaker label stands for until someone names it: the diarizer's
+ * `speaker_1` (or `t0_speaker_1`) is speaker 2, and a whole-track label such as
+ * `track-0` is that track's microphone, shared audio or plain track number.
+ */
+export function recordingSpeakerDefault(
+  label: string,
+  tracks: readonly { trackNumber: number; source: RecordingTrackSource }[],
+): RecordingSpeakerDefault {
+  const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
+  if (diarized) return { kind: "speaker", number: Number(diarized[1]) + 1 };
+  const track = TRACK_SPEAKER_LABEL.exec(label);
+  if (track) {
+    const trackNumber = Number(track[1]);
+    const source = tracks.find((candidate) => candidate.trackNumber === trackNumber)?.source;
+    if (source === "microphone") return { kind: "microphone" };
+    if (source === "system") return { kind: "system" };
+    return { kind: "track", number: trackNumber + 1 };
+  }
+  return { kind: "label", label };
+}
+
+/**
  * The name a speaker label has until someone names it: "Speaker 2" for a
  * diarizer's `speaker_1` (or `t0_speaker_1` when several tracks were
  * diarized), and the track's role for a whole-track label such as `track-0`.
@@ -698,17 +750,19 @@ export function defaultRecordingSpeakerName(
   label: string,
   tracks: readonly { trackNumber: number; source: RecordingTrackSource }[],
 ): string {
-  const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
-  if (diarized) return `Speaker ${Number(diarized[1]) + 1}`;
-  const track = TRACK_SPEAKER_LABEL.exec(label);
-  if (track) {
-    const trackNumber = Number(track[1]);
-    const source = tracks.find((candidate) => candidate.trackNumber === trackNumber)?.source;
-    if (source === "microphone") return "Microphone";
-    if (source === "system") return "Shared audio";
-    return `Track ${trackNumber + 1}`;
+  const named = recordingSpeakerDefault(label, tracks);
+  switch (named.kind) {
+    case "speaker":
+      return `Speaker ${named.number}`;
+    case "microphone":
+      return "Microphone";
+    case "system":
+      return "Shared audio";
+    case "track":
+      return `Track ${named.number}`;
+    case "label":
+      return named.label;
   }
-  return label;
 }
 
 export const UpdateRecordingSpeakersResponse = /* @__PURE__ */ defineSchema(() =>
@@ -803,7 +857,12 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     available: z.boolean(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
-    /** List price in USD per audio hour, when known. */
+    /**
+     * What an audio hour costs this workspace in USD: the list price on its
+     * own key, or the credits charged for a deployment's model. Null when it
+     * pays nothing per hour (a subscription, or a model the deployment covers)
+     * or the price is unknown.
+     */
     usdPerHour: z.number().nullable(),
   }),
 );
@@ -822,6 +881,16 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
     dictationDefault: z.object({ providerId: z.string(), model: z.string() }).nullable(),
     /** The deployment uses one model for everything; workspaces cannot pick. */
     pinned: z.boolean(),
+    /**
+     * The language this workspace's meetings are transcribed in unless a
+     * recording names another; null detects it. Absent from older servers.
+     */
+    language: z.string().nullable().optional(),
+    /**
+     * Whether this workspace's recorders start with the live transcript on
+     * (its `recordings.liveTranscript` setting). Absent from older servers.
+     */
+    liveTranscript: z.boolean().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;
@@ -835,9 +904,21 @@ export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResp
  * `{"message_type":"input_audio_chunk","audio_base_64":…,"commit":false,"sample_rate":…}`
  * with little-endian 16-bit mono PCM; the provider answers with
  * `partial_transcript` and `committed_transcript_with_timestamps` messages.
+ *
+ * `openai.realtime`: an OpenAI Realtime transcription session (OpenAI or
+ * Azure OpenAI), already configured. `token` is a short-lived client secret,
+ * sent as `Authorization: Bearer <token>`. A browser posts its WebRTC offer
+ * (`application/sdp`) to `webrtcUrl`, sends the track's audio as media and
+ * reads events on a data channel named `oai-events`. A client that can set
+ * headers on a WebSocket (React Native) opens `url` instead and sends
+ * `{"type":"input_audio_buffer.append","audio":…}` with base64 PCM at
+ * `audio.sampleRate`. Either way the provider answers with
+ * `input_audio_buffer.speech_started`/`speech_stopped` (with `audio_start_ms`
+ * and `audio_end_ms`) and
+ * `conversation.item.input_audio_transcription.delta`/`completed` events.
  */
 export const RecordingLiveProtocol = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["elevenlabs.scribe_realtime"]),
+  z.enum(["elevenlabs.scribe_realtime", "openai.realtime"]),
 );
 export type RecordingLiveProtocol = z.infer<typeof RecordingLiveProtocol>;
 
@@ -859,9 +940,10 @@ export const CreateRecordingLiveSessionRequest = /* @__PURE__ */ defineSchema(()
 export type CreateRecordingLiveSessionRequest = z.infer<typeof CreateRecordingLiveSessionRequest>;
 
 /**
- * A grant to stream one track to a live model. `url` already carries the
- * single-use credential and the audio format; open it as a WebSocket before
- * `expiresAt`, and ask for a new session to reconnect.
+ * A grant to stream one track to a live model. Connect before `expiresAt`,
+ * and ask for a new session to reconnect. For `elevenlabs.scribe_realtime`,
+ * `url` carries the single-use credential and the audio format; for
+ * `openai.realtime`, the credential is `token` (see {@link RecordingLiveProtocol}).
  */
 export const RecordingLiveSession = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -869,6 +951,10 @@ export const RecordingLiveSession = /* @__PURE__ */ defineSchema(() =>
     model: z.string(),
     protocol: RecordingLiveProtocol,
     url: z.string(),
+    /** A short-lived client secret, for protocols that take it in a header. */
+    token: z.string().optional(),
+    /** Where a browser posts its WebRTC offer, for protocols that offer WebRTC. */
+    webrtcUrl: z.string().optional(),
     audio: z.object({ encoding: z.literal("pcm_s16le"), sampleRate: z.number().int() }),
     expiresAt: z.string(),
   }),

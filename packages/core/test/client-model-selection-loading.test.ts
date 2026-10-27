@@ -35,6 +35,7 @@ describe("fresh model admission versus live discovery", () => {
   let policy: ReturnType<typeof spyOn<typeof opengeniDb, "getWorkspaceModelPolicy">>;
   let metadata: ReturnType<typeof spyOn<typeof opengeniDb, "listConnectionsMetadata">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
+  let spendable: ReturnType<typeof spyOn<typeof opengeniDb, "getSpendableCreditBalance">>;
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
 
   beforeEach(() => {
@@ -46,6 +47,12 @@ describe("fresh model admission versus live discovery", () => {
     metadata = spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]);
     availability = mock(async () => ({}));
     balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+      accountId: context.accountId,
+      balanceMicros: 0,
+      currency: "usd",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    });
+    spendable = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: context.accountId,
       balanceMicros: 0,
       currency: "usd",
@@ -98,6 +105,7 @@ describe("fresh model admission versus live discovery", () => {
         }),
       ),
       balance,
+      spendable,
       allowance,
       metadata,
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
@@ -145,6 +153,7 @@ describe("fresh model admission versus live discovery", () => {
     expect(active).toBe(true);
     expect(availability).not.toHaveBeenCalled();
     expect(balance).not.toHaveBeenCalled();
+    expect(spendable).not.toHaveBeenCalled();
     expect(allowance).toHaveBeenCalledWith(
       db,
       expect.objectContaining({ fundedWithoutCredits: true }),

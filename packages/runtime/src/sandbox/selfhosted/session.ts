@@ -100,6 +100,7 @@ import {
   shellDialectFor,
   spliceCarry,
 } from "../secret-delivery";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -308,7 +309,7 @@ export interface SelfhostedBackgroundCommandAdoption {
 }
 
 /** Exact command-admission snapshot. A worker resolves this immediately before
- * every exec/Git admission; retries and already-started operations retain it. */
+ * every exec admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
   transactionalFsWriteMachineSupported?: boolean;
@@ -517,8 +518,6 @@ function requestedRunAs(op: NonNullable<ControlRequest["op"]>): string {
       return op.fsStat.runAs;
     case "fsRemove":
       return op.fsRemove.runAs;
-    case "git":
-      return op.git.runAs;
     case "ptyOpen":
       return op.ptyOpen.runAs;
     case "opStart":
@@ -582,8 +581,6 @@ function runAsForRunner(
       return { ...op, fsStat: { ...op.fsStat, runAs: "" } };
     case "fsRemove":
       return { ...op, fsRemove: { ...op.fsRemove, runAs: "" } };
-    case "git":
-      return { ...op, git: { ...op.git, runAs: "" } };
     case "ptyOpen":
       return { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } };
     case "opStart": {
@@ -1079,21 +1076,18 @@ export class SelfhostedSession {
     const opKind = op.$case;
     // This is the last shared boundary before every request/reply provider
     // operation. Even a cached routed or pinned session must re-resolve its live
-    // authority here; an already-admitted Git operation threads its exact
-    // snapshot. Exec uses the op-stream client and never enters this helper.
-    const commandOperation = opKind === "git";
-    let operationAdmission = admitted ?? (await this.admitOperation(commandOperation));
+    // authority here; an already-admitted operation threads its exact snapshot.
+    // Exec uses the op-stream client and never enters this helper.
+    let operationAdmission = admitted ?? (await this.admitOperation(false));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
-      const commandAdmission = opKind === "git" ? operationAdmission : undefined;
-      const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
-        resourcePolicy,
+        resourcePolicy: undefined,
         op: runAsForRunner(op, operationAdmission.runAsSupported, this.runAsRequired),
       };
       const connectionCurrent = this.connectionCurrentFor(operationAdmission);
@@ -1173,7 +1167,7 @@ export class SelfhostedSession {
       // Every physical retry is a new provider dispatch. The retry policy has
       // already proven it safe (never-sent/draining, or read-only timeout), so
       // revalidate live authority without ever replaying an ambiguous mutation.
-      operationAdmission = await this.admitOperation(commandOperation);
+      operationAdmission = await this.admitOperation(false);
       // Advance the counter for the class that was retried (separate budgets).
       if (error.neverSent) {
         neverSentRetries += 1;
@@ -1660,7 +1654,7 @@ export class SelfhostedSession {
         error instanceof SelfhostedControlError
           ? error
           : new SelfhostedControlError({
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
               code: ErrorCode.ERROR_CODE_PROTOCOL,
               reason: null,
               retryable: false,
@@ -3232,22 +3226,4 @@ function kindToProtocol(kind: StreamKind | undefined): string {
     default:
       return "raw";
   }
-}
-
-/**
- * The selfhosted NotFound discriminator — THE load-bearing safety property
- *: for selfhosted, `agent-offline` (no responder) is NEVER a
- * provider NotFound. A user's real machine is not recreatable; if the lease saw
- * agent-offline as NotFound it would cold-create a RIVAL box (a Modal box) for
- * the user's machine. So this ALWAYS returns FALSE for selfhosted — there is no
- * "box gone, recreate it" condition. An OS-level file NotFound is an op-level
- * error the fs layer 404s; it is likewise NOT a session-recreate condition.
- *
- * `establishSandboxSessionFromEnvelope` cold-restores ONLY when the per-backend
- * NotFound discriminator returns true; returning false here guarantees the
- * selfhosted path never cold-creates a rival — the op surfaces agent_offline and
- * the caller backs off / retries.
- */
-export function isSelfhostedProviderNotFoundError(_error: unknown): false {
-  return false;
 }

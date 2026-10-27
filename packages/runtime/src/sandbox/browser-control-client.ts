@@ -8,11 +8,15 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
+import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
+  BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
+  BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -113,6 +117,7 @@ import {
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
+import { isRecord } from "@opengeni/contracts/values";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
@@ -295,6 +300,9 @@ export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
   notice?: string;
+  /** How a headed managed browser shows on its machine as launched: in a
+   * native window, or offscreen with none. An older controller omits it. */
+  display?: "window" | "offscreen";
 };
 
 export type PlacementComputerSessionReference = {
@@ -621,15 +629,22 @@ export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
 }
 
-function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
+function browserControllerCompatibilityError(
+  feature: string,
+  controllerInAgent: boolean,
+): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this release`,
+    // A controller embedded in the Opengeni agent updates with that agent;
+    // only image-backed placements have a controller image.
+    message: controllerInAgent
+      ? `browser controller does not support ${feature}; it runs in an older Opengeni agent, and updating the agent adds support`
+      : `browser controller does not support ${feature}; update the placement's controller image to match this release`,
     retryable: false,
   });
 }
 
-/** The controller's route table rejected a request before dispatch: its image
+/** The controller's route table rejected a request before dispatch: its release
  *  predates this route. Distinct from a missing target or session. */
 function isLegacyRouteMiss(error: unknown): boolean {
   return (
@@ -743,6 +758,13 @@ export class BrowserControlClient {
     this.nativeAuthority = options.nativeAuthority;
   }
 
+  /** True when the controller ships inside the placement's Opengeni agent
+   *  (connected machines, attached devices, compute sandboxes) rather than a
+   *  controller image pinned to this release. */
+  controllerRunsInAgent(): boolean {
+    return typeof this.session.ensureBrowserControl === "function";
+  }
+
   async addAllowedOrigins(origins: readonly string[]): Promise<readonly string[]> {
     if (origins.length === 0 || origins.length > 64) {
       throw new RangeError("browser controller origin list size is invalid");
@@ -819,6 +841,7 @@ export class BrowserControlClient {
       observation: BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
+      ...creationDisplay(data.display),
     };
   }
 
@@ -892,6 +915,40 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
     }
+  }
+
+  /**
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+        },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
   }
 
   async endComputerSession(
@@ -1988,7 +2045,11 @@ export class BrowserControlSessionClient {
     } catch (error) {
       // A controller older than browser recording has no such route; say so
       // instead of surfacing a bare "route not found".
-      if (isLegacyRouteMiss(error)) throw browserControllerCompatibilityError("browser recording");
+      if (isLegacyRouteMiss(error))
+        throw browserControllerCompatibilityError(
+          "browser recording",
+          this.parent.controllerRunsInAgent(),
+        );
       throw error;
     }
     return BrowserRecordingSummary.parse(data);
@@ -2230,7 +2291,10 @@ export class BrowserControlSessionClient {
       // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
       // route response from a missing target/session; neither is safe to retry.
       if (isLegacyRouteMiss(error)) {
-        throw browserControllerCompatibilityError("focused DOM reads");
+        throw browserControllerCompatibilityError(
+          "focused DOM reads",
+          this.parent.controllerRunsInAgent(),
+        );
       }
       throw error;
     }
@@ -2304,8 +2368,9 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets ignore this parameter.
-            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1`,
+            // Controllers that predate resolved targets or notes ignore these
+            // parameters.
+            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -2315,13 +2380,22 @@ export class BrowserControlSessionClient {
       // This command already passed the release's schema. The controller's
       // exact parser rejection proves a schema mismatch, not invalid tool use.
       // Do not replay the action, restart the controller, or lose live tabs.
+      // The controller parses before it runs anything, so nothing ran; name the
+      // newer option it did not know.
       if (
         error instanceof BrowserControlRequestError &&
         error.status === 400 &&
         error.error.code === "invalid_action" &&
         error.error.message === "browser action is invalid"
       ) {
-        throw browserControllerCompatibilityError("this browser action");
+        throw new BrowserControlRequestError(409, {
+          code: "unsupported",
+          message: olderBrowserControllerMessage(
+            parsed.action,
+            this.parent.controllerRunsInAgent(),
+          ),
+          retryable: false,
+        });
       }
       throw error;
     }
@@ -2556,8 +2630,9 @@ export class ComputerControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate role stand-ins ignore this parameter.
-            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
+            // Controllers that predate role stand-ins or unconfirmed input
+            // ignore these parameters.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1&${COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER}=1`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -3127,6 +3202,12 @@ function creationNotice(value: unknown): { notice?: string } {
   if (typeof value !== "string") return {};
   const notice = value.replace(/\s+/gu, " ").trim();
   return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
+}
+
+/** The launched display is a report, not authority: anything but a known
+ * value is dropped, as from an older controller that sends none. */
+function creationDisplay(value: unknown): { display?: "window" | "offscreen" } {
+  return value === "window" || value === "offscreen" ? { display: value } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {
@@ -4277,8 +4358,4 @@ function parseHttpStatus(value: string): number {
     throw new BrowserControlProtocolError("HTTP status is invalid");
   }
   return status;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

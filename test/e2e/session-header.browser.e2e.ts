@@ -119,7 +119,13 @@ describe("responsive production session header", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    // OPENGENI_TEST_CHROMIUM points at a system Chromium where Playwright's
+    // own build can't load (NixOS, for example), as other browser tests allow.
+    browser = await chromium.launch(
+      process.env.OPENGENI_TEST_CHROMIUM
+        ? { executablePath: process.env.OPENGENI_TEST_CHROMIUM, args: ["--no-sandbox"] }
+        : {},
+    );
 
     const bootstrap = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -390,6 +396,9 @@ describe("responsive production session header", () => {
         isMobile: true,
         hasTouch: true,
         theme: "dark" as const,
+        // Everything optional is in the "…" menu here; the title keeps what is left.
+        minIdentity: 40,
+        minTitle: 32,
       },
       {
         name: "tablet-768-light",
@@ -442,18 +451,23 @@ describe("responsive production session header", () => {
         expect(metrics.documentOverflow).toBe(false);
         expect(metrics.headerOverflow).toBe(false);
         expect(metrics.headerInsideViewport).toBe(true);
-        expect(metrics.identityWidth).toBeGreaterThanOrEqual(72);
-        expect(metrics.titleWidth).toBeGreaterThanOrEqual(40);
+        const minimums = matrixCase as { minIdentity?: number; minTitle?: number };
+        expect(metrics.identityWidth).toBeGreaterThanOrEqual(minimums.minIdentity ?? 72);
+        expect(metrics.titleWidth).toBeGreaterThanOrEqual(minimums.minTitle ?? 40);
         expect(metrics.backWidth).toBeGreaterThanOrEqual(44);
         expect(metrics.offscreenControls).toEqual([]);
-        expect(metrics.headerFlexWrap).toBe("wrap");
+        // One row at every width: nothing wraps, and the parent link is a
+        // small line above the title rather than a row of its own.
+        expect(metrics.headerFlexWrap).toBe("nowrap");
+        expect(metrics.headerHeight).toBeLessThanOrEqual(60);
+        expect(metrics.backCenter).toBeLessThan(metrics.titleCenter);
 
         const ancestry = page.getByRole("navigation", { name: "Session ancestry" });
         if (matrixCase.viewport.width >= 640) {
-          await ancestry
-            .getByRole("button", { name: "31 intermediate ancestor sessions" })
-            .waitFor();
-          expect(await ancestry.getByRole("link").count()).toBe(2);
+          // The 32 ancestors before the parent share one menu; the parent is
+          // the one link, leading into the title.
+          await ancestry.getByRole("button", { name: "32 earlier sessions" }).waitFor();
+          expect(await ancestry.getByRole("link").count()).toBe(1);
         } else {
           expect(await ancestry.getByRole("link").count()).toBe(1);
         }
@@ -786,9 +800,12 @@ type SessionHeaderMetrics = {
   headerOverflow: boolean;
   headerInsideViewport: boolean;
   headerFlexWrap: string;
+  headerHeight: number;
   identityWidth: number;
   titleWidth: number;
+  titleCenter: number;
   backWidth: number;
+  backCenter: number;
   paddingTop: number;
   paddingLeft: number;
   paddingRight: number;
@@ -830,9 +847,12 @@ async function sessionHeaderMetrics(page: Page): Promise<SessionHeaderMetrics> {
       headerInsideViewport:
         headerRect.left >= viewportLeft - 0.5 && headerRect.right <= viewportRight + 0.5,
       headerFlexWrap: style.flexWrap,
+      headerHeight: headerRect.height,
       identityWidth: identity.getBoundingClientRect().width,
       titleWidth: title.getBoundingClientRect().width,
+      titleCenter: title.getBoundingClientRect().top + title.getBoundingClientRect().height / 2,
       backWidth: back.getBoundingClientRect().width,
+      backCenter: back.getBoundingClientRect().top + back.getBoundingClientRect().height / 2,
       paddingTop: Number.parseFloat(style.paddingTop),
       paddingLeft: Number.parseFloat(style.paddingLeft),
       paddingRight: Number.parseFloat(style.paddingRight),
@@ -879,8 +899,8 @@ async function assertHeaderKeyboardOrder(page: Page): Promise<void> {
     expect(await control.evaluate((element) => element === document.activeElement)).toBe(true);
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
-    // Controls may wrap onto a later row at extreme widths, so only require
-    // stable DOM/focus order—not a fragile single-line x-coordinate ordering.
+    // The parent link sits above the title, so only require stable DOM/focus
+    // order—not a fragile single-line x-coordinate ordering.
     previousX = Math.max(previousX, box!.x);
   }
   expect(previousX).toBeGreaterThanOrEqual(0);

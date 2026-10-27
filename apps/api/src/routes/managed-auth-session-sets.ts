@@ -1,3 +1,4 @@
+import { verifySignupChallenge } from "../auth/signup-challenge";
 import {
   assertManagedUserAdmission,
   getManagedSession,
@@ -392,6 +393,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         if (stored) {
           await authContext.internalAdapter.deleteVerificationByIdentifier(receiptIdentifier);
         }
+        const signupVerified =
+          deps.settings.signupChallengeEnabled && Boolean(body.signupChallengeToken);
+        if (signupVerified) await verifySignupChallenge(deps.settings, body.signupChallengeToken);
         const result = await available.managedAuth.api.signInSocial({
           body: {
             provider: body.provider,
@@ -399,6 +403,14 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
             callbackURL: callbackURL.toString(),
             errorCallbackURL: errorCallbackURL.toString(),
             additionalData: {
+              ...(signupVerified
+                ? {
+                    opengeniSignupChallenge: {
+                      provider: body.provider,
+                      expiresAt: Date.now() + 600_000,
+                    },
+                  }
+                : {}),
               opengeniManagedAuth: {
                 version: 1,
                 operationId: body.operationId,

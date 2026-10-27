@@ -43,7 +43,6 @@ export const CALENDAR_DAY_LABEL: Record<ScheduledTaskCalendarDay, string> = {
 };
 
 const SCHEDULE_DESCRIPTION_METADATA_KEY = "scheduleDescription";
-export const SCHEDULE_DESCRIPTION_MAX_LENGTH = 2_000;
 
 export type ScheduledTaskCadence = "once" | "hourly" | "daily" | "weekly" | "interval";
 
@@ -245,7 +244,7 @@ export function newScheduledTaskFormState(
     sandboxBackend: "",
     machineSandboxId: machineDefault ? (defaults.defaultMachineSandboxId ?? "") : "",
     workingDir: "",
-    overlapPolicy: "allow_concurrent",
+    overlapPolicy: "steer",
     includeOpenGeniTool,
     // A new schedule that starts its own session follows the defaults, like a new chat.
     followsWorkspaceDefaults: true,

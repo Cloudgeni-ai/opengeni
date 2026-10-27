@@ -30,6 +30,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -185,7 +186,6 @@ import { Button } from "../../ui/button";
 import { EmptyState } from "../../ui/empty-state";
 import { useAppContext } from "../app-context";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
-import type { SessionArtifactSourceCache } from "../lib/session-artifact-discovery";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -278,6 +278,7 @@ import type { ConnectionMetadata, Session, SessionEvent } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
+import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -1320,6 +1321,7 @@ export function SessionRoute({
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
+      pendingWake={sessionHasPendingWake(withLineageAutomationFacts(session, lineage.lineage))}
       descendantRefreshSignal={descendantRefreshSignal}
       onDescendantResolved={() => void lineage.refresh()}
       hasOlder={hasOlder}
@@ -1428,7 +1430,16 @@ export function SessionRoute({
         session={session}
         events={events}
         connectionState={connectionState}
-        primary={chatPane}
+        primary={
+          <ChatPaymentPages
+            accountId={
+              session?.accountId ??
+              context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
+            }
+          >
+            {chatPane}
+          </ChatPaymentPages>
+        }
         onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -1561,7 +1572,9 @@ function SessionDockPanel(props: SessionDockProps) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
-  const artifactRefresh = useMemo(() => {
+  // Tool output may have published a file or Site, here or in a sub-session;
+  // the end of a turn settles everything. Either re-reads the chat's artifacts.
+  const artifactRefreshSequence = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index];
       if (
@@ -1571,16 +1584,12 @@ function SessionDockPanel(props: SessionDockProps) {
           event.type === "turn.failed" ||
           event.type === "turn.cancelled")
       ) {
-        // Tool output re-reads the chat and only sub-sessions with new
-        // activity; the end of a turn re-reads everything once.
-        return { sequence: event.sequence, complete: event.type !== "agent.toolCall.output" };
+        return event.sequence;
       }
     }
-    return { sequence: 0, complete: true };
+    return 0;
   }, [props.events]);
-  const artifactRefreshSequence = artifactRefresh.sequence;
-  // Tool output may have published a file or Site: let the Artifacts page show
-  // its cached rows on the next visit but refetch them.
+  // Let the Artifacts page show its cached rows on the next visit but refetch them.
   useEffect(() => {
     if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
   }, [artifactRefreshSequence, context.client, props.workspaceId]);
@@ -1588,7 +1597,6 @@ function SessionDockPanel(props: SessionDockProps) {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
-    completeRefresh: artifactRefresh.complete,
   });
   const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
     context.client,
@@ -1789,8 +1797,6 @@ function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
   refreshSequence: number;
-  /** Re-read every sub-session instead of only those with new activity. */
-  completeRefresh: boolean;
 }): Readonly<{
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
@@ -1800,11 +1806,14 @@ function useSessionEditableArtifactSummaries(input: {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
   const [retrySequence, setRetrySequence] = useState(0);
-  const sourceCache = useRef<{
+  // One discovery at a time per view. A refresh asked for while one is in
+  // flight runs once after it, so a busy chat never stacks overlapping reads.
+  const discovery = useRef<{
     key: string;
     client: typeof context.client;
     retrySequence: number;
-    cache: SessionArtifactSourceCache;
+    running: boolean;
+    again: boolean;
   } | null>(null);
   const [loaded, setLoaded] = useState<{
     key: string;
@@ -1813,21 +1822,27 @@ function useSessionEditableArtifactSummaries(input: {
     artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
 
+  useEffect(
+    () => () => {
+      discovery.current = null;
+    },
+    [],
+  );
+
   useEffect(() => {
-    let current = true;
     if (
-      input.completeRefresh ||
-      sourceCache.current?.key !== authorityKey ||
-      sourceCache.current.client !== context.client ||
-      sourceCache.current.retrySequence !== retrySequence
+      discovery.current?.key !== authorityKey ||
+      discovery.current.client !== context.client ||
+      discovery.current.retrySequence !== retrySequence
     )
-      sourceCache.current = {
+      discovery.current = {
         key: authorityKey,
         client: context.client,
         retrySequence,
-        cache: new Map(),
+        running: false,
+        again: false,
       };
-    const cache = sourceCache.current.cache;
+    const run = discovery.current;
     setLoaded((previous) =>
       previous?.key === authorityKey &&
       previous.client === context.client &&
@@ -1843,49 +1858,50 @@ function useSessionEditableArtifactSummaries(input: {
                 : [],
           },
     );
-    void import("../lib/session-artifact-discovery")
-      .then(async ({ discoverSessionArtifacts }) => {
-        const reconcile = await discoverSessionArtifacts(
-          input.workspaceId,
-          input.sessionId,
-          () => current,
-          context.client,
-          cache,
-        );
-        if (current) {
+    if (run.running) {
+      run.again = true;
+      return;
+    }
+    const workspaceId = input.workspaceId;
+    const sessionId = input.sessionId;
+    const client = context.client;
+    // The stale-result fence is sufficient for this bounded metadata GET.
+    // Aborting Chrome fetch during React StrictMode cleanup surfaced an
+    // unhandled AbortError from the SDK/fetch boundary on every mount.
+    const live = () => discovery.current === run;
+    const previousArtifacts = (previous: typeof loaded) =>
+      previous?.key === authorityKey && previous.client === client ? previous.artifacts : [];
+    const start = () => {
+      run.running = true;
+      run.again = false;
+      void import("../lib/session-artifact-discovery")
+        .then(async ({ discoverSessionArtifacts }) => {
+          const reconcile = await discoverSessionArtifacts(workspaceId, sessionId, live, client);
+          if (live())
+            setLoaded((previous) => ({
+              key: authorityKey,
+              client,
+              ...reconcile(previousArtifacts(previous)),
+            }));
+        })
+        .catch(() => {
+          if (!live()) return;
           setLoaded((previous) => ({
             key: authorityKey,
-            client: context.client,
-            ...reconcile(
-              previous?.key === authorityKey && previous.client === context.client
-                ? previous.artifacts
-                : [],
-            ),
+            client,
+            status: "error",
+            artifacts: previousArtifacts(previous),
           }));
-        }
-      })
-      .catch(() => {
-        if (!current) return;
-        setLoaded((previous) => ({
-          key: authorityKey,
-          client: context.client,
-          status: "error",
-          artifacts:
-            previous?.key === authorityKey && previous.client === context.client
-              ? previous.artifacts
-              : [],
-        }));
-      });
-    return () => {
-      // The stale-result fence is sufficient for this bounded metadata GET.
-      // Aborting Chrome fetch during React StrictMode cleanup surfaced an
-      // unhandled AbortError from the SDK/fetch boundary on every mount.
-      current = false;
+        })
+        .finally(() => {
+          run.running = false;
+          if (run.again && live()) start();
+        });
     };
+    start();
   }, [
     authorityKey,
     context.client,
-    input.completeRefresh,
     input.refreshSequence,
     input.sessionId,
     input.workspaceId,
@@ -1937,6 +1953,8 @@ function SessionChatPane(props: {
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
+  /** Something will wake this session on its own (a timed wait or an automation). */
+  pendingWake: boolean;
   /** Bumped when a sub-session in this tree changed; open request cards re-read. */
   descendantRefreshSignal: number;
   /** A sub-session's request was settled from this page: re-read the tree. */
@@ -1979,7 +1997,17 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
+  const navigate = useNavigate();
+  // `session:` chat links in agent text open the chat here; ⌘/Ctrl-click opens its page.
+  const openSession = useCallback(
+    (workspaceId: string, sessionId: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      }),
+    [navigate],
+  );
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -2459,7 +2487,6 @@ function SessionChatPane(props: {
       afterConnectionSetup,
     ],
   );
-  const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
   const launchEffort = launch.effort;
@@ -3864,6 +3891,7 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
+                running={usageLimitTreeActive || props.pendingWake}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

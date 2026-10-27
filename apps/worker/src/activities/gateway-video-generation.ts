@@ -1,7 +1,6 @@
 import type { CanonicalVideoGenerationRequest } from "@opengeni/core";
 import { readResponseTextBounded, type FetchLike } from "@opengeni/network";
 
-export const GATEWAY_VIDEO_PROVIDER_ID = "vercel-ai-gateway" as const;
 export const GATEWAY_VIDEO_START_URL =
   "https://ai-gateway.vercel.sh/v4/ai/video-model/start" as const;
 export const GATEWAY_VIDEO_STATUS_URL =

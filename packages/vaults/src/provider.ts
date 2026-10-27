@@ -15,8 +15,12 @@ export interface VaultProviderCapabilities {
   totp: boolean;
   files: boolean;
   groupGrants: boolean;
-  /** Passkeys live only in Opengeni-hosted vaults (D20). */
-  passkeys: false;
+  /**
+   * The provider can hand its own passkeys (for example a Bitwarden login's
+   * passkey) to an agent's browser through `readPasskeys`. New passkeys an
+   * agent registers are still saved in Opengeni-hosted vaults.
+   */
+  passkeys: boolean;
   /** Additive: older in-process providers retain the legacy capability flags. */
   operations?: VaultProviderOperations;
 }
@@ -32,6 +36,29 @@ export interface ProviderFieldMeta {
   externalFieldId: string;
   name: string;
   kind: VaultFieldKind;
+}
+/** A passkey a provider item holds, without its key material. */
+export interface ProviderPasskeyMeta {
+  /** The credential id, base64url without padding. */
+  credentialId: string;
+  /** The relying party (site) the passkey signs in to, such as "google.com". */
+  rpId: string;
+  /** The account name the site registered, when the provider keeps it. */
+  userName?: string | null;
+}
+/** A provider passkey with the key material a browser authenticator needs. */
+export interface ProviderPasskey {
+  /** base64url without padding. */
+  credentialId: string;
+  rpId: string;
+  /** The site's user handle, base64url without padding, when stored. */
+  userHandle: string | null;
+  userName: string | null;
+  userDisplayName: string | null;
+  /** The private key as PKCS#8 DER, base64url without padding. */
+  privateKey: string;
+  /** The provider's signature counter; 0 when it does not keep one. */
+  signCount: number;
 }
 export interface ProviderItemMeta {
   externalItemId: string;
@@ -56,6 +83,12 @@ export interface ProviderItemMeta {
    * resolves as archived.
    */
   archivedAt?: string | null;
+  /**
+   * The passkeys the item holds (a provider login can carry them next to its
+   * password). Absent when the provider does not report passkeys; an empty
+   * list when it does and the item has none.
+   */
+  passkeys?: ProviderPasskeyMeta[];
 }
 
 /** Never fetch a field just for this hint, or truncate it into a different username. */
@@ -178,6 +211,28 @@ export interface VaultProvider {
     externalItemId: string,
     externalFieldIds: readonly string[],
   ): Promise<ProviderFieldValue[]>;
+  /**
+   * The item's passkeys with their key material, read live for a browser
+   * authenticator. Present when `capabilities().passkeys` is true. A provider
+   * that withholds secrets from this account (a hide-passwords collection)
+   * refuses with `provider_permission_denied`.
+   */
+  readPasskeys?(
+    ctx: VaultProviderContext,
+    externalVaultId: string,
+    externalItemId: string,
+  ): Promise<ProviderPasskey[]>;
+  /**
+   * Raise one passkey's stored signature counter to at least `signCount` after
+   * the agent signed in with it, so the person's own password manager keeps
+   * counting from there. Absent when the provider cannot store it.
+   */
+  updatePasskeySignCount?(
+    ctx: VaultProviderContext,
+    externalVaultId: string,
+    externalItemId: string,
+    update: { credentialId: string; signCount: number },
+  ): Promise<void>;
   writeItem(
     ctx: VaultProviderContext,
     externalVaultId: string,

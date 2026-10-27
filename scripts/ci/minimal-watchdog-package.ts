@@ -26,6 +26,15 @@ export async function stageOperatorCode(
       const bytes = await readFile(join(source, name));
       if (createHash("sha256").update(bytes).digest("hex") !== expected)
         throw Error(`Operator source mismatch: ${name}`);
+      // Preserve the reviewed original provenance, but package the tracked
+      // settlement reader with current durable-effect schema support.
+      if (name === "stopped-reconciliation.ts" && hashes === operatorSources)
+        return {
+          name,
+          bytes: await readFile(
+            new URL("../../docs/merge-batcher-admin/stopped-reconciliation.ts", import.meta.url),
+          ),
+        };
       // Only path location changes: original write/temp/rename ordering remains.
       // This generated operator is separately reviewed and gets a new hash.
       if (name === "control.ts") {

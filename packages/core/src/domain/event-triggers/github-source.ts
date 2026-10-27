@@ -23,6 +23,7 @@ import {
 import { eventMatchesTrigger } from "./matching";
 import { WebhookBodyError } from "./webhook-adapters";
 import { inboundWebhookBaseUrl } from "./webhook-url";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The GitHub source: the deployment's GitHub App delivers its webhooks to one
@@ -65,7 +66,7 @@ function sameUrl(left: string, right: string): boolean {
 }
 
 function githubUnavailable(error: unknown): HTTPException {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return new HTTPException(503, {
     message: `Couldn't read the GitHub App's webhook settings (${message.slice(0, 200)}). Try again shortly.`,
   });

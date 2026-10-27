@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { isRecord } from "@opengeni/contracts/values";
 
 const BRIDGE_PROTOCOL_VERSION = 1 as const;
 const MAX_REQUEST_MESSAGE_BYTES = 1024 * 1024;
@@ -40,6 +41,9 @@ export type AttachedBrowserBridgeOptions = {
 
 export class AttachedBrowserBridgeError extends Error {
   readonly name = "AttachedBrowserBridgeError";
+  /** The extension's own code for a `driver_rejected` failure (for example
+   * `tab_unavailable`), which says why Chrome or the extension refused. */
+  readonly extensionCode: string | undefined;
 
   constructor(
     readonly code:
@@ -55,9 +59,10 @@ export class AttachedBrowserBridgeError extends Error {
       | "driver_rejected",
     message: string,
     readonly retryable: boolean,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { extensionCode?: string },
   ) {
     super(message, options);
+    this.extensionCode = options?.extensionCode;
   }
 }
 
@@ -420,7 +425,12 @@ function errorFromWire(error: BridgeWireError): AttachedBrowserBridgeError {
         | "debugger_unavailable"
         | "invalid_request")
     : "driver_rejected";
-  return new AttachedBrowserBridgeError(code, error.message, error.retryable);
+  return new AttachedBrowserBridgeError(
+    code,
+    error.message,
+    error.retryable,
+    code === "driver_rejected" ? { extensionCode: error.code } : undefined,
+  );
 }
 
 function isWireError(value: unknown): value is BridgeWireError {
@@ -458,8 +468,4 @@ function boundedTimeout(value: number): number {
     throw new RangeError("attached browser bridge timeout is invalid");
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import {
   EVENT_DATA_MAX_BYTES,
   SCHEDULED_OCCURRENCE_EVENT_DATA_MAX_BYTES,
   SCHEDULED_OCCURRENCE_EVENTS_MAX_BYTES,
   type InboundEvent,
+  WebhookFormat,
+  type WebhookFormatInput,
 } from "@opengeni/contracts";
 import {
   boundEvent,
@@ -12,12 +15,16 @@ import {
   eventTypeMatches,
   generateStandardWebhookSecret,
   jsonUtf8Bytes,
+  readPath,
   scheduledOccurrenceEvents,
   signHexBodyHmac,
   signStandardWebhook,
+  signTimestampedHmac,
+  signBodyHmac,
   standardWebhookSecretKey,
   verifyStandardWebhook,
-  webhookAdapter,
+  webhookEventTypeCatalog,
+  webhookAdapterFor,
   WebhookBodyError,
   type MatchableEvent,
 } from "../src/domain/event-triggers";
@@ -140,7 +147,7 @@ describe("webhook adapters", () => {
   const receivedAt = new Date("2026-10-24T10:00:00.000Z");
 
   test("standard adapter reads type, time, subject and data", () => {
-    const adapter = webhookAdapter("standard");
+    const adapter = webhookAdapterFor({ adapter: "standard", format: null });
     const secret = generateStandardWebhookSecret();
     const body = encoder.encode(
       JSON.stringify({
@@ -187,7 +194,7 @@ describe("webhook adapters", () => {
 
   test("standard adapter refuses a body without a type", () => {
     expect(() =>
-      webhookAdapter("standard").read({
+      webhookAdapterFor({ adapter: "standard", format: null }).read({
         headers: headersOf({}),
         body: encoder.encode(JSON.stringify({ data: {} })),
         receivedAt,
@@ -196,7 +203,7 @@ describe("webhook adapters", () => {
   });
 
   test("linear adapter verifies the signature and timestamp and names Issue.create", () => {
-    const adapter = webhookAdapter("linear");
+    const adapter = webhookAdapterFor({ adapter: "linear", format: null });
     const secret = "lin_wh_secret_value";
     const payload = {
       action: "create",
@@ -260,7 +267,7 @@ describe("webhook adapters", () => {
   });
 
   test("sentry adapter names the resource and action from the header", () => {
-    const adapter = webhookAdapter("sentry");
+    const adapter = webhookAdapterFor({ adapter: "sentry", format: null });
     const secret = "sentry-client-secret";
     const body = encoder.encode(
       JSON.stringify({
@@ -295,6 +302,271 @@ describe("webhook adapters", () => {
       url: "https://acme.sentry.io/issues/123/",
       actor: { kind: "bot", name: "Sentry" },
       occurredAt: new Date("2026-10-24T09:58:00.000Z"),
+    });
+  });
+
+  describe("custom adapter", () => {
+    const now = 1_800_000_000;
+    const custom = (format: WebhookFormatInput) =>
+      webhookAdapterFor({ adapter: "custom", format: WebhookFormat.parse(format) });
+
+    describe("Tailscale's format: a timestamped signature over a list of events", () => {
+      const adapter = custom({
+        preset: "tailscale",
+        signature: { scheme: "timestamped_hmac_sha256", header: "Tailscale-Webhook-Signature" },
+        batch: {},
+        type: { path: "type" },
+        occurredAt: "timestamp",
+        summary: "message",
+        subject: "data.deviceName",
+        url: "data.url",
+        actor: "data.actor",
+      });
+      const secret = "tskey-webhook-kTEST1CNTRL-SecretValue1234";
+      const events = [
+        {
+          timestamp: "2026-10-24T09:58:00.000Z",
+          version: 1,
+          type: "nodeNeedsApproval",
+          tailnet: "example.com",
+          message: "Node laptop.example.ts.net needs approval",
+          data: {
+            nodeID: "nAbC123",
+            deviceName: "laptop.example.ts.net",
+            actor: "ada@example.com",
+            url: "https://login.tailscale.com/admin/machines/100.64.0.7",
+          },
+        },
+        {
+          timestamp: "2026-10-24T09:59:00.000Z",
+          version: 1,
+          type: "userRoleUpdated",
+          tailnet: "example.com",
+          message: "User bo@example.com role changed",
+          data: { user: "bo@example.com", actor: "ada@example.com", newRoles: ["Admin"] },
+        },
+      ];
+      const body = encoder.encode(JSON.stringify(events));
+      const signed = (value: string, timestampSeconds = now) =>
+        headersOf({
+          "tailscale-webhook-signature": signTimestampedHmac({
+            secret: value,
+            body,
+            timestampSeconds,
+          }),
+        });
+
+      test("verifies the documented signature, any v1 entry, and dedupes by body", () => {
+        // Computed independently of the helper, as Tailscale and Stripe document it.
+        const documented = createHmac("sha256", secret)
+          .update(`${now}.${new TextDecoder().decode(body)}`)
+          .digest("hex");
+        const headers = headersOf({
+          "tailscale-webhook-signature": `t=${now},v1=${"0".repeat(64)},v1=${documented}`,
+        });
+        expect(adapter.verify({ secret, headers, body, nowSeconds: now })).toEqual({
+          ok: true,
+          deliveryKey: null,
+        });
+        expect(signed(secret).get("tailscale-webhook-signature")).toBe(`t=${now},v1=${documented}`);
+      });
+
+      test("refuses a wrong secret, a stale time, a tampered body or no header", () => {
+        expect(
+          adapter.verify({ secret, headers: signed("tskey-webhook-other"), body, nowSeconds: now }),
+        ).toEqual({
+          ok: false,
+          reason: "The Tailscale-Webhook-Signature header does not match the signing secret",
+        });
+        expect(
+          adapter.verify({ secret, headers: signed(secret, now - 301), body, nowSeconds: now }),
+        ).toEqual({ ok: false, reason: "The delivery was signed more than 300 seconds from now" });
+        expect(adapter.verify({ secret, headers: headersOf({}), body, nowSeconds: now })).toEqual({
+          ok: false,
+          reason: "Missing or malformed Tailscale-Webhook-Signature header",
+        });
+        const tampered = encoder.encode(JSON.stringify([{ ...events[0], type: "test" }]));
+        expect(
+          adapter.verify({ secret, headers: signed(secret), body: tampered, nowSeconds: now }).ok,
+        ).toBe(false);
+      });
+
+      test("reads every event in the list with its mapped fields", () => {
+        const reading = adapter.read({ headers: signed(secret), body, receivedAt });
+        if (reading.kind !== "events") throw new Error("expected events");
+        expect(reading.events).toHaveLength(2);
+        expect(reading.events[0]).toMatchObject({
+          externalId: null,
+          type: "nodeNeedsApproval",
+          occurredAt: new Date("2026-10-24T09:58:00.000Z"),
+          subject: "laptop.example.ts.net",
+          summary: "Node laptop.example.ts.net needs approval",
+          url: "https://login.tailscale.com/admin/machines/100.64.0.7",
+          actor: { kind: "unknown", name: "ada@example.com" },
+        });
+        expect(readPath(reading.events[0]?.data, "data.nodeID")).toBe("nAbC123");
+        expect(reading.events[1]).toMatchObject({ type: "userRoleUpdated", subject: null });
+        expect(
+          adapter.read({ headers: new Headers(), body: encoder.encode("[]"), receivedAt }),
+        ).toEqual({ kind: "ignored", reason: "The delivery holds no events" });
+      });
+
+      test("refuses a body that is not a list of typed objects", () => {
+        for (const value of [{ type: "test" }, [1], [{ message: "no type" }], [{ type: "a b" }]]) {
+          expect(() =>
+            adapter.read({
+              headers: new Headers(),
+              body: encoder.encode(JSON.stringify(value)),
+              receivedAt,
+            }),
+          ).toThrow(WebhookBodyError);
+        }
+      });
+
+      test("the preset lists Tailscale's documented types, then received ones", () => {
+        const catalog = webhookEventTypeCatalog(
+          { adapter: "custom", format: { preset: "tailscale" } },
+          [{ type: "nodeAuthorized", count: 2 }],
+        );
+        const types = catalog.map((entry) => entry.type);
+        expect(types).toContain("nodeNeedsApproval");
+        expect(types).toContain("policyUpdate");
+        expect(types.at(-1)).toBe("nodeAuthorized");
+        expect(
+          webhookEventTypeCatalog({ adapter: "custom", format: { preset: "other" } }, []),
+        ).toEqual([]);
+      });
+    });
+
+    test("a base64 body HMAC with the type and delivery id in headers (Shopify's format)", () => {
+      const adapter = custom({
+        signature: { scheme: "hmac_sha256", header: "X-Shopify-Hmac-Sha256", encoding: "base64" },
+        type: { header: "X-Shopify-Topic" },
+        deliveryId: { header: "X-Shopify-Webhook-Id" },
+        eventId: "id",
+        summary: "name",
+      });
+      const secret = "shpss_example_secret";
+      const body = encoder.encode(JSON.stringify({ id: 820982911946154500, name: "#9999" }));
+      const headers = headersOf({
+        "x-shopify-hmac-sha256": createHmac("sha256", secret).update(body).digest("base64"),
+        "x-shopify-topic": "orders/create",
+        "x-shopify-webhook-id": "b54557e4-bdd9-4b37-8a5f-bf7d70bcd043",
+      });
+      expect(adapter.verify({ secret, headers, body })).toEqual({
+        ok: true,
+        deliveryKey: "delivery-id:b54557e4-bdd9-4b37-8a5f-bf7d70bcd043",
+      });
+      expect(adapter.retainedHeaders).toEqual(["x-shopify-topic", "x-shopify-webhook-id"]);
+      const reading = adapter.read({ headers, body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({
+        type: "orders/create",
+        externalId: "820982911946154500",
+        summary: "#9999",
+      });
+      expect(
+        adapter.verify({
+          secret: "another-secret",
+          headers,
+          body,
+        }),
+      ).toEqual({
+        ok: false,
+        reason: "The X-Shopify-Hmac-Sha256 header does not match the signing secret",
+      });
+      expect(() => adapter.read({ headers: headersOf({}), body, receivedAt })).toThrow(
+        "The delivery has no X-Shopify-Topic header for its event type",
+      );
+    });
+
+    test("a prefixed hex HMAC, and a body path for the delivery id", () => {
+      const adapter = custom({
+        signature: { scheme: "hmac_sha256", header: "X-Signature-256", prefix: "sha256=" },
+        type: { path: "event.kind" },
+        deliveryId: { path: "delivery" },
+      });
+      const secret = "a-shared-secret";
+      const body = encoder.encode(JSON.stringify({ delivery: "d-1", event: { kind: "ping" } }));
+      const signature = signBodyHmac({ secret, body, encoding: "hex", prefix: "sha256=" });
+      expect(signature).toBe(`sha256=${signHexBodyHmac(secret, body)}`);
+      expect(
+        adapter.verify({ secret, headers: headersOf({ "x-signature-256": signature }), body }),
+      ).toEqual({ ok: true, deliveryKey: "delivery-id:d-1" });
+      expect(
+        adapter.verify({
+          secret,
+          headers: headersOf({ "x-signature-256": signHexBodyHmac(secret, body) }),
+          body,
+        }),
+      ).toEqual({ ok: false, reason: 'The X-Signature-256 header does not start with "sha256="' });
+    });
+
+    test("a shared token after a prefix, one type for every delivery, a list at a path", () => {
+      const adapter = custom({
+        signature: { scheme: "token", header: "Authorization", prefix: "Bearer " },
+        batch: { path: "alerts" },
+        type: { value: "alert.fired" },
+        subject: "labels.host",
+      });
+      const body = encoder.encode(
+        JSON.stringify({ alerts: [{ labels: { host: "a" } }, { labels: { host: "b" } }] }),
+      );
+      const secret = "token-1234567890";
+      expect(
+        adapter.verify({
+          secret,
+          headers: headersOf({ authorization: "bearer token-1234567890" }),
+          body,
+        }),
+      ).toEqual({ ok: true, deliveryKey: null });
+      for (const value of ["Bearer token-123456789", "token-1234567890x", ""]) {
+        expect(
+          adapter.verify({ secret, headers: headersOf({ authorization: value }), body }).ok,
+        ).toBe(false);
+      }
+      const reading = adapter.read({ headers: new Headers(), body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events.map((event) => [event.type, event.subject])).toEqual([
+        ["alert.fired", "a"],
+        ["alert.fired", "b"],
+      ]);
+      const tooMany = encoder.encode(JSON.stringify({ alerts: Array(101).fill({}) }));
+      expect(() => adapter.read({ headers: new Headers(), body: tooMany, receivedAt })).toThrow(
+        "The delivery holds 101 events; at most 100 are read",
+      );
+    });
+
+    test("Standard Webhooks signatures from an app's own whsec_ secret (Svix)", () => {
+      const adapter = custom({
+        signature: { scheme: "standard_webhooks" },
+        type: { path: "type" },
+        eventId: "data.id",
+      });
+      const secret = generateStandardWebhookSecret();
+      const body = JSON.stringify({ type: "user.created", data: { id: "user_1" } });
+      const headers = headersOf(
+        signStandardWebhook({ secret, webhookId: "msg_1", body, timestampSeconds: now }),
+      );
+      expect(
+        adapter.verify({ secret, headers, body: encoder.encode(body), nowSeconds: now }),
+      ).toEqual({
+        ok: true,
+        deliveryKey: "webhook-id:msg_1",
+      });
+      const reading = adapter.read({ headers, body: encoder.encode(body), receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({ type: "user.created", externalId: "user_1" });
+    });
+
+    test("a custom source without a format refuses every delivery", () => {
+      const adapter = webhookAdapterFor({ adapter: "custom", format: null });
+      expect(
+        adapter.verify({ secret: "x", headers: new Headers(), body: new Uint8Array() }),
+      ).toEqual({
+        ok: false,
+        reason: "This custom webhook has no format yet",
+      });
     });
   });
 });

@@ -35,7 +35,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AcknowledgeStreamResponse"
-    ]
+    ],
+    "permission": "stream:acknowledge"
   },
   {
     "id": "actInBrowser",
@@ -71,7 +72,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "activateCodexRealtimeConnection",
@@ -82,7 +84,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRealtimeMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "activateCompanyProfileRevision",
@@ -93,7 +96,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CompanyProfileMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "activateOrganizationClaudeSubscriptionAccount",
@@ -118,7 +122,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "activateRigVersion",
@@ -145,7 +150,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "actOnMemorySlackPublication",
@@ -156,7 +162,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemorySlackPublication"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "addDocument",
@@ -167,7 +174,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "addExternalWorkspaceMember",
@@ -269,7 +277,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionGoal"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "approveDeviceEnrollment",
@@ -281,6 +290,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DeviceEnrollmentApproveResponse"
     ],
+    "permission": "enrollments:read",
     "secretFields": [
       "request.userCode"
     ]
@@ -306,16 +316,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SlackUserLinkAccessRequest"
-    ]
+    ],
+    "permission": "members:manage"
   },
   {
     "id": "approveWorkspaceSkill",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/approve",
-    "request": [],
+    "request": [
+      "ApplyWorkspaceSkillRevisionRequest"
+    ],
     "response": [
       "SkillWriteReceipt"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "archiveKnowledgeEntry",
@@ -395,7 +409,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CreateFileUploadResponse"
-    ]
+    ],
+    "permission": "files:upload"
   },
   {
     "id": "beginIdentityLink",
@@ -407,7 +422,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "BeginExternalIdentityLinkResponse"
     ],
-    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+    "permission": "workspace:read"
   },
   {
     "id": "beginSessionRealtime",
@@ -418,7 +434,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRealtimeMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "browseAtlassianSources",
@@ -427,16 +444,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AtlassianBrowseResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "browseGoogleDriveFacetSource",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     "request": [],
+    "query": [
+      "pageToken",
+      "parentId"
+    ],
     "response": [
       "GoogleDriveBrowseResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "callNativeComputerTool",
@@ -453,14 +476,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "callWorkspaceSiteTool",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/calls",
-    "request": [],
+    "request": [
+      "ToolGatewayCallRequest"
+    ],
     "response": [
       "ToolGatewayApprovalResponse",
       "ToolGatewayCallResponse",
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
+      "request.approvalToken",
       "response.approvalToken"
     ]
   },
@@ -532,6 +559,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
     "request": [],
+    "query": [
+      "region",
+      "regionFrame"
+    ],
     "response": []
   },
   {
@@ -565,13 +596,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "checkSiteHostname",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
     "request": [],
+    "query": [
+      "siteId"
+    ],
     "response": [
       "SiteHostnameAvailability"
     ]
@@ -587,8 +622,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "clearSessionContext",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/context/clear",
-    "request": [],
-    "response": []
+    "request": [
+      "ClearSessionContextRequest"
+    ],
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "clearWorkspaceAllowance",
@@ -599,7 +637,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ClearWorkspaceAllowanceResponse"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "closeBrowserTarget",
@@ -615,7 +654,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId/usage",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "codexConnectPoll",
@@ -624,7 +664,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SubscriptionConnectPollRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "codexConnectStart",
@@ -634,6 +675,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SubscriptionDeviceSignInStart"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "response.userCode"
     ]
@@ -643,37 +685,44 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/codex",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "codexOverview",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/overview",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "codexStatus",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/status",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "codexUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/usage",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "compactSessionContext",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/context/compact",
-    "request": [],
+    "request": [
+      "CompactSessionContextRequest"
+    ],
     "response": [
       "CompactSessionContextResult"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "completeFileUpload",
@@ -683,7 +732,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CompleteFileUploadResponse",
       "FileAsset"
-    ]
+    ],
+    "permission": "files:upload"
   },
   {
     "id": "completeOrganizationClaudeSubscriptionOAuth",
@@ -722,7 +772,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "IntegrationFacetMutationResult"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "configureOrganizationRecoveryPolicy",
@@ -795,7 +846,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ContinueSessionWaitingWorkResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "controlSession",
@@ -806,7 +858,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionControlResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "correctPreferenceRegistry",
@@ -817,7 +870,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "createAdditionalOrganization",
@@ -855,6 +909,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PrReviewAppRegistration"
     ],
+    "permission": "workspace:admin",
     "secretFields": [
       "request.accessToken",
       "request.privateKey",
@@ -904,7 +959,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserIdentityMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "createBrowserSession",
@@ -915,7 +971,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "createCapability",
@@ -926,7 +983,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CapabilityCatalogItem"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "createChannel",
@@ -937,7 +995,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Channel"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "createComputerSession",
@@ -948,7 +1007,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ComputerSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "createConnection",
@@ -961,6 +1021,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ConnectionResponse"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.credential"
     ]
@@ -974,7 +1035,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "DocumentBase"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "createDocumentOriginalFileDownloadUrl",
@@ -983,21 +1045,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "FileDownloadUrlResponse"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "createEditableArtifact",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "createEditableArtifactMaterialization",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/materializations",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "createEventSource",
@@ -1023,7 +1088,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "FeedbackSubmissionResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "createFileDownloadUrl",
@@ -1032,14 +1098,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "FileDownloadUrlResponse"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "createGitHubAppManifest",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/github/app-manifest",
-    "request": [],
-    "response": []
+    "request": [
+      "GitHubAppManifestCreate"
+    ],
+    "response": [],
+    "permission": "github:manage"
   },
   {
     "id": "createInteractionIntervention",
@@ -1061,7 +1131,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "createKnowledgeFileDownloadUrl",
@@ -1132,8 +1203,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models",
     "request": [
-      "CreateOrganizationProviderCustomModelRequest",
-      "OrganizationModelProviderKind"
+      "CreateOrganizationProviderCustomModelRequest"
     ],
     "response": [
       "OrganizationProviderCustomModel"
@@ -1198,7 +1268,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryRecord"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "createRepositoryBinding",
@@ -1231,7 +1302,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "createSession",
@@ -1243,6 +1315,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CreateSessionResponse"
     ],
+    "permission": "sessions:create",
     "secretFields": [
       "request.mcpServers[].headers"
     ]
@@ -1321,7 +1394,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "VideoArtifactPlaybackSource"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "createWorkspace",
@@ -1365,7 +1439,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceGatewayCustomModel"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceInstructionPolicyDraft",
@@ -1376,7 +1451,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInstructionPolicyRevision"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceInstructionPolicyOnboardingProposal",
@@ -1387,7 +1463,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInstructionPolicyOnboardingProposal"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceOpenRouterCustomModel",
@@ -1398,7 +1475,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceOpenRouterCustomModel"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceOpperCustomModel",
@@ -1407,7 +1485,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CreateWorkspaceOpperCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceWebhook",
@@ -1432,7 +1511,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "defineSiteDataCollection",
@@ -1480,14 +1560,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "request": [],
-    "response": []
+    "query": [
+      "connectionId"
+    ],
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
@@ -1495,7 +1580,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "workspace:admin"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
@@ -1503,7 +1589,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "sessions:read"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -1572,14 +1659,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId",
     "request": [],
+    "query": [
+      "permanent"
+    ],
     "response": []
   },
   {
     "id": "DELETE /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "method": "DELETE",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
-    "request": [],
-    "response": []
+    "request": [
+      "ClearWorkspaceAllowanceRequest"
+    ],
+    "response": [],
+    "permission": "account:admin"
   },
   {
     "id": "deleteApiKey",
@@ -1595,7 +1688,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteAutomationTemplate",
@@ -1609,7 +1703,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/channels/:channelId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:create"
   },
   {
     "id": "deleteConnection",
@@ -1618,6 +1713,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "GoogleDriveDisconnectRequest",
       "PersonalGitHubDisconnectRequest"
+    ],
+    "query": [
+      "expectedVersion"
     ],
     "response": [
       "ConnectionMetadata",
@@ -1629,7 +1727,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "documents:manage"
   },
   {
     "id": "deleteEventSource",
@@ -1643,7 +1742,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "deleteOrganizationApiKey",
@@ -1673,8 +1773,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId",
     "request": [
-      "DeleteOrganizationProviderCustomModelRequest",
-      "OrganizationModelProviderKind"
+      "DeleteOrganizationProviderCustomModelRequest"
     ],
     "response": [
       "OrganizationProviderCustomModel"
@@ -1710,14 +1809,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionQueueMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "deleteRepositoryBinding",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/pr-review/repositories/:bindingId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteRig",
@@ -1731,20 +1832,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "deleteSession",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "deleteSiteDataCollection",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
     "request": [],
+    "query": [
+      "confirm"
+    ],
     "response": []
   },
   {
@@ -1782,7 +1888,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceClaudeCustomModel",
@@ -1807,14 +1914,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceGatewayCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceModelAccessPolicy",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/model-policy",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceOpenRouterCustomModel",
@@ -1823,7 +1932,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceOpenRouterCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceOpperCustomModel",
@@ -1832,7 +1942,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceOpperCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceWebhook",
@@ -1851,6 +1962,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DeviceEnrollmentDenyResponse"
     ],
+    "permission": "enrollments:read",
     "secretFields": [
       "request.userCode"
     ]
@@ -1864,7 +1976,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SlackUserLinkAccessRequest"
-    ]
+    ],
+    "permission": "members:manage"
   },
   {
     "id": "designateCodexAppsAccount",
@@ -1889,9 +2002,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CompanyProfileDiffRequest"
     ],
+    "query": [
+      "fromRevisionId",
+      "toRevisionId"
+    ],
     "response": [
       "CompanyProfileDiffResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "disableCapability",
@@ -1900,7 +2018,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "CapabilityInstallation"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "disableOrganizationRecoveryPolicy",
@@ -1926,6 +2045,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/automations/triggers/:triggerId",
     "request": [],
+    "query": [
+      "expectedRevision"
+    ],
     "response": []
   },
   {
@@ -1949,7 +2071,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/codex/accounts/:accountId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "disconnectOrganizationClaudeSubscriptionAccount",
@@ -1972,7 +2095,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SocialConnection"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "disconnectSuperGrokAccount",
@@ -1986,23 +2110,39 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry",
     "request": [],
+    "query": [
+      "limit",
+      "query"
+    ],
     "response": [
       "DiscoverMcpCapabilitiesResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "discoverPlugins",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
     "request": [],
-    "response": []
+    "query": [
+      "id",
+      "offset",
+      "provider",
+      "query"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "downloadEditableArtifactMaterialization",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/materializations/:jobId/download",
     "request": [],
-    "response": []
+    "query": [
+      "replicaId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "duplicateWorkspaceArtifact",
@@ -2024,7 +2164,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionQueueMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "enableCapability",
@@ -2047,7 +2188,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "EnableMachineScreenControlResponse"
-    ]
+    ],
+    "permission": "enrollments:read"
   },
   {
     "id": "endBrowserSession",
@@ -2058,7 +2200,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "endComputerSession",
@@ -2069,7 +2212,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ComputerSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "endSessionRealtime",
@@ -2080,7 +2224,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRealtimeMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "ensureWorkspace",
@@ -2137,13 +2282,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "exportSiteData",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
     "request": [],
+    "query": [
+      "format"
+    ],
     "response": []
   },
   {
@@ -2153,16 +2302,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SiteSqlExportFormat"
     ],
+    "query": [
+      "cursor",
+      "format",
+      "maxBytes",
+      "table"
+    ],
     "response": []
   },
   {
     "id": "exportWorkspaceState",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/workspace-state/export",
-    "request": [],
+    "request": [
+      "WorkspaceStateQuery"
+    ],
+    "query": [
+      "attemptId"
+    ],
     "response": [
       "WorkspaceStateExportResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "finalizeTranscriptionRecording",
@@ -2292,6 +2453,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
     "request": [],
+    "query": [
+      "includeSettled"
+    ],
     "response": []
   },
   {
@@ -2320,7 +2484,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/source",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/company-brain/context-receipts",
@@ -2330,17 +2495,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/connections/:connectionId",
@@ -2351,7 +2521,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ListConnectionsResponse",
       "PersonalGitHubConnectionStatusResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/connections/:connectionId/provider-vaults",
@@ -2374,7 +2545,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "secrets:list"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/connections/1password/service-accounts",
@@ -2397,13 +2569,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "secrets:list"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/connections/accounts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/accounts",
     "request": [],
+    "query": [
+      "includeInactive"
+    ],
     "response": [
       "ConnectionMetadata",
       "ListConnectionsResponse"
@@ -2414,27 +2590,40 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
     "request": [],
-    "response": []
+    "query": [
+      "pageToken",
+      "parentId"
+    ],
+    "response": [],
+    "permission": "connections:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/enrollments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/enrollments",
     "request": [],
-    "response": []
+    "query": [
+      "status"
+    ],
+    "response": [],
+    "permission": "enrollments:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/github/installations/:installationId/configure",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
     "request": [],
+    "query": [
+      "state"
+    ],
     "response": []
   },
   {
@@ -2442,6 +2631,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/github/installations/select",
     "request": [],
+    "query": [
+      "installation_id",
+      "state"
+    ],
     "response": []
   },
   {
@@ -2459,7 +2652,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InsightsCallsResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/instruction-policies/:revisionId",
@@ -2472,7 +2666,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "WorkspaceInstructionPolicyDiffResponse",
       "WorkspaceInstructionPolicyOnboardingProposalListResponse",
       "WorkspaceInstructionPolicyRevision"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/instruction-policies/diff",
@@ -2481,22 +2676,46 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "WorkspaceInstructionPolicyDiffRequest"
     ],
+    "query": [
+      "fromRevisionId",
+      "toRevisionId"
+    ],
     "response": [
       "WorkspaceInstructionPolicyDiffResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/integrations/teams/bot",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries",
-    "request": [],
+    "request": [
+      "KnowledgeEntryListRequest"
+    ],
+    "query": [
+      "createdSince",
+      "cursor",
+      "fileId",
+      "groupId",
+      "includeEvidence",
+      "kind",
+      "limit",
+      "mode",
+      "query",
+      "reviewBatchId",
+      "rootOnly",
+      "scope",
+      "sessionId",
+      "view"
+    ],
     "response": []
   },
   {
@@ -2504,7 +2723,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/models",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/pr-review/github/connect",
@@ -2525,6 +2745,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/pr-review/github/installations/select",
     "request": [],
+    "query": [
+      "installation_id"
+    ],
     "response": []
   },
   {
@@ -2532,7 +2755,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
     "request": [],
-    "response": []
+    "query": [
+      "versionId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/link",
@@ -2546,6 +2773,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
     "request": [],
+    "query": [
+      "status"
+    ],
     "response": []
   },
   {
@@ -2576,14 +2806,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/social/posts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/social/posts",
     "request": [],
-    "response": []
+    "query": [
+      "connectionId",
+      "connectionIds",
+      "limit",
+      "since"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/tools/catalog",
@@ -2596,6 +2834,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -2611,6 +2850,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -2636,7 +2876,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "secrets:list"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vaults",
@@ -2691,6 +2932,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "ListVaultItemsQuery"
     ],
+    "query": [
+      "cursor",
+      "includeArchived",
+      "limit",
+      "q",
+      "type"
+    ],
     "response": [],
     "secretFields": [
       "route: a vault item's fields hold its secret values, and these routes have no contract schema"
@@ -2744,14 +2992,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "method": "GET",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
@@ -2774,7 +3024,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage/me",
@@ -2810,7 +3061,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AttachedBrowserDevice"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getAuthRun",
@@ -2826,6 +3078,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing",
     "request": [],
+    "query": [
+      "accountId"
+    ],
     "response": []
   },
   {
@@ -2833,6 +3088,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/checkout/:checkoutSessionId",
     "request": [],
+    "query": [
+      "accountId"
+    ],
     "response": [
       "BillingCheckoutStatus"
     ]
@@ -2842,6 +3100,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/entitlements",
     "request": [],
+    "query": [
+      "accountId"
+    ],
     "response": []
   },
   {
@@ -2849,6 +3110,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/subscription/plans",
     "request": [],
+    "query": [
+      "accountId"
+    ],
     "response": [
       "BillingSubscriptionCatalog"
     ]
@@ -2858,6 +3122,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/usage",
     "request": [],
+    "query": [
+      "accountId",
+      "workspaceId"
+    ],
     "response": []
   },
   {
@@ -2885,7 +3153,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "BrowserIdentity"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getBrowserRecording",
@@ -2903,7 +3172,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "BrowserSession"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getBrowserSessionWorkingCopyAdoption",
@@ -2937,6 +3207,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/config/client",
     "request": [],
+    "query": [
+      "workspaceId"
+    ],
     "response": [
       "ClientConfig"
     ]
@@ -2948,7 +3221,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "CompanyBrainOkfPackage"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getCompanyProfileAgentPolicy",
@@ -2957,7 +3231,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "CompanyProfileAgentPolicy"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getCompanyProfileRevision",
@@ -2966,7 +3241,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "CompanyProfileRevision"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getComposerDraft",
@@ -2975,7 +3251,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ComposerDraft"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getComputerActionReceipt",
@@ -3003,7 +3280,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ComputerSession"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getConnectAttempt",
@@ -3041,16 +3319,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "getConnectorToolPermissions",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions",
     "request": [],
+    "query": [
+      "connectionId",
+      "instanceKey"
+    ],
     "response": [
       "ConnectorToolPermissionsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getDocumentBase",
@@ -3059,16 +3343,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DocumentBase"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "getDocumentDefaultCollectionBackfillAudit",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/document-default-collection-backfills/:runId",
-    "request": [],
+    "request": [
+      "GetDocumentDefaultCollectionBackfillAuditQuery"
+    ],
+    "query": [
+      "limit",
+      "operationCursor",
+      "receiptCursor"
+    ],
     "response": [
       "DocumentDefaultCollectionBackfillAudit"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "getDocumentOriginalFile",
@@ -3077,21 +3370,30 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "FileAsset"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "getEditableArtifact",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId",
     "request": [],
-    "response": []
+    "query": [
+      "replicaId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "getEditableArtifactMaterialization",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/materializations/:jobId",
     "request": [],
-    "response": []
+    "query": [
+      "replicaId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "getEventSource",
@@ -3110,7 +3412,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "FileAsset"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "getGitHubActionPolicies",
@@ -3119,25 +3422,34 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GitHubActionPoliciesResponse"
-    ]
+    ],
+    "permission": "github:use"
   },
   {
     "id": "getGitHubApp",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/github/app",
     "request": [],
+    "query": [
+      "returnPath"
+    ],
     "response": [
       "GitHubAppInfo"
-    ]
+    ],
+    "permission": "github:use"
   },
   {
     "id": "getGoal",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal",
     "request": [],
+    "query": [
+      "absent"
+    ],
     "response": [
       "SessionGoal"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getHumanInputRequest",
@@ -3146,7 +3458,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionHumanInputRequest"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getIdentityLink",
@@ -3172,7 +3485,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/plugins/details",
     "request": [],
-    "response": []
+    "query": [
+      "pluginKey"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "getInteractionIntervention",
@@ -3188,6 +3505,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId",
     "request": [],
+    "query": [
+      "revisionId",
+      "view"
+    ],
     "response": [
       "KnowledgeEntryRecord"
     ]
@@ -3199,7 +3520,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PrReviewManagedGitHubSetup"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getMcpConnectionRequest",
@@ -3215,7 +3537,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "MemberNotificationsSetting"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getMemorySlackPublicationConfiguration",
@@ -3224,7 +3547,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "MemorySlackPublicationConfigurationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getModelAccountPreferences",
@@ -3240,6 +3564,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/organizations/:organizationId/model-account-settings/overview",
     "request": [],
+    "query": [
+      "after",
+      "limit"
+    ],
     "response": [
       "ModelAccountSettingsOverview"
     ]
@@ -3271,7 +3599,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "NewSessionDraft"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getOpenGeniSlackBotOrganizationAccess",
@@ -3280,7 +3609,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OpenGeniSlackBotOrganizationAccess"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "getOrganizationAdministrationOverview",
@@ -3395,6 +3725,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "OrganizationUsagePeriod"
     ],
+    "query": [
+      "accountId"
+    ],
     "response": [
       "OrganizationModelUsage"
     ]
@@ -3459,7 +3792,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/usage-summary",
     "request": [
-      "OrganizationUsagePeriod"
+      "OrganizationUsageQuery"
+    ],
+    "query": [
+      "accountId",
+      "period"
     ],
     "response": [
       "OrganizationUsageSummary"
@@ -3470,7 +3807,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/billing/usage-workspaces",
     "request": [
-      "OrganizationUsagePeriod"
+      "OrganizationUsageWorkspacePageQuery"
+    ],
+    "query": [
+      "accountId",
+      "afterWorkspaceId",
+      "period",
+      "until"
     ],
     "response": [
       "OrganizationUsageWorkspacePage"
@@ -3493,16 +3836,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PreferenceRegistryDetailResponse",
       "PreferenceRegistrySnapshot"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getPreferenceRegistryFullContent",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/full-content",
-    "request": [],
+    "request": [
+      "PreferenceRegistryFullContentRequest"
+    ],
     "response": [
       "PreferenceRegistryFullContent"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getPreferenceRegistrySummary",
@@ -3511,7 +3858,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PreferenceRegistrySnapshot"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getQueue",
@@ -3520,21 +3868,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionQueueSnapshot"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getRetainedArtifact",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "files:read"
   },
   {
     "id": "getRetainedArtifactContent",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId/content",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "files:read"
   },
   {
     "id": "getRig",
@@ -3543,7 +3894,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Rig"
-    ]
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "getRigChange",
@@ -3552,7 +3904,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "RigChange"
-    ]
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "getSandboxRecovery",
@@ -3572,7 +3925,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "PrivateScheduledTaskSummary",
       "ScheduledTask",
       "ScheduledTaskAccessAttention"
-    ]
+    ],
+    "permission": "scheduled_tasks:run"
   },
   {
     "id": "getSession",
@@ -3581,7 +3935,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionAdminAccess",
@@ -3599,7 +3954,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionLineage",
@@ -3608,23 +3964,33 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionLineageResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionMcpToolPermissions",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/session-mcp-tool-permissions",
     "request": [],
+    "query": [
+      "serverId",
+      "url"
+    ],
     "response": [
       "SessionMcpToolPermissionsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getSessionMessagePreview",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
     "request": [],
-    "response": []
+    "query": [
+      "sequence"
+    ],
+    "response": [],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionModelAccount",
@@ -3633,7 +3999,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionModelAccountChoiceResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionModelContext",
@@ -3642,13 +4009,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionModelContextResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getSessionProxyArtifactAssociation",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifact-associations/:artifactId",
     "request": [],
+    "query": [
+      "kind"
+    ],
     "response": []
   },
   {
@@ -3665,14 +4036,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "files:read"
   },
   {
     "id": "getSessionRetainedArtifactContent",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId/content",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "files:read"
   },
   {
     "id": "getSessionTenancyCreateCapabilities",
@@ -3681,7 +4054,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionTenancyCreateCapabilities"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "getSessionUsageLimit",
@@ -3722,7 +4096,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SiteLimitProfile"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getSitePlatformUsage",
@@ -3731,7 +4106,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SitePlatformUsage"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getSiteSql",
@@ -3757,6 +4133,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SessionCapabilities"
     ],
+    "permission": "sessions:read",
     "secretFields": [
       "response.DesktopStream.token",
       "response.Terminal.token"
@@ -3776,9 +4153,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId/details",
     "request": [],
+    "query": [
+      "actionDigest",
+      "offset",
+      "path"
+    ],
     "response": [
       "ToolReviewDetailsPage"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getTranscriptionRecording",
@@ -3798,7 +4181,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceUsageResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getVideoGenerationOperation",
@@ -3807,7 +4191,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "VideoGenerationOperationSummary"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getVideoGenerationSettings",
@@ -3816,7 +4201,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceVideoGenerationSettings"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspace",
@@ -3840,7 +4226,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary",
       "Workspace"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceAllowance",
@@ -3849,7 +4236,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceAllowance"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceAllowanceState",
@@ -3858,7 +4246,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceAllowanceState"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceArtifact",
@@ -3867,16 +4256,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceArtifactDetailResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "getWorkspaceArtifactContent",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/content",
     "request": [],
+    "query": [
+      "versionId"
+    ],
     "response": [
       "WorkspaceArtifactContentResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "getWorkspaceArtifactCurrent",
@@ -3885,14 +4279,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceArtifactCurrentResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "getWorkspaceArtifactHtml",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/html",
     "request": [],
-    "response": []
+    "query": [
+      "versionId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "getWorkspaceCapture",
@@ -3901,16 +4300,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GetWorkspaceCaptureResponse"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "getWorkspaceCaptureFile",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file",
     "request": [],
+    "query": [
+      "path",
+      "revision"
+    ],
     "response": [
       "GetWorkspaceCaptureFileResponse"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "getWorkspaceClaudeSubscriptionUsage",
@@ -3946,9 +4351,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "InsightsRange"
     ],
+    "query": [
+      "model",
+      "provider",
+      "range",
+      "rootSessionId",
+      "sessionId"
+    ],
     "response": [
       "WorkspaceInsightsResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceInsightsSiteUsage",
@@ -3959,7 +4372,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InsightsSiteUsageResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceInsightsUsage",
@@ -3968,23 +4382,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "InsightsUsageResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "getWorkspaceLearningHistory",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/learning",
-    "request": [],
+    "request": [
+      "WorkspaceLearningPolicyHistoryQuery"
+    ],
+    "query": [
+      "limit"
+    ],
     "response": [
       "WorkspaceLearningHistoryResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceModelAccessPolicy",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/model-policy",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceModelAccountSettings",
@@ -3993,7 +4415,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceModelAccountSettings"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceModelCatalog",
@@ -4002,7 +4425,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceModelCatalogResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceRealtimeModelCatalog",
@@ -4011,16 +4435,23 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceRealtimeModelCatalogResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceState",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/workspace-state",
-    "request": [],
+    "request": [
+      "WorkspaceStateQuery"
+    ],
+    "query": [
+      "attemptId"
+    ],
     "response": [
       "WorkspaceStateResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceSubscriptionUsagePools",
@@ -4029,7 +4460,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SubscriptionUsagePoolsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "getWorkspaceWebhook",
@@ -4056,6 +4488,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/github/connect",
     "request": [],
+    "query": [
+      "state"
+    ],
     "response": []
   },
   {
@@ -4122,7 +4557,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceCreditGrant"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "heartbeatBrowserSession",
@@ -4151,7 +4587,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRealtimeMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "heartbeatViewer",
@@ -4180,7 +4617,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/imports",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "importExternalWorkspaceArchivedSession",
@@ -4217,7 +4655,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInstructionPolicyRevision"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "importSiteData",
@@ -4251,7 +4690,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "inspectSiteSql",
@@ -4269,7 +4709,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InstalledApiIntegration"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "installFikenConnection",
@@ -4282,6 +4723,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ConnectionResponse"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.apiToken"
     ]
@@ -4295,7 +4737,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InstalledSkill"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "installPlugin",
@@ -4306,7 +4749,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InstalledPlugin"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "installSkill",
@@ -4317,7 +4761,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InstalledSkill"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "issueUserResourceGrant",
@@ -4337,13 +4782,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "listAgentInstructionReviews",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-learning/instructions/reviews",
     "request": [],
+    "query": [
+      "cursor"
+    ],
     "response": [
       "AgentInstructionReviewListResponse"
     ]
@@ -4353,6 +4802,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-learning/overrides",
     "request": [],
+    "query": [
+      "scope"
+    ],
     "response": [
       "AgentLearningOverrideRecord"
     ]
@@ -4367,7 +4819,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentTopologyPageResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listApiIntegrations",
@@ -4376,7 +4829,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListApiIntegrationsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listApiKeys",
@@ -4391,7 +4845,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "listArtifactCatalog",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog",
-    "request": [],
+    "request": [
+      "ArtifactCatalogListQuery"
+    ],
+    "query": [
+      "cursor",
+      "includeSubSessions",
+      "kind",
+      "limit",
+      "q",
+      "sort",
+      "sourceSessionId",
+      "status"
+    ],
     "response": [
       "ArtifactCatalogListResponse"
     ]
@@ -4401,15 +4867,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/attached-browsers",
     "request": [],
+    "query": [
+      "includeDisconnected"
+    ],
     "response": [
       "AttachedBrowserDeviceListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listAuthRuns",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/auth-runs",
     "request": [],
+    "query": [
+      "includeSettled"
+    ],
     "response": [
       "AuthRunListResponse"
     ]
@@ -4431,13 +4904,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AvailableOpenGeniSlackBots"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "listBrowserDiagnostics",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics",
     "request": [],
+    "query": [
+      "after",
+      "kinds",
+      "limit"
+    ],
     "response": [
       "BrowserDiagnosticBatch"
     ]
@@ -4456,9 +4935,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-identities",
     "request": [],
+    "query": [
+      "includeArchived"
+    ],
     "response": [
       "BrowserIdentityListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listBrowserRevisions",
@@ -4467,7 +4950,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "BrowserRevisionListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listBrowserSessions",
@@ -4476,7 +4960,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "BrowserSessionListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listBrowserTargets",
@@ -4494,7 +4979,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "CapabilityCatalogResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listChannels",
@@ -4503,7 +4989,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Channel"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listClaudeSubscriptionAccounts",
@@ -4519,16 +5006,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codex/accounts",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "listCompanyProfile",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-profile",
-    "request": [],
+    "request": [
+      "CompanyProfileListQuery"
+    ],
+    "query": [
+      "afterRevision",
+      "limit"
+    ],
     "response": [
       "CompanyProfileListResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listComputerSessions",
@@ -4537,7 +5032,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ComputerSessionListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listComputerTargets",
@@ -4553,7 +5049,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/pr-review/registrations",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "listConnectAccounts",
@@ -4562,7 +5059,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ConnectAccount"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listConnections",
@@ -4581,16 +5079,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ConnectProvider"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listDocumentAuthorityReclassifications",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
-    "request": [],
+    "request": [
+      "ListDocumentAuthorityReclassificationsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": [
       "ListDocumentAuthorityReclassificationsResponse"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "listDocumentBases",
@@ -4599,16 +5105,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DocumentBase"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "listDocumentDefaultCollectionBackfillRuns",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/document-default-collection-backfills",
-    "request": [],
+    "request": [
+      "ListDocumentMigrationAuditQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": [
       "ListDocumentDefaultCollectionBackfillRunsResponse"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "listDocuments",
@@ -4617,7 +5131,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:search"
   },
   {
     "id": "listEventDeliveries",
@@ -4633,7 +5148,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
     "request": [],
-    "response": []
+    "query": [
+      "after",
+      "before",
+      "compact",
+      "direction",
+      "excludeClasses",
+      "excludeTypes",
+      "includeClasses",
+      "includeTypes",
+      "latest",
+      "limit",
+      "mode",
+      "payloadMode",
+      "presentedToolCalls",
+      "result",
+      "resultMode",
+      "toolOutputs"
+    ],
+    "response": [],
+    "permission": "sessions:read"
   },
   {
     "id": "listEventSources",
@@ -4660,9 +5194,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "FileListRequest"
     ],
+    "query": [
+      "cursor",
+      "limit",
+      "scope"
+    ],
     "response": [
       "FileListResponse"
-    ]
+    ],
+    "permission": "files:read"
   },
   {
     "id": "listGitHubRepositories",
@@ -4671,7 +5211,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GitHubRepositoriesResponse"
-    ]
+    ],
+    "permission": "github:use"
   },
   {
     "id": "listGitHubRepositoryBranches",
@@ -4680,16 +5221,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GitHubRepositoryBranchesResponse"
-    ]
+    ],
+    "permission": "github:use"
   },
   {
     "id": "listGoalRevisionPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/page",
-    "request": [],
+    "request": [
+      "ListSessionGoalRevisionsQuery"
+    ],
+    "query": [
+      "before",
+      "limit"
+    ],
     "response": [
       "ListSessionGoalRevisionsResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listGoalRevisions",
@@ -4698,7 +5247,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionGoalRevision"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listHumanInputRequests",
@@ -4707,19 +5257,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SessionHumanInputRequest"
     ],
+    "query": [
+      "status"
+    ],
     "response": [
       "SessionHumanInputRequest"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listIdentityLinks",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/identity-links",
     "request": [],
+    "query": [
+      "cursor"
+    ],
     "response": [
       "ExternalIdentityLinkPage"
     ],
-    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+    "permission": "workspace:read"
   },
   {
     "id": "listInboundEvents",
@@ -4735,6 +5293,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/inbox",
     "request": [],
+    "query": [
+      "workspaceId"
+    ],
     "response": [
       "ListInboxResponse"
     ]
@@ -4746,7 +5307,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInstalledPluginsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listInstalledSkills",
@@ -4755,7 +5317,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListInstalledSkillsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listIntegrationDefinitions",
@@ -4764,7 +5327,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListIntegrationDefinitionsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listIntegrationFacets",
@@ -4773,13 +5337,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "IntegrationInstanceFacetsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listInteractionInterventions",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions",
     "request": [],
+    "query": [
+      "includeSettled"
+    ],
     "response": [
       "InteractionInterventionListResponse"
     ]
@@ -4800,6 +5368,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/history",
     "request": [],
+    "query": [
+      "beforeRevision"
+    ],
     "response": [
       "KnowledgeEntryListResponse"
     ]
@@ -4811,6 +5382,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "KnowledgeReviewBatchListRequest"
     ],
+    "query": [
+      "cursor",
+      "limit",
+      "scope"
+    ],
     "response": [
       "KnowledgeReviewBatchListResponse"
     ]
@@ -4820,6 +5396,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/machines",
     "request": [],
+    "query": [
+      "sessionId"
+    ],
     "response": [
       "MachinesResponse"
     ]
@@ -4829,9 +5408,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/memory-slack-publications/channels",
     "request": [],
+    "query": [
+      "connectionId",
+      "cursor"
+    ],
     "response": [
       "SlackPublicationChannelListResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "listMemorySlackPublications",
@@ -4840,13 +5424,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "MemorySlackPublicationHistoryResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listNetworkRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/network-routes",
     "request": [],
+    "query": [
+      "includeArchived"
+    ],
     "response": [
       "NetworkRouteListResponse"
     ]
@@ -4863,18 +5451,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/channel-routes",
     "request": [],
+    "query": [
+      "connectionId"
+    ],
     "response": [
       "SlackChannelRouteListResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "listOpenGeniSlackReactionChannels",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/reaction-channels",
     "request": [],
+    "query": [
+      "connectionId",
+      "cursor"
+    ],
     "response": [
       "SlackReactionChannelListResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "listOrganizationAdministrationMembers",
@@ -4907,16 +5504,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "listOrganizationDocumentAuthorityReclassifications",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/document-authority-reclassifications",
-    "request": [],
+    "request": [
+      "ListDocumentMigrationAuditQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": [
       "ListOrganizationDocumentAuthorityReclassificationsResponse"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "listOrganizationInvitations",
     "method": "GET",
     "path": "/v1/organization-invitations",
-    "request": [],
+    "request": [
+      "ListOrganizationInvitationsPageQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": [
       "ListOrganizationInvitationsPageResponse"
     ],
@@ -4926,7 +5536,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "listOrganizationInvitationsForOrganization",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/invitations",
-    "request": [],
+    "request": [
+      "ListOrganizationInvitationsPageQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": [
       "ListOrganizationInvitationsPageResponse"
     ]
@@ -4972,7 +5588,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "listOrganizationSessions",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/sessions",
-    "request": [],
+    "request": [
+      "ListOrganizationSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "endUserId",
+      "endUserSource",
+      "limit",
+      "scopeSubjectId",
+      "status"
+    ],
     "response": [
       "OrganizationSessionListResponse"
     ]
@@ -4989,6 +5615,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/organizations/:organizationId/webhooks/:webhookId/deliveries",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "ListOrganizationWebhookDeliveriesResponse"
     ]
@@ -5007,9 +5636,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/feedback",
     "request": [],
+    "query": [
+      "includeTurns",
+      "limit",
+      "sessionId"
+    ],
     "response": [
       "Feedback"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listPendingConnectAttempts",
@@ -5040,7 +5675,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListPersonalGitHubRepositoriesResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "listPersonalGitHubRepositoryBranches",
@@ -5049,16 +5685,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GitHubRepositoryBranchesResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "listPreferenceRegistry",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/preferences",
-    "request": [],
+    "request": [
+      "PreferenceRegistryListQuery"
+    ],
+    "query": [
+      "limit",
+      "scope",
+      "status"
+    ],
     "response": [
       "PreferenceRegistryListResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listPrivateScheduledTaskSummaries",
@@ -5067,7 +5712,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PrivateScheduledTaskSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "listReadyEventSources",
@@ -5083,9 +5729,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/rigs/:rigId/changes",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "RigChange"
-    ]
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "listRigs",
@@ -5094,7 +5744,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Rig"
-    ]
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "listRigVersions",
@@ -5103,7 +5754,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "RigVersion"
-    ]
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "listRuns",
@@ -5112,7 +5764,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AutomationRun"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listScheduledTaskAccessAttention",
@@ -5121,34 +5774,50 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ScheduledTaskAccessAttention"
-    ]
+    ],
+    "permission": "scheduled_tasks:run"
   },
   {
     "id": "listScheduledTaskRuns",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/runs",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "ScheduledTaskRun"
-    ]
+    ],
+    "permission": "scheduled_tasks:run"
   },
   {
     "id": "listScheduledTasks",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks",
     "request": [],
+    "query": [
+      "limit",
+      "offset",
+      "sessionId"
+    ],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:run"
   },
   {
     "id": "listScheduledTaskSlackChannels",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/scheduled-task-slack-channels",
     "request": [],
+    "query": [
+      "connectionId",
+      "cursor"
+    ],
     "response": [
       "SlackReactionChannelListResponse"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "listSessionBackgroundCommands",
@@ -5157,21 +5826,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SessionBackgroundCommandListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listSessionCodexAccounts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:read"
   },
   {
     "id": "listSessionEditableArtifacts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts",
     "request": [],
-    "response": []
+    "query": [
+      "replicaId",
+      "sourceSessionId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "listSessionPage",
@@ -5180,17 +5856,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SessionScopeSubjectId"
     ],
+    "query": [
+      "cursor",
+      "projection",
+      "view"
+    ],
     "response": [
       "Session",
       "SessionListEntryResponse",
       "SessionListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listSiteAuthConnections",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections",
     "request": [],
+    "query": [
+      "includeArchived"
+    ],
     "response": [
       "SiteAuthConnectionListResponse"
     ]
@@ -5200,6 +5885,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
     "request": [],
+    "query": [
+      "cursor",
+      "limit"
+    ],
     "response": []
   },
   {
@@ -5217,7 +5906,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListSlackInstallationBindingsResponse",
       "SlackInstallationBinding"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "listSlackUserLinkAccessRequests",
@@ -5227,16 +5917,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ListSlackUserLinkAccessRequestsResponse",
       "SlackUserLinkAccessRequest"
-    ]
+    ],
+    "permission": "members:manage"
   },
   {
     "id": "listSocialConnections",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/social/connections",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "SocialConnection"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listSources",
@@ -5245,7 +5940,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AutomationSource"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listSuperGrokAccounts",
@@ -5270,34 +5966,58 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AutomationTrigger"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listTurns",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/turns",
     "request": [],
+    "query": [
+      "latestStarted",
+      "limit"
+    ],
     "response": [
       "SessionTurn"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listUserResourceAuthorities",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/user-resource-authorities",
-    "request": [],
+    "request": [
+      "ListUserResourceAuthoritiesQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "resourceKind",
+      "scope"
+    ],
     "response": [
       "ListUserResourceAuthoritiesResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceArtifacts",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts",
-    "request": [],
+    "request": [
+      "WorkspaceArtifactListQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "sourceSessionId",
+      "status"
+    ],
     "response": [
       "WorkspaceArtifactListResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "listWorkspaceClaudeCustomModels",
@@ -5313,7 +6033,12 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/control-events",
     "request": [],
-    "response": []
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceGatewayCustomModels",
@@ -5322,25 +6047,42 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceGatewayCustomModelsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceInstructionPolicies",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/instruction-policies",
-    "request": [],
+    "request": [
+      "WorkspaceInstructionPolicyListQuery"
+    ],
+    "query": [
+      "afterRevision",
+      "kind",
+      "limit",
+      "roleKey",
+      "scope"
+    ],
     "response": [
       "WorkspaceInstructionPolicyListResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceInstructionPolicyOnboardingProposals",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals",
-    "request": [],
+    "request": [
+      "WorkspaceInstructionPolicyOnboardingProposalListQuery"
+    ],
+    "query": [
+      "limit"
+    ],
     "response": [
       "WorkspaceInstructionPolicyOnboardingProposalListResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceMemberCandidates",
@@ -5369,7 +6111,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceOpenRouterCustomModelsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceOpperCustomModels",
@@ -5378,7 +6121,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceOpperCustomModelsResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaces",
@@ -5394,20 +6138,30 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sandbox-images",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceSkills",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/skills/content",
     "request": [],
-    "response": []
+    "query": [
+      "cursor",
+      "limit",
+      "sessionId"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "listWorkspaceWebhookDeliveries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/deliveries",
     "request": [],
+    "query": [
+      "limit"
+    ],
     "response": [
       "ListWorkspaceWebhookDeliveriesResponse"
     ]
@@ -5437,10 +6191,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series",
     "request": [],
+    "query": [
+      "window"
+    ],
     "response": [
       "MachineMetricsSeriesResponse",
       "MetricSample"
-    ]
+    ],
+    "permission": "enrollments:read"
   },
   {
     "id": "migrateSiteSql",
@@ -5461,6 +6219,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "MintEnrollTokenResponse"
     ],
+    "permission": "enrollments:read",
     "secretFields": [
       "response.token"
     ]
@@ -5470,7 +6229,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/live-ticket",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "moveDocument",
@@ -5481,7 +6241,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "moveQueueItem",
@@ -5492,7 +6253,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionQueueMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "negotiateCodexRealtimeWebrtc",
@@ -5503,18 +6265,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CodexRealtimeWebrtcResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "negotiateGatewayRealtime",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway",
     "request": [
-      "GatewayRealtimeConnectRequest"
+      "SessionRealtimeWebsocketRequest"
     ],
     "response": [
       "GatewayRealtimeConnectResponse"
     ],
+    "permission": "sessions:control",
     "secretFields": [
       "response.token"
     ]
@@ -5529,6 +6293,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SessionRealtimeWebsocketResponse"
     ],
+    "permission": "sessions:control",
     "secretFields": [
       "response.token"
     ]
@@ -5538,11 +6303,12 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok",
     "request": [
-      "GatewayRealtimeConnectRequest"
+      "SessionRealtimeWebsocketRequest"
     ],
     "response": [
       "GatewayRealtimeConnectResponse"
     ],
+    "permission": "sessions:control",
     "secretFields": [
       "response.token"
     ]
@@ -5592,7 +6358,12 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream",
     "request": [],
-    "response": []
+    "query": [
+      "after",
+      "transport"
+    ],
+    "response": [],
+    "permission": "sessions:read"
   },
   {
     "id": "openExternalBrowserAuthFlow",
@@ -5614,20 +6385,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OpenMachinePrivacySettingsResponse"
-    ]
+    ],
+    "permission": "enrollments:read"
   },
   {
     "id": "openWorkspaceControlEventStream",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/control-events/stream",
     "request": [],
-    "response": []
+    "query": [
+      "after",
+      "transport"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "openWorkspaceInteractionRevisionStream",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
     "request": [],
+    "query": [
+      "transport"
+    ],
     "response": []
   },
   {
@@ -5635,7 +6415,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/live-events/stream",
     "request": [],
-    "response": []
+    "query": [
+      "transport"
+    ],
+    "response": [],
+    "permission": "sessions:read"
   },
   {
     "id": "organizationCodexAccountUsage",
@@ -5708,7 +6492,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SubscriptionAccountToggleRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/codex/source",
@@ -5717,7 +6502,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CodexSourceRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
@@ -5770,7 +6556,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PrivateScheduledTaskSummary"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "pauseScheduledTask",
@@ -5779,7 +6566,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "personalGitHubStatus",
@@ -5788,14 +6576,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PersonalGitHubConnectionStatusResponse"
-    ]
+    ],
+    "permission": "connections:read"
   },
   {
     "id": "pinEditableArtifactVersion",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/versions",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "pinSessionCodexAccount",
@@ -5804,7 +6594,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SessionCodexAccountPinRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
@@ -5853,13 +6644,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/chat/completions",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:create"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/codemode/calls",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codemode/calls",
-    "request": [],
+    "request": [
+      "CodemodeCallRequest"
+    ],
     "response": []
   },
   {
@@ -5925,6 +6719,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.token"
     ]
@@ -5933,29 +6728,36 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/connections/atlassian/install",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
-    "request": [],
-    "response": []
+    "request": [
+      "AtlassianOAuthStartRequest"
+    ],
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/install",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/install",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
     "request": [],
-    "response": []
+    "response": [],
+    "retired": "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
+    "permission": "documents:search"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/github/installations",
@@ -5976,22 +6778,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
-    "request": [],
-    "response": []
+    "request": [
+      "MutateIntegrationFacetRequest"
+    ],
+    "response": [],
+    "permission": "capabilities:manage"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
-    "request": [],
-    "response": []
+    "request": [
+      "MutateIntegrationFacetRequest"
+    ],
+    "response": [],
+    "permission": "capabilities:manage"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:create"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link",
@@ -5999,41 +6808,49 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "sessions:create"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/knowledge/search",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/search",
     "request": [],
-    "response": []
+    "response": [],
+    "retired": "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
+    "permission": "documents:search"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions/:revisionId/activate",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions/:revisionId/activate",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/rollback",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/rollback",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
-    "request": [],
+    "request": [
+      "SiteDataGetRequest"
+    ],
     "response": []
   },
   {
@@ -6041,6 +6858,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
     "request": [],
+    "query": [
+      "name",
+      "scope"
+    ],
     "response": []
   },
   {
@@ -6073,13 +6894,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/uploads",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/rigs/:rigId/versions",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/rigs/:rigId/versions",
-    "request": [],
+    "request": [
+      "RigDefinitionEditPayload"
+    ],
     "response": []
   },
   {
@@ -6109,33 +6933,43 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "stream:view"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/social/connections",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/social/connections",
-    "request": [],
-    "response": []
+    "request": [
+      "CreateSocialConnectionRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/social/posts",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/social/posts",
-    "request": [],
-    "response": []
+    "request": [
+      "CreateSocialPostRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/approvals",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/approvals",
-    "request": [],
+    "request": [
+      "ToolGatewayApprovalRequest"
+    ],
     "response": [
       "ToolGatewayApprovalResponse",
       "ToolGatewayCallResponse",
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -6151,6 +6985,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewayTargetApprovalResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -6166,6 +7001,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewayTargetApprovalResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -6181,6 +7017,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewayTargetApprovalResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -6196,6 +7033,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewayTargetApprovalResponse"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.approvalToken"
     ]
@@ -6378,8 +7216,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/grants",
     "method": "POST",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/grants",
-    "request": [],
-    "response": []
+    "request": [
+      "GrantWorkspaceCreditsRequest"
+    ],
+    "response": [],
+    "permission": "account:admin"
   },
   {
     "id": "prepareKnowledgeFile",
@@ -6424,7 +7265,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ApiIntegrationPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "previewApiIntegrationUninstall",
@@ -6433,7 +7275,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiIntegrationUninstallPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "previewMachineAudience",
@@ -6455,7 +7298,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PluginPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "previewPluginUninstall",
@@ -6464,7 +7308,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "PluginUninstallPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "previewSessionVisibilityChange",
@@ -6472,6 +7317,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview",
     "request": [
       "SessionVisibility"
+    ],
+    "query": [
+      "visibility"
     ],
     "response": [
       "SessionVisibilityChangePreview"
@@ -6486,7 +7334,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SkillImportPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "previewSkillUninstall",
@@ -6495,7 +7344,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SkillUninstallPreview"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "processNextTranscriptionRecordingSegment",
@@ -6535,7 +7385,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PublishBrowserRevisionResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "publishSandboxFileArtifact",
@@ -6546,7 +7397,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SandboxFileArtifactReceipt"
-    ]
+    ],
+    "permission": "files:upload"
   },
   {
     "id": "publishWorkspaceArtifactVersion",
@@ -6601,6 +7453,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.token"
     ]
@@ -6611,14 +7464,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
-    "request": [],
-    "response": []
+    "request": [
+      "SetMemberAllowanceRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -6641,13 +7498,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/vault-policy",
-    "request": [],
+    "request": [
+      "SetSessionVaultPolicyRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -6670,8 +7530,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/workspaces/:workspaceId/slack-task-policy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
-    "request": [],
-    "response": []
+    "request": [
+      "UpdateSlackTaskPolicyRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/credentials",
@@ -6718,7 +7581,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
-    "request": [],
+    "request": [
+      "SetWorkspaceAllowanceRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
       "DisconnectVaultProviderResponse",
@@ -6735,21 +7600,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultProviderConnectionSummary",
       "VaultSummary"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/:subjectId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/:subjectId/allowance",
-    "request": [],
-    "response": []
+    "request": [
+      "SetMemberAllowanceRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/external/:memberSource/:memberExternalId/allowance",
-    "request": [],
-    "response": []
+    "request": [
+      "SetMemberAllowanceRequest"
+    ],
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "putOrganizationCredentialProvider",
@@ -6842,7 +7714,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/skills/content/:skillId",
     "request": [],
-    "response": []
+    "query": [
+      "revisionId"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "reclassifyDocumentAuthority",
@@ -6853,7 +7729,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "DocumentAuthorityReclassification"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "reconnectPersonalGitHub",
@@ -6864,7 +7741,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PersonalGitHubOAuthStartResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "recordSiteOpened",
@@ -6873,7 +7751,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "SiteOpenedResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "recoverSandbox",
@@ -6918,7 +7797,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/codex/usage/refresh",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "refreshOrganizationClaudeSubscriptionAccountUsage",
@@ -6947,7 +7827,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "refreshWorkspaceClaudeSubscriptionUsage",
@@ -6965,7 +7846,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "Document"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "rejectGoalRevision",
@@ -6974,7 +7856,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "RejectSessionGoalRevisionRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "rejectPreferenceRegistryProposal",
@@ -6985,16 +7868,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "rejectWorkspaceSkill",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/reject",
-    "request": [],
+    "request": [
+      "ApplyWorkspaceSkillRevisionRequest"
+    ],
     "response": [
       "SkillWriteReceipt"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "removeEnrollment",
@@ -7003,7 +7890,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "RemoveEnrollmentRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "enrollments:read"
   },
   {
     "id": "removeIntegrationFacet",
@@ -7014,7 +7902,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "IntegrationFacetRemovalResult"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "removeWorkspaceMember",
@@ -7027,10 +7916,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "removeWorkspaceSkill",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/remove",
-    "request": [],
+    "request": [
+      "RemoveWorkspaceSkillRequest"
+    ],
     "response": [
       "SkillWriteReceipt"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "renameClaudeSubscriptionAccount",
@@ -7050,7 +7942,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SubscriptionAccountRenameRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "renameOrganizationClaudeSubscriptionAccount",
@@ -7088,7 +7981,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Channel"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "replacePersonalGitHubRepositorySelections",
@@ -7099,7 +7993,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PersonalGitHubRepositorySelectionState"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "replayEventDelivery",
@@ -7136,14 +8031,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "resetSiteDataCollection",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/reset",
-    "request": [],
+    "request": [
+      "SiteDataConfirmRequest"
+    ],
     "response": []
   },
   {
     "id": "resetSiteSql",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/reset",
-    "request": [],
+    "request": [
+      "SiteSqlResetRequest"
+    ],
     "response": []
   },
   {
@@ -7172,10 +8071,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "restoreWorkspaceSkill",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/restore",
-    "request": [],
+    "request": [
+      "ApplyWorkspaceSkillRevisionRequest"
+    ],
     "response": [
       "SkillWriteReceipt"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "resumeBrowserSession",
@@ -7186,7 +8088,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "resumeScheduledTask",
@@ -7195,7 +8098,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "retryOrganizationUserSetupDelivery",
@@ -7217,7 +8121,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRetryResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "revertBrowserSessionWorkingCopyAdoption",
@@ -7277,7 +8182,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
     "request": [
-      "OrganizationModelProviderKind",
       "RevokeOrganizationModelProviderConnectionRequest"
     ],
     "response": []
@@ -7287,7 +8191,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId/revoke",
     "request": [
-      "CancelExternalWorkspaceMemberGrantRequest",
       "RevokeOrganizationWorkspaceMemberRequest"
     ],
     "response": [
@@ -7316,6 +8219,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/user-resource-authorities/grants/:grantId",
     "request": [],
+    "query": [
+      "scope"
+    ],
     "response": []
   },
   {
@@ -7327,7 +8233,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CompanyProfileMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "rollbackGoalRevision",
@@ -7338,7 +8245,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionGoal"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "rollbackWorkspaceArtifact",
@@ -7360,7 +8268,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "rotateEventSourceSecret",
@@ -7408,6 +8317,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "RotateSessionMcpCredentialsReceipt"
     ],
+    "permission": "sessions:control",
     "secretFields": [
       "request.updates[].headers"
     ]
@@ -7445,7 +8355,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "DocumentDefaultCollectionBackfill"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "runSiteSqlQuery",
@@ -7474,7 +8385,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ConnectionResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "saveBrowserDownload",
@@ -7485,7 +8397,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserDownloadSaveResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "saveBrowserRecording",
@@ -7497,7 +8410,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "BrowserRecordingSaveProgress",
       "BrowserRecordingSaveResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "saveComposerDraft",
@@ -7508,7 +8422,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ComposerDraft"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "saveGoogleDriveFacetSource",
@@ -7519,7 +8434,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "IntegrationFacetMutationResult"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "saveKnowledgeEntry",
@@ -7541,23 +8457,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "NewSessionDraft"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "saveWorkspaceSkill",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/skills/content/save",
-    "request": [],
+    "request": [
+      "SaveWorkspaceSkillRequest"
+    ],
     "response": [
       "SkillWriteReceipt"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "searchPublicSkills",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/skills/search",
     "request": [],
-    "response": []
+    "query": [
+      "q"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "searchSessionMessages",
@@ -7566,9 +8490,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SessionMessageSearchRequest"
     ],
+    "query": [
+      "archiveStatus",
+      "cursor",
+      "groupBy",
+      "limit",
+      "query",
+      "sessionId"
+    ],
     "response": [
       "SessionMessageSearchResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "selectBrowserTarget",
@@ -7583,9 +8516,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "sendEvent",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
-    "request": [],
+    "request": [
+      "ClientSessionEvent"
+    ],
     "response": [
       "SessionEvent"
+    ],
+    "permission": "sessions:control",
+    "secretFields": [
+      "request.payload.mcpCredentialUpdates[].headers"
     ]
   },
   {
@@ -7608,7 +8547,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ConnectionResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "setClaudeSubscriptionAccountAllocator",
@@ -7637,7 +8577,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SubscriptionAccountToggleRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "setCodexRotationSettings",
@@ -7646,7 +8587,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "SubscriptionRotationSettingsRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "setMemberAllowance",
@@ -7657,7 +8599,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemberAllowance"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",
@@ -7668,7 +8611,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OpenGeniSlackBotOrganizationAccess"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "setOrganizationClaudeSubscriptionAccountAllocator",
@@ -7717,7 +8661,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionInboxMute"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "setSessionModelAccount",
@@ -7728,7 +8673,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SetSessionModelAccountChoiceResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "setSessionUsageLimit",
@@ -7769,7 +8715,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceAllowance"
-    ]
+    ],
+    "permission": "account:admin"
   },
   {
     "id": "setWorkspaceArtifactStatus",
@@ -7791,16 +8738,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Workspace"
-    ]
+    ],
+    "permission": "rigs:manage"
   },
   {
     "id": "setWorkspaceInferenceState",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/inference-control",
-    "request": [],
+    "request": [
+      "WorkspaceInferenceControlRequest"
+    ],
     "response": [
       "WorkspaceInferenceControlResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "setWorkspacePauseTimer",
@@ -7809,7 +8760,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "WorkspacePauseTimerRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "sitePublicationPath",
@@ -7827,7 +8779,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OAuthStartResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "startBrowserAuthRun",
@@ -7844,7 +8797,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "startBrowserRecording",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
-    "request": [],
+    "request": [
+      "BrowserRecordingStartRequest"
+    ],
     "response": [
       "BrowserRecordingSummary"
     ]
@@ -7859,6 +8814,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OAuthStartResponse"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.oauthClient.clientSecret"
     ]
@@ -7872,7 +8828,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "FikenOAuthStartResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "startOpenGeniSlackBotInstall",
@@ -7883,7 +8840,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OpenGeniSlackBotInstallStart"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "startOrganizationClaudeSubscriptionOAuth",
@@ -7917,7 +8875,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PersonalGitHubOAuthStartResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "startSocialOAuth",
@@ -7945,8 +8904,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "steerMessage",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/steer",
-    "request": [],
-    "response": []
+    "request": [
+      "SteerSessionMessageRequest"
+    ],
+    "response": [],
+    "permission": "sessions:control",
+    "secretFields": [
+      "request.mcpCredentialUpdates[].headers"
+    ]
   },
   {
     "id": "steerQueueItem",
@@ -7957,7 +8922,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionQueueMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "submitComposerDraft",
@@ -7969,6 +8935,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SubmitComposerDraftResponse"
     ],
+    "permission": "sessions:control",
     "secretFields": [
       "request.mcpCredentialUpdates[].headers"
     ]
@@ -8001,7 +8968,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/supergrok/status",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "supersedePreferenceRegistry",
@@ -8012,7 +8980,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "suspendBrowserSession",
@@ -8023,7 +8992,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserSessionMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "swapActiveSandbox",
@@ -8034,7 +9004,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SwapActiveSandboxResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "syncGitHubRepositories",
@@ -8043,7 +9014,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "GitHubRepositoriesResponse"
-    ]
+    ],
+    "permission": "github:use"
   },
   {
     "id": "syncSessionRealtimeLedger",
@@ -8054,7 +9026,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SyncSessionRealtimeLedgerResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "terminalExec",
@@ -8130,7 +9103,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "TranscribeAudioResponse"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "transitionGoogleDriveLifecycle",
@@ -8142,7 +9116,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ConnectionMetadata",
       "ConnectionResponse"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "triggerManually",
@@ -8159,16 +9134,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "triggerScheduledTask",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger",
-    "request": [],
+    "request": [
+      "TriggerScheduledTaskRequest"
+    ],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:run"
   },
   {
     "id": "undoGovernedLearningActivation",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/activations/:activationReceiptId/undo",
-    "request": [],
+    "request": [
+      "UndoGovernedLearningActivationHttpRequest"
+    ],
     "response": [
       "GovernedLearningActivationUndoReceipt"
     ]
@@ -8182,7 +9162,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UninstallApiIntegrationResult"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "uninstallPlugin",
@@ -8193,7 +9174,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UninstallPluginResult"
-    ]
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "uninstallSkill",
@@ -8204,14 +9186,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UninstallSkillResult"
-    ]
+    ],
+    "permission": "documents:manage"
   },
   {
     "id": "unlinkGitHubInstallation",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/github/installations/:installationId",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "github:manage"
   },
   {
     "id": "updateAppRegistration",
@@ -8223,6 +9207,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PrReviewAppRegistration"
     ],
+    "permission": "workspace:admin",
     "secretFields": [
       "request.accessToken",
       "request.privateKey",
@@ -8238,7 +9223,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ArtifactPinResponse"
-    ]
+    ],
+    "permission": "artifacts:publish"
   },
   {
     "id": "updateAutomationTemplate",
@@ -8261,7 +9247,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserIdentityMutationResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateChannel",
@@ -8272,7 +9259,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Channel"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "updateCompanyProfile",
@@ -8283,7 +9271,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CompanyProfileMutationResponse"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateCompanyProfileAgentPolicy",
@@ -8294,7 +9283,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CompanyProfileAgentPolicy"
-    ]
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateConnection",
@@ -8307,6 +9297,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ConnectionResponse"
     ],
+    "permission": "connections:write",
     "secretFields": [
       "request.credential"
     ]
@@ -8318,7 +9309,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpdateConnectorToolPermissionsRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "capabilities:manage"
   },
   {
     "id": "updateEventSource",
@@ -8365,7 +9357,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UpdateFileVisibilityResponse"
-    ]
+    ],
+    "permission": "files:upload"
   },
   {
     "id": "updateGitHubActionPolicy",
@@ -8387,14 +9380,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionGoal"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateInboxItem",
     "method": "PATCH",
     "path": "/v1/inbox/items/:itemId",
     "request": [
-      "InboxItem"
+      "UpdateInboxItemRequest"
+    ],
+    "query": [
+      "workspaceId"
     ],
     "response": []
   },
@@ -8416,7 +9413,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "UpdateMachineAgentResponse"
-    ]
+    ],
+    "permission": "enrollments:read"
   },
   {
     "id": "updateMachineOperationPolicy",
@@ -8427,7 +9425,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MachineOperationPolicy"
-    ]
+    ],
+    "permission": "enrollments:read"
   },
   {
     "id": "updateMemberNotifications",
@@ -8438,7 +9437,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemberNotificationsSetting"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "updateMemorySlackPublicationConfiguration",
@@ -8449,7 +9449,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemorySlackPublicationConfiguration"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateModelAccountPreferences",
@@ -8480,7 +9481,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpdateSlackChannelRoutesRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateOrganizationAgentAdminAccess",
@@ -8654,7 +9656,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PrReviewRepositoryBinding"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateRig",
@@ -8676,7 +9679,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ScheduledTask"
-    ]
+    ],
+    "permission": "scheduled_tasks:manage"
   },
   {
     "id": "updateSession",
@@ -8687,7 +9691,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionAgent",
@@ -8698,7 +9703,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionArchive",
@@ -8709,7 +9715,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "updateSessionAttention",
@@ -8720,7 +9727,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "updateSessionChannel",
@@ -8731,7 +9739,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionMcpApprovalPolicy",
@@ -8742,7 +9751,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UpdateSessionMcpApprovalPolicyResponse"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionMcpToolPermissions",
@@ -8751,7 +9761,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpdateSessionMcpToolPermissionsRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "capabilities:manage"
   },
   {
     "id": "updateSessionPin",
@@ -8762,7 +9773,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "updateSessionRetention",
@@ -8773,7 +9785,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionSkills",
@@ -8784,7 +9797,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionToolPolicy",
@@ -8795,7 +9809,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionVisibility",
@@ -8839,7 +9854,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SiteSidebarStateResponse"
-    ]
+    ],
+    "permission": "artifacts:read"
   },
   {
     "id": "updateSiteSqlSettings",
@@ -8884,7 +9900,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "VideoGenerationPolicy"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspace",
@@ -8910,7 +9927,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary",
       "Workspace"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceArtifactVisibility",
@@ -8921,7 +9939,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UpdateWorkspaceArtifactVisibilityResponse"
-    ]
+    ],
+    "permission": "artifacts:publish"
   },
   {
     "id": "updateWorkspaceMember",
@@ -8941,7 +9960,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpdateWorkspaceModelPolicyRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceModelAccountSettings",
@@ -8952,7 +9972,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceModelAccountSettings"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceSettings",
@@ -8963,7 +9984,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Workspace"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceWebhook",
@@ -9001,7 +10023,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
     "request": [
-      "OrganizationModelProviderKind",
       "UpsertOrganizationModelProviderConnectionRequest"
     ],
     "response": [],
@@ -9030,7 +10051,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PersonalGitHubRepositorySelectionState"
-    ]
+    ],
+    "permission": "connections:write"
   },
   {
     "id": "verifyPublicGitHubRepositoryRef",

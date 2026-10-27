@@ -293,6 +293,9 @@ export function idleComposer(overrides: Partial<ComposerState> = {}): ComposerSt
     send: async () => true,
     steer: async () => true,
     sending: false,
+    // Nothing runs or waits: Send just sends. `working: true` shows the
+    // working controls (Pause, and Queue/Steer wording).
+    working: false,
     canSend: false,
     pause: async () => {},
     pausing: false,

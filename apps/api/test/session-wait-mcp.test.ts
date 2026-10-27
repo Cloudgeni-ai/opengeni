@@ -326,7 +326,7 @@ async function createLiveAttempt(message: string) {
 }
 
 describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory event bus)", () => {
-  test("registers only for session-scoped grants holding sessions:read", () => {
+  test("session_wait needs sessions:read; the command tools also need a session", () => {
     const sessionScoped = buildOpenGeniMcpServer(fakeDeps(new MemoryEventBus()), grant);
     expect(registeredToolNames(sessionScoped)).toContain("session_wait");
     expect(registeredToolNames(sessionScoped)).toContain("command_wait");
@@ -341,7 +341,8 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       metadata: metadataWithoutSession,
     });
     expect(registeredToolNames(noSession)).toContain("session_events");
-    expect(registeredToolNames(noSession)).not.toContain("session_wait");
+    // A sessionless caller waits on named sessions only.
+    expect(registeredToolNames(noSession)).toContain("session_wait");
     expect(registeredToolNames(noSession)).not.toContain("command_wait");
     expect(registeredToolNames(noSession)).not.toContain("command_read");
 

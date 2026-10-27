@@ -13,13 +13,14 @@
 
 mod memory;
 mod postgres;
+mod templates;
 
 use std::collections::BTreeMap;
 use std::future::Future;
 
 use compute_fleet::{Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Verdict};
 use compute_protocol::fleet::Verdict as Wire;
-use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
+use compute_protocol::fleet::{Boot, Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,7 @@ use crate::e2b::lifecycle::Record;
 
 pub use memory::MemoryStore;
 pub use postgres::{PostgresLead, PostgresStore};
+pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
 
 /// What can go wrong reading or writing the store.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +43,21 @@ pub enum StoreError {
 
 /// A result of the store.
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// A host's renewal count, which the leader watches, read with the boot of
+/// its machine its registration named: both from the same row at once, so
+/// the boot is the one of the registration the count was reached under.
+/// Every registration and renewal raises the count, so once the host is
+/// given up on at this count ([`Store::give_up`]), it is this registration
+/// that is given up on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counted {
+    pub host: HostId,
+    pub renewals: u64,
+    /// `None` if the registration named none, or one that cannot be read:
+    /// either proves nothing of a restart.
+    pub boot: Option<Boot>,
+}
 
 /// A host as the store holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,8 +299,9 @@ pub trait Store: Send + Sync + 'static {
     /// The host rows changed after `after`, oldest change first.
     fn hosts_changed(&self, after: u64) -> impl Future<Output = Result<Vec<HostRow>>> + Send;
 
-    /// The renewal count of every host not given up on.
-    fn renewals(&self) -> impl Future<Output = Result<Vec<(HostId, u64)>>> + Send;
+    /// The renewal count of every host not given up on, with the boot its
+    /// registration named.
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send;
 
     /// Gives up on `host` if its renewal count is still `renewals`, and in
     /// the same transaction leaves each of its sandboxes without an owner
@@ -306,7 +324,14 @@ pub trait Store: Send + Sync + 'static {
     fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
 
     /// Moves a host from `from` to `to` (live and draining), if it is in
-    /// `from`.
+    /// `from`. A drained host stays drained until moved back to live: given
+    /// up on, it registers again draining, so a drain an operator asked for
+    /// outlasts the host's going away and coming back. Moved from draining
+    /// to live while given up on, it stays given up on and registers again
+    /// live. A host already in `to` whose mark says otherwise (a build from
+    /// before the mark drained or undrained it, or registered it again
+    /// live, during a rollout) has its mark set as for `to`, so repeating
+    /// a drain or undrain repairs it.
     fn set_state(
         &self,
         host: HostId,
@@ -322,7 +347,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Inserts a new sandbox, at the version it carries. False if one with
     /// its id exists. Refused if it names an owner the service has given
-    /// up on; see [`Write::OwnerLost`].
+    /// up on; see [`Write::OwnerLost`]. One created from a team's template
+    /// (its spec's image [`TEMPLATE_PREFIX`] then the template's id) is
+    /// inserted only while the template is there, ordered with its delete,
+    /// so the image it starts from is never forgotten under it; see
+    /// [`Write::TemplateGone`].
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// As [`Store::insert`], for `row.team`'s create request `request_id`,
@@ -439,6 +468,13 @@ pub trait Store: Send + Sync + 'static {
     /// creates of `name` use: builds are not byte for byte the same, so the
     /// first recorded wins. Every name that uses a source is recorded, so
     /// two names sharing one each keep it as their latest.
+    ///
+    /// A build is a captured image's bytes only once it is recorded: each
+    /// build is a new file system with a random UUID (compute-image's
+    /// `ext4::make`), so no disk can be captured with its bytes before a
+    /// sandbox starts from it, which it does only once recorded. A
+    /// recorded build is a use, which keeps a captured image of the same
+    /// bytes (see [`Store::collect_image`]).
     fn record_built(
         &self,
         source: &str,
@@ -449,6 +485,64 @@ pub trait Store: Send + Sync + 'static {
 
     /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Inserts template `row`, recording its image as captured and in
+    /// use, unless its team has a template of its name or the image is
+    /// being collected. Ordered with [`Store::collect_image`] by the
+    /// image's record, so an image is never collected under a template.
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send;
+
+    /// A team's template with the id `key`, or else the name `key`.
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send;
+
+    /// A team's templates, oldest first.
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send;
+
+    /// Deletes a team's template `id`; whether it was there. Its image
+    /// stays until it has been unused for a while.
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Notes at `now_ms` which captured images are unused (no template,
+    /// sandbox or built image names them) and which are used again, and
+    /// answers those to collect: being collected, or unused since before
+    /// `before_ms`.
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send;
+
+    /// Claims captured image `image` for `collector` to forget, if it is
+    /// still unused and has been since before `before_ms`, or another
+    /// collector's claim on it lapsed; whether `collector` holds the claim
+    /// now (as it does when it claimed it before). Ordered by the image's
+    /// record with every use recorded of it (a template, a sandbox created
+    /// from one, an image built), so none is recorded from then on, and a
+    /// claim sees every use recorded before it.
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Whether the collector `collector` (its id) still holds its claim
+    /// on captured image `image`.
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes the record of captured image `image` once object storage
+    /// has forgotten it, if the collector `collector` (its id) still holds
+    /// its claim on it.
+    fn collected(&self, image: ImageId, collector: &str)
+    -> impl Future<Output = Result<()>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.
@@ -463,6 +557,10 @@ pub enum Write {
     /// transaction, and this check is ordered with it, so no sandbox is
     /// left owned by a host after it was given up on.
     OwnerLost,
+    /// For an insert of a sandbox created from a team's template: the
+    /// template was deleted since the create found it. Never for a
+    /// replace.
+    TemplateGone,
 }
 
 impl Write {

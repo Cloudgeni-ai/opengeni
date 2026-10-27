@@ -127,6 +127,8 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       }
     },
     requestWorkerDrain: deps.requestWorkerDrain,
+    outstandingWriters: () =>
+      deps.eventing.toolCancellationFenceRef.current?.outstandingWriters?.() ?? [],
     execution: {
       workspaceId: deps.input.workspaceId,
       sessionId: deps.input.sessionId,

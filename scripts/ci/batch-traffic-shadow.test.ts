@@ -808,7 +808,7 @@ describe("traffic recovery and bounded reads", () => {
       fresh: async (path: string) =>
         path.includes("/jobs?")
           ? {
-              // Two running jobs after the fan-out (3 pre-plan jobs completed).
+              // Two running jobs after the fan-out (five jobs: more than the pre-plan jobs).
               total_count: 5,
               jobs: [
                 { status: "in_progress" },
@@ -931,7 +931,8 @@ describe("traffic recovery and bounded reads", () => {
       });
       expect((await readHeadroom(reader, 65, 40, undefined, isolated)).allowed).toBe(false);
       const quiet = scan([{ id: 1, status: "queued", ...MAIN }], {
-        1: page(jobs("waiting", "waiting", "completed", "completed")),
+        // Five jobs: more than the MAIN_PRE_FANOUT_JOBS pre-plan jobs, so fanned out.
+        1: page(jobs("waiting", "waiting", "completed", "completed", "completed")),
       });
       expect(await readHeadroom(quiet, 58, 40)).toMatchObject({
         allowed: true,

@@ -41,6 +41,7 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionNote,
   BrowserActionResolvedTarget,
   BrowserDialog,
   InteractionDiagnosticSummary,
@@ -99,6 +100,7 @@ import {
   OpenGeniApiError,
   OpenGeniClient,
   interactionControlFailureFromError,
+  type BrowserFrame,
   type InteractionControlFailure,
   type InteractionTransport,
 } from "@opengeni/sdk";
@@ -141,6 +143,7 @@ import {
   computerOpenText,
   computerTargetsText,
 } from "./computer-model-text";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -182,6 +185,11 @@ const BrowserAgentNode = z
     // empty arrays on every node only costs the model tokens.
     states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
     actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
+    // The full length of a name, description or value clipped above, so the
+    // model knows how much it is not seeing.
+    nameChars: z.number().int().positive().optional(),
+    descriptionChars: z.number().int().positive().optional(),
+    valueChars: z.number().int().positive().optional(),
   })
   .strict();
 /** The model-facing view keeps only what a next call can use: what is on the
@@ -209,6 +217,10 @@ const BrowserAgentView = z
       .optional(),
     removedRefCount: z.number().int().positive().optional(),
     clippedFieldCount: z.number().int().positive().optional(),
+    /** The page was too large to read whole: at least this many elements
+     * were left unread (the outline keeps its structure and what is on
+     * screen). */
+    unreadNodeCount: z.number().int().positive().optional(),
   })
   .strict();
 /** A tab as the model needs it: identity, page, selection and the generations
@@ -253,6 +265,7 @@ const CompactBrowserActionReceipt = z
     state: InteractionOperationState,
     error: InteractionError.optional(),
     targets: z.array(BrowserActionResolvedTarget).optional(),
+    notes: z.array(BrowserActionNote).optional(),
     observation: CompactBrowserObservation.optional(),
   })
   .strict();
@@ -307,7 +320,8 @@ const BrowserReadInput = z
             kind: z.literal("element"),
             locator: BrowserDomReadLocator,
             attributes: z.array(BrowserDomSafeAttribute).max(6).optional(),
-            maxChars: z.number().int().min(1).max(4_096).optional(),
+            maxChars: z.number().int().min(1).max(32_768).optional(),
+            offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
           })
           .strict(),
         z
@@ -396,6 +410,9 @@ const BrowserReadOutput = z
   .strict();
 const BrowserDomAgentReadOutput = BrowserDomReadResponse.safeExtend({
   source: z.literal("dom"),
+  /** On a truncated element read, the offset that reads on from where this
+   * read stopped. */
+  nextOffset: z.number().int().positive().optional(),
 });
 const BrowserReadToolOutput = z.discriminatedUnion("source", [
   BrowserReadOutput,
@@ -472,12 +489,35 @@ const AgentAttachedBrowserBridge = z
     connectedProfileCount: z.number().int().nonnegative(),
   })
   .strict();
+/**
+ * One of the person's Connected Machines this chat can use, with whether it is
+ * online and has a screen, and the placement computer_open and browser_open
+ * take to use it. onThisMachine marks the one this chat runs on now.
+ */
+const AgentMachine = z
+  .object({
+    name: z.string(),
+    os: z.string(),
+    state: z.enum([
+      "online",
+      "reconnecting",
+      "offline",
+      "consent_required",
+      "display_unavailable",
+      "enrolling",
+    ]),
+    hasDisplay: z.boolean(),
+    placement: z.object({ kind: z.literal("connected_machine"), sandboxId: z.string() }).strict(),
+    onThisMachine: z.literal(true).optional(),
+  })
+  .strict();
 const DiscoveryOutput = z
   .object({
     browserRevision: z.number().int().nonnegative(),
     computerRevision: z.number().int().nonnegative(),
     identityRevision: z.number().int().nonnegative(),
     attachedBrowserRevision: z.number().int().nonnegative(),
+    machines: z.array(AgentMachine).optional(),
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
@@ -1217,7 +1257,7 @@ export function createInteractionAttemptToolDefinitions(
           },
           (error: unknown) => {
             throw new Error(
-              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${errorMessage(error)}`.slice(
                 0,
                 8_192,
               ),
@@ -1313,10 +1353,25 @@ export function createInteractionAttemptToolDefinitions(
     error: unknown,
     kind: InteractionSessionKind,
     requestedId: string | undefined,
+    use: MissingSessionUse = "current",
   ): Promise<unknown> => {
     if (requestedId === undefined || !isMissingSessionError(error, kind)) return error;
     const open = await ownOpenSessions(kind).catch(() => null);
-    return open === null ? error : missingSessionError(error, kind, open);
+    return open === null ? error : missingSessionError(error, kind, open, use, requestedId);
+  };
+  /** Run a call that names a session directly, answering a missing id with
+   * the open sessions of that kind this chat may use. */
+  const withSessionHint = async <T>(
+    kind: InteractionSessionKind,
+    requestedId: string | undefined,
+    use: MissingSessionUse,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      throw await explainMissingSession(error, kind, requestedId, use);
+    }
   };
   /** This chat's open sessions of one kind on its current placement, most
    * recently used first: the ones browser and computer tools reuse. */
@@ -1750,7 +1805,7 @@ export function createInteractionAttemptToolDefinitions(
         ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
         ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
       };
-      const [browsers, computers, identities, attached, thisMachine] = await Promise.all([
+      const [browsers, computers, identities, attached, thisMachine, machines] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId, listFilter),
         input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
@@ -1762,12 +1817,14 @@ export function createInteractionAttemptToolDefinitions(
         scope === "workspace"
           ? readCurrentMachineSandboxId(input.transport, input.workspaceId, input.sessionId)
           : null,
+        discoverMachines(input.transport, input.workspaceId, input.sessionId),
       ]);
       const discovered = {
         browserRevision: browsers.revision,
         computerRevision: computers.revision,
         identityRevision: identities.revision,
         attachedBrowserRevision: attached.revision,
+        ...(machines ? { machines } : {}),
         browsers: filterDiscoveredSessions(
           browsers.sessions,
           input.sessionId,
@@ -1807,24 +1864,47 @@ export function createInteractionAttemptToolDefinitions(
       return browserOpenText(output);
     },
     execute: async (value, context) => {
-      const opened = await openBrowser(
-        input.transport,
-        input.workspaceId,
-        input.sessionId,
-        value,
-        context,
-        extension.installUrl,
+      const chatMove: ChatMoveRecord = { moved: false };
+      const opened = await reportingChatMove(
+        chatMove,
+        async () =>
+          await withSessionHint(
+            "BrowserSession",
+            value.browserSessionId,
+            "open",
+            async () =>
+              await withSessionHint(
+                "ComputerSession",
+                value.linkedComputerSessionId,
+                "required",
+                async () =>
+                  await openBrowser(
+                    input.transport,
+                    input.workspaceId,
+                    input.sessionId,
+                    value,
+                    context,
+                    extension.installUrl,
+                    chatMove,
+                  ),
+              ),
+          ),
       );
       const openedTargetId =
         opened.observation?.target.id ??
         opened.targets.find((target) => target.selected)?.id ??
         null;
       currentTab.use(opened.session.id, openedTargetId);
-      if (!value.includeScreenshot) return opened;
+      const notes: Array<{ type: "text"; text: string }> = chatMove.moved
+        ? [{ type: "text", text: CHAT_MOVED_NOTE }]
+        : [];
+      if (!value.includeScreenshot)
+        return notes.length ? new InteractionExecutionResult(opened, notes) : opened;
       // The browser is already open. A failed capture must not turn its result
       // into an error the model could answer by opening another browser.
       if (!openedTargetId)
         return new InteractionExecutionResult(opened, [
+          ...notes,
           {
             type: "text" as const,
             text: "The browser opened, but it has no tab to capture a screenshot of.",
@@ -1836,11 +1916,18 @@ export function createInteractionAttemptToolDefinitions(
           opened.session.id,
           openedTargetId,
         );
+        if (!screenshotShowsObservedDocument(opened.observation, frame))
+          return new InteractionExecutionResult(opened, [
+            ...notes,
+            { type: "text" as const, text: BROWSER_OPEN_SCREENSHOT_NEWER_DOCUMENT },
+          ]);
         return new InteractionExecutionResult(opened, [
+          ...notes,
           browserToolImageContent(frame.data, frame.mediaType),
         ]);
       } catch (error) {
         return new InteractionExecutionResult(opened, [
+          ...notes,
           {
             type: "text" as const,
             text: `The browser opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
@@ -2024,16 +2111,30 @@ export function createInteractionAttemptToolDefinitions(
                   locator: dom.locator,
                   ...(dom.attributes ? { attributes: dom.attributes } : {}),
                   maxChars: dom.maxChars ?? 4_096,
+                  ...(dom.offset ? { offset: dom.offset } : {}),
                 }
               : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
+          const read = await input.transport.readBrowserDom(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+            request,
+          );
+          // Text and value take the character budget first, so the text or
+          // value itself was cut only when they used (nearly) all of it; a
+          // page can end one character early to keep a character whole.
+          // Clipped attributes or options alone offer no next page.
+          const textChars = read.text?.length ?? 0;
+          const valueChars = read.value?.length ?? 0;
+          const textCut =
+            dom.kind === "element" &&
+            read.truncated &&
+            Math.max(textChars, valueChars) > 0 &&
+            textChars + valueChars >= (dom.maxChars ?? 4_096) - 1;
           return {
-            ...(await input.transport.readBrowserDom(
-              input.workspaceId,
-              browserSessionId,
-              targetId,
-              request,
-            )),
+            ...read,
             source: "dom" as const,
+            ...(textCut ? { nextOffset: (dom.offset ?? 0) + Math.max(textChars, valueChars) } : {}),
           };
         }
         return readBrowserObservation(
@@ -2092,7 +2193,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run the rest together: as many whole records per batch as fit in its 32 actions, each record ending with a wait (condition 'visible', timeoutMs 10000) for what its successful save shows so that a failed record stops the batch, or one Code Mode loop over all of them that checks each result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. viewport_reset returns the tab to its window's own size and scale. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -2150,6 +2251,10 @@ export function createInteractionAttemptToolDefinitions(
             browserSessionId,
             targetId,
           );
+          if (!screenshotShowsObservedDocument(receipt.observation, frame))
+            return new InteractionExecutionResult(projected, [
+              { type: "text" as const, text: BROWSER_ACT_SCREENSHOT_NEWER_DOCUMENT },
+            ]);
           return new InteractionExecutionResult(projected, [
             browserToolImageContent(frame.data, frame.mediaType),
           ]);
@@ -2175,7 +2280,13 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
+      await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "required",
+        async () =>
+          await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
+      ),
   });
 
   add({
@@ -2218,35 +2329,38 @@ export function createInteractionAttemptToolDefinitions(
     output: z.union([BrowserDownloadListResponse, BrowserDownload]),
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      if (value.operation === "get") {
-        const download = await input.transport.getBrowserDownload(
+    execute: async (value) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        if (value.operation === "get") {
+          const download = await input.transport.getBrowserDownload(
+            input.workspaceId,
+            value.browserSessionId,
+            value.downloadId!,
+          );
+          if (
+            download.browserSessionId !== value.browserSessionId ||
+            download.id !== value.downloadId
+          ) {
+            throw new Error("Browser download belongs to another resource");
+          }
+          return download;
+        }
+        const response = await input.transport.listBrowserDownloads(
           input.workspaceId,
           value.browserSessionId,
-          value.downloadId!,
         );
+        // Downloads kept from before a suspension keep the controller generation
+        // that fetched them, so only the browser binding must match.
         if (
-          download.browserSessionId !== value.browserSessionId ||
-          download.id !== value.downloadId
+          response.browserSessionId !== value.browserSessionId ||
+          response.downloads.some(
+            (download) => download.browserSessionId !== value.browserSessionId,
+          )
         ) {
-          throw new Error("Browser download belongs to another resource");
+          throw new Error("Browser downloads belong to another session binding");
         }
-        return download;
-      }
-      const response = await input.transport.listBrowserDownloads(
-        input.workspaceId,
-        value.browserSessionId,
-      );
-      // Downloads kept from before a suspension keep the controller generation
-      // that fetched them, so only the browser binding must match.
-      if (
-        response.browserSessionId !== value.browserSessionId ||
-        response.downloads.some((download) => download.browserSessionId !== value.browserSessionId)
-      ) {
-        throw new Error("Browser downloads belong to another session binding");
-      }
-      return response;
-    },
+        return response;
+      }),
   });
 
   add({
@@ -2259,27 +2373,28 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserDownloadSaveResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const response = await input.transport.saveBrowserDownload(
-        input.workspaceId,
-        value.browserSessionId,
-        value.downloadId,
-        {
-          operationId: context.operationId,
-          destinationPath: value.destinationPath,
-          overwrite: value.overwrite,
-        },
-      );
-      if (
-        response.download.browserSessionId !== value.browserSessionId ||
-        response.download.id !== value.downloadId ||
-        response.operationId !== context.operationId ||
-        response.destinationPath !== value.destinationPath
-      ) {
-        throw new Error("Browser download save returned another operation binding");
-      }
-      return response;
-    },
+    execute: async (value, context) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        const response = await input.transport.saveBrowserDownload(
+          input.workspaceId,
+          value.browserSessionId,
+          value.downloadId,
+          {
+            operationId: context.operationId,
+            destinationPath: value.destinationPath,
+            overwrite: value.overwrite,
+          },
+        );
+        if (
+          response.download.browserSessionId !== value.browserSessionId ||
+          response.download.id !== value.downloadId ||
+          response.operationId !== context.operationId ||
+          response.destinationPath !== value.destinationPath
+        ) {
+          throw new Error("Browser download save returned another operation binding");
+        }
+        return response;
+      }),
   });
 
   add({
@@ -2312,15 +2427,21 @@ export function createInteractionAttemptToolDefinitions(
         );
       }
       const browser = await currentTab.session(value.browserSessionId);
-      const response = await saveBrowserRecording.call(
-        input.transport,
-        input.workspaceId,
-        browser.browserSessionId,
-        value.recordingId!,
-        {
-          operationId: context.operationId,
-          ...(value.destinationPath ? { destinationPath: value.destinationPath } : {}),
-        },
+      const response = await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "current",
+        async () =>
+          await saveBrowserRecording.call(
+            input.transport,
+            input.workspaceId,
+            browser.browserSessionId,
+            value.recordingId!,
+            {
+              operationId: context.operationId,
+              ...(value.destinationPath ? { destinationPath: value.destinationPath } : {}),
+            },
+          ),
       );
       if (response.recording.recordingId !== value.recordingId) {
         throw new Error("Browser recording save returned another recording");
@@ -2536,12 +2657,18 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     execute: async (value, context) =>
-      await input.transport.publishBrowserRevision(input.workspaceId, value.browserSessionId, {
-        operationId: context.operationId,
-        identityId: value.identityId,
-        expectedHeadGeneration: value.expectedHeadGeneration,
-        ...(value.advanceDefault !== undefined ? { advanceDefault: value.advanceDefault } : {}),
-      }),
+      await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "required",
+        async () =>
+          await input.transport.publishBrowserRevision(input.workspaceId, value.browserSessionId, {
+            operationId: context.operationId,
+            identityId: value.identityId,
+            expectedHeadGeneration: value.expectedHeadGeneration,
+            ...(value.advanceDefault !== undefined ? { advanceDefault: value.advanceDefault } : {}),
+          }),
+      ),
   });
 
   add({
@@ -2554,29 +2681,30 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const request = { operationId: context.operationId };
-      if (value.action === "suspend") {
-        return await input.transport.suspendBrowserSession(
+    execute: async (value, context) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        const request = { operationId: context.operationId };
+        if (value.action === "suspend") {
+          return await input.transport.suspendBrowserSession(
+            input.workspaceId,
+            value.browserSessionId,
+            request,
+          );
+        }
+        if (value.action === "resume") {
+          return await input.transport.resumeBrowserSession(
+            input.workspaceId,
+            value.browserSessionId,
+            request,
+          );
+        }
+        currentTab.forgetSession(value.browserSessionId);
+        return await input.transport.endBrowserSession(
           input.workspaceId,
           value.browserSessionId,
           request,
         );
-      }
-      if (value.action === "resume") {
-        return await input.transport.resumeBrowserSession(
-          input.workspaceId,
-          value.browserSessionId,
-          request,
-        );
-      }
-      currentTab.forgetSession(value.browserSessionId);
-      return await input.transport.endBrowserSession(
-        input.workspaceId,
-        value.browserSessionId,
-        request,
-      );
-    },
+      }),
   });
 
   add({
@@ -2603,18 +2731,40 @@ export function createInteractionAttemptToolDefinitions(
       return `${opened}\n${computerActionText(launch)}`;
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
-      const opened = await openComputer(
-        input.transport,
-        input.workspaceId,
-        input.sessionId,
-        value,
-        context,
+      const chatMove: ChatMoveRecord = { moved: false };
+      const { unavailable, ...opened } = await reportingChatMove(
+        chatMove,
+        async () =>
+          await withSessionHint(
+            "ComputerSession",
+            value.computerSessionId,
+            "open",
+            async () =>
+              await openComputer(
+                input.transport,
+                input.workspaceId,
+                input.sessionId,
+                value,
+                context,
+                chatMove,
+              ),
+          ),
       );
       currentComputer.use(opened.session.id);
       // The computer is already open. A failed launch or capture must not turn
       // its result into an error the model could answer by opening another
-      // computer: the result says what failed instead.
-      const notes: Array<{ type: "text"; text: string }> = [];
+      // computer: the result says what failed instead. A move of the chat to
+      // this machine has already happened, so every result says so.
+      const notes: Array<{ type: "text"; text: string }> = chatMove.moved
+        ? [{ type: "text", text: CHAT_MOVED_NOTE }]
+        : [];
+      // Its screen is locked or shows another user's session: nothing on it
+      // can be read, launched, captured or clicked, so say why and do nothing.
+      if (unavailable)
+        return new InteractionExecutionResult(opened, [
+          ...notes,
+          { type: "text" as const, text: unavailable },
+        ]);
       let result: z.input<typeof ComputerOpenOutput> = opened;
       let appWindow: { id: string; targetGeneration: string } | null = null;
       if (applicationId) {
@@ -2958,15 +3108,16 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const ended = await input.transport.endComputerSession(
-        input.workspaceId,
-        value.computerSessionId,
-        { operationId: context.operationId },
-      );
-      currentComputer.forgetSession(value.computerSessionId);
-      return ended;
-    },
+    execute: async (value, context) =>
+      await withSessionHint("ComputerSession", value.computerSessionId, "required", async () => {
+        const ended = await input.transport.endComputerSession(
+          input.workspaceId,
+          value.computerSessionId,
+          { operationId: context.operationId },
+        );
+        currentComputer.forgetSession(value.computerSessionId);
+        return ended;
+      }),
   });
 
   if (
@@ -3217,6 +3368,59 @@ function filterDiscoveredSessions<
   );
 }
 
+/**
+ * The person's Connected Machines this chat can use, as the person who started
+ * the turn sees them: the one this chat runs on first, then online ones, then
+ * by name. Undefined when they cannot be listed (no Connected Machines on this
+ * deployment, or a failed read): a failed read must not fail the rest of the
+ * discovery.
+ */
+async function discoverMachines(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Array<z.infer<typeof AgentMachine>> | undefined> {
+  if (!transport.listMachines) return undefined;
+  let listed: Awaited<ReturnType<NonNullable<InteractionPlacementTransport["listMachines"]>>>;
+  try {
+    listed = await transport.listMachines(workspaceId, { sessionId });
+  } catch {
+    return undefined;
+  }
+  return listed.machines
+    .filter((machine) => machine.kind === "selfhosted" && !machine.isSessionGroup)
+    .sort(
+      (left, right) =>
+        Number(right.active) - Number(left.active) ||
+        Number(right.state === "online") - Number(left.state === "online") ||
+        left.name.localeCompare(right.name),
+    )
+    .map((machine) => ({
+      name: machine.name,
+      os: machine.os,
+      state: machine.state,
+      hasDisplay: machine.hasDisplay,
+      placement: { kind: "connected_machine" as const, sandboxId: machine.sandboxId },
+      ...(machine.active ? { onThisMachine: true as const } : {}),
+    }));
+}
+
+/**
+ * Whether a session runs on a Connected Machine discovery lists as offline.
+ * Such a session is not one of the person's computers to offer; it only
+ * becomes usable again when its machine is back. A machine missing from the
+ * list (for example one listed for another subject) is not known to be gone,
+ * so its sessions stay; without a machine list nothing is hidden.
+ */
+function onOfflineMachine(
+  placement: z.infer<typeof InteractionPlacement>,
+  machines: ReadonlyArray<z.infer<typeof AgentMachine>> | undefined,
+): boolean {
+  if (!machines || placement.kind !== "connected_machine") return false;
+  const machine = machines.find((entry) => entry.placement.sandboxId === placement.sandboxId);
+  return machine?.state === "offline";
+}
+
 /** The most records of each kind the model sees from one discovery. */
 const DISCOVERY_MODEL_LIST_LIMIT = 50;
 /** The most bytes a model caller's discovery result serializes to: its
@@ -3290,11 +3494,22 @@ function modelDiscoverySelection(
       .filter((association) => (association as { sessionId?: unknown }).sessionId === sessionId)
       .slice(0, 1),
   });
+  // Sessions on a machine that is offline or no longer usable are not the
+  // person's computers to offer; the machines list shows what is.
+  const usable = <T extends { placement: z.infer<typeof InteractionPlacement> }>(
+    sessions: readonly T[],
+  ) => sessions.filter((session) => !onOfflineMachine(session.placement, output.machines));
+  const usableBrowsers = usable(output.browsers);
+  const usableComputers = usable(output.computers);
+  const leftOnOfflineMachines =
+    output.browsers.length -
+    usableBrowsers.length +
+    (output.computers.length - usableComputers.length);
   const ranked: Record<DiscoveryListKind, unknown[]> = {
-    browsers: discoveryRank(output.browsers as DiscoveredSession[], sessionId).map(
+    browsers: discoveryRank(usableBrowsers as DiscoveredSession[], sessionId).map(
       ownAssociationOnly,
     ),
-    computers: discoveryRank(output.computers as DiscoveredSession[], sessionId).map(
+    computers: discoveryRank(usableComputers as DiscoveredSession[], sessionId).map(
       ownAssociationOnly,
     ),
     identities: [...output.identities].sort((left, right) =>
@@ -3305,6 +3520,8 @@ function modelDiscoverySelection(
   };
   const empty = {
     ...output,
+    // The person's machines are few; they always come first and whole.
+    ...(output.machines ? { machines: output.machines.slice(0, DISCOVERY_MODEL_LIST_LIMIT) } : {}),
     browsers: [],
     computers: [],
     identities: [],
@@ -3353,6 +3570,7 @@ function modelDiscoverySelection(
   }
   const selection = {
     ...output,
+    ...(empty.machines ? { machines: empty.machines } : {}),
     browsers: selected.browsers as DiscoveryOutputValue["browsers"],
     computers: selected.computers as DiscoveryOutputValue["computers"],
     identities: selected.identities as DiscoveryOutputValue["identities"],
@@ -3363,18 +3581,25 @@ function modelDiscoverySelection(
   const omitted = DISCOVERY_LIST_KINDS.filter(
     (kind) => selected[kind].length < ranked[kind].length,
   );
-  if (omitted.length === 0) return selection;
-  const shown = omitted
-    .map(
-      (kind) => `${selected[kind].length} of ${ranked[kind].length} ${DISCOVERY_LIST_NAMES[kind]}`,
-    )
-    .join(", ");
-  return new InteractionExecutionResult(selection, [
-    {
+  const notes: Array<{ type: "text"; text: string }> = [];
+  if (omitted.length > 0) {
+    const shown = omitted
+      .map(
+        (kind) =>
+          `${selected[kind].length} of ${ranked[kind].length} ${DISCOVERY_LIST_NAMES[kind]}`,
+      )
+      .join(", ");
+    notes.push({
       type: "text",
       text: `Listed ${shown}: this session's own first, then usable ones, most recently used first. Reuse one by its id. A Code Mode program calling interaction.discover receives every record.`,
-    },
-  ]);
+    });
+  }
+  if (leftOnOfflineMachines > 0)
+    notes.push({
+      type: "text",
+      text: `Left out ${leftOnOfflineMachines} browser and computer sessions on offline machines. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.`,
+    });
+  return notes.length > 0 ? new InteractionExecutionResult(selection, notes) : selection;
 }
 
 /** The model's view of a discovery: what it needs to pick a session or
@@ -3403,6 +3628,7 @@ function compactDiscoveryForModel(
     computerRevision: output.computerRevision,
     identityRevision: output.identityRevision,
     attachedBrowserRevision: output.attachedBrowserRevision,
+    ...(output.machines ? { machines: output.machines } : {}),
     browsers: output.browsers.map((browser) => ({
       id: browser.id,
       name: browser.name,
@@ -3597,7 +3823,7 @@ async function actInComputerBatch(
       return error instanceof OpenGeniApiError && error.status === 404 ? "absent" : "unknown";
     }
   };
-  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const reasonOf = (error: unknown) => errorMessage(error);
   // The two ways derive different operation IDs. The computer fixes its
   // answer for the session's life, so every try of one batch picks the same
   // way and cannot send its actions under both ways' IDs. Run as one
@@ -3860,6 +4086,7 @@ async function openBrowser(
   value: z.output<typeof BrowserOpenInput>,
   context: AttemptToolExecutionContext,
   extensionUrl: string,
+  chatMove: ChatMoveRecord = { moved: false },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
@@ -3878,6 +4105,16 @@ async function openBrowser(
     // read too: a profile on the computer this session runs on comes first.
     const resolveProfile =
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
+    const moved =
+      value.placement?.kind === "connected_machine"
+        ? await moveChatToRequestedMachine(
+            transport,
+            workspaceId,
+            sourceSessionId,
+            value.placement,
+            chatMove,
+          )
+        : null;
     const [listed, attachedInventory, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
@@ -3888,12 +4125,16 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
-        ? // Only a preference here: a failed read must not fail the open.
-          readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(() => null)
-        : value.mode === "new" || value.placement
-          ? null
-          : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+      moved
+        ? moved
+        : resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : value.mode === "new" || value.placement
+            ? null
+            : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -4124,6 +4365,8 @@ function chooseAttachedProfile(
 export type UserSetupCardPoster = (
   blocker: UserSetupBlocker,
   toolName: string,
+  /** The machine the refused call asked for, so its card can lead with it. */
+  options?: { requestedSandboxId?: string },
 ) => Promise<{ chatUrl: string | null } | "unavailable" | null>;
 
 /**
@@ -4147,7 +4390,13 @@ async function withUserSetupCard(
   let posted: Awaited<ReturnType<UserSetupCardPoster>> = null;
   if (post) {
     try {
-      posted = await post(blocker, toolName);
+      posted = await post(
+        blocker,
+        toolName,
+        error instanceof MachineMoveRefusedError
+          ? { requestedSandboxId: error.requestedSandboxId }
+          : undefined,
+      );
     } catch {
       posted = null;
     }
@@ -4243,11 +4492,19 @@ async function openComputer(
   sourceSessionId: string,
   value: z.output<typeof ComputerOpenInput>,
   context: AttemptToolExecutionContext,
-): Promise<z.input<typeof ComputerOpenOutput>> {
+  chatMove: ChatMoveRecord = { moved: false },
+): Promise<z.input<typeof ComputerOpenOutput> & { unavailable?: string }> {
   let session: z.infer<typeof ComputerSession>;
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
+    const moved = await moveChatToRequestedMachine(
+      transport,
+      workspaceId,
+      sourceSessionId,
+      value.placement,
+      chatMove,
+    );
     const [listed, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
@@ -4255,8 +4512,8 @@ async function openComputer(
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
           }),
-      value.mode === "new"
-        ? null
+      value.mode === "new" || moved
+        ? moved
         : value.placement?.kind === "connected_machine"
           ? // Only a preference here: a failed read must not fail the open.
             readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
@@ -4283,13 +4540,28 @@ async function openComputer(
           })
         ).session;
   }
-  return {
-    session,
-    targets:
-      session.lifecycle === "active"
-        ? (await transport.listComputerTargets(workspaceId, session.id)).targets
-        : [],
-  };
+  if (session.lifecycle !== "active") return { session, targets: [] };
+  try {
+    return {
+      session,
+      targets: (await transport.listComputerTargets(workspaceId, session.id)).targets,
+    };
+  } catch (error) {
+    // 423: the computer is open, but its screen is locked or shows another
+    // user's session, so it has no target to offer until a person acts.
+    if (error instanceof OpenGeniApiError && error.status === 423 && !error.outcomeUnknown)
+      return {
+        session,
+        targets: [],
+        unavailable: lockedScreenText(error.message),
+      };
+    throw error;
+  }
+}
+
+/** The controller's own reason, without the API's status prefix. */
+function lockedScreenText(message: string): string {
+  return boundedErrorMessage(message.replace(/^API 423: /u, "").replace(/ Reference: \S+\.$/u, ""));
 }
 
 /**
@@ -4458,7 +4730,7 @@ export function openComputerAppWindow(
 }
 
 type InteractionPlacementTransport = InteractionTransport &
-  Partial<Pick<OpenGeniClient, "getSession">>;
+  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">>;
 
 /** Where a placement-less open creates its session: the machine the chat is
  * routed to now. No active sandbox means the session's own group sandbox; a
@@ -4475,6 +4747,112 @@ async function readCurrentInteractionPlacement(
   return session.activeSandboxId === null
     ? { kind: "sandbox_group", sandboxGroupId: session.sandboxGroupId }
     : { kind: "connected_machine", sandboxId: session.activeSandboxId };
+}
+
+/**
+ * A refused move of this chat to the machine an open asked for. It names that
+ * machine, so a setup card for it (a personal machine whose owner has not
+ * allowed this chat yet) leads with allowing exactly that machine.
+ */
+class MachineMoveRefusedError extends OpenGeniApiError {
+  readonly requestedSandboxId: string;
+  constructor(requestedSandboxId: string, code: string | undefined, reason: string | undefined) {
+    super(code && userSetupBlocker(code) ? 403 : 409, "", {
+      code,
+      retryable: false,
+      displayMessage: `This chat could not move to that machine: ${reason ?? "the move was refused"}`,
+    });
+    this.name = "MachineMoveRefusedError";
+    this.requestedSandboxId = requestedSandboxId;
+  }
+}
+
+/** Whether an open moved this chat to the machine it named. */
+type ChatMoveRecord = { moved: boolean };
+
+/** The line an open's result adds when it moved this chat to another machine:
+ * the move outlasts the open, so later commands and files run there too. */
+const CHAT_MOVED_NOTE =
+  "This chat moved to the requested machine; its commands and files now run there too.";
+
+/**
+ * Run an open that may move this chat, so a failure after the move still says
+ * the chat moved: the model must not assume it is on its old machine. The
+ * note leads the error's message, which every error result is built from, so
+ * bounding a long message never drops it.
+ */
+async function reportingChatMove<T>(chatMove: ChatMoveRecord, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw chatMove.moved ? withChatMovedNote(error) : error;
+  }
+}
+
+/**
+ * A copy of `error` whose message leads with the moved note: the same type and
+ * fields (status, code, retryable and the rest), so it is handled exactly as
+ * the original. The original is never changed: its message may be read-only
+ * (a DOMException's is) and the SDK may share one failed read between callers.
+ * An error that cannot be copied is returned unchanged.
+ */
+function withChatMovedNote(error: unknown): unknown {
+  if (!(error instanceof Error) || error.message.startsWith(CHAT_MOVED_NOTE)) return error;
+  const message = `${CHAT_MOVED_NOTE} ${error.message}`;
+  try {
+    // A DOMException keeps its name and message in internal slots, so only its
+    // own constructor makes one (TimeoutError and AbortError from the SDK).
+    if (typeof DOMException !== "undefined" && error instanceof DOMException)
+      return new DOMException(message, error.name);
+    const copy = Object.create(
+      Object.getPrototypeOf(error) as object,
+      Object.getOwnPropertyDescriptors(error),
+    ) as Error;
+    Object.defineProperty(copy, "message", {
+      value: message,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    return copy;
+  } catch {
+    return error;
+  }
+}
+
+/**
+ * Move this chat to the Connected Machine an open names when it runs on
+ * another one, so computer_open and browser_open reach any of the person's
+ * machines in one call, exactly as sandbox_swap followed by the open would.
+ * The move is the chat's, not only this session's: later commands and files
+ * run there too, as after sandbox_swap. A personal machine whose owner has not
+ * allowed this chat yet refuses with the blocker that shows them the card to
+ * allow it. Returns the chat's placement after the move, or null when there
+ * was nothing to move (another placement, a transport that cannot read or
+ * move the chat, or a failed read, which leaves the server to say where the
+ * chat is). Records in `chatMove` whether the chat actually moved, so the
+ * open's result can say so.
+ */
+async function moveChatToRequestedMachine(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+  placement: z.infer<typeof BrowserOpenPlacement> | undefined,
+  chatMove: ChatMoveRecord,
+): Promise<z.infer<typeof InteractionPlacement> | null> {
+  if (placement?.kind !== "connected_machine" || !transport.swapActiveSandbox) return null;
+  const current = await readCurrentInteractionPlacement(transport, workspaceId, sessionId).catch(
+    () => null,
+  );
+  if (!current) return null;
+  if (placementFieldsMatch(current, placement)) return current;
+  const moved = await transport.swapActiveSandbox(workspaceId, sessionId, {
+    target: placement.sandboxId,
+  });
+  if (!moved.swapped)
+    throw new MachineMoveRefusedError(placement.sandboxId, moved.code, moved.reason);
+  chatMove.moved = true;
+  return { kind: "connected_machine", sandboxId: moved.activeSandboxId ?? placement.sandboxId };
 }
 
 function compatibleInteractionPlacement(
@@ -4640,6 +5018,15 @@ function boundedAgentField(value: string, onClip: () => void): string {
   return `${value.slice(0, BROWSER_AGENT_MAX_FIELD_LENGTH - 1)}…`;
 }
 
+function clippedLength<K extends "nameChars" | "descriptionChars" | "valueChars">(
+  key: K,
+  value: string | undefined,
+): Partial<Record<K, number>> {
+  return value !== undefined && value.length > BROWSER_AGENT_MAX_FIELD_LENGTH
+    ? ({ [key]: value.length } as Partial<Record<K, number>>)
+    : {};
+}
+
 function projectAgentNode(flat: FlatBrowserNode): {
   node: z.infer<typeof BrowserAgentNode>;
   clippedFieldCount: number;
@@ -4669,6 +5056,9 @@ function projectAgentNode(flat: FlatBrowserNode): {
     ...(source.actions.length > 0
       ? { actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)) }
       : {}),
+    ...clippedLength("nameChars", source.name),
+    ...clippedLength("descriptionChars", source.description),
+    ...clippedLength("valueChars", typeof source.value === "string" ? source.value : undefined),
   };
   if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
   if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;
@@ -4943,6 +5333,8 @@ function projectBrowserObservation(
       ? omittedBrowserRegions(ranked, new Set(projected.nodes.map((node) => node.ref)))
       : [];
   const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const unreadNodeCount =
+    semantic?.kind === "snapshot" && semantic.incomplete ? semantic.incomplete.unreadCount : 0;
   const viewport = observation.viewport;
   const diagnostics = observation.diagnostics;
   const hasDiagnostics =
@@ -4981,6 +5373,7 @@ function projectBrowserObservation(
       ...(projected.clippedFieldCount > 0
         ? { clippedFieldCount: projected.clippedFieldCount }
         : {}),
+      ...(unreadNodeCount > 0 ? { unreadNodeCount } : {}),
     },
   };
 }
@@ -5058,6 +5451,7 @@ function compactActionReceipt(
     state: receipt.state,
     ...(receipt.error ? { error: receipt.error } : {}),
     ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.notes && receipt.notes.length > 0 ? { notes: receipt.notes } : {}),
     ...(receipt.observation
       ? {
           observation: projectBrowserObservation(
@@ -5200,6 +5594,7 @@ function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): st
       state: receipt.state,
       error: receipt.error,
       ...(receipt.targets ? { targets: receipt.targets } : {}),
+      ...(receipt.notes ? { notes: receipt.notes } : {}),
     });
     return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
   }
@@ -5365,12 +5760,39 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
 }
 
 function screenshotFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
 
 const BROWSER_DIALOG_NO_SCREENSHOT =
   "No screenshot: a JavaScript dialog is open in this tab. Handle it first with browser_act action {type:'handle_dialog'}.";
+
+/**
+ * Whether a screenshot shows the document a result's page outline describes.
+ * The outline and the image are read one after the other, so a page that
+ * commits a new document in between would pair one page's elements with
+ * another page's picture. Without an outline there is nothing to contradict.
+ */
+function screenshotShowsObservedDocument(
+  observation:
+    | { target: { targetGeneration: string; documentGeneration: string | null } }
+    | null
+    | undefined,
+  frame: BrowserFrame,
+): boolean {
+  if (!observation) return true;
+  return (
+    observation.target.targetGeneration === frame.targetGeneration &&
+    (observation.target.documentGeneration === null ||
+      observation.target.documentGeneration === frame.documentGeneration)
+  );
+}
+
+const BROWSER_ACT_SCREENSHOT_NEWER_DOCUMENT =
+  "The action ran, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.";
+
+const BROWSER_OPEN_SCREENSHOT_NEWER_DOCUMENT =
+  "The browser opened, but the tab moved on to another page after this outline was read, so its screenshot is left out: it would show a different page from the outline. Observe the tab to see the page it shows now.";
 
 function browserToolImageContent(
   data: Uint8Array,
@@ -5411,10 +5833,20 @@ const MISSING_SESSION_HINT_EXCLUDED_LIFECYCLES: ReadonlySet<string> = new Set([
   "repair_required",
 ]);
 
+/** How the call that named a missing session can carry on without it:
+ * - current: omitting the id uses the session this chat used last;
+ * - required: the call needs an id, so only the listed ones help;
+ * - open: omitting the id opens or reuses a session. */
+type MissingSessionUse = "current" | "required" | "open";
+
 /** The most open sessions a missing-id hint lists. */
 const MISSING_SESSION_HINT_LIMIT = 5;
 
-/** The API found no session of this kind with the requested id. */
+/** The API found no session of this kind with the requested id. Read from the
+ * API's own refusal in the response body, never the display message: a hint
+ * already added to it lists session names, which could contain any text.
+ * Opening a browser linked to a computer that does not exist is refused as
+ * "Linked ComputerSession not found". */
 function isMissingSessionError(
   error: unknown,
   kind: InteractionSessionKind,
@@ -5422,8 +5854,27 @@ function isMissingSessionError(
   return (
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(error.message)
+    new RegExp(`(?:^|: )(?:Linked )?${kind} not found\\b`, "u").test(apiRefusalText(error))
   );
+}
+
+/** The refusal text the API sent: the message of its JSON error envelope
+ * (nested under "error" or flat), or else the plain-text body. */
+function apiRefusalText(error: OpenGeniApiError): string {
+  try {
+    const decoded: unknown = JSON.parse(error.body);
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      const record = decoded as Record<string, unknown>;
+      const envelope =
+        record.error && typeof record.error === "object" && !Array.isArray(record.error)
+          ? (record.error as Record<string, unknown>)
+          : record;
+      if (typeof envelope.message === "string") return envelope.message;
+    }
+  } catch {
+    // A plain-text body.
+  }
+  return error.body.trim();
 }
 
 /** The API's refusal for a missing session id, followed by the open sessions
@@ -5432,17 +5883,40 @@ function isMissingSessionError(
 function missingSessionError(
   error: OpenGeniApiError,
   kind: InteractionSessionKind,
-  open: ReadonlyArray<{ id: string; name: string }>,
+  openSessions: ReadonlyArray<{ id: string; name: string }>,
+  use: MissingSessionUse,
+  requestedId: string,
 ): OpenGeniApiError {
+  // A session the API did not find is never listed as open, even if this
+  // chat's listing still shows it (it ended between the call and the
+  // listing). An id that nearly matches an open one is named as differing
+  // from it: a slip of a few characters in a long id is easy to read past.
+  const sent = requestedId.trim().toLowerCase();
+  const stillListed = openSessions.some((session) => session.id.toLowerCase() === sent);
+  const open = openSessions.filter((session) => session.id.toLowerCase() !== sent);
   const listed = open.slice(0, MISSING_SESSION_HINT_LIMIT);
   const opener = kind === "BrowserSession" ? "browser_open" : "computer_open";
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
+  const nearMiss = stillListed ? null : nearMissSession(requestedId, listed);
+  const sentNote = stillListed
+    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended.`
+    : nearMiss
+      ? ` The ${parameter} you sent, ${requestedId}, is not ${nearMiss.id}: they differ in ${nearMiss.difference} character${nearMiss.difference === 1 ? "" : "s"}.`
+      : "";
+  const instead =
+    use === "current"
+      ? `, or omit ${parameter} to use the one you used last`
+      : use === "open"
+        ? `, or omit ${parameter} to open or reuse one`
+        : "";
   const hint =
     listed.length === 0
-      ? `This chat has no open ${kind}; call ${opener} to start one.`
+      ? use === "open"
+        ? `This chat has no open ${kind}; omit ${parameter} to open one.`
+        : `This chat has no open ${kind}; call ${opener} to start one.`
       : `This chat's open ${kind}s, most recently used first: ${listed
           .map((session) => `${session.id} ${JSON.stringify(sessionHintLabel(session.name))}`)
-          .join(", ")}. Use one of these ids, or omit ${parameter} to use the one you used last.`;
+          .join(", ")}. Use one of these ids${instead}.`;
   const reference = error.correlationId ? ` Reference: ${error.correlationId}.` : "";
   const refusal =
     reference && error.message.endsWith(reference)
@@ -5453,14 +5927,56 @@ function missingSessionError(
     retryable: false,
     outcomeUnknown: false,
     correlationId: error.correlationId,
-    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."} ${hint}`,
+    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."}${sentNote} ${hint}`,
   });
 }
 
 /** A session's name as a short one-line label. */
 function sessionHintLabel(name: string): string {
-  const line = name.replace(/\s+/gu, " ").trim();
-  return line.length <= 60 ? line : `${line.slice(0, 59)}…`;
+  // Cut by code point, so a cut never splits an emoji or other astral
+  // character into a lone surrogate.
+  const characters = Array.from(name.replace(/\s+/gu, " ").trim());
+  return characters.length <= 60 ? characters.join("") : `${characters.slice(0, 59).join("")}…`;
+}
+
+/** The most characters a sent id may differ from an open session's id in
+ * and still be named as a near miss of it. Two random UUIDs differ in about
+ * 34 of their 36 characters; a model copying an id slips on a few. */
+const NEAR_MISS_MAX_DIFFERENCE = 8;
+
+/** How many characters must be inserted, removed or changed to turn one
+ * string into the other (Levenshtein distance). */
+function characterDifference(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      current[column] = Math.min(
+        previous[column]! + 1,
+        current[column - 1]! + 1,
+        previous[column - 1]! + (left[row - 1] === right[column - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
+}
+
+/** The open session whose id the sent one most nearly matches, when it is
+ * close enough to be a slip in copying that id. */
+function nearMissSession(
+  requestedId: string,
+  open: ReadonlyArray<{ id: string }>,
+): { id: string; difference: number } | null {
+  const sent = requestedId.trim().toLowerCase();
+  let best: { id: string; difference: number } | null = null;
+  for (const session of open) {
+    const difference = characterDifference(sent, session.id.toLowerCase());
+    if (difference > 0 && difference <= NEAR_MISS_MAX_DIFFERENCE) {
+      if (!best || difference < best.difference) best = { id: session.id, difference };
+    }
+  }
+  return best;
 }
 
 /** The named tab no longer exists, while its browser does: the controller's

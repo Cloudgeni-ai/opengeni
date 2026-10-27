@@ -17,8 +17,10 @@ function billedSettings() {
   return testSettings({ billingMode: "stripe", usageLimitsMode: "managed" });
 }
 
+// These admission tests mock the canonical spendable-balance boundary. Its
+// tenant-scoped abuse evaluation and ledger projection run in the PostgreSQL suites.
 function mockZeroBalance(): () => void {
-  const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+  const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ACCOUNT,
     balanceMicros: 0,
     currency: "usd",
@@ -31,7 +33,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
   test("(a) codex turn with 0 credits does NOT throw (credit gate skipped, balance never read)", async () => {
     let balanceRead = false;
     const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
-    const spy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
+    const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(async () => {
       balanceRead = true;
       return {
         accountId: ACCOUNT,
@@ -62,9 +64,11 @@ describe("worker ensureRunAllowed — codex bypass", () => {
 
   test("a deployment-funded free turn skips credits but still enforces the token cap", async () => {
     const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
-    const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
-      throw new Error("free turns must not read the credit balance");
-    });
+    const balanceSpy = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(
+      async () => {
+        throw new Error("free turns must not read the credit balance");
+      },
+    );
     const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
     try {
       await expect(

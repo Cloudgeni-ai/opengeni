@@ -68,4 +68,42 @@ describe("installOpenGeniReactNativeEnvironment", () => {
     );
     expect(hydrationGate).toBeGreaterThan(layoutEffectEnd);
   });
+
+  test("gives a reason-dropping AbortController the standard reason and throwIfAborted", () => {
+    // React Native's controller ignores abort(reason) and has no throwIfAborted.
+    class LegacySignal {
+      aborted = false;
+    }
+    class LegacyController {
+      readonly signal = new LegacySignal();
+      abort(): void {
+        this.signal.aborted = true;
+      }
+    }
+    const previous = globalThis.AbortController;
+    Reflect.set(globalThis, "AbortController", LegacyController);
+    const installed = installOpenGeniReactNativeEnvironment(adapters());
+    try {
+      const closed = new Error("closed");
+      const controller = new LegacyController() as unknown as AbortController;
+      expect(() => controller.signal.throwIfAborted()).not.toThrow();
+      controller.abort(closed);
+      expect(controller.signal.reason).toBe(closed);
+      expect(() => controller.signal.throwIfAborted()).toThrow(closed);
+
+      const plain = new LegacyController() as unknown as AbortController;
+      plain.abort();
+      expect((plain.signal.reason as Error).name).toBe("AbortError");
+    } finally {
+      installed.cleanup();
+      Reflect.set(globalThis, "AbortController", previous);
+    }
+  });
+
+  test("leaves a standard AbortController untouched", () => {
+    const abort = AbortController.prototype.abort;
+    const installed = installOpenGeniReactNativeEnvironment(adapters());
+    installed.cleanup();
+    expect(AbortController.prototype.abort).toBe(abort);
+  });
 });

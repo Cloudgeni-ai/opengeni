@@ -44,15 +44,16 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 const WorkspaceInstructionPolicyRevisionId = z.string().uuid();
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "Invalid workspace instruction-policy request" });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid workspace instruction-policy request",
+  });
+  return parsed;
 }
 
 function policyErrorResponse(context: Context, error: unknown): Response {
@@ -147,19 +148,20 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const parsed = WorkspaceInstructionPolicyListQuery.safeParse({
-      kind: context.req.query("kind"),
-      scope: context.req.query("scope"),
-      roleKey: context.req.query("roleKey"),
-      afterRevision: context.req.query("afterRevision"),
-      limit: context.req.query("limit"),
-    });
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "Invalid workspace instruction-policy query" });
-    }
+    const parsed = parseRequestQuery(
+      WorkspaceInstructionPolicyListQuery,
+      {
+        kind: context.req.query("kind"),
+        scope: context.req.query("scope"),
+        roleKey: context.req.query("roleKey"),
+        afterRevision: context.req.query("afterRevision"),
+        limit: context.req.query("limit"),
+      },
+      { status: 422, message: "Invalid workspace instruction-policy query" },
+    );
     return context.json(
       WorkspaceInstructionPolicyListResponse.parse(
-        await listWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, parsed.data),
+        await listWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, parsed),
       ),
     );
   });
@@ -219,17 +221,16 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
   app.get(`${base}/onboarding-proposals`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const parsed = WorkspaceInstructionPolicyOnboardingProposalListQuery.safeParse({
-      limit: context.req.query("limit"),
-    });
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "Invalid workspace instruction-policy onboarding-proposal query",
-      });
-    }
+    const parsed = parseRequestQuery(
+      WorkspaceInstructionPolicyOnboardingProposalListQuery,
+      {
+        limit: context.req.query("limit"),
+      },
+      { status: 422, message: "Invalid workspace instruction-policy onboarding-proposal query" },
+    );
     return context.json(
       WorkspaceInstructionPolicyOnboardingProposalListResponse.parse(
-        await listWorkspaceInstructionPolicyOnboardingProposals(deps.db, workspaceId, parsed.data),
+        await listWorkspaceInstructionPolicyOnboardingProposals(deps.db, workspaceId, parsed),
       ),
     );
   });
@@ -271,17 +272,18 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
   app.get(`${base}/diff`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const parsed = WorkspaceInstructionPolicyDiffRequest.safeParse({
-      fromRevisionId: context.req.query("fromRevisionId"),
-      toRevisionId: context.req.query("toRevisionId"),
-    });
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "Invalid workspace instruction-policy diff query" });
-    }
+    const parsed = parseRequestQuery(
+      WorkspaceInstructionPolicyDiffRequest,
+      {
+        fromRevisionId: context.req.query("fromRevisionId"),
+        toRevisionId: context.req.query("toRevisionId"),
+      },
+      { status: 422, message: "Invalid workspace instruction-policy diff query" },
+    );
     try {
       return context.json(
         WorkspaceInstructionPolicyDiffResponse.parse(
-          await diffWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, parsed.data),
+          await diffWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, parsed),
         ),
       );
     } catch (error) {

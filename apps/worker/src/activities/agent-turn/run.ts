@@ -92,7 +92,6 @@ import {
   providerRecoveryCountAfterModelRequestPhase,
   sandboxRouteTransitionCode,
 } from "./errors";
-import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
@@ -120,7 +119,7 @@ import {
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
+import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -568,6 +567,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turn,
         session,
         installedApiIntegrations,
+        capabilityServerCategories,
         credentialSubjectId,
         fileAuthoritySubjectId,
         capabilitySettings,
@@ -873,7 +873,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     cacheAffinityKey: codexCacheAffinityKey(
                       input.workspaceId,
-                      preferenceSnapshotHumanSubjectId(turn),
+                      session.scopeSubjectId,
                       input.sessionId,
                     ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
@@ -1385,7 +1385,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
             rigVersion,
@@ -1746,6 +1745,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             capabilitySettings,
             installedApiIntegrations,
+            ...(capabilityServerCategories ? { capabilityServerCategories } : {}),
             codexAppsCoreConnectionId,
             turnExecutionPolicy,
             trigger,
@@ -1942,7 +1942,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
-            workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
             rigVersion,
@@ -2038,7 +2037,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 if (downloadsToMaterialize.length === 0) {
                   fileMaterializationCache = "hit";
                 }
-                const runAs = sandboxRunAs(runSettings);
                 if (downloadsToMaterialize.length > 0) {
                   const materialized = await runWorkspaceMutationForSandbox(
                     sandboxState.resolvedSandbox,
@@ -2054,7 +2052,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                               true,
                             );
                           },
-                          ...(runAs ? { runAs } : {}),
                           ...(eventing.toolCancellationFenceRef.current
                             ? {
                                 commandRunner:

@@ -18,6 +18,7 @@ import { readCodexCutoverDisposition } from "./subscription-core-codex-compat";
 import { organizationAdministeredConnection } from "./subscription-core/access";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
 import { recordSubscriptionUsageReading } from "./subscription-core/usage-reading";
+import { usageReadTransportJoin } from "./usage-read-transport";
 
 type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) => Promise<T>;
 
@@ -35,19 +36,19 @@ function remainingCoreUsageBudget(deadline: number): number {
  * An injected core transport must cancel and join its local work for this exact
  * signal, including any deferred dispatch, before this promise resolves. Native
  * Fetch already provides abortable fetch/body custody. Arbitrary CodexFetch
- * callbacks do not, so they fail closed before receiving a bearer.
+ * callbacks do not, so they fail closed before receiving a bearer. Native fetch
+ * behind the API's request tracing is still native fetch.
  */
 export type OrganizationCodexUsageJoinedFetch = CodexFetch & {
   abortAndJoin: (signal: AbortSignal) => Promise<void>;
 };
 
 function joinedTransport(fetchImpl: CodexFetch) {
-  if (fetchImpl === nativeUsageFetch) return null;
-  const candidate = fetchImpl as Partial<OrganizationCodexUsageJoinedFetch>;
-  if (typeof candidate.abortAndJoin !== "function") {
-    throw new Error("Organization Codex usage requires an abort-and-join transport");
-  }
-  return candidate.abortAndJoin.bind(fetchImpl);
+  return usageReadTransportJoin(
+    fetchImpl,
+    nativeUsageFetch,
+    "Organization Codex usage requires an abort-and-join transport",
+  );
 }
 
 /** No detached deadline: the administrator transaction awaits local fetch/body teardown. */

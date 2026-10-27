@@ -1602,6 +1602,39 @@ export async function classifyConnectedCommandOps(
   return classified;
 }
 
+const REARM_UNANSWERED_CONNECTED_COMMANDS =
+  "opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)";
+
+/**
+ * Make the running commands one exact runner process did not answer for
+ * (left to it as `provider_unanswered`) due again, while it reports its
+ * inventory. A runner reports only operations it knows, so one whose start
+ * never reached it would otherwise stay running forever. The next reconciler
+ * pass asks the runner, which is talking now: an unknown operation answers
+ * lost and settles. Returns how many commands were made due.
+ *
+ * 0984 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this makes nothing due and returns 0. The grant is checked in a
+ * separate statement: EXECUTE is checked when a statement starts.
+ */
+export async function rearmUnansweredConnectedCommands(
+  db: Database,
+  input: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
+): Promise<number> {
+  const [grant] = (await db.execute<{ granted: boolean | null }>(sql`
+    select has_function_privilege(
+      to_regprocedure(${REARM_UNANSWERED_CONNECTED_COMMANDS})::oid, 'EXECUTE'
+    ) as granted`)) as Array<{ granted: boolean | null }>;
+  if (grant?.granted !== true) return 0;
+  const rows = await db.execute<{ rearmed: number }>(sql`
+    select opengeni_private.rearm_unanswered_connected_commands(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text
+    ) as rearmed`);
+  return Number((rows as Array<{ rearmed: number }>)[0]?.rearmed ?? 0);
+}
+
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
  * inbox claiming; already delivered history is never rewritten. */

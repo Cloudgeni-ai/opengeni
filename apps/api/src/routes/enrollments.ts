@@ -12,8 +12,11 @@
 //     the app.use("*", requireAccessKey) edge already enforces). They are
 //     IP-rate-limited here. They DO NOT call requireAccessGrant.
 //   * device/approve + GET /enrollments + revoke are USER-authenticated +
-//     workspace-gated via requireAccessGrant (enrollments:manage / enrollments:read;
-//     workspace:admin is the super-wildcard).
+//     workspace-gated via requireAccessGrant (enrollments:read; workspace:admin is
+//     the super-wildcard). Connecting or changing a machine then follows its
+//     scope (../sandbox/machine-authority.ts): a signed-in teammate connects
+//     their own Only me machine; workspace machines need enrollments:manage and
+//     organization machines also account:admin.
 //
 // The cross-workspace safety of an unauthenticated start: start binds the request
 // to a workspaceId the agent supplies, and ONLY a user holding a grant in THAT
@@ -55,12 +58,12 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
-import {
-  requireAccessGrant,
-  requireAccessGrantAuthorization,
-  requirePermission,
-} from "@opengeni/core";
+import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  requireMachineAccessGrant,
+  requireMachineScopeAuthority,
+} from "../sandbox/machine-authority";
 import {
   approveDeviceEnrollment,
   denyDeviceEnrollment,
@@ -72,6 +75,7 @@ import {
   renewEnrollmentCredentials,
   toLookupResponse,
 } from "../sandbox/enrollment";
+import { parseRequestBody } from "../http/request-body";
 
 const ENROLLMENT_OUTCOMES = new Set([
   "ok",
@@ -144,12 +148,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/renew", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, exchangeLimiter);
-    const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
+    const parsed = parseRequestBody(RenewEnrollmentRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid renewal request",
+    });
     c.header("Cache-Control", "no-store");
     const now = Math.floor(Date.now() / 1000);
     // These failures do not establish that the credential can never recover.
-    if (Math.abs(now - parsed.data.signedAt) > 120)
+    if (Math.abs(now - parsed.signedAt) > 120)
       return c.json(
         {
           code: "enrollment_clock_skew",
@@ -165,7 +171,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         503,
       );
-    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data, now);
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed, now);
     recordEnrollment(deps, "renew", credentials ? "ok" : "unauthorized");
     if (!credentials)
       return c.json(
@@ -183,11 +189,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/start", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, startLimiter);
-    const parsed = DeviceEnrollmentStartRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-start request" });
-    }
-    const body = parsed.data;
+    const parsed = parseRequestBody(
+      DeviceEnrollmentStartRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-start request" },
+    );
+    const body = parsed;
     // Resolve the (account) for the supplied workspace. An unknown workspace is a
     // 404 (the same shape requireAccessGrant uses for an unknown workspace).
     const workspace = await getWorkspace(db, body.workspaceId);
@@ -219,14 +226,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/poll", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, pollLimiter);
-    const parsed = DeviceEnrollmentPollRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-poll request" });
-    }
-    const result = await pollDeviceEnrollment(
-      { db, settings },
-      { deviceCode: parsed.data.deviceCode },
+    const parsed = parseRequestBody(
+      DeviceEnrollmentPollRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-poll request" },
     );
+    const result = await pollDeviceEnrollment({ db, settings }, { deviceCode: parsed.deviceCode });
     // `pending` is the normal polling loop; count only decisions.
     if (result.state !== "pending") recordEnrollment(deps, "device_poll", result.state);
     return c.json(result, 200);
@@ -241,16 +246,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/lookup", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, lookupLimiter);
-    const parsed = DeviceEnrollmentLookupRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid device-lookup request",
-      });
-    }
-    const record = await lookupDeviceEnrollment(
-      { db, settings },
-      { userCode: parsed.data.userCode },
+    const parsed = parseRequestBody(
+      DeviceEnrollmentLookupRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-lookup request" },
     );
+    const record = await lookupDeviceEnrollment({ db, settings }, { userCode: parsed.userCode });
     if (!record) {
       // Unknown / terminal / expired code → 404 (indistinguishable from an
       // unauthorized one below, by design).
@@ -280,13 +281,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/token/exchange", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, exchangeLimiter);
-    const parsed = EnrollTokenExchangeRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid enroll-token-exchange request",
-      });
-    }
-    const body = parsed.data;
+    const parsed = parseRequestBody(
+      EnrollTokenExchangeRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid enroll-token-exchange request" },
+    );
+    const body = parsed;
     const result = await exchangeEnrollToken(
       { db, settings },
       {
@@ -342,18 +342,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // The LOUD CONSENT step. requireAccessGrant BEFORE the Zod parse.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/approve", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
-    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
     const rawBody = await c.req.json().catch(() => null);
-    const parsed = DeviceEnrollmentApproveRequest.safeParse(rawBody);
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid device-approve request",
-      });
-    }
-    const body = parsed.data;
+    const body = parseRequestBody(DeviceEnrollmentApproveRequest, rawBody, {
+      status: 400,
+      message: "invalid device-approve request",
+    });
     const scopeWasExplicit =
       typeof rawBody === "object" &&
       rawBody !== null &&
@@ -369,14 +365,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         grant.metadata?.delegated !== true)
         ? body.scope
         : undefined;
-    const allowOrganization =
-      effectiveScope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
-    if (effectiveScope === "organization" && !allowOrganization) {
-      throw new HTTPException(403, {
-        message: "missing permission: account:admin",
-      });
-    }
+    // No scope keeps the legacy workspace machine.
+    requireMachineScopeAuthority(authorization, effectiveScope ?? "workspace", "connect");
+    const allowOrganization = effectiveScope === "organization";
     const approved = await approveDeviceEnrollment(
       { db, settings },
       {
@@ -415,29 +406,33 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // ── POST /workspaces/:workspaceId/enrollments/device/deny (user-authed) ─────
-  // The explicit "no" at the approve page. Mirrors approve (enrollments:manage,
-  // requireAccessGrant BEFORE the parse). Idempotent: a non-pending code → denied:false.
+  // The explicit "no" at the approve page. Whoever may approve the code for
+  // themselves may decline it (requireAccessGrant BEFORE the parse). Idempotent:
+  // a non-pending code → denied:false.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/deny", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
-    const parsed = DeviceEnrollmentDenyRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-deny request" });
-    }
+    requireMachineScopeAuthority(authorization, "user", "connect");
+    const parsed = parseRequestBody(
+      DeviceEnrollmentDenyRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-deny request" },
+    );
     const result = await denyDeviceEnrollment(
       { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
-        userCode: parsed.data.userCode,
+        userCode: parsed.userCode,
       },
     );
     return c.json(DeviceEnrollmentDenyResponse.parse({ denied: result.denied }), 200);
   });
 
   // ── POST /workspaces/:workspaceId/enrollments/token (user-authed) ───────────
-  // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
+  // Mint a short-TTL headless enroll token. Mirrors approve (the scope rule,
   // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
   // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
   // `scope: "user"` signs the authenticated person as the machine's owner. Only a
@@ -447,25 +442,19 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // The owner is always the caller, never a request field.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    // The permission is part of the authorization, so a request that lacks it
-    // is refused before any first-use workspace membership is provisioned.
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:manage",
-    );
+    // The read permission is part of the authorization, so a request that lacks
+    // it is refused before any first-use workspace membership is provisioned.
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
-    const parsed = MintEnrollTokenRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid mint-enroll-token request",
-      });
-    }
-    const personal = parsed.data.scope === "user";
+    const parsed = parseRequestBody(MintEnrollTokenRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "invalid mint-enroll-token request",
+    });
+    const personal = parsed.scope === "user";
+    requireMachineScopeAuthority(authorization, personal ? "user" : "workspace", "connect");
     if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
       throw new HTTPException(422, {
         message:
@@ -477,7 +466,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        allowScreenControl: parsed.data.allowScreenControl,
+        allowScreenControl: parsed.allowScreenControl,
         ...(personal ? { ownerSubjectId: grant.subjectId } : {}),
       },
     );
@@ -531,18 +520,15 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /workspaces/:workspaceId/enrollments/:id/revoke (user-authed) ──────
   app.post("/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
-    requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
-    const parsed = RemoveEnrollmentRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid machine removal request",
-      });
-    }
+    const parsed = parseRequestBody(RemoveEnrollmentRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "invalid machine removal request",
+    });
     const idempotencyKey =
-      parsed.data.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
+      parsed.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
     try {
       const enrollmentId = c.req.param("enrollmentId");
       const enrollment = (await listEnrollments(db, grant, { status: "active" })).find(
@@ -553,22 +539,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "machine enrollment not found",
         });
       }
-      if (
-        enrollment.scope === "organization" &&
-        authorization.accountGrant?.permissions.includes("account:admin") !== true
-      ) {
-        throw new HTTPException(403, {
-          message: "missing permission: account:admin",
-        });
-      }
+      // A user-scope machine is listed only to its owner, so this is their own.
+      requireMachineScopeAuthority(authorization, enrollment.scope, "change");
       const result = await removeEnrollment(db, {
         accountId: grant.accountId,
         workspaceId: enrollment.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey,
-        ...(parsed.data.expectedUpdatedAt
-          ? { expectedUpdatedAt: parsed.data.expectedUpdatedAt }
-          : {}),
+        ...(parsed.expectedUpdatedAt ? { expectedUpdatedAt: parsed.expectedUpdatedAt } : {}),
         subjectId: grant.subjectId,
       });
       if (!result) {
@@ -604,29 +582,38 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained
 // rate. Buckets are created lazily and reset their tokens by elapsed time on each
 // take, so an idle key fully refills without a background timer.
-class TokenBucket {
+// The map is bounded: a new key first drops buckets that have fully refilled
+// (they carry no state), and if every tracked key is still active, the least
+// recently used one.
+export class TokenBucket {
   private readonly capacity: number;
   private readonly refillPerSecond: number;
+  private readonly maxKeys: number;
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  private lastSweepAt = Number.NEGATIVE_INFINITY;
 
-  constructor(options: { capacity: number; refillPerSecond: number }) {
+  constructor(options: { capacity: number; refillPerSecond: number; maxKeys?: number }) {
     this.capacity = options.capacity;
     this.refillPerSecond = options.refillPerSecond;
+    this.maxKeys = options.maxKeys ?? 10_000;
+  }
+
+  get size(): number {
+    return this.buckets.size;
   }
 
   take(key: string, now = Date.now()): boolean {
-    const bucket = this.buckets.get(key) ?? {
-      tokens: this.capacity,
-      updatedAt: now,
-    };
+    let bucket = this.buckets.get(key);
+    if (bucket) {
+      // Re-inserting keeps the map in least-recently-used order.
+      this.buckets.delete(key);
+    } else {
+      this.makeRoom(now);
+      bucket = { tokens: this.capacity, updatedAt: now };
+    }
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
     bucket.updatedAt = now;
-    // Prune the map opportunistically so it never grows unbounded: a fully-refilled
-    // bucket carries no state worth keeping.
-    if (bucket.tokens >= this.capacity && this.buckets.size > 10_000) {
-      this.buckets.delete(key);
-    }
     if (bucket.tokens < 1) {
       this.buckets.set(key, bucket);
       return false;
@@ -634,5 +621,26 @@ class TokenBucket {
     bucket.tokens -= 1;
     this.buckets.set(key, bucket);
     return true;
+  }
+
+  private makeRoom(now: number): void {
+    if (this.buckets.size < this.maxKeys) return;
+    // Under a flood of more than maxKeys distinct sources, evicting the least
+    // recently used bucket resets that source's limit. That is acceptable: an
+    // attacker who controls that many sources already has that aggregate rate.
+    // At most one full sweep per second keeps a flood of new keys linear.
+    if (now - this.lastSweepAt >= 1_000) {
+      this.lastSweepAt = now;
+      for (const [key, bucket] of this.buckets) {
+        const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
+        if (bucket.tokens + elapsedSeconds * this.refillPerSecond >= this.capacity) {
+          this.buckets.delete(key);
+        }
+      }
+    }
+    for (const key of this.buckets.keys()) {
+      if (this.buckets.size < this.maxKeys) break;
+      this.buckets.delete(key);
+    }
   }
 }

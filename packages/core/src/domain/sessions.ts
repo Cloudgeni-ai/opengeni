@@ -173,6 +173,7 @@ import {
   resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
+  getSessionModelGate,
   getInitializedSessionCreateReplay,
   getSessionGoal,
   getSessionAuthorityProjection,
@@ -225,7 +226,12 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  hasPermission,
+  requirePermission,
+  workspaceSettingsAuthorized,
+  type AccessGrantAuthorization,
+} from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -1934,6 +1940,8 @@ type PostUserMessageTurnResult = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** It waits for the owner of the personal machine the chat runs on. */
+  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -2089,6 +2097,7 @@ function finalizePostUserMessageTurn(
         }
       : null,
     interruptionCount: result.interruptionCount,
+    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
   };
 }
@@ -2111,7 +2120,8 @@ export async function postUserMessageTurn(
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const sessionForModelGate = await getSessionModelGate(db, workspaceId, sessionId);
+  if (!sessionForModelGate) throw new Error(`Session not found: ${sessionId}`);
   // Acceptance already froze this policy before resource/credential validation.
   // A different turn starting meanwhile must not change the model we gate here.
   const effectiveModelForGate =
@@ -2642,12 +2652,15 @@ async function createSessionForRequestInFileScope(
     });
   }
   // What the first message may do through app actions, frozen with its turn.
-  // A pure function of the request's own grant, computed once it is valid.
+  // Computed from the request's own grant once it is valid.
   const initialAppActionGrant = turnAppActionGrant({
     grant,
     authorization,
     delegatedSignInChangesEnabled:
       unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+    workspaceSettings:
+      authorization !== undefined &&
+      (await workspaceSettingsAuthorized(unresolvedDeps, authorization, workspaceId)),
   });
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
@@ -3354,11 +3367,15 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
-      const ownerContext = authorization
-        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-        : grant.principalKind === "agent_attempt"
-          ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-          : undefined;
+      // The outer creation scope already established the caller's file actor.
+      // Only attached files need a second live ownership read at validation.
+      const ownerContext = !resources.some((resource) => resource.kind === "file")
+        ? undefined
+        : authorization
+          ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+          : grant.principalKind === "agent_attempt"
+            ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+            : undefined;
       await validateFileResources(
         db,
         grant.accountId,
@@ -3671,9 +3688,6 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
-  const atlassianEnabled =
-    firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-    (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -3696,7 +3710,6 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
-        atlassianEnabled,
       }),
     );
   if (effectiveGoal) {
@@ -4402,6 +4415,7 @@ async function acceptSessionUserMessageInFileScope(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
@@ -4704,10 +4718,6 @@ async function acceptSessionUserMessageInFileScope(
         resources: [...existingSession.resources, ...requestedResources],
         source: connectionDelegationSource,
         targetSessionId: sessionId,
-        atlassianEnabled:
-          existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-          (!existingSession.firstPartyMcpPermissions?.length ||
-            existingSession.firstPartyMcpPermissions.includes("connections:read")),
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
       });
 
@@ -4722,78 +4732,89 @@ async function acceptSessionUserMessageInFileScope(
       grant,
       authorization: input.authorization,
       delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
+      workspaceSettings:
+        input.authorization !== undefined &&
+        (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
     });
-    const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
-      await postUserMessageTurn({
-        db,
-        bus,
-        workflowClient,
-        settings,
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        text: input.text,
-        annotations,
-        modelContext: input.modelContext ?? null,
-        resources: requestedResources,
-        ...(composerDraftResources ? { composerDraftResources } : {}),
-        model: input.model ?? null,
-        reasoningEffort: input.reasoningEffort ?? null,
-        latencyMode: input.latencyMode ?? null,
-        reasoningEffortFallback: sessionReasoningEffort,
-        turnExecutionPolicy,
-        mcpCredentialUpdates,
-        personalConnectionDelegations,
-        mcpAccountBindings,
-        connectionAccountIntent,
-        ...(timeZone ? { timeZone } : {}),
+    const {
+      accepted,
+      turn,
+      draft,
+      receipt,
+      routing,
+      interruptionCount,
+      waitsForMachineOwner,
+      replay,
+    } = await postUserMessageTurn({
+      db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      text: input.text,
+      annotations,
+      modelContext: input.modelContext ?? null,
+      resources: requestedResources,
+      ...(composerDraftResources ? { composerDraftResources } : {}),
+      model: input.model ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      latencyMode: input.latencyMode ?? null,
+      reasoningEffortFallback: sessionReasoningEffort,
+      turnExecutionPolicy,
+      mcpCredentialUpdates,
+      personalConnectionDelegations,
+      mcpAccountBindings,
+      connectionAccountIntent,
+      ...(timeZone ? { timeZone } : {}),
 
-        captureTurnAuthority: async (tx: Database, turnId: string) => {
-          await teamsCommitAuthorizer?.(tx);
-          await captureLinkedAuthority?.(tx, sessionId, turnId);
-          if (appActionGrant)
-            await recordTurnAppActionGrant(tx, {
+      captureTurnAuthority: async (tx: Database, turnId: string) => {
+        await teamsCommitAuthorizer?.(tx);
+        await captureLinkedAuthority?.(tx, sessionId, turnId);
+        if (appActionGrant)
+          await recordTurnAppActionGrant(tx, {
+            accountId: grant.accountId,
+            workspaceId,
+            turnId,
+            grant: appActionGrant,
+          });
+        // The prompt transaction has frozen the exact authority at this
+        // point. A refusal rolls back both prompt and receipt atomically.
+        if (effectiveModel.startsWith("codex/"))
+          await requireLimit(
+            { ...deps, db: tx },
+            {
               accountId: grant.accountId,
               workspaceId,
-              turnId,
-              grant: appActionGrant,
-            });
-          // The prompt transaction has frozen the exact authority at this
-          // point. A refusal rolls back both prompt and receipt atomically.
-          if (effectiveModel.startsWith("codex/"))
-            await requireLimit(
-              { ...deps, db: tx },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
-                action: "agent_run:create",
-                quantity: 1,
-                model: effectiveModel,
-                acceptedTurn: { sessionId, turnId },
-              },
-            );
-        },
-        ...(input.personalResourceAttachment
-          ? { personalResourceAttachment: input.personalResourceAttachment }
-          : {}),
-        delivery,
-        origin: source === "api" ? "operator" : "human",
-        surface,
-        actor: grant.subjectId,
-        ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-        commandActor,
-        ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
-        ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
-        ...(input.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: input.expectedDraftRevision }
-          : {}),
-        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-        recordAgentRunUsage: true,
-        ...(deps.schedulePromptPostCommit
-          ? { schedulePostCommit: deps.schedulePromptPostCommit }
-          : {}),
-      });
+              initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
+              action: "agent_run:create",
+              quantity: 1,
+              model: effectiveModel,
+              acceptedTurn: { sessionId, turnId },
+            },
+          );
+      },
+      ...(input.personalResourceAttachment
+        ? { personalResourceAttachment: input.personalResourceAttachment }
+        : {}),
+      delivery,
+      origin: source === "api" ? "operator" : "human",
+      surface,
+      actor: grant.subjectId,
+      ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+      commandActor,
+      ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+      ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+      ...(input.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: input.expectedDraftRevision }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      recordAgentRunUsage: true,
+      ...(deps.schedulePromptPostCommit
+        ? { schedulePostCommit: deps.schedulePromptPostCommit }
+        : {}),
+    });
     if (!replay) recordUserMessageAccepted(deps.observability, { surface });
     return {
       accepted,
@@ -4802,6 +4823,7 @@ async function acceptSessionUserMessageInFileScope(
       receipt,
       routing,
       interruptionCount,
+      waitsForMachineOwner,
       replay,
     };
   } catch (error) {
@@ -4858,11 +4880,12 @@ export async function acceptSessionUserMessage(
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  waitsForMachineOwner: boolean;
   replay: boolean;
 }> {
-  const { accepted, turn, receipt, routing, interruptionCount, replay } =
+  const { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay } =
     await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, input);
-  return { accepted, turn, receipt, routing, interruptionCount, replay };
+  return { accepted, turn, receipt, routing, interruptionCount, waitsForMachineOwner, replay };
 }
 
 /**

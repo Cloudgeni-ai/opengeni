@@ -25,6 +25,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
+  PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -12022,9 +12023,14 @@ export const enrollments = pgTable(
     organizationPubkey: uniqueIndex("enrollments_organization_pubkey_idx")
       .on(table.accountId, table.pubkey)
       .where(sql`${table.authorityScope} = 'organization'`),
-    userPubkey: uniqueIndex("enrollments_user_pubkey_idx")
-      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+    // A person's machine: one enrollment per workspace it was connected from,
+    // and at most one of them live (0996).
+    userWorkspacePubkey: uniqueIndex("enrollments_user_workspace_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey, table.workspaceId)
       .where(sql`${table.authorityScope} = 'user'`),
+    userActivePubkey: uniqueIndex("enrollments_user_active_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'user' and ${table.status} = 'active'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
     sandboxGroup: index("enrollments_sandbox_group_idx")
@@ -13294,6 +13300,9 @@ export const modelCallFacts = pgTable(
     timeToFirstTokenMs: integer("time_to_first_token_ms"),
     timeToFirstTextMs: integer("time_to_first_text_ms"),
     durationMs: integer("duration_ms"),
+    // Prompt-cache observation and warm-miss classification (see
+    // PromptCacheDiagnostics); null before 0979 and for repaired facts.
+    promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -15711,3 +15720,16 @@ export const feedbackSubmissions = pgTable(
     ),
   }),
 );
+
+/** Promotion eligibility is separate from account access and paid funding. */
+export const promotionDecisions = pgTable("promotion_decisions", {
+  accountId: uuid("account_id").primaryKey(),
+  decision: text("decision").notNull(),
+  revision: bigint("revision", { mode: "number" }).notNull(),
+  actor: text("actor").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const promotionEnforcement = pgTable("promotion_enforcement", {
+  singleton: boolean("singleton").primaryKey().default(true),
+  enabled: boolean("enabled").notNull().default(false),
+});

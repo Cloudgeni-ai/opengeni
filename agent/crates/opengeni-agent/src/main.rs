@@ -54,7 +54,6 @@ mod handover;
 mod instance_lock;
 mod inventory;
 mod job;
-mod legacy;
 mod log_file;
 mod metrics;
 mod ops;
@@ -654,6 +653,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         }
         if let Some(inherited) = inherited {
             supervisor.restore_lost_markers(inherited.lost_markers);
+            supervisor.restore_reply_leases(inherited.reply_leases);
             supervisor.adopt_handed_over(&platform, inherited.ops);
         }
     }
@@ -1001,6 +1001,7 @@ fn carry_on_handed_over<P: Platform + 'static>(
     }
     if let Some(inherited) = inherited {
         supervisor.restore_lost_markers(inherited.lost_markers);
+        supervisor.restore_reply_leases(inherited.reply_leases);
         supervisor.adopt_handed_over(platform, inherited.ops);
     }
     supervisor

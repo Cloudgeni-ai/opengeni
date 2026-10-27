@@ -30,13 +30,20 @@ describe("LogoTile", () => {
     expect(html.match(/data-size="(\w+)"/g)).toEqual(['data-size="sm"', 'data-size="lg"']);
   });
 
-  test("logos render as images with an empty alt, on the surface when padded", () => {
-    const cover = renderToStaticMarkup(<LogoTile src="/slack.png" name="Slack" />);
+  test("logos render as images with an empty alt; padded marks sit on a light plate", () => {
+    const cover = renderToStaticMarkup(<LogoTile src="/slack.png" fit="cover" name="Slack" />);
     expect(cover).toContain('src="/slack.png"');
     expect(cover).toContain('alt=""');
     expect(cover).toContain("object-cover");
+    expect(cover).toContain('data-fit="cover"');
     const contain = renderToStaticMarkup(<LogoTile src="/gmail.ico" fit="contain" name="Gmail" />);
     expect(contain).toContain("object-contain");
-    expect(contain).toContain("bg-surface ");
+    expect(contain).toContain("bg-surface dark:bg-fg");
+  });
+
+  test("by default an image stays hidden until it is measured, so it never jumps", () => {
+    const html = renderToStaticMarkup(<LogoTile src="/unmeasured.png" name="Unmeasured" />);
+    expect(html).toContain('data-fit="pending"');
+    expect(html).toContain("opacity-0");
   });
 });

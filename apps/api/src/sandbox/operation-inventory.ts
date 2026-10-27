@@ -3,6 +3,7 @@ import { getEnrollment, type Database } from "@opengeni/db";
 import {
   classifyConnectedCommandOps,
   CONNECTED_COMMAND_CLASSIFY_LIMIT,
+  rearmUnansweredConnectedCommands,
   recordConnectedCommandOutputRelease,
   type ConnectedCommandInventoryRow,
 } from "@opengeni/db/session-background-commands";
@@ -13,6 +14,7 @@ import {
   collectExitedConnectedCommandOutput,
   type ConnectedCommandCollectionDeps,
 } from "./command-completion";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** One reported operation, as the runner described it. */
 export type ReportedOperation = {
@@ -103,7 +105,7 @@ export function decideInventoryPage(input: {
 /** The outcome of one inventory page. */
 export type OperationInventoryAnswer =
   | { answered: false; reason: "not_current" | "invalid" | "no_transport" }
-  | ({ answered: true } & InventoryDecision);
+  | ({ answered: true; rearmed: number } & InventoryDecision);
 
 /**
  * Answer one page of the inventory a runner process reports, on each
@@ -114,6 +116,13 @@ export type OperationInventoryAnswer =
  * connection gets no answer (it repeats the page while connected). The
  * runner starts every such exchange, so nothing here reaches a runner that is
  * not talking, such as a sleeping compute sandbox.
+ *
+ * A report also makes due again the running commands this process did not
+ * answer for while it was away (left to it as unanswered). It lists only
+ * operations it knows, so one whose start never reached it would otherwise
+ * stay running forever; the reconciler now asks the runner once more, and an
+ * operation it does not know settles lost. A sandbox runner's running
+ * commands are never polled, so its report changes nothing here.
  */
 export async function answerOperationInventory(
   db: Database,
@@ -146,6 +155,31 @@ export async function answerOperationInventory(
   ) {
     return { answered: false, reason: "not_current" };
   }
+  let rearmed = 0;
+  if (inventory.page === 0 && enrollment.kind !== "sandbox") {
+    rearmed = await rearmUnansweredConnectedCommands(db, {
+      controlWorkspaceId: ids.workspaceId,
+      enrollmentId: ids.agentId,
+      connectionInstanceId: ids.connectionInstanceId,
+    }).catch((error: unknown) => {
+      observability?.warn?.("Failed to ask again about commands a runner did not answer for", {
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+        error: errorMessage(error),
+      });
+      return 0;
+    });
+    if (rearmed > 0) {
+      observability?.info?.(
+        "A returning runner is asked again about commands it did not answer for",
+        {
+          workspaceId: ids.workspaceId,
+          enrollmentId: ids.agentId,
+          commands: rearmed,
+        },
+      );
+    }
+  }
   const commands = await classifyConnectedCommandOps(db, {
     controlWorkspaceId: ids.workspaceId,
     enrollmentId: ids.agentId,
@@ -162,7 +196,7 @@ export async function answerOperationInventory(
       workspaceId: ids.workspaceId,
       enrollmentId: ids.agentId,
       opId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   // Record each release before answering, so an output is never dropped with
   // its obligation left open. Opengeni already holds the output; should the
@@ -203,5 +237,5 @@ export async function answerOperationInventory(
       warn("Failed to collect a reported command output", row.opId, error),
     );
   }
-  return { answered: true, ...decision };
+  return { answered: true, rearmed, ...decision };
 }

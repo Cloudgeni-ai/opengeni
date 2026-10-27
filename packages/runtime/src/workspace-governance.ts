@@ -117,8 +117,8 @@ export function renderWorkspaceGovernanceContext(
   const rendered = [
     context.learningPolicy ? renderAgentLearningPolicy(context.learningPolicy) : null,
     companyProfile
-      ? "Active organization and workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt."
-      : "Active workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt.",
+      ? "Active organization and workspace governance for this turn follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply from a later turn."
+      : "Active workspace governance for this turn follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply from a later turn.",
     companyProfileEvidence,
     `Instruction-policy snapshot evidence: sha256=${context.instructionPolicy.entryHash}; role=${context.instructionPolicy.policyRole ?? "none"}; roleSource=${context.instructionPolicy.roleSource}; entries=${context.instructionPolicy.entries.length}/3.`,
     options.sharedSkillReader ? null : preferenceEvidence,

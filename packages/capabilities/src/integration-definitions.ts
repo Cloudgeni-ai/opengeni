@@ -1,4 +1,5 @@
 import { IntegrationProtocolError } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export interface IntegrationDefinitionOAuth2Authentication {
   readonly kind: "oauth2";
@@ -60,14 +61,6 @@ export interface IntegrationDefinition {
   readonly autoApproval?: Readonly<{
     forbiddenOperationKeys: readonly string[] | "all";
   }>;
-}
-
-/** @deprecated Compatibility adapter. User choices are always overridable. */
-export function autoApprovalForbidden(
-  _definition: IntegrationDefinition | undefined,
-  _operationKey: string,
-): boolean {
-  return false;
 }
 
 export interface IntegrationFacetDefinition {
@@ -787,8 +780,4 @@ function escapeJsonPointer(value: string): string {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

@@ -268,6 +268,12 @@ export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
       headless: primitives.boolean,
+      /** How a headed managed browser shows on its machine, as its controller
+       * launched it: "window" is a native window on the machine's screen,
+       * "offscreen" is the same browser with no window (for example a managed
+       * browser on a person's Mac). Absent when unknown, headless, remote or
+       * the person's own Chrome. */
+      display: z.enum(["window", "offscreen"]).optional(),
       identityId: primitives.nullableUuid,
       baseRevisionId: primitives.nullableUuid,
       networkRouteId: primitives.nullableUuid,
@@ -2257,6 +2263,9 @@ export const BrowserDomReadRequest = /* @__PURE__ */ defineSchema(() =>
       locator: BrowserDomReadLocator,
       attributes: z.array(BrowserDomSafeAttribute).max(13).optional(),
       maxChars: z.number().int().min(1).max(32_768).optional(),
+      /** Characters of the element's text and value to skip, to read on
+       * past a truncated read. */
+      offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     }).strict(),
     BrowserDomReadFence.extend({
       kind: z.literal("count"),
@@ -2356,6 +2365,8 @@ const browserActionVariants = [
       deviceScaleFactor: z.number().min(0.5).max(4).optional(),
     })
     .strict(),
+  /** Ends viewport emulation: the tab returns to the window's own size and scale. */
+  z.object({ type: z.literal("viewport_reset") }).strict(),
   z
     .object({
       type: z.literal("click"),
@@ -3302,6 +3313,17 @@ export const BrowserSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeartbeatResponse>;
 
+/**
+ * The longest a browser is kept after its last use while an agent session
+ * using it is still working (a turn in progress) or deliberately waits (an
+ * armed input wait). A browser normally stops after a few unused minutes;
+ * such a session keeps it, page state and all, until it stops working and
+ * waiting (a wait ends at its deadline) or this long after the browser's last
+ * use, whichever comes first. Anchoring the cap on the last use means a long
+ * turn or repeated waits cannot keep a browser nobody uses.
+ */
+export const BROWSER_WAIT_HOLD_MAX_MS = 60 * 60_000;
+
 const resolvedTargetRole = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(64));
 const resolvedTargetText = /* @__PURE__ */ defineSchema(() =>
   primitives.nonEmptyString.max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),
@@ -3338,6 +3360,49 @@ export type BrowserActionResolvedTarget = z.infer<typeof BrowserActionResolvedTa
  * and callers that do not send it receive receipts without the field. */
 export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 
+/** Something an action did that its completed state alone does not say. A
+ * `network_busy` note is a network_idle wait on a page that loaded but whose
+ * network never went quiet (it keeps polling or holds requests open): the wait
+ * ended at its timeout and the action still completed; or one that ended
+ * without waiting for requests still unanswered after a long-poll cutoff. An
+ * `observation_unavailable` note is on a completed action after which the
+ * page could not be read, so its receipt carries no observation although one
+ * was asked for. `message` says which in plain words. */
+export const BrowserActionNote = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actionIndex: z
+        .number()
+        .int()
+        .min(0)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+      kind: z.enum(["network_busy", "observation_unavailable"]),
+      message: primitives.nonEmptyString.max(1_024),
+    })
+    .strict(),
+);
+export type BrowserActionNote = z.infer<typeof BrowserActionNote>;
+
+/** Query parameter by which a caller asks a browser controller to include
+ * `notes` in an action receipt. Controllers that predate the field ignore it,
+ * and callers that do not send it receive receipts without the field. Its
+ * value is the newest note version the caller parses (see
+ * BROWSER_ACTION_NOTE_KIND_VERSIONS). */
+export const BROWSER_ACTION_RECEIPT_NOTES_PARAMETER = "receiptNotes";
+
+/** The receipt-notes version that introduced each note kind. A controller
+ * returns a note only to a caller that asked with at least that version,
+ * because receipts are parsed strictly and an older caller would reject a
+ * kind it does not know. */
+export const BROWSER_ACTION_NOTE_KIND_VERSIONS = {
+  network_busy: 1,
+  observation_unavailable: 2,
+} as const satisfies Record<BrowserActionNote["kind"], number>;
+
+/** The newest receipt-notes version; callers send it as the value of
+ * BROWSER_ACTION_RECEIPT_NOTES_PARAMETER. */
+export const BROWSER_ACTION_RECEIPT_NOTES_VERSION = 2;
+
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3358,6 +3423,10 @@ export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(BrowserActionResolvedTarget)
         .max(INTERACTION_MAX_RESOLVED_ACTION_TARGETS)
         .optional(),
+      /** Per-action notes, in dispatch order (see BrowserActionNote). Present
+       * only when the controller supports it and the caller asked for it;
+       * never persisted in the controller's operation journal. */
+      notes: z.array(BrowserActionNote).max(INTERACTION_MAX_ACTIONS_PER_BATCH).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {
@@ -3611,7 +3680,8 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           context.addIssue({
             code: "custom",
             path: ["continuationOfOperationId"],
-            message: "clickCount 2 requires exactly one prior first-click operation",
+            message:
+              'clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead',
           });
         }
         if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
@@ -3787,6 +3857,11 @@ export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn
  * ignore it, and callers that do not send it receive receipts without it. */
 export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
 
+/** Query parameter by which a caller asks a computer controller to include
+ * `unconfirmedInput` in an action receipt, on the same terms as
+ * {@link COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}. */
+export const COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER = "receiptUnconfirmedInput";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3808,6 +3883,11 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(ComputerActionRoleStandIn)
         .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
         .optional(),
+      /** The action sent raw input (a click or a key press) that its driver
+       * reported as delivered without any confirmation that the app acted on
+       * it. Present only when the controller supports it and the caller asked
+       * for it; never persisted in the controller's operation journal. */
+      unconfirmedInput: z.literal(true).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

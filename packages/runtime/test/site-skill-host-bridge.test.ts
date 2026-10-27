@@ -11,16 +11,18 @@ const reference = (name: string) =>
     "utf8",
   );
 
-describe("Sites skill simple-page path", () => {
-  test("keeps the main file small: a simple page needs nothing else", () => {
-    // The main file is all a simple page reads; app material lives in references.
+describe("Sites skill single-file path", () => {
+  test("keeps the main file small: a single-file Site needs nothing else", () => {
+    // The main file is all a single-file Site reads; app material lives in references.
     expect(Buffer.byteLength(skill)).toBeLessThan(16 * 1024);
-    expect(skill).toContain('Follow "Simple page" below; nothing else in this Skill is needed.');
+    expect(skill).toContain(
+      'Follow "Single-file Site" below; nothing else in this Skill is\n  needed.',
+    );
   });
 
-  test("puts the path choice and the simple page before any app material", () => {
+  test("puts the path choice and the single-file Site before any app material", () => {
     const choice = skill.indexOf("## Pick the path first");
-    const simple = skill.indexOf("## Simple page");
+    const simple = skill.indexOf("## Single-file Site");
     const apps = skill.indexOf("## Apps");
     expect(choice).toBeGreaterThan(-1);
     expect(choice).toBeLessThan(simple);
@@ -31,6 +33,30 @@ describe("Sites skill simple-page path", () => {
     expect(section).toContain("At most one quick look at phone width");
     expect(section).toContain("`requestedTools: []`");
     expect(section).toContain("ask before making it public");
+    expect(skill.slice(choice, simple)).toContain(
+      "A Site you can finish in this turn needs no goal.",
+    );
+  });
+
+  test("covers a personal tracker with saved entries without the app path", () => {
+    const choice = skill.slice(
+      skill.indexOf("## Pick the path first"),
+      skill.indexOf("## Single-file Site"),
+    );
+    expect(choice).toContain("keeps the viewer's own entries");
+    expect(choice).toContain("Build what the person asked for.");
+    expect(choice).toContain("instead of building them");
+    const section = skill.slice(
+      skill.indexOf("## Single-file Site"),
+      skill.indexOf("## Make new Sites readable by default"),
+    );
+    expect(section).toContain('<script src="/__opengeni/site-tools/client.js"></script>');
+    expect(section).toContain('.data.collection("entries")');
+    expect(section).toContain("`opengeni__site_data_define_collection`");
+    expect(section).toContain("`per_viewer`");
+    expect(section).toContain("preview servers and test harnesses");
+    expect(section).toContain("Reply with the link as soon as it is saved");
+    expect(skill).toContain("Mention source files, tests or tool names only to");
   });
 
   test("scopes the heavy checks to apps", () => {

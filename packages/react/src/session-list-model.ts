@@ -9,6 +9,7 @@ import {
   type ClientModel,
   type Session,
   type SessionListEntry,
+  type SessionLineageResponse,
   type SessionStatus,
 } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
@@ -128,6 +129,54 @@ export function sessionAutomationWait(
 ): SessionAutomationWait | null {
   if (session.waitingForEvents === true) return "event";
   return sessionHasUpcomingSchedule(session) ? "schedule" : null;
+}
+
+/**
+ * The session with the automation facts of its lineage read, when that read
+ * carries them. The facts come from one read, so a newer lineage never pairs
+ * with an older session read (an older server sends no upcoming flag).
+ */
+export function withLineageAutomationFacts<S extends SessionListRow>(
+  session: S,
+  lineage:
+    | Pick<
+        SessionLineageResponse,
+        | "sessionHasSchedules"
+        | "sessionHasUpcomingSchedules"
+        | "sessionWaitingForEvents"
+        | "sessionAutomationWait"
+      >
+    | null
+    | undefined,
+): S {
+  const schedules = lineage?.sessionHasSchedules;
+  if (schedules === undefined) return session;
+  return {
+    ...session,
+    hasSchedules: schedules,
+    hasUpcomingSchedules: lineage?.sessionHasUpcomingSchedules ?? schedules,
+    waitingForEvents: lineage?.sessionWaitingForEvents ?? false,
+    automationWait: lineage?.sessionAutomationWait,
+  };
+}
+
+/**
+ * Something will wake this session on its own: the agent's timed wait, or
+ * an automation (a schedule's next run, or an event) that can still start a
+ * run. The composer keeps Pause available while one is pending.
+ */
+export function sessionHasPendingWake(
+  session: Pick<
+    SessionListRow,
+    | "status"
+    | "effectiveControl"
+    | "inputWait"
+    | "hasSchedules"
+    | "hasUpcomingSchedules"
+    | "waitingForEvents"
+  >,
+): boolean {
+  return sessionInputWait(session) !== null || sessionAutomationWait(session) !== null;
 }
 
 /** How a chat's automation wait reads in a tooltip, hover card or announcement. */

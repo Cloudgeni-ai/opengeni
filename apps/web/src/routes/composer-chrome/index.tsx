@@ -12,7 +12,12 @@ import { ScenarioStack } from "./scenario-stack";
 type ViewMode = "phone" | "gallery" | "queue";
 
 export function ComposerChromeGalleryRoute() {
-  const composer = useMemo(() => idleComposer(), []);
+  // Toggle to walk a turn's start and end: Pause and the working wording
+  // come and go, and nothing else in the row may move.
+  const [working, setWorking] = useState(
+    () => new URLSearchParams(window.location.search).get("working") === "1",
+  );
+  const composer = useMemo(() => idleComposer({ working }), [working]);
   const scenarios = useGalleryScenarios();
   const [mode, setMode] = useState<ViewMode>(() =>
     new URLSearchParams(window.location.search).get("view") === "queue" ? "queue" : "gallery",
@@ -84,6 +89,19 @@ export function ComposerChromeGalleryRoute() {
                 Queued message
               </button>
             </div>
+            <button
+              type="button"
+              aria-pressed={working}
+              data-harness-working={working ? "on" : "off"}
+              className={
+                working
+                  ? "rounded-lg border border-fg bg-fg px-3 py-1.5 text-xs font-medium text-bg"
+                  : "rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-fg-muted hover:text-fg"
+              }
+              onClick={() => setWorking((value) => !value)}
+            >
+              Agent working
+            </button>
             {mode === "gallery" ? (
               <ScenarioFilter
                 scenarios={scenarios}

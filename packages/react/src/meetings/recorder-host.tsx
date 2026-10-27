@@ -2,7 +2,7 @@
  * Runs the recorder for the whole workspace and publishes it to the store.
  * Loaded lazily by MeetingRecorderProvider; renders nothing.
  */
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { desktopCapability } from "../app/lib/desktop";
 import { useRecorder } from "../recordings";
 
@@ -22,10 +22,18 @@ export default function RecorderHost({
     ...(client ? { client } : {}),
     onFinished: (recordingId) => store.markFinished(recordingId),
   });
+  const published = useRef(recorder);
   useLayoutEffect(() => {
-    store.set(recorder);
+    published.current = recorder;
+    store.set(recorder, workspaceId);
   });
-  useEffect(() => () => store.set(null), [store]);
+  // The host for the next workspace may already have published its recorder.
+  useEffect(
+    () => () => {
+      if (store.get() === published.current) store.set(null);
+    },
+    [store],
+  );
 
   // Closing the tab ends a recording in progress. Chunks already cut are safe
   // on this device and upload next time, so only live capture asks first.

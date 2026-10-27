@@ -11,14 +11,22 @@
 //! A client made for one VMM process sends nothing to any other: a request
 //! still on its way when that VMM ends can never reach a later one behind
 //! the same socket path.
+//!
+//! A deadline counts only time the VMM can run. While its group is held
+//! frozen (the host's guard freezes every VM once the host's lease runs
+//! out, until it is renewed) the VMM cannot answer, and a request that
+//! failed for that would end a VM that was only paused with the rest.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::{Pin, pin};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::{Instant, timeout_at};
+
+use crate::cgroup::Cgroup;
 
 /// Responses larger than this are refused; real ones are a few hundred bytes.
 const MAX_RESPONSE: usize = 1 << 20;
@@ -30,6 +38,11 @@ const CONTROL_LIMIT: Duration = Duration::from_secs(10);
 /// How long a snapshot request may take. It moves a VM's memory to or from
 /// disk, which can take minutes when many VMs save at once.
 const SNAPSHOT_LIMIT: Duration = Duration::from_secs(600);
+
+/// How often a request still waiting looks at whether its VMM is frozen:
+/// the time since the last look counts toward its deadline only if
+/// neither look found it so.
+const FROZEN_LOOK: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -60,6 +73,9 @@ pub struct Api {
     socket: PathBuf,
     /// The process that must serve the socket, in the host's PID namespace.
     server: Option<i32>,
+    /// The group whose freezer holds that process; time it spends frozen
+    /// does not count toward a deadline.
+    group: Option<Cgroup>,
     control_limit: Duration,
     snapshot_limit: Duration,
 }
@@ -69,6 +85,7 @@ impl Api {
         Self {
             socket: socket.into(),
             server: None,
+            group: None,
             control_limit: CONTROL_LIMIT,
             snapshot_limit: SNAPSHOT_LIMIT,
         }
@@ -78,6 +95,15 @@ impl Api {
     pub fn served_by(self, pid: i32) -> Self {
         Self {
             server: Some(pid),
+            ..self
+        }
+    }
+
+    /// The same client, not counting toward a deadline the time `group`,
+    /// the VMM's cgroup, is held frozen.
+    pub fn held_by(self, group: Cgroup) -> Self {
+        Self {
+            group: Some(group),
             ..self
         }
     }
@@ -114,16 +140,20 @@ impl Api {
         body: Option<&serde_json::Value>,
     ) -> Result<Vec<u8>, ApiError> {
         let limit = self.limit(path);
-        let deadline = Instant::now() + limit;
+        // The time the VMM may run before the request fails, over both
+        // the connect and the exchange.
+        let mut left = limit;
         let body = body.map(serde_json::Value::to_string).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let mut stream = timeout_at(deadline, crate::confined::connect(&self.socket))
+        let connect = pin!(crate::confined::connect(&self.socket));
+        let mut stream = self
+            .until(&mut left, connect)
             .await
-            .map_err(|_| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
+            .ok_or_else(|| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
             .map_err(ApiError::Connect)?;
         if let Some(server) = self.server {
             let peer = stream.peer_cred().map_err(ApiError::Connect)?.pid();
@@ -133,13 +163,14 @@ impl Api {
                 ))));
             }
         }
-        let exchange = async {
+        let exchange = pin!(async {
             stream.write_all(request.as_bytes()).await?;
             read_response(&mut stream).await
-        };
-        let (status, response) = timeout_at(deadline, exchange)
+        });
+        let (status, response) = self
+            .until(&mut left, exchange)
             .await
-            .map_err(|_| ApiError::Timeout(limit))??;
+            .ok_or(ApiError::Timeout(limit))??;
         if (200..300).contains(&status) {
             Ok(response)
         } else {
@@ -149,6 +180,51 @@ impl Api {
                 status,
                 body: String::from_utf8_lossy(&response).into_owned(),
             })
+        }
+    }
+
+    /// Runs `work` for at most `left` of the time the VMM can run, taking
+    /// what it uses off `left`; `None` once that is spent first. Time
+    /// counts unless the VMM's group is found held frozen at either end of
+    /// it, however late a look comes (the executor may be busy), and the
+    /// time is only found spent by a look that finds the group not held.
+    /// The caller pins `work`, so it is held once, not again in here.
+    async fn until<T>(
+        &self,
+        left: &mut Duration,
+        mut work: Pin<&mut impl Future<Output = T>>,
+    ) -> Option<T> {
+        // A freezer it cannot read is not known to hold the VMM.
+        let held = |group: &Cgroup| group.is_held_frozen().unwrap_or(false);
+        let Some(group) = &self.group else {
+            let started = Instant::now();
+            let done = timeout_at(started + *left, work).await.ok();
+            *left = left.saturating_sub(started.elapsed());
+            return done;
+        };
+        let (mut looked, mut was_held) = (Instant::now(), held(group));
+        loop {
+            // While held, nothing is spent before the next look.
+            let wait = if was_held {
+                FROZEN_LOOK
+            } else {
+                (*left).min(FROZEN_LOOK)
+            };
+            let done = tokio::select! {
+                biased;
+                done = work.as_mut() => Some(done),
+                () = tokio::time::sleep_until(looked + wait) => None,
+            };
+            let (now, is_held) = (Instant::now(), held(group));
+            if !(was_held || is_held) {
+                *left = left.saturating_sub(now - looked);
+            }
+            // Work that finished is charged its last stretch too, for the
+            // part of the request still to come.
+            if done.is_some() || (left.is_zero() && !is_held) {
+                return done;
+            }
+            (looked, was_held) = (now, is_held);
         }
     }
 }
@@ -258,6 +334,32 @@ mod tests {
             matches!(error, ApiError::Status { status: 400, .. }),
             "{error}"
         );
+    }
+
+    /// The connect and the exchange share one limit: what the first uses
+    /// is gone for the second, whether or not the client watches a group.
+    #[tokio::test]
+    async fn the_parts_of_a_request_share_its_time() {
+        let dir = tempdir::Dir::new();
+        let own = dir.path().join("vm");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("cgroup.freeze"), "0").unwrap();
+        std::fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        for api in [
+            Api::new("unused"),
+            Api::new("unused").held_by(Cgroup::at(&own)),
+        ] {
+            let mut left = Duration::from_millis(200);
+            let first = pin!(tokio::time::sleep(Duration::from_millis(80)));
+            assert_eq!(api.until(&mut left, first).await, Some(()));
+            assert!(
+                left <= Duration::from_millis(125),
+                "{left:?} left after 80 ms of 200"
+            );
+            let second = pin!(std::future::pending::<()>());
+            assert_eq!(api.until(&mut left, second).await, None);
+            assert_eq!(left, Duration::ZERO);
+        }
     }
 
     /// A self-deleting temporary directory, to avoid a dependency for tests.

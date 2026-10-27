@@ -234,6 +234,7 @@
     "@codemirror/state": "6.7.1",
     "@codemirror/view": "6.43.6",
     "@grpc/grpc-js": "1.14.4",
+    "@peculiar/asn1-schema": "2.11.1",
     "dompurify": "3.4.12",
     "esbuild": "0.25.0",
     "form-data": "4.0.6",

@@ -8,6 +8,7 @@ import {
   makeResumeBoxById,
   type ApiSandboxSession,
 } from "../src/sandbox/access";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // P0.4 LIVE API-DIRECT RESUME SMOKE (NEEDS-CREDS(Modal)).
 //
@@ -106,9 +107,7 @@ async function terminate(session: ApiSandboxSession | null | undefined): Promise
     }
   } catch (error) {
     // Surface but never throw out of teardown.
-    console.error(
-      `[smoke teardown] terminate failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    console.error(`[smoke teardown] terminate failed: ${errorMessage(error)}`);
   }
 }
 

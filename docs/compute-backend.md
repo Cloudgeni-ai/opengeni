@@ -77,6 +77,10 @@ sandbox or its host again on a timer. The transport never depends on what the
 database says about the runner, so a failed read cannot turn a recovery query
 into a waking one. The gateway logs such a request to a
 sandbox it last saw asleep at debug, never as a wake.
+A Connected Machine's next inventory report makes such commands due again, so
+one whose start never reached the agent settles lost; a compute agent's report
+does not, and its running commands stay unpolled (see
+[Connected Machines](connected-machines.md)).
 
 Every compute agent serves `OpRelease` and reports its operation inventory
 (`capabilities.op_release`). A compute

@@ -680,48 +680,6 @@ function UsageList({
    Placeholders and page frames.
    -------------------------------------------------------------------------- */
 
-/** Placeholder body for a section that hasn't been built yet. */
-export function ComingUp({ note }: { note?: ReactNode }) {
-  const sectionKey = useRequiredSectionKey(undefined, "ComingUp");
-  const section = getSection(sectionKey);
-  return (
-    <KitBlock
-      title="Coming up"
-      description={
-        note ??
-        (section.alternatives
-          ? "These versions are being built from the real components, on the same content."
-          : "Coming soon, built from the real components and the shared fixtures.")
-      }
-    >
-      {section.alternatives ? (
-        <ol className="flex min-w-0 flex-col divide-y divide-border rounded-[14px] border border-border bg-surface">
-          {section.alternatives.map((alternative) => (
-            <li key={alternative.id} className="flex min-w-0 items-start gap-3 px-4 py-3">
-              <LetterBadge id={alternative.id} />
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <p className="text-sm font-medium text-fg">{alternative.name}</p>
-                  {section.recommended === alternative.id ? (
-                    <RecommendedTag open={section.open} />
-                  ) : null}
-                </div>
-                <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">{alternative.rationale}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <KitCanvas canvas="surface">
-          <p className="text-sm text-fg-muted">
-            Nothing to pick here. Leave a note below if something should change.
-          </p>
-        </KitCanvas>
-      )}
-    </KitBlock>
-  );
-}
-
 /**
  * A frame for a full page composition (the Pages group). The canvas is the
  * app's page background; give it a height to scroll inside the frame.

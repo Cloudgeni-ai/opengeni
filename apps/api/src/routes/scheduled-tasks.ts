@@ -43,7 +43,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
@@ -74,7 +74,7 @@ import {
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
-import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
+import { permissionsRequiredByFirstPartyTools } from "@opengeni/contracts";
 import {
   createOpenGeniSlackBotInteractionClient,
   verifyScheduledTaskSlackChannel,
@@ -240,13 +240,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     if ("response" in legacy) return legacy.response;
     // An agent's schedule without a zone uses the zone of the message that asked for it.
     const { input: rawPayload } = await withAgentScheduleTimeZone(db, grant, legacy.payload);
-    const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task create request",
-      });
-    }
-    const payload = parsedPayload.data;
+    const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task create request",
+    });
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -375,12 +372,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       workspaceId,
       "scheduled_tasks:manage",
     );
-    const parsed = RefreshScheduledTaskAccessRequest.safeParse(
+    const parsed = parseRequestBody(
+      RefreshScheduledTaskAccessRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid scheduled task access refresh request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid scheduled task access refresh request" });
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: authorization.grant.accountId,
@@ -393,7 +389,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       objectStorage,
       authorization,
       taskId: c.req.param("taskId"),
-      request: parsed.data,
+      request: parsed,
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
@@ -416,7 +412,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = authorization.grant;
     const taskId = c.req.param("taskId");
     const existing = await requireVisibleScheduledTask(db, grant, taskId);
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const body = await readRequestJson(c);
     const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
@@ -426,17 +422,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       legacy.payload,
       existing.schedule,
     );
-    const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task update request",
-      });
-    }
+    const parsedPayload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task update request",
+    });
     // `variableSetId: null` / `variableSetIds: []` still clear an old link, so a
     // task tied to a set that is gone can be fixed without recreating it.
     const payload = clearsLegacyVariableSet(body)
-      ? { ...parsedPayload.data, variableSetId: null }
-      : parsedPayload.data;
+      ? { ...parsedPayload, variableSetId: null }
+      : parsedPayload;
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -476,7 +470,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
     const adminPause = viewer.admin && !ownerPause;
     const task = adminPause
@@ -497,7 +491,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

@@ -2,7 +2,13 @@
 // HTML, each conversation's history and live events, a restore), answered in
 // memory. SiteView and SessionConversation are real. A message the `edit`
 // script recognizes runs a short turn that publishes a new version, as the
-// agent would, so the Site view can be seen going live.
+// agent would, so the Site view can be seen going live. Publishing to the web
+// (the header's Publish and its form) is answered in memory too.
+import {
+  DEFAULT_SITE_LIMITS,
+  type SitePublication,
+  type UpsertSitePublicationRequest,
+} from "@opengeni/contracts";
 import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
 import type { Session } from "@opengeni/react/app/types";
 
@@ -61,10 +67,18 @@ export function siteViewPreviewClient(options: {
   edit?: ((text: string) => PreviewEdit | null) | undefined;
   /** Each Site's published address; without it the API has no publishing. */
   publishedHost?: ((siteId: string) => string) | undefined;
+  /**
+   * The deployment can publish: a Site without a published address is
+   * "not published", and Publish puts it on `sitesDomain`.
+   */
+  publishable?: boolean | undefined;
+  /** How long a publish takes, to show Publishing…; Infinity never finishes. */
+  publishDelayMs?: number | undefined;
   /** How long loading a version's page takes, to show Updating. */
   htmlDelayMs?: number | undefined;
 }) {
   const { workspaceId } = options;
+  const sitesDomain = "sites.opengeni.ai";
   const versionId = (siteId: string, revision: number) =>
     `${siteId.slice(0, -4)}7e${String(revision).padStart(2, "0")}`;
   const site = (siteId: string) => {
@@ -127,6 +141,42 @@ export function siteViewPreviewClient(options: {
     live.set(siteId, next.id);
     changes.get(siteId)!.push(change(siteId, "published", from, next));
     return next;
+  };
+  // Each Site's publication on the web, as the publication API keeps it.
+  const publications = new Map<string, SitePublication>();
+  const publication = (
+    siteId: string,
+    hostname: string,
+    patch: Partial<SitePublication> = {},
+  ): SitePublication => ({
+    siteId,
+    workspaceId,
+    label: hostname.split(".")[0]!,
+    hostname,
+    url: `https://${hostname}/`,
+    access: "members",
+    status: "active",
+    noindex: true,
+    agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
+    limitProfile: { kind: "standard", overrides: null },
+    effectiveLimits: { ...DEFAULT_SITE_LIMITS },
+    invitedEmails: [],
+    moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
+    usage: { agentMicrosThisMonth: 0, agentMicrosToday: 0, conversationsToday: 0 },
+    warnings: [],
+    outsideAgentModel: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...patch,
+  });
+  for (const each of options.sites) {
+    const hostname = options.publishedHost?.(each.id);
+    if (hostname) publications.set(each.id, publication(each.id, hostname));
+  }
+  const notPublished = () => {
+    // A deployment without publishing has no route (404); one with it says so.
+    if (!options.publishable) throw new OpenGeniApiError(404, "{}");
+    throw new OpenGeniApiError(404, "{}", { code: "site_not_published" });
   };
   const events = new Map<string, SessionEvent[]>();
   for (const [sessionId, exchanges] of options.history) {
@@ -304,13 +354,59 @@ export function siteViewPreviewClient(options: {
     /** Preview control: publish a version as someone else would, elsewhere. */
     publishPreviewVersion: (siteId: string, html: (current: string) => string) =>
       publish(siteId, html(liveVersion(siteId).html)),
-    // The header's published-link read. Without a published address the
-    // route is missing (404) and the header keeps its plain "Live".
+    // The header's published-link read: the Site's address, or not published.
     getSitePublicationLink: async (_workspace: string, siteId: string) => {
-      const hostname = options.publishedHost?.(siteId);
-      if (!hostname) throw new OpenGeniApiError(404, "{}");
-      return { siteId, hostname, url: `https://${hostname}/`, status: "active" as const };
+      const saved = publications.get(siteId);
+      if (!saved) return notPublished();
+      const { hostname, url, status } = saved;
+      return { siteId, hostname, url, status };
     },
+    // The publish form: its publication, a name check and Publish.
+    getSitePublication: async (_workspace: string, siteId: string) =>
+      publications.get(siteId) ?? notPublished(),
+    checkSiteHostname: async (_workspace: string, label: string) => ({
+      label,
+      hostname: `${label}.${sitesDomain}`,
+      available: true,
+      problem: null,
+      message: null,
+    }),
+    updateSitePublication: async (
+      _workspace: string,
+      siteId: string,
+      request: UpsertSitePublicationRequest,
+    ) => {
+      const delay = options.publishDelayMs ?? 600;
+      await new Promise<void>((resolve) => {
+        if (Number.isFinite(delay)) setTimeout(resolve, delay);
+      });
+      const saved = publications.get(siteId);
+      const label = request.label ?? saved?.label ?? `site-${siteId.slice(0, 4)}`;
+      const next = publication(siteId, `${label}.${sitesDomain}`, {
+        ...saved,
+        label,
+        hostname: `${label}.${sitesDomain}`,
+        url: `https://${label}.${sitesDomain}/`,
+        ...(request.access ? { access: request.access } : {}),
+        ...(request.noindex !== undefined ? { noindex: request.noindex } : {}),
+        status: request.status ?? saved?.status ?? "active",
+        updatedAt: new Date().toISOString(),
+      });
+      publications.set(siteId, next);
+      return next;
+    },
+    unpublishSite: async (_workspace: string, siteId: string) => {
+      const saved = publications.get(siteId);
+      if (!saved) return notPublished();
+      const next = {
+        ...saved,
+        status: "unpublished" as const,
+        updatedAt: new Date().toISOString(),
+      };
+      publications.set(siteId, next);
+      return next;
+    },
+    listSiteAbuseReports: async () => ({ reports: [] }),
     listEvents: async (
       _workspace: string,
       sessionId: string,

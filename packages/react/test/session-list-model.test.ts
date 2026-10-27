@@ -11,8 +11,10 @@ import {
   recentSessionsForHome,
   relativeTimeLabel,
   sessionAutomationWait,
+  sessionHasPendingWake,
   sessionHasUpcomingSchedule,
   sessionRepoLabel,
+  withLineageAutomationFacts,
 } from "../src/session-list-model";
 import { createOpenGeniText } from "../src/messages/runtime";
 
@@ -248,6 +250,41 @@ describe("sessionHasUpcomingSchedule", () => {
     // Servers that predate the upcoming flag keep the earlier meaning.
     expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
     expect(sessionHasUpcomingSchedule({})).toBe(false);
+  });
+});
+
+describe("sessionHasPendingWake", () => {
+  const wait = { deadlineAt: "2026-10-03T12:30:00Z", reason: "Waiting for CI" };
+  test("a timed wait or an automation that can still run wakes the session", () => {
+    expect(sessionHasPendingWake(session("a"))).toBe(false);
+    expect(sessionHasPendingWake(session("a", { inputWait: wait }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { hasUpcomingSchedules: true }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { waitingForEvents: true }))).toBe(true);
+    // A spent schedule wakes nothing, and a wait only counts while idle and active.
+    expect(
+      sessionHasPendingWake(session("a", { hasSchedules: true, hasUpcomingSchedules: false })),
+    ).toBe(false);
+    expect(sessionHasPendingWake(session("a", { status: "running", inputWait: wait }))).toBe(false);
+  });
+
+  test("the lineage read's automation facts replace the session's own", () => {
+    const plain = session("a", { hasSchedules: false, hasUpcomingSchedules: false });
+    expect(withLineageAutomationFacts(plain, null)).toBe(plain);
+    expect(withLineageAutomationFacts(plain, {})).toBe(plain);
+    const merged = withLineageAutomationFacts(plain, {
+      sessionHasSchedules: true,
+      sessionHasUpcomingSchedules: true,
+    });
+    expect(merged).toMatchObject({
+      hasSchedules: true,
+      hasUpcomingSchedules: true,
+      waitingForEvents: false,
+    });
+    expect(sessionHasPendingWake(merged)).toBe(true);
+    // An older server sends only the schedules flag, which keeps its meaning.
+    expect(withLineageAutomationFacts(plain, { sessionHasSchedules: true })).toMatchObject({
+      hasUpcomingSchedules: true,
+    });
   });
 });
 

@@ -4,7 +4,9 @@ import type { Settings } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import { createApp, type AppDependencies } from "../src/app";
-import { parseRequestJson } from "../src/http/request-body";
+import { HTTPException } from "hono/http-exception";
+import { routeRetired } from "../src/http/deprecation";
+import { parseRequestJson, parseRequestQuery } from "../src/http/request-body";
 import { validatedAllowedToolIds } from "../src/routes/api-integrations";
 import { workspaceUpdateRequestsSettings } from "../src/routes/workspaces";
 
@@ -81,6 +83,12 @@ describe("request body validation", () => {
   function appWithProbeRoutes() {
     const app = appFor();
     app.post("/v1/test-probe/body", async (c) => c.json(await parseRequestJson(c, Body)));
+    app.post("/v1/test-probe/own-status", async (c) =>
+      c.json(await parseRequestJson(c, Body, { status: 422, message: "Invalid probe request." })),
+    );
+    app.get("/v1/test-probe/query", (c) =>
+      c.json(parseRequestQuery(z.object({ limit: z.coerce.number().int().max(5) }), c.req.query())),
+    );
     app.get("/v1/test-probe/projection", (c) => c.json(Projection.parse({ id: "not-a-uuid" })));
     // A route that reads the body itself, without the parsing helpers.
     app.post("/v1/test-probe/raw", async (c) => c.json(await c.req.json()));
@@ -122,6 +130,32 @@ describe("request body validation", () => {
       code: "validation_failed",
       details: { code: "invalid_json" },
     });
+  });
+
+  test("a route's own status and lead-in stay, followed by every field", async () => {
+    const response = await appWithProbeRoutes().request("/v1/test-probe/own-status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "nope" }),
+    });
+    expect(response.status).toBe(422);
+    const error = await envelope(response);
+    expect(error.code).toBe("validation_failed");
+    expect(error.message).toStartWith("Invalid probe request: accountId: ");
+    expect(error.message).toContain("; name: ");
+    expect(error.details).toMatchObject({
+      code: "invalid_request_body",
+      issues: [{ path: "accountId" }, { path: "name" }],
+      omittedIssueCount: 0,
+    });
+  });
+
+  test("an invalid query parameter is a 400 that names it", async () => {
+    const response = await appWithProbeRoutes().request("/v1/test-probe/query?limit=50");
+    expect(response.status).toBe(400);
+    const error = await envelope(response);
+    expect(error.message).toStartWith("Invalid query parameters: limit: ");
+    expect(error.details).toMatchObject({ code: "invalid_request_query" });
   });
 
   test("malformed JSON read directly by a route is a 400", async () => {
@@ -192,5 +226,34 @@ describe("Integration allowedTools", () => {
       },
     });
     expect((thrown as Error).message).toContain("GET /items -> inventory_listitems");
+  });
+});
+
+describe("gone", () => {
+  test("a retired route is a 410 gone that names its replacement", async () => {
+    const app = appFor();
+    app.post("/v1/test-probe/retired", () => {
+      throw routeRetired("POST /v1/test-probe/current", "Search moved to /v1/test-probe/current.");
+    });
+    const response = await app.request("/v1/test-probe/retired", { method: "POST" });
+    expect(response.status).toBe(410);
+    expect(await envelope(response)).toEqual({
+      status: 410,
+      code: "gone",
+      message: "Search moved to /v1/test-probe/current.",
+      retryable: false,
+      requestId: expect.any(String),
+      details: { code: "route_retired", replacement: "POST /v1/test-probe/current" },
+    });
+  });
+
+  test("any other 410 is gone too, never internal_error", async () => {
+    const app = appFor();
+    app.get("/v1/test-probe/expired", () => {
+      throw new HTTPException(410, { message: "This sign-in expired." });
+    });
+    const response = await app.request("/v1/test-probe/expired");
+    expect(response.status).toBe(410);
+    expect(await envelope(response)).toMatchObject({ code: "gone", retryable: false });
   });
 });

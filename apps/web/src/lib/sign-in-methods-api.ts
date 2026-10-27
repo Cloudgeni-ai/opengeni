@@ -1,5 +1,7 @@
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
+import type { RegistrationResponseJSON } from "@simplewebauthn/browser";
+import type { PasskeyCeremony } from "@/lib/passkeys";
 import {
   ApiError,
   apiBaseUrl,
@@ -15,6 +17,12 @@ function signInResponseError(status: number, body: string): ApiError {
     const parsed = JSON.parse(body) as Record<string, unknown>;
     return new ApiError(status, body, {
       ...(typeof parsed.code === "string" ? { code: parsed.code } : {}),
+      // Passkey refusals carry a sentence written for the person.
+      ...(typeof parsed.code === "string" &&
+      parsed.code.startsWith("PASSKEY_") &&
+      typeof parsed.message === "string"
+        ? { message: parsed.message }
+        : {}),
       ...(parsed.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
     });
   } catch {
@@ -37,18 +45,36 @@ export type SignInMethods = {
     canDisconnect: boolean;
     implicitRelinkingSuppressed: boolean;
   }>;
+  /** Absent from servers without passkey sign-in. */
+  passkeys?: SignInPasskey[];
+  passkeysAvailable?: boolean;
+  canRemovePasskey?: boolean;
+};
+export type SignInPasskey = {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** Synced by a password manager or platform keychain, rather than on one device. */
+  backedUp: boolean;
 };
 export type SignInChangeResult = {
-  reauthenticationRequired: true;
-  notification: "sent" | "failed" | "outcome_unknown";
+  /** Adding or removing a passkey ends other sessions only when it changes how the account signs in. */
+  reauthenticationRequired: boolean;
+  notification: "sent" | "failed" | "outcome_unknown" | "none";
 };
 export type SignInCommand = {
   expectedIdentityId: string;
   operationId: string;
   expectedIdentityRevision: number;
-} & ({ provider: "google" | "github" } | { newPassword: string; currentPassword?: string });
+} & (
+  | { provider: "google" | "github" }
+  | { newPassword: string; currentPassword?: string }
+  | { challengeId: string; response: RegistrationResponseJSON; name?: string }
+  | { passkeyId: string }
+);
 export type PreparedSignInCommand = {
-  path: "connect" | "disconnect" | "password";
+  path: "connect" | "disconnect" | "password" | "passkey" | "passkey/remove";
   body: SignInCommand;
   headers: Record<string, string>;
 };
@@ -82,6 +108,9 @@ export function createSignInMethodsApi(sessionSetMode: "legacy" | "dual" | "brok
         throw new Error("Missing canonical identity binding");
       return result;
     },
+    /** Starts adding a passkey: the browser answers these options with a new credential. */
+    passkeyOptions: () =>
+      request<PasskeyCeremony>("/passkey/options", { method: "POST", body: "{}" }),
     async prepare(
       path: PreparedSignInCommand["path"],
       body: SignInCommand,

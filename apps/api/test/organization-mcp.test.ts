@@ -4,18 +4,26 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   OPENGENI_API_CONTRACT_HEADER,
+  Permission,
   SitePublishWarningFix,
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
-import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
+import {
+  measureInsightsPhase,
+  verifiedDelegatedHumanAuthorizationForRequest,
+} from "@opengeni/core";
 
 import surface from "../../../scripts/public-api/surface.gen.json";
 import {
+  ACCESS_GATE_OPERATIONS,
+  ACCESS_GATE_WRAPPERS,
   ACTION_CATALOG_BROWSER_ONLY,
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
+  routeInputs,
+  ACTION_REQUEST_SCHEMAS,
   type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
 import * as primitives from "../../../packages/contracts/src/primitives";
@@ -35,6 +43,7 @@ import {
   type OrganizationMcpCaller,
   searchActions,
 } from "../src/organization-mcp";
+import { measureSessionCreatePhase } from "../src/session-create-observability";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -440,7 +449,9 @@ describe("organization MCP server", () => {
       total: number;
       actions: unknown[];
     };
-    expect(everything.total).toBe(ACTION_CATALOG.filter((entry) => !entry.browserOnly).length);
+    expect(everything.total).toBe(
+      ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired).length,
+    );
     expect(everything.actions).toHaveLength(5);
     const described = (await call("opengeni_action_describe", { id: "createSession" })).value as {
       method: string;
@@ -564,6 +575,29 @@ describe("organization MCP server", () => {
     });
   });
 
+  test("compact session-page guidance uses ordinary query dispatch without changing defaults", async () => {
+    const { call, seen } = await connect(person(readOnly));
+    const compact = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", projection: "summary", limit: 50, cursor: "next-page" },
+    });
+    expect(compact.isError).toBe(false);
+    expect(Object.fromEntries(new URL(seen[0]!.url).searchParams)).toEqual({
+      view: "page",
+      projection: "summary",
+      limit: "50",
+      cursor: "next-page",
+    });
+    const fullPage = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", limit: 50 },
+    });
+    expect(fullPage.isError).toBe(false);
+    expect(new URL(seen[1]!.url).searchParams.has("projection")).toBe(false);
+  });
+
   test("read only refuses changes before anything runs; reads still work", async () => {
     const { call, seen } = await connect(person(readOnly));
     const refused = await call("opengeni_action_call", {
@@ -587,7 +621,7 @@ describe("organization MCP server", () => {
     });
     // Searching sends the query as a POST body, but only reads: it runs.
     const search = await call("opengeni_action_call", {
-      id: "POST /v1/workspaces/:workspaceId/knowledge/search",
+      id: "listKnowledgeEntries",
       pathParameters: { workspaceId },
       body: { query: "release notes" },
     });
@@ -714,5 +748,359 @@ describe("organization MCP action search", () => {
     expect(first("workspaces")).toBe("listWorkspaces");
     expect(first("create session")).toBe("createSession");
     expect(first("github repositories")).toBe("listGitHubRepositories");
+  });
+});
+
+describe("organization MCP action inputs", () => {
+  const byId = (id: string) => ACTION_CATALOG.find((entry) => entry.id === id)!;
+
+  test("come from what each route's handler validates", () => {
+    expect(byId("sendEvent").request).toEqual(["ClientSessionEvent"]);
+    expect(byId("steerMessage").request).toEqual(["SteerSessionMessageRequest"]);
+    expect(byId("saveWorkspaceSkill").request).toEqual(["SaveWorkspaceSkillRequest"]);
+    expect(byId("removeWorkspaceSkill").request).toEqual(["RemoveWorkspaceSkillRequest"]);
+    expect(byId("listScheduledTasks").query).toEqual(["limit", "offset", "sessionId"]);
+    expect(byId("listWorkspaceSkills").query).toEqual(expect.arrayContaining(["cursor", "limit"]));
+  });
+
+  test("the route source reader finds body and query schemas, query names and retirement", () => {
+    expect(
+      routeInputs([
+        `async (c) => {
+          const page = c.req.query("cursor");
+          const query = c.req.query();
+          const { view } = c.req.query();
+          const filter = parseRequestQuery(z.object({ status: z.string() }).strict(), c.req.query());
+          const body = await parseRequestJson(c, SaveWorkspaceSkillRequest, { status: 422 });
+          return c.json({ page, limit: query.limit, view, filter, body });
+        }`,
+      ]),
+    ).toEqual({
+      body: ["SaveWorkspaceSkillRequest"],
+      query: [],
+      queryParameters: ["cursor", "limit", "status", "view"],
+    });
+    // A schema checked against values the route assembles from its path is
+    // not the body when the handler reads none.
+    expect(
+      routeInputs([
+        `async (c) => parseRequestBody(SaveWorkspaceSkillRequest, { id: c.req.param("id") })`,
+      ]).body,
+    ).toEqual([]);
+    expect(
+      routeInputs([
+        `async (c) => { throw routeRetired("POST /v1/workspaces/:workspaceId/knowledge/entries/search", "moved"); }`,
+      ]).retired,
+    ).toBe("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
+  });
+
+  test("the route source reader names the permission a route checks before anything else", () => {
+    const gate = (...sources: string[]) => routeInputs(sources).permission;
+    expect(
+      gate(`async (c) => {
+        const workspaceId = c.req.param("workspaceId"), payload = await parseRequestJson(c, X);
+        const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+        return c.json(await list(grant, payload));
+      }`),
+    ).toBe("sessions:read");
+    // At the start of a try/finally, or returned by an awaited wrapper's
+    // arrow function, as a measured phase does.
+    expect(
+      gate(`async (c) => {
+        const startedAt = performance.now();
+        try {
+          const workspaceId = c.req.param("workspaceId");
+          const grant = await measureInsightsPhase(observe, "auth", () =>
+            requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
+          );
+          return c.json(await read(grant));
+        } finally {
+          observe(performance.now() - startedAt);
+        }
+      }`),
+    ).toBe("workspace:admin");
+    // A listed helper's operation names its permission; one it doesn't list,
+    // or reading one's own usage, names none.
+    expect(gate(`async (c) => { const scope = await authorize(c, deps, "read"); }`)).toBe(
+      "workspace:admin",
+    );
+    expect(gate(`async (c) => { await authorize(c, deps, "own"); }`)).toBeUndefined();
+    expect(gate(`async (c) => { await authorize(c, deps, "renamed"); }`)).toBeUndefined();
+    // Not when a catch could swallow the refusal.
+    expect(
+      gate(`async (c) => {
+        try {
+          await requireAccessGrant(c, deps, id, "workspace:admin");
+        } catch {
+          return c.json({});
+        }
+      }`),
+    ).toBeUndefined();
+    // Not when a branch, return or throw could skip the check, the checked
+    // value isn't a permission, or the route's handlers disagree.
+    expect(
+      gate(`async (c) => {
+        if (c.req.query("public")) return c.json({});
+        await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:read");
+      }`),
+    ).toBeUndefined();
+    expect(gate(`async (c) => { await requireAccessGrant(c, deps, id, scope); }`)).toBeUndefined();
+    expect(
+      gate(
+        `async (c) => { await requireAccessGrant(c, deps, id, "sessions:read"); }`,
+        `async (c) => { await requireAccessGrant(c, deps, id, "workspace:read"); }`,
+      ),
+    ).toBeUndefined();
+    expect(byId("listSessionPage").permission).toBe("sessions:read");
+    expect(byId("getMyUsage").permission).toBeUndefined();
+    expect(byId("getWorkspaceInsights").permission).toBe("workspace:admin");
+    expect(byId("createSession").permission).toBe("sessions:create");
+    // Helper-gated usage routes, from the hand-named table.
+    expect(byId("getUsage").permission).toBe("workspace:admin");
+    expect(byId("setWorkspaceAllowance").permission).toBe("account:admin");
+  });
+
+  test("every route checked through an operation helper gets that operation's permission", async () => {
+    const operations = ACCESS_GATE_OPERATIONS.authorize!;
+    for (const permission of Object.values(operations))
+      if (permission !== null)
+        expect(Permission.safeParse(permission).success, permission).toBe(true);
+    // The listed operations are exactly the helper's own, so a renamed,
+    // removed or new operation fails here.
+    const helper = await Bun.file(
+      new URL("../src/routes/usage-allowances.ts", import.meta.url),
+    ).text();
+    const declared = [
+      ...(/type Operation =([^;]+);/u.exec(helper)?.[1] ?? "").matchAll(/"([^"]+)"/gu),
+    ].map((match) => match[1]!);
+    expect(declared.sort()).toEqual(Object.keys(operations).sort());
+    // Every route that calls the helper, wherever in its handler, carries its
+    // operation's permission in the catalog; a route the reader can't decode
+    // (the call moved behind a branch) fails here rather than being offered.
+    const used = new Set<string>();
+    for (const route of registeredApiRoutes()) {
+      const called = (route.sources ?? []).flatMap((source) =>
+        [...source.matchAll(/\bauthorize\(\s*c\s*,\s*deps\s*,\s*"([^"]+)"\s*\)/gu)].map(
+          (match) => match[1]!,
+        ),
+      );
+      if (called.length === 0) continue;
+      const key = routeKey(route);
+      for (const operation of called) {
+        expect(Object.keys(operations), key).toContain(operation);
+        used.add(operation);
+      }
+      const entry = ACTION_CATALOG.find((action) => routeKey(action) === key);
+      expect(entry, key).toBeDefined();
+      expect(entry!.permission, key).toBe(operations[called[0]!] ?? undefined);
+    }
+    expect([...used].sort()).toEqual(Object.keys(operations).sort());
+  });
+
+  test("every listed access-check wrapper runs its work once and passes on its refusal", async () => {
+    const span = { end: async () => undefined };
+    const runs: Record<string, ((work: () => Promise<string>) => Promise<string>)[]> = {
+      measureInsightsPhase: [
+        (work) => measureInsightsPhase(undefined, "auth", work),
+        (work) => measureInsightsPhase(() => undefined, "auth", work),
+      ],
+      measureSessionCreatePhase: [
+        (work) => measureSessionCreatePhase(null, "authorization", work),
+        (work) =>
+          measureSessionCreatePhase({ startSpan: () => span } as never, "authorization", work),
+      ],
+    };
+    expect(Object.keys(runs).sort()).toEqual([...ACCESS_GATE_WRAPPERS].sort());
+    for (const [name, variants] of Object.entries(runs)) {
+      for (const run of variants) {
+        let calls = 0;
+        expect(
+          await run(async () => {
+            calls += 1;
+            return "granted";
+          }),
+          name,
+        ).toBe("granted");
+        expect(calls, name).toBe(1);
+        const refusal = new Error("missing permission");
+        await expect(
+          run(async () => {
+            throw refusal;
+          }),
+          name,
+        ).rejects.toBe(refusal);
+      }
+    }
+    // An unlisted wrapper names nothing, even around a gate.
+    expect(
+      routeInputs([
+        `async (c) => {
+          const grant = await maybe(() => requireAccessGrant(c, deps, id, "workspace:admin"));
+        }`,
+      ]).permission,
+    ).toBeUndefined();
+  });
+
+  test("a workspace settings route needs workspace:admin, so it isn't offered to someone without it", () => {
+    const gate = (...sources: string[]) => routeInputs(sources).permission;
+    expect(
+      gate(`async (c) => {
+        const workspaceId = c.req.param("workspaceId");
+        const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+        return c.json(await save(grant));
+      }`),
+    ).toBe("workspace:admin");
+    expect(
+      gate(`async (c) => {
+        if (c.req.query("dry")) return c.json({});
+        await requireWorkspaceSettingsGrant(c, deps, c.req.param("workspaceId"));
+      }`),
+    ).toBeUndefined();
+    expect(byId("updateVideoGenerationPolicy").permission).toBe("workspace:admin");
+  });
+
+  test("every hand-named request schema is still needed", () => {
+    for (const rule of ACTION_REQUEST_SCHEMAS) {
+      const routes = registeredApiRoutes().filter((route) => rule.pattern.test(routeKey(route)));
+      expect(routes).not.toEqual([]);
+      for (const route of routes) expect(routeInputs(route.sources ?? []).body).toEqual([]);
+    }
+  });
+
+  test("describe shows the body schema and the query parameters", async () => {
+    const { client, call } = await connect(person(full));
+    try {
+      for (const id of ["sendEvent", "saveWorkspaceSkill"]) {
+        const described = (await call("opengeni_action_describe", { id })).value as {
+          input: Array<{ in: string; schema: { properties?: Record<string, unknown> } | null }>;
+        };
+        expect(described.input).toHaveLength(1);
+        expect(described.input[0]!.in).toBe("body");
+        expect(described.input[0]!.schema).not.toBeNull();
+      }
+      const skill = (await call("opengeni_action_describe", { id: "saveWorkspaceSkill" }))
+        .value as {
+        input: Array<{ schema: { required?: string[]; properties: Record<string, unknown> } }>;
+      };
+      expect(skill.input[0]!.schema.required).toContain("stableKey");
+      expect(Object.keys(skill.input[0]!.schema.properties)).toContain("scope");
+      const list = (await call("opengeni_action_describe", { id: "listScheduledTasks" })).value as {
+        queryParameters?: string[];
+      };
+      expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("organization MCP retired actions", () => {
+  const retiredEntries = ACTION_CATALOG.filter((entry) => entry.retired);
+
+  test("are the retired search routes, never found and never run", async () => {
+    expect(retiredEntries.map(routeKey).sort()).toEqual([
+      "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
+      "POST /v1/workspaces/:workspaceId/knowledge/search",
+    ]);
+    const { client, call, seen } = await connect(person(full));
+    try {
+      const page = searchActions({ query: "knowledge search", limit: 50, offset: 0 });
+      for (const entry of retiredEntries)
+        expect(page.actions.map((action) => action.id)).not.toContain(entry.id);
+      expect(page.actions.map((action) => action.id)).toContain("listKnowledgeEntries");
+      for (const entry of retiredEntries) {
+        for (const [tool, args] of [
+          ["opengeni_action_describe", { id: entry.id }],
+          ["opengeni_action_call", { id: entry.id, pathParameters: { workspaceId } }],
+        ] as const) {
+          expect(await call(tool, args)).toEqual({
+            isError: true,
+            value: `${entry.id} was removed. Use the listKnowledgeEntries action (POST /v1/workspaces/:workspaceId/knowledge/entries/search) instead; describe it for its input.`,
+          });
+        }
+      }
+      expect(seen).toHaveLength(0);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("organization MCP large responses", () => {
+  const item = (index: number) => ({ id: `task-${index}`, prompt: "x".repeat(4_000) });
+
+  test("a list keeps whole items and says how to page with offset", async () => {
+    const tasks = Array.from({ length: 100 }, (_, index) => item(index));
+    const { client, call } = await connect(person(full), () => Response.json(tasks));
+    try {
+      const result = (
+        await call("opengeni_action_call", {
+          id: "listScheduledTasks",
+          pathParameters: { workspaceId },
+          query: { offset: 10 },
+        })
+      ).value as {
+        status: number;
+        body: Array<{ id: string }>;
+        truncated: { returnedItems: number; totalItems: number; returnedBytes: number };
+        hint: string;
+      };
+      const count = result.truncated.returnedItems;
+      expect(result.status).toBe(200);
+      expect(count).toBeGreaterThan(0);
+      expect(count).toBeLessThan(100);
+      expect(result.truncated.totalItems).toBe(100);
+      expect(result.body.map((task) => task.id)).toEqual(tasks.slice(0, count).map((t) => t.id));
+      expect(result.hint).toBe(
+        `Only the first ${count} of the 100 items in this response fit in one result. Call again with query offset=${10 + count} and limit=${count} for the next items.`,
+      );
+      const text = JSON.stringify(result);
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256 * 1024);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("a cursor page trims its largest list and says how to get pages that fit", async () => {
+    const items = Array.from({ length: 100 }, (_, index) => item(index));
+    const { client, call } = await connect(person(full), () =>
+      Response.json({ items, nextCursor: "next" }),
+    );
+    try {
+      const result = (
+        await call("opengeni_action_call", {
+          id: "listWorkspaceSkills",
+          pathParameters: { workspaceId },
+        })
+      ).value as {
+        body: { items: unknown[]; nextCursor: string };
+        truncated: { returnedItems: number; field: string };
+        hint: string;
+      };
+      expect(result.truncated.field).toBe("items");
+      expect(result.body.items).toHaveLength(result.truncated.returnedItems);
+      expect(result.body.nextCursor).toBe("next");
+      expect(result.hint).toContain(
+        `Call again with query limit=${result.truncated.returnedItems}`,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("a body that is not a list keeps the byte cut", async () => {
+    const { client, call } = await connect(person(full), () =>
+      Response.json({ text: "x".repeat(300_000) }),
+    );
+    try {
+      const result = (await call("opengeni_action_call", { id: "getAccessContext" })).value as {
+        body: string;
+        truncated: { returnedBytes: number; totalBytes: number };
+      };
+      expect(typeof result.body).toBe("string");
+      expect(result.truncated.returnedBytes).toBe(256 * 1024);
+    } finally {
+      await client.close();
+    }
   });
 });

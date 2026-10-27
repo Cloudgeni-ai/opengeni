@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SessionArchivedError } from "@opengeni/db";
+import { AgentCommandAuthorityError, SessionArchivedError } from "@opengeni/db";
 import { orchestrationFailureEnvelope } from "../src/mcp/server";
 import {
   readOnlySessionRefusal,
@@ -47,5 +47,19 @@ describe("read-only session refusals", () => {
     expect(orchestrationFailureEnvelope("session_send_message", new Error("boom")).error.code).toBe(
       "session_send_message_failed",
     );
+  });
+
+  test("a steer into somebody else's personal machine says why nothing was applied", () => {
+    const refused = new AgentCommandAuthorityError(
+      "PERSONAL_MACHINE_OWNER_REQUIRED",
+      "only its owner can steer it",
+    );
+    expect(orchestrationFailureEnvelope("session_steer", refused)).toEqual({
+      error: {
+        code: "session_steer_personal_machine_owner_required",
+        message:
+          "That session runs on another person's personal machine, so only its owner can steer it. Nothing was applied.",
+      },
+    });
   });
 });

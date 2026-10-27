@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import { ActiveBackendUnresolvableError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import {
+  activeRouteUnavailableError,
   wrongInteractionPlacementMessage,
   wrongPlacementInsteadOfOffline,
 } from "../src/routes/interaction-placement-message";
@@ -48,6 +49,24 @@ describe("wrong placement instead of offline", () => {
     expect((answered as HTTPException).status).toBe(422);
   });
 
+  // The chat's current machine can be unresolvable before any request reaches
+  // it: it has no live connection, or is no longer usable from this chat.
+  // That was a 500; it is the same wrong-placement answer.
+  for (const code of ["offline_enrollment", "stale_pointer"] as const) {
+    test(`a current machine that cannot be resolved (${code}) is the wrong-placement answer`, async () => {
+      const answered = await wrongPlacementInsteadOfOffline(
+        new ActiveBackendUnresolvableError(
+          code,
+          "selfhosted sandbox has no live runner connection",
+        ),
+        requested,
+        async () => "7f099792-650d-4356-96c5-e0df3aab4752",
+      );
+      expect((answered as HTTPException).status).toBe(422);
+      expect((answered as HTTPException).message).toBe(wrongInteractionPlacementMessage(requested));
+    });
+  }
+
   test("the requested machine itself being offline stays an offline failure", async () => {
     const error = offline();
     expect(await wrongPlacementInsteadOfOffline(error, requested, async () => requested)).toBe(
@@ -71,5 +90,31 @@ describe("wrong placement instead of offline", () => {
         throw new Error("db unavailable");
       }),
     ).toBe(error);
+  });
+});
+
+describe("current machine unavailable", () => {
+  test("an unresolvable current machine is a 409 that says so, not a 500", () => {
+    const offlineMachine = activeRouteUnavailableError(
+      new ActiveBackendUnresolvableError("offline_enrollment", "sandbox x has no live runner"),
+    );
+    expect(offlineMachine?.status).toBe(409);
+    expect(offlineMachine?.message).toBe(
+      "The Connected Machine this session is working on is not connected.",
+    );
+    const gone = activeRouteUnavailableError(
+      new HTTPException(500, {
+        cause: new ActiveBackendUnresolvableError("stale_pointer", "sandbox x not found"),
+      }),
+    );
+    expect(gone?.status).toBe(409);
+    expect(gone?.message).toBe(
+      "The Connected Machine this session is working on is no longer available to it.",
+    );
+    const other = activeRouteUnavailableError(
+      new ActiveBackendUnresolvableError("workspace_root_unavailable", "reconnect it"),
+    );
+    expect(other?.message).toBe("reconnect it");
+    expect(activeRouteUnavailableError(new Error("boom"))).toBeNull();
   });
 });

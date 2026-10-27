@@ -71,7 +71,52 @@ test("catalog query adapts only existing output domains and parameterizes litera
   expect(statement.params).toContain(query.q);
   expect(statement.params).toContain(scope.accountId);
   expect(statement.params).toContain(scope.workspaceId);
-  expect(statement.params).toContain(sessionId);
+  expect(statement.params).toContain(`{${sessionId}}`);
+});
+
+test("a chat and its sub-sessions are one candidate query over an authorized session list", async () => {
+  const { db, queries } = databaseFixture();
+  const child = "30000000-0000-4000-8000-000000000004";
+  await listArtifactCatalogCandidates(db, scope, {
+    // The explicit list replaces the single source filter.
+    query: ArtifactCatalogListQuery.parse({
+      sourceSessionId: sessionId,
+      includeSubSessions: "true",
+    }),
+    kinds: ["site", "document", "image", "file"],
+    siteViewer: { subjectId: null },
+    snapshotAt,
+    limit: 101,
+    sourceSessionIds: [sessionId, child],
+  });
+  const statement = queries.at(-1)!;
+  expect(queries.filter((query) => query.sql.includes("WITH candidates"))).toHaveLength(1);
+  expect(statement.params).toContain(`{${sessionId},${child}}`);
+  expect(statement.sql).toContain("sv.source_session_id = ANY(");
+  expect(statement.sql).toContain("l.session_id = ANY(");
+  expect(statement.sql).toContain("g.session_id = ANY(");
+  const published = statement.params.find(
+    (param) => typeof param === "string" && param.includes('"kinds"'),
+  ) as string;
+  expect(JSON.parse(published)).toMatchObject({ sourceSessionIds: [sessionId, child] });
+  expect(JSON.parse(published)).not.toHaveProperty("sourceSessionId");
+
+  for (const sourceSessionIds of [
+    [],
+    ["not-a-uuid"],
+    [`${sessionId}}`],
+    Array.from({ length: 202 }, () => sessionId),
+  ])
+    await expect(
+      listArtifactCatalogCandidates(db, scope, {
+        query: ArtifactCatalogListQuery.parse({}),
+        kinds: ["file"],
+        siteViewer: { subjectId: null },
+        snapshotAt,
+        limit: 10,
+        sourceSessionIds,
+      }),
+    ).rejects.toThrow("Invalid catalog source sessions");
 });
 
 test("catalog keysets retain microseconds and stable domain/native-ID ties for every sort", async () => {

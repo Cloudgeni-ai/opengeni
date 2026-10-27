@@ -10,7 +10,6 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
 } from "@opengeni/contracts/atlassian-native-retirement";
-import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -52,7 +51,6 @@ import {
   scheduledSlackBotConnectionId,
   freezeConnectionAccounts,
   ConnectionAccountSelectionError,
-  scheduledConnectionSurfaceEligibility,
   scheduledConnectionTools,
   scheduledTaskRunTools,
   settingsWithEnabledCapabilityMcpServers,
@@ -136,7 +134,7 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -769,14 +767,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // its connectors and the owner's current accounts.
       let runPins: McpConnectionAccountSelection[] =
         task.runMode === "existing_session" ? [] : [...(task.agentConfig.pinnedAccounts ?? [])];
-      const surfaceEligibility = scheduledConnectionSurfaceEligibility(
-        settings,
-        connectionTarget ?? {
-          firstPartyMcpTools,
-          firstPartyMcpPermissions,
-        },
-        toolWorkspaceSettings,
-      );
       const resolveTaskConnections = () =>
         freezeConnectionAccounts({
           db,
@@ -794,7 +784,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
             : { kind: "none" },
           authoritySelections: runPins,
-          ...surfaceEligibility,
         }).catch((error: unknown) => {
           if (error instanceof ConnectionAccountSelectionError) return error;
           throw error;
@@ -829,9 +818,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             (serverId) => !runPins.some((pin) => pin.serverId === serverId),
           ),
         );
-        if (droppedServerIds.has(GOOGLE_DRIVE_PUBLICATION_SERVER_ID)) {
-          surfaceEligibility.googleDrivePublicationEnabled = false;
-        }
         connectionTools = connectionTools.filter(
           (tool) => !(tool.kind === "mcp" && droppedServerIds.has(tool.id)),
         );

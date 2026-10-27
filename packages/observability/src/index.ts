@@ -71,7 +71,7 @@ export {
   type SpanKind,
   type TraceContext,
 } from "./trace-context";
-export { traceClientCalls, traceFetch } from "./client-spans";
+export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
 export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,
@@ -447,6 +447,14 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "cpuProfileBusyMs",
   "cpuProfileLongestBlockMs",
   "cpuProfileBlocksOver100Ms",
+  // Database password rotation events (packages/db database-credentials.ts):
+  // candidate positions, counts and whether a refusal was stale. Never a
+  // password or file contents.
+  "credentialIndex",
+  "credentialFromIndex",
+  "credentialToIndex",
+  "credentialCandidates",
+  "credentialStale",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
@@ -461,6 +469,10 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  [
+    "writerKinds",
+    /^(?:tool_call|shell_session|pending_shell_start|remote_operation)(?:,(?:tool_call|shell_session|pending_shell_start|remote_operation)){0,3}$/,
+  ],
   // Rejected-request classification (apps/api/src/http/rejection-telemetry.ts):
   // the public ErrorEnvelope code enum, a catalog permission or typed detail
   // code, and a one-way message hash. Never message text or identifiers.
@@ -493,6 +505,11 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // method called on it.
   ["opengeni.client", /^[a-z][a-z0-9_]{0,31}$/],
   ["opengeni.client.operation", /^[A-Za-z][A-Za-z0-9_]{0,63}$/],
+  // Database password rotation events: the code-chosen pool name, which
+  // password file could not be read, and its errno code.
+  ["databasePool", /^[a-z][a-z0-9-]{0,63}$/],
+  ["credentialFile", /^(?:current|previous)$/],
+  ["credentialFileErrorCode", /^[A-Z][A-Z0-9_]{0,31}$/],
 ]);
 
 /**
@@ -541,6 +558,7 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "browser.download.save",
   "browser.recording.save",
   "browser.attach",
+  "browser.hold",
   "computer.create",
   "computer.end",
   "computer.read",

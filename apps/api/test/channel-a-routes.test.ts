@@ -41,8 +41,8 @@ import {
 //       runs BEFORE parseChannelABody (the Zod parse) in every handler.
 //   (2) FLAG-GATE: the preamble asserts sandboxOwnershipEnabled, so the routes
 //       are inert until the flag flips per-environment.
-//   (3) EXPLICIT 400 ON PARSE FAIL: parseChannelABody uses safeParse + an
-//       explicit HTTPException(400) — never a raw ZodError → 500.
+//   (3) EXPLICIT 400 ON PARSE FAIL: parseChannelABody uses parseRequestBody
+//       with an explicit 400 — never a raw ZodError → 500.
 //   (4) CORRECT PERMISSION: FS reads/Git ride files:read, FS mutations ride
 //       files:write, Terminal exec + PTY ride terminal:attach.
 
@@ -252,11 +252,11 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(slice).toContain("HTTPException(404");
   });
 
-  test("parseChannelABody uses safeParse + an explicit HTTPException(400), never a raw ZodError", () => {
+  test("parseChannelABody validates with parseRequestBody and an explicit 400, never a raw ZodError", () => {
     const parser = sessionsRoute.slice(sessionsRoute.indexOf("async function parseChannelABody"));
     const slice = parser.slice(0, 600);
-    expect(slice).toContain(".safeParse(");
-    expect(slice).toContain("HTTPException(400");
+    expect(slice).toContain("parseRequestBody(");
+    expect(slice).toContain("status: 400");
   });
 
   test("the flag gate is a 404 (the routes are invisible while disabled)", () => {

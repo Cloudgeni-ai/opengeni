@@ -383,6 +383,46 @@ describe("ogtool CLI", () => {
     }
   });
 
+  test("an error result with --save-image prints the error, not an image save failure", async () => {
+    const error = {
+      code: "internal_error",
+      message: "API 500: The workspace could not complete the request. Reference: r-1.",
+      retryable: true,
+      requestId: "r-1",
+    };
+    const errorResult = {
+      content: [{ type: "text", text: JSON.stringify({ error }) }],
+      structuredContent: { error },
+      isError: true,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: errorResult });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      try {
+        const target = join(directory, "shot.png");
+        const result = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(result.exitCode).toBe(0);
+        const printed = JSON.parse(result.stdout);
+        expect(printed.isError).toBe(true);
+        expect(printed.structuredContent).toEqual({ error });
+        expect(printed.imageSaveError).toBeUndefined();
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("call prints the payload once by default and the exact result with --full", async () => {
     const mock = codemodeServer({ result: duplicatedResult });
     const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
@@ -793,6 +833,52 @@ describe("ogtool CLI", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("tool arguments must be a JSON object");
       expect(mock.requests).toHaveLength(0);
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test("call reads its arguments from @file and from stdin", async () => {
+    const token = await tokenFile();
+    const mock = codemodeServer();
+    const environment = {
+      OPENGENI_CODEMODE_URL: mock.url,
+      OPENGENI_CODEMODE_TOKEN_FILE: token.path,
+    };
+    try {
+      const path = join(token.root, "large arguments.json");
+      const large = "x".repeat(200_000);
+      await writeFile(path, JSON.stringify({ query: "from-file", padding: large }));
+      const fromFile = await run(["call", "docs.search", `@${path}`], environment);
+      expect(fromFile.exitCode).toBe(0);
+      expect(fromFile.stdout).toContain("from-file");
+
+      const child = Bun.spawn([process.execPath, cliSource, "call", "docs.search", "-"], {
+        env: {
+          ...process.env,
+          OPENGENI_CODEMODE_TOKEN: undefined,
+          OPENGENI_OGTOOL_PACKAGE_SPEC: undefined,
+          ...environment,
+        },
+        stdin: new Blob([JSON.stringify({ query: "from-stdin" })]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("from-stdin");
+
+      const before = mock.requests.length;
+      const missing = await run(
+        ["call", "docs.search", `@${join(token.root, "none.json")}`],
+        environment,
+      );
+      expect(missing.exitCode).toBe(1);
+      expect(missing.stderr).toContain("tool arguments file could not be read as UTF-8");
+      expect(mock.requests).toHaveLength(before);
     } finally {
       mock.server.stop(true);
     }

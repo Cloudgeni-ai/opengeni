@@ -61,6 +61,7 @@ import {
   type CapabilityInstallation,
   type SessionEvent,
 } from "@opengeni/contracts";
+import { errorMessage } from "@opengeni/contracts/values";
 
 describe("API helpers", () => {
   test("rejects embedded query setup transport without the edge-sanitization proof", () => {
@@ -451,6 +452,7 @@ describe("API helpers", () => {
     expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
     expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
     expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
+    expect(temporalOverlapPolicy("steer")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
   });
 
   test("only creates a schedule after update when Temporal reports not found", () => {
@@ -869,6 +871,7 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(401)).toBe("unauthenticated");
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(410)).toBe("gone");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
   });
 
@@ -1272,7 +1275,10 @@ describe("API helpers", () => {
     expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
     expect(params.cancel_url).toContain("checkout=cancelled");
     expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
-      "http://127.0.0.1:3000/billing?checkout=success",
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=success",
+    );
+    expect(stripeCheckoutSessionCreateParams(base).cancel_url).toBe(
+      "http://127.0.0.1:3000/checkout-complete.html?checkout=cancelled",
     );
     expect(() =>
       stripeCheckoutSessionCreateParams({
@@ -1684,7 +1690,7 @@ describe("API helpers", () => {
         );
       });
     } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+      message = errorMessage(error);
     }
 
     expect(message).toContain("the workspace could not initialize configured.example");

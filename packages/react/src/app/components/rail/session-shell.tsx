@@ -24,6 +24,7 @@ import {
 import { toast } from "../../lib/toast";
 
 import { findPickerRow } from "../../../model-policy";
+import { withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
@@ -48,10 +49,7 @@ export {
   SessionShellSlotsProvider,
   type SessionShellSlots,
 } from "./rail-sections";
-import {
-  SessionComputeIndicator,
-  sessionSupportsFleetSwitching,
-} from "../session/sandbox-switcher";
+import { SessionComputeIndicator } from "../session/sandbox-switcher";
 import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
 import { subscriptionAccountProvider } from "../session/subscription-account";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
@@ -72,6 +70,7 @@ import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("../session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -467,23 +466,9 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
-    // The automation facts come from one read, so a newer lineage never pairs
-    // with an older session read (an older server sends no upcoming flag).
-    const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
       <SessionRouteHeader
-        session={{
-          ...context.session,
-          ...(lineageSchedules === undefined
-            ? {}
-            : {
-                hasSchedules: lineageSchedules,
-                hasUpcomingSchedules:
-                  lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
-                waitingForEvents: lineage.lineage?.sessionWaitingForEvents ?? false,
-                automationWait: lineage.lineage?.sessionAutomationWait,
-              }),
-        }}
+        session={withLineageAutomationFacts(context.session, lineage.lineage)}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
         lineageError={lineage.error}
@@ -584,7 +569,7 @@ function SessionRouteHeader({
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;
@@ -658,9 +643,7 @@ function SessionRouteHeader({
         ) : null
       }
       sandboxSlot={
-        sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
-        ) : null
+        <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
       }
       accountSlot={
         policyReady && accountProvider ? (

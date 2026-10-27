@@ -48,7 +48,7 @@ import {
   siteRequestHeaders,
   siteSessionPath,
 } from "@opengeni/contracts/site-session-http";
-import { permissionsRequiredByFirstPartyTools } from "./mcp/first-party-tool-permissions";
+import { permissionsRequiredByFirstPartyTools } from "@opengeni/contracts";
 import { isPreparedMcpConnectPath, preparedMcpProxyPermissions } from "./prepared-mcp-permissions";
 
 /** The REST authority a Codemode SDK proxy token may ever carry. */

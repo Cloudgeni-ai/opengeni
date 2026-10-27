@@ -80,6 +80,8 @@ export type SessionCreateReceiptResult = {
 export function sessionCreateMutationReceipt(
   result: SessionCreateReceiptResult,
   idempotencyKeyRequested: boolean,
+  // The new chat's canonical link, when the deployment has a web base URL.
+  chatUrl: string | null = null,
 ): McpMutationReceiptType {
   const usageRecordingFailed = result.usageRecording === "failed";
   const retryable = usageRecordingFailed && idempotencyKeyRequested;
@@ -116,6 +118,7 @@ export function sessionCreateMutationReceipt(
       sandboxGroupId: result.session.sandboxGroupId,
       parentSessionId: result.session.parentSessionId,
       sessionCreateOutcome: result.outcome,
+      ...(chatUrl ? { chatUrl } : {}),
     },
     id: result.session.id,
     rootSessionId: result.session.rootSessionId,

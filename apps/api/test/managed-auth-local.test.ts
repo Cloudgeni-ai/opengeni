@@ -74,6 +74,21 @@ describe("managed auth email verification posture", () => {
     ).toBe(false);
   });
 
+  test("only passkey sign-up may create an account with a reserved .invalid address", () => {
+    const settings = { environment: "production", managedAuthRequireEmailVerification: false };
+    const placeholder = { id: "user-1", email: "user-1@passkey.invalid", emailVerified: true };
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "credential")).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        settings,
+        { ...placeholder, email: "someone@Example.INVALID" },
+        "credential",
+      ),
+    ).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "google")).toBe(false);
+    expect(managedAuthUserCreateAdmission(settings, placeholder, "passkey")).not.toBe(false);
+  });
+
   test("rejects an unverified social identity before creating its managed user", () => {
     expect(
       managedAuthUserCreateAdmission(

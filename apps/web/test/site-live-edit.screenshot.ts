@@ -3,9 +3,10 @@
 // publishes a new version and the preview beside it reloads in place, the
 // chip shows the history and Undo puts the previous version back, a version
 // published elsewhere shows within seconds, and Edit with Opengeni (`?new`)
-// opens a new conversation with its composer focused. On a Site published to
-// the web, Updating shows beside the header's link and the link's tooltips
-// work in full screen. Light and dark, plus a
+// opens a new conversation with its composer focused. The Site view never
+// says "Live", only Updating or Reconnecting; on a Site published to the web,
+// Updating shows beside the header's "Published" and its menu works in full
+// screen. Light and dark, plus a
 // screen recording of the edit going live. Start the server first:
 //   bunx vite --config test/session-sidebar-preview.vite.config.ts --port 4292
 import { mkdir, readdir, rename } from "node:fs/promises";
@@ -70,7 +71,7 @@ async function openSite(page: Page, theme: "light" | "dark", extra = "") {
 /** Ask the side chat for a change; the agent publishes it and the preview reloads. */
 async function editLive(page: Page) {
   check((await chip(page).textContent())?.trim() === "v4", "the chip doesn't show version 4");
-  check((await liveLabel(page).textContent()) === "Live", "the Site isn't marked Live");
+  check((await liveLabel(page).count()) === 0, "the Site view says Live");
   check((await headerBackground(page)) !== blue, "the header is already blue");
   const composer = panel(page).getByRole("textbox").first();
   await composer.click();
@@ -84,8 +85,8 @@ async function editLive(page: Page) {
   check((await chip(page).textContent())?.trim() === "v5", "the chip didn't follow to version 5");
   await panel(page).getByText("The header is now a blue band").waitFor();
   await waitUntil(
-    async () => (await liveLabel(page).textContent()) === "Live",
-    "the Site didn't settle back to Live",
+    async () => (await liveLabel(page).count()) === 0,
+    "Updating didn't clear once the version loaded",
   );
 }
 
@@ -131,17 +132,16 @@ async function fullScreenMenu(page: Page, name: string) {
 }
 
 /**
- * A Site on the web: the header's link to the published Site stands in for
- * Live, Updating shows beside it while a new version loads, and the link's
- * tooltips work in full screen.
+ * A Site on the web: the header says Published, Updating shows beside it
+ * while a new version loads, and its menu works in full screen.
  */
 async function publishedHeader(page: Page, theme: "light" | "dark") {
   await openSite(page, theme, "&published=1&htmlDelay=1500");
-  const link = page.locator("[data-site-public-link] a");
-  await link.waitFor();
+  const published = page.locator('[data-site-publication="published"]');
+  await published.waitFor();
   check(
-    (await link.getAttribute("href")) === "https://usage.sites.opengeni.ai/",
-    "the header doesn't link to the published Site",
+    (await published.getAttribute("aria-label")) === "Published at usage.sites.opengeni.ai",
+    "the header doesn't say where the Site is published",
   );
   check((await liveLabel(page).count()) === 0, "a published Site shows a second Live label");
   const composer = panel(page).getByRole("textbox").first();
@@ -150,9 +150,9 @@ async function publishedHeader(page: Page, theme: "light" | "dark") {
   await page.keyboard.press("Enter");
   await waitUntil(
     async () => (await liveLabel(page).textContent()) === "Updating",
-    "Updating didn't show beside the published link",
+    "Updating didn't show beside Published",
   );
-  check(await link.isVisible(), "the published link went away while updating");
+  check(await published.isVisible(), "Published went away while updating");
   await capture(page, `site-live-updating-published-${theme}`);
   await waitUntil(
     async () => (await headerBackground(page)) === blue,
@@ -164,13 +164,11 @@ async function publishedHeader(page: Page, theme: "light" | "dark") {
   );
   await page.getByRole("button", { name: "Open Site full screen" }).click();
   await page.locator("dialog[data-artifact-fullscreen]").waitFor();
-  await page.getByRole("button", { name: "Copy link" }).hover();
-  const tooltip = page
-    .locator("[data-radix-popper-content-wrapper]")
-    .filter({ hasText: "Copy link" });
-  await tooltip.waitFor();
+  await published.click();
+  const copy = page.getByRole("menuitem", { name: "Copy link" });
+  await copy.waitFor();
   check(
-    await tooltip.evaluate((element) => {
+    await copy.evaluate((element) => {
       const box = element.getBoundingClientRect();
       const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
       return (
@@ -179,10 +177,11 @@ async function publishedHeader(page: Page, theme: "light" | "dark") {
         element.contains(hit)
       );
     }),
-    "the published link's tooltip is hidden in full screen",
+    "the Published menu is hidden in full screen",
   );
-  await capture(page, `site-live-fullscreen-link-${theme}`);
-  await page.mouse.move(700, 600);
+  await capture(page, `site-live-fullscreen-published-${theme}`);
+  await page.keyboard.press("Escape");
+  await copy.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await page.locator("dialog[data-artifact-fullscreen]").waitFor({ state: "detached" });
 }
