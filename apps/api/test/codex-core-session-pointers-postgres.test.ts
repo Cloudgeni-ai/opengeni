@@ -1,7 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
   createApiKey,
@@ -281,14 +280,6 @@ afterEach(async () => {
 });
 
 describe.skipIf(!realDb)("Codex session pointers on every Session response", () => {
-  test("without a cutover row every response clears the legacy pointers", async () => {
-    // Migration 0680 seeds every organization on the core; this case
-    // reproduces the pre-cutover world (no Codex row).
-    await setCutover(null);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
   test("an enabled cutover projects the core binding everywhere", async () => {
     await setCutover(true);
     expectEverywhere(
@@ -297,25 +288,5 @@ describe.skipIf(!realDb)("Codex session pointers on every Session response", () 
       // No core binding: nulls, never the legacy ids.
       { codexPinnedCredentialId: null, codexLastCredentialId: null },
     );
-  });
-
-  test("a disabled cutover (maintenance) shows nulls everywhere", async () => {
-    await setCutover(false);
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-  });
-
-  test("an unreadable cutover never fails a session read", async () => {
-    await setCutover(true);
-    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-    restores.push(
-      warn,
-      spyOn(opengeniDb, "readCodexCutoverDisposition").mockImplementation(async () => {
-        throw new Error("cutover read failed");
-      }),
-    );
-    const none = { codexPinnedCredentialId: null, codexLastCredentialId: null };
-    expectEverywhere(await everySessionResponse(), none, none);
-    expect(warn).toHaveBeenCalled();
   });
 });

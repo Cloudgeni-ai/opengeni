@@ -195,13 +195,11 @@ export {
   assertSubscriptionOperationLeaseCurrent,
   claimSubscriptionCapacityWakeDeliveries,
   createSubscriptionConnection,
-  isSubscriptionProviderCutoverEnabled,
   listSubscriptionConnectionsForPlacement,
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   resolveSubscriptionConnectionId,
   releaseSubscriptionOperationLease,
@@ -233,10 +231,8 @@ export {
   type SubscriptionCorePlacementWorldResult,
 } from "./subscription-core-placement-world";
 export {
-  codexSubscriptionAuthorityV2ActiveInTransaction,
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
   codexSubscriptionAuthorityV2ForScheduledTaskInTransaction,
-  codexSubscriptionAuthorityV2OrEmptyInTransaction,
   persistSubscriptionCodexRefresh,
   persistSubscriptionCodexRefreshWithPlan,
   withSubscriptionCoreCodexRefreshLock,
@@ -412,15 +408,9 @@ export * from "./subscription-core-codex-connections";
 export * from "./subscription-core-codex-catalog";
 export * from "./subscription-settings";
 export {
-  readSubscriptionCoreProviderRoute,
-  readSubscriptionCoreProviderRouteForWorkspace,
-  type SubscriptionCoreProviderRoute,
-} from "./subscription-core/provider-route";
-export {
-  readSubscriptionCoreRouteFunding,
-  readSubscriptionCoreRouteReadiness,
-  type SubscriptionCoreRouteAnswer,
-} from "./subscription-core/route-readiness";
+  readSubscriptionCoreFunding,
+  readSubscriptionCoreReadiness,
+} from "./subscription-core/funding-readiness";
 // The provider-parameterized runtimes, reachable by provider binding (design
 // 5.3, SuperGrok track X1a; this supersedes 5.1.3's "the package index exports
 // none of the provider-parameterized entry points"). A binding of a provider
@@ -512,7 +502,6 @@ export {
 } from "./subscription-core/personal-connections";
 import {
   listSubscriptionCoreCodexServingConnections,
-  readCodexCutoverDispositionForWorkspace,
   subscriptionCoreCodexConnectionAllowlist,
 } from "./subscription-core-codex-catalog";
 import {
@@ -548,7 +537,6 @@ import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibil
 import { withDatabaseStatementTimeout } from "./database";
 import { withPoolWakeServiceScopeInTransaction } from "./subscription-session-access";
 import {
-  readSubscriptionProviderCutoverState as readCoreProviderCutoverState,
   readSubscriptionSessionBinding as readCoreSessionBinding,
   recordSubscriptionCoreRateLimitResetInTransaction,
 } from "./subscription-core-repository";
@@ -580,21 +568,16 @@ export {
   copySubscriptionAuthorityCompatInTransaction,
   coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
   coreSubscriptionAuthorityV2ForScheduledTaskInTransaction,
-  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  subscriptionAuthorityV2OrEmpty,
   type SubscriptionAuthorityCarrier,
 } from "./subscription-core-acceptance-authority";
 import {
   copySubscriptionAuthorityCompatInTransaction,
   coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
   coreSubscriptionAuthorityV2ForScheduledTaskInTransaction,
-  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  subscriptionAuthorityV2OrEmpty,
   subscriptionAuthorityCompatForCarriersInTransaction,
-  subscriptionProviderCutoverCommittedInTransaction,
 } from "./subscription-core-acceptance-authority";
-import {
-  readSubscriptionCoreProviderRoute,
-  type SubscriptionCoreProviderRoute,
-} from "./subscription-core/provider-route";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
@@ -18854,11 +18837,7 @@ export async function createScheduledTask(
             )
           : [];
       const taskSubscriptionAuthority = input.createdByActor
-        ? await coreSubscriptionAuthorityV2OrEmptyInTransaction(
-            scopedDb,
-            input.accountId,
-            taskDestination?.eligible ? creatorTurn?.authority : null,
-          )
+        ? subscriptionAuthorityV2OrEmpty(taskDestination?.eligible ? creatorTurn?.authority : null)
         : await coreSubscriptionAuthorityV2ForScheduledTaskInTransaction(scopedDb, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -24414,7 +24393,6 @@ export async function fetchOrganizationCodexUsageForAccount(
     organizationId: string;
     actorSubjectId: string;
     credentialId: string;
-    mode: "core";
   },
   fetchImpl: CodexFetch = fetch,
   refresh?: CodexAuthDeps["refresh"],
@@ -24520,10 +24498,8 @@ export class CodexAppsAuthorizationRevokedError extends CodexAppsCredentialUnava
  * decide whether to inject the synthetic codex-subscription provider, so billing
  * and provider-injection cannot drift. Metadata-only read (never the secret).
  *
- * Gated by the organization's Codex cutover row (M3 PR4): a missing or disabled
- * row is maintenance (false); an enabled row asks the shared core whether a connection
- * can serve new work of `context.subjectId` here (shared capacity only
- * without a human subject). Retired decision tables are never read.
+ * Asks the shared core whether a connection can serve new work of
+ * `context.subjectId` here (shared capacity only without a human subject).
  */
 export async function workspaceCodexSubscriptionActive(
   db: Database,
@@ -24536,21 +24512,14 @@ export async function workspaceCodexSubscriptionActive(
     return false;
   }
   return await withCodexActiveReadRetry(async () => {
-    const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(
-      db,
+    const accountId =
+      context.accountId ?? (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    const serving = await listSubscriptionCoreCodexServingConnections(db, {
+      accountId,
       workspaceId,
-      context.accountId,
-    );
-    if (disposition === "maintenance") return false;
-    if (disposition === "core") {
-      const serving = await listSubscriptionCoreCodexServingConnections(db, {
-        accountId,
-        workspaceId,
-        subjectId: context.subjectId ?? null,
-      });
-      return serving.length > 0;
-    }
-    return false;
+      subjectId: context.subjectId ?? null,
+    });
+    return serving.length > 0;
   });
 }
 
@@ -24637,9 +24606,6 @@ export async function isCodexBilledTurn(input: {
   if (input.acceptedTurn) {
     const accountId =
       input.accountId ?? (await rlsContextForWorkspace(input.db, input.workspaceId)).accountId;
-    const { readCodexCutoverDisposition } = await import("./subscription-core-codex-compat");
-    const disposition = await readCodexCutoverDisposition(input.db, accountId, input.workspaceId);
-    if (disposition !== "core") return false;
     const { subscriptionCoreAcceptedCodexTurnIsFunded } = await import("./subscription-core-codex");
     return subscriptionCoreAcceptedCodexTurnIsFunded(input.db, {
       accountId,
@@ -25241,8 +25207,8 @@ export type ArmSubscriptionCoreCapacityWaitInput = {
 };
 
 /**
- * The provider-neutral arm: `provider` names the core lease, the waiter row
- * and the cutover it requires, and selects its session-event vocabulary.
+ * The provider-neutral arm: `provider` names the core lease and the waiter
+ * row, and selects its session-event vocabulary.
  */
 export async function armSubscriptionCoreCapacityWait(
   db: Database,
@@ -25279,11 +25245,6 @@ export async function armSubscriptionCoreCapacityWait(
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
-        const cutover = await readCoreProviderCutoverState(tx, {
-          accountId: input.accountId,
-          provider,
-        });
-        if (cutover !== "enabled") return { action: "stale", events: [] } as const;
         const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -26332,12 +26293,8 @@ export async function getWorkspaceConnectionModelRestrictions(
 }
 
 /**
- * The Codex accounts whose model allowlists bound the `codex/` restriction,
- * by the organization's Codex cutover row (M3 PR 3): the legacy selectable
- * pool without a row; the core connections that can serve this subject's new
- * work with an enabled row; none (every Codex model closed) while the
- * cutover is disabled. No legacy table is read for an organization with a
- * row.
+ * The Codex accounts whose model allowlists bound the `codex/` restriction:
+ * the core connections that can serve this subject's new work.
  */
 async function codexAccountsForModelRestrictions(
   db: Database,
@@ -26346,21 +26303,17 @@ async function codexAccountsForModelRestrictions(
 ): Promise<
   Array<{ status: string; allocatorEnabled: boolean; allowedModelIds?: string[] | null }>
 > {
-  const { accountId, disposition } = await readCodexCutoverDispositionForWorkspace(db, workspaceId);
-  if (disposition === "maintenance") return [];
-  if (disposition === "core") {
-    const serving = await listSubscriptionCoreCodexServingConnections(db, {
-      accountId,
-      workspaceId,
-      subjectId,
-    });
-    return serving.map((connection) => ({
-      status: "active",
-      allocatorEnabled: true,
-      allowedModelIds: subscriptionCoreCodexConnectionAllowlist(connection),
-    }));
-  }
-  return [];
+  const { accountId } = await rlsContextForWorkspace(db, workspaceId);
+  const serving = await listSubscriptionCoreCodexServingConnections(db, {
+    accountId,
+    workspaceId,
+    subjectId,
+  });
+  return serving.map((connection) => ({
+    status: "active",
+    allocatorEnabled: true,
+    allowedModelIds: subscriptionCoreCodexConnectionAllowlist(connection),
+  }));
 }
 
 export const CODEX_RESET_REDEMPTION_OUTCOMES = [
@@ -27816,29 +27769,6 @@ export async function deliverSubscriptionCoreCodexWake(
   wake: SubscriptionCoreCodexWake | null,
 ): Promise<void> {
   await deliverSubscriptionCoreWake(db, SUBSCRIPTION_CORE_CODEX_PROVIDER, wake, "Codex");
-}
-
-/**
- * The runtime serving one provider for one organization, for a route
- * handler (`readSubscriptionCoreProviderRoute`). While the provider has no
- * cutover receipt this is `legacy` after that one read, without resolving the
- * organization (`accountId` is not called), so legacy handlers keep their
- * order of checks; afterwards the organization's switch row is read under
- * its own row-level-security scope.
- */
-export async function readSubscriptionCoreProviderRouteForRequest(
-  db: Database,
-  provider: string,
-  accountId: () => Promise<string>,
-): Promise<SubscriptionCoreProviderRoute> {
-  if (!(await subscriptionProviderCutoverCommittedInTransaction(db, provider))) return "legacy";
-  const organizationId = await accountId();
-  return await withRlsContext(
-    db,
-    { accountId: organizationId, workspaceId: null },
-    async (tx) =>
-      await readSubscriptionCoreProviderRoute(tx, { accountId: organizationId, provider }),
-  );
 }
 
 /**
@@ -72361,14 +72291,10 @@ export async function initializeSessionStartAtomically(
           // design 3.7 EP-T13), never a fresh computation: it gains nothing the
           // parent did not hold, and the database rechecks owner, session and
           // generation before any personal lease. A parent with no v2 value
-          // yields the empty value once the cutover is enabled.
+          // yields the empty value.
           const initialSubscriptionAuthority =
             input.initialSubscriptionAuthority !== undefined
-              ? await coreSubscriptionAuthorityV2OrEmptyInTransaction(
-                  tx as unknown as Database,
-                  session.accountId,
-                  input.initialSubscriptionAuthority,
-                )
+              ? subscriptionAuthorityV2OrEmpty(input.initialSubscriptionAuthority)
               : session.parentSessionId
                 ? causalParentSubscriptionAuthority !== null
                   ? causalParentSubscriptionAuthority
@@ -76922,9 +76848,7 @@ export async function claimSessionWorkForAttempt(
               internalSubscriptionAuthority = goalCausalTurn.subscriptionAuthority;
             }
           }
-          internalSubscriptionAuthority = await coreSubscriptionAuthorityV2OrEmptyInTransaction(
-            tx as unknown as Database,
-            session.accountId,
+          internalSubscriptionAuthority = subscriptionAuthorityV2OrEmpty(
             internalSubscriptionAuthority,
           );
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);

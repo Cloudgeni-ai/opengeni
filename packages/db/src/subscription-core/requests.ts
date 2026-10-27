@@ -84,19 +84,14 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
   async function lockRequestSource(tx: Database, accountId: string, connectionId: string) {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(
     ${`subscription-refresh:${connectionId}`}, 0))`);
-    const [source] = await rawRows<{
-      status: string;
-      disconnected_at: Date | null;
-      enabled: boolean;
-    }>(
+    const [source] = await rawRows<{ status: string; disconnected_at: Date | null }>(
       tx,
-      sql`select status, disconnected_at, exists (select 1 from subscription_provider_cutovers
-        where account_id = ${accountId}::uuid and provider = ${providerId} and enabled) as enabled
+      sql`select status, disconnected_at
       from subscription_connections
       where account_id = ${accountId}::uuid and id = ${connectionId}::uuid and provider = ${providerId}`,
     );
     if (!source || source.disconnected_at !== null) throw provider.errors.sourceDisconnected();
-    if (source.status !== "active" || !source.enabled) throw provider.errors.accessLost();
+    if (source.status !== "active") throw provider.errors.accessLost();
   }
 
   async function insertRequestReservation(
@@ -403,7 +398,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
    * Reserve one physical request of a provider feature that runs under an
    * explicit workspace designation (no turn). Requires the workspace RLS
    * context on `tx`; the caller takes its own feature lock first. Takes the
-   * source lock (refresh key, then the live source and cutover check) before
+   * source lock (refresh key, then the live source check) before
    * inserting, and the native operation-reference and disconnect guards
    * recheck designation, scope, cutover and the active connection without
    * minting personal authority.

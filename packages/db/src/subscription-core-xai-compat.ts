@@ -2,11 +2,7 @@
  * SuperGrok's legacy route shapes on the shared subscription core (design
  * docs/design/subscription-core-2026-10-07.md, 5.3 "SuperGrok track", X2b).
  *
- * Dormant: API handlers call into this module only when
- * `readSubscriptionCoreProviderRoute(..., "xai")` is `core`, which needs the
- * SuperGrok cutover receipt (X3); until then the binding is not registered
- * and every shared runtime refuses it. The pools, settings and writers are
- * the provider-neutral ones (`subscription-core/administration`,
+ * The pools, settings and writers are the provider-neutral ones (`subscription-core/administration`,
  * `subscription-core/connections`); this module only projects neutral rows
  * into the legacy SuperGrok account shape and encodes a device-code sign-in
  * as the adapter's stored credential. Nothing here reads or writes a legacy

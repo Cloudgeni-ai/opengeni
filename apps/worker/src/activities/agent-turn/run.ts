@@ -134,12 +134,12 @@ import {
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
-  selectClaudeTurnCapacityByRoute,
+  selectClaudeTurnCapacity,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
 import {
   buildXaiCoreRequestAuthorization,
-  selectXaiTurnCapacityByRoute,
+  selectXaiTurnCapacity,
   xaiCoreTitleCustody,
   type XaiCoreRequestAuthorization,
 } from "./xai-core";
@@ -699,9 +699,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             } else {
               const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
               if ("exit" in codexCapacity) return codexCapacity.exit;
-              const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
+              const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
               if ("exit" in xaiCapacity) return xaiCapacity.exit;
-              const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
+              const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
               if ("exit" in claudeCapacity) return claudeCapacity.exit;
             }
           }

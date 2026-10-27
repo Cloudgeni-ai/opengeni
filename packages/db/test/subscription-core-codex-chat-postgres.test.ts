@@ -98,13 +98,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex chat fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The organization's seeded settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -142,13 +136,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function enableCodexCutover(accountId: string, enabled = true): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 async function sharedConnection(
@@ -354,7 +341,6 @@ async function leaseRows(
 describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () => {
   test("SUB-CREDITS-01: live credit consent preserves held leases after pause, honors revocation and yields to included capacity", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "credit-consent",
@@ -398,7 +384,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("live credit consent never approves spending past an explicit choice of a deleted account (D-24)", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "credit-deleted-pin",
@@ -452,21 +437,8 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
   });
 
-  test("placement refuses unless the Codex cutover row is enabled in the same transaction", async () => {
-    const org = await organization();
-    await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "gate" });
-    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
-    expect(await place(turn)).toEqual({ kind: "cutover_not_enabled" });
-    await enableCodexCutover(org.accountId, false);
-    expect(await place(turn)).toEqual({ kind: "cutover_not_enabled" });
-    expect(await leaseRows(org, turn)).toEqual([]);
-    await enableCodexCutover(org.accountId, true);
-    expect(await place(turn)).toMatchObject({ kind: "run" });
-  });
-
   test("shared placement leases, binds, records the selection and materializes the token", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "shared",
@@ -614,7 +586,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("the core lease is renewed, fenced and released under the core turn actor", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "renew",
@@ -662,7 +633,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("an explicit pin is honoured and waits instead of failing over", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const pinned = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "pin",
@@ -790,7 +760,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("a disconnected automatic source re-places the continuation, then waits when none remain", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "drain-first" });
     await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "drain-second" });
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -818,7 +787,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("a personal connection serves only its owner's own work with a matching v2 entry", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const personal = await personalConnection(org, "mine");
 
     // Owner's own turn in their Personal workspace with the frozen v2 entry.
@@ -964,27 +932,10 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
         leaseOf(service, personal),
       ),
     ).toEqual({ kind: "lease_lost" });
-
-    // Before the drained cutover the v2 entry grants nothing.
-    await enableCodexCutover(org.accountId, false);
-    const afterSwitchOff = await runningTurn(org, {
-      workspaceId: org.personalWorkspaceId,
-      personalAuthority: true,
-    });
-    expect(await place(afterSwitchOff)).toEqual({ kind: "cutover_not_enabled" });
-    expect(
-      await loadSubscriptionCoreCodexCredential(
-        client!.db,
-        settings,
-        own.identity,
-        leaseOf(own, personal),
-      ),
-    ).toEqual({ kind: "not_visible" });
   });
 
   test("a co-member's turn never uses the owner's personal connection", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const personal = await personalConnection(org, "owner-only");
     const coMemberSubjectId = `user:core-codex-co-member-${crypto.randomUUID()}`;
     const [coWorkspace] = await shared!.admin<{ id: string }[]>`
@@ -1028,7 +979,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("an ownerless turn is shared-only and never writes a binding", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const personal = await personalConnection(org, "not-for-service");
     const turn = await runningTurn(org, {
       workspaceId: org.sharedWorkspaceId,
@@ -1170,7 +1120,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     // without an owner, while its turn still records the person it runs for.
     // That turn must place on shared capacity, never on personal capacity.
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const personal = await personalConnection(org, "not-for-ownerless");
     const turn = await runningTurn(org, {
       workspaceId: org.sharedWorkspaceId,
@@ -1232,7 +1181,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("concurrent refreshes of one generation persist one rotation and call the provider once", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "stale",
@@ -1298,7 +1246,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("a permanent OAuth refusal marks only the current generation as needing sign-in", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "revoked",
@@ -1364,7 +1311,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     "a credential that never renews is not rotated: its refresh marks the connection needs-relogin (%s)",
     async (shape) => {
       const org = await organization();
-      await enableCodexCutover(org.accountId);
       const connectionId = await sharedConnection(org, {
         workspaceId: org.sharedWorkspaceId,
         label: "non-renewing",
@@ -1441,7 +1387,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("every header reading persists before finalization and even when the allocator rejects its order or generation", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "history",
@@ -1543,7 +1488,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("quota observations and failure receipts are fenced to the leased connection", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "quota",
@@ -1636,7 +1580,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("a core credential that cannot be decoded fails with fixed text and no cause", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "garbled",
@@ -1660,32 +1603,8 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(Bun.inspect(caught)).not.toContain("secret-token");
   });
 
-  test("failure receipts also require the enabled gate", async () => {
-    const org = await organization();
-    await enableCodexCutover(org.accountId);
-    const connectionId = await sharedConnection(org, {
-      workspaceId: org.sharedWorkspaceId,
-      label: "receipt-gate",
-    });
-    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
-    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
-    await enableCodexCutover(org.accountId, false);
-    expect(
-      await recordSubscriptionCoreCodexTurnFailure(
-        client!.db,
-        turn.identity,
-        leaseOf(turn, connectionId),
-        { kind: "forbidden" },
-      ),
-    ).toBe(false);
-    const failures = await shared!.admin`
-      select 1 from subscription_turn_failures where turn_id = ${turn.identity.turnId}::uuid`;
-    expect(failures.length).toBe(0);
-  });
-
   test("this attempt's own expired lease is never reused; placement acquires it afresh", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "own-expired",
@@ -1711,19 +1630,21 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
     expect(live!.live).toBe(true);
   });
 
-  test("personal access reads only the v2 entry, behind an enabled Codex cutover row (v1 snapshots grant nothing)", async () => {
+  test("personal access reads only the v2 entry (v1 snapshots grant nothing)", async () => {
     const org = await organization();
     const personal = await personalConnection(org, "v1-only");
     const turn = await runningTurn(org, { workspaceId: org.personalWorkspaceId });
     await shared!.admin.begin(async (owner) => {
-      // The v1 snapshot is immutable to every writer; seed this fixture once.
+      // The v1 snapshot is immutable to every writer; seed this fixture once,
+      // without the v2 entry the turn received at acceptance.
       await owner`set local session_replication_role = replica`;
       await owner`
         update session_turns set codex_provider_account_authority_snapshot = ${owner.json({
           version: 1,
           scope: "user",
           authorityGeneration: 1,
-        })}::jsonb
+        })}::jsonb,
+          subscription_authority = ${owner.json({ version: 2, personal: [] })}::jsonb
         where id = ${turn.identity.turnId}::uuid`;
     });
     const authorize = () =>
@@ -1744,14 +1665,7 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           },
         ),
       );
-    // Migration 0712 replaced 0668's legacy-generation branch: without a
-    // cutover row (unreachable for Codex after 0689) the v1 snapshot no
-    // longer authorizes anything.
-    expect(await authorize()).toBe(false);
-    await enableCodexCutover(org.accountId, false);
-    expect(await authorize()).toBe(false);
-    // Enabled: only the v2 entry counts, and this turn has none.
-    await enableCodexCutover(org.accountId, true);
+    // Only the v2 entry counts, and this turn has none.
     expect(await authorize()).toBe(false);
     await shared!.admin`
       update session_turns set subscription_authority = ${shared!.admin.json({
@@ -1761,11 +1675,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
         ],
       })}::jsonb
       where account_id = ${org.accountId}::uuid and id = ${turn.identity.turnId}::uuid`;
-    expect(await authorize()).toBe(true);
-    // A disabled row grants nothing, even with the v2 entry.
-    await enableCodexCutover(org.accountId, false);
-    expect(await authorize()).toBe(false);
-    await enableCodexCutover(org.accountId, true);
     expect(await authorize()).toBe(true);
     // The same grant for a provider without a cutover receipt is refused: an
     // enabled switch row, a v2 entry, the exact owner and the current
@@ -1842,7 +1751,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("a completed model call advances the binding cache clock", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const first = await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "a" });
     await sharedConnection(org, { workspaceId: org.sharedWorkspaceId, label: "b" });
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1868,7 +1776,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
 
   test("an older attempt's live lease makes the redispatched attempt wait for its expiry", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "busy",
@@ -2111,7 +2018,6 @@ describe("core Codex resolver single-flight", () => {
 describe.skipIf(!realDb)("durable model catalog observations", () => {
   test("placement, wait reconciliation and credit admission share exact accepted model facts", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const a = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "catalog-a",
@@ -2211,7 +2117,6 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
 
   test("an Ultrafast turn is placed only on an account offering the model at that tier", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const plain = await sharedConnection(org, {
       workspaceId: org.sharedWorkspaceId,
       label: "tier-plain",
@@ -2292,7 +2197,6 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
 
   test("a managed account keeps serving its pin across organization reach edits; people are refused", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const managed = await managedConnection(org, "managed-pin");
     const admin = {
       kind: "codex" as const,
@@ -2354,7 +2258,6 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
 
   test("people scope is evaluated against the session owner, and an excluded pin waits", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     // People scope is offered only while no workspace manages the account.
     const managed = await managedConnection(org, "managed-reach", false);
     const [otherPersonal] = await shared!.admin<{ id: string }[]>`
@@ -2471,7 +2374,6 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
 
   test("the organization disconnects an account a shared workspace manages, never one a Personal workspace manages", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const disconnect = async (connectionId: string) =>
       (
         await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
