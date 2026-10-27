@@ -4,9 +4,8 @@ Since maintenance migration `0689_subscription_core_codex_cutover.sql`, Codex
 (ChatGPT subscription) accounts run on the shared subscription core. The legacy
 selector, leases, refresh and failover path is removed in M3 PR 4. Missing or
 disabled cutover rows fail closed; neither permits a legacy-table fallback.
-Its historical text remains in git history, and historical database regression
-setup lives only in test fixtures. The reset-redemption ledger remains a live
-core fence. `bun run check:no-legacy-subscription-runtime` enforces this boundary.
+Its historical text remains in git history. The reset-redemption ledger remains
+a live core fence.
 
 | Topic | Now |
 | --- | --- |

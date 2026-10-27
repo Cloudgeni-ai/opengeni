@@ -13,10 +13,10 @@ import { splitStatements, stripComments, stripRoutineBodies } from "./migration-
 
 export { MIGRATIONS_DIR } from "./migration-rls-backfills";
 
-// 0887 was the last existing migration when this guard was introduced. Its
-// predecessors are hash-frozen history, including real online-safety violations.
+// The 0977 baseline parts install a fresh database from nothing; an existing
+// database adopts them without running them. Every later migration is checked.
 // Never raise this boundary to admit a new unsafe migration.
-export const ONLINE_SAFETY_FROM_ORDINAL = 888;
+export const ONLINE_SAFETY_FROM_ORDINAL = 978;
 export const EXCEPTION_KEY = "online-safety-exception";
 
 export const RULES = {

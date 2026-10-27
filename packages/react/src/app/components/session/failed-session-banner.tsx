@@ -29,6 +29,7 @@ export function FailedSessionBanner({
   onChooseModel,
   workspaceId,
   canBuyCredits = false,
+  onAddCredits,
   canConnectModel = false,
   modelChanged = false,
   canChooseModel = false,
@@ -50,6 +51,8 @@ export function FailedSessionBanner({
   onChooseModel?: ((modelId: string) => void) | undefined;
   workspaceId?: string | undefined;
   canBuyCredits?: boolean | undefined;
+  /** Opens the add-credits prompt in the chat; without it, Add credits opens billing. */
+  onAddCredits?: (() => void) | undefined;
   canConnectModel?: boolean | undefined;
   modelChanged?: boolean | undefined;
   canChooseModel?: boolean | undefined;
@@ -164,7 +167,11 @@ export function FailedSessionBanner({
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
             {offerCredits ? (
-              <BuyCreditsLink workspaceId={workspaceId} primary={!offerConnect} />
+              <BuyCreditsLink
+                workspaceId={workspaceId}
+                primary={!offerConnect}
+                onAddCredits={onAddCredits}
+              />
             ) : null}
             {offerConnect ? (
               <ConnectModelLink
@@ -186,13 +193,17 @@ export function FailedSessionBanner({
                 Use {switchTo.label}
               </Button>
               {workspaceId && canBuyCredits ? (
-                <BuyCreditsLink workspaceId={workspaceId} primary={false} />
+                <BuyCreditsLink
+                  workspaceId={workspaceId}
+                  primary={false}
+                  onAddCredits={onAddCredits}
+                />
               ) : null}
             </>
           ) : workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} primary />
+            <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
           ) : workspaceId && canConnectModel ? (
-            <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
+            <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
           <SandboxRecoveryActions
@@ -211,7 +222,31 @@ export function FailedSessionBanner({
 }
 
 /** The banner's one unblocking action is the primary; next to Connect it is the outline. */
-function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
+function BuyCreditsLink({
+  workspaceId,
+  primary,
+  onAddCredits,
+}: {
+  workspaceId: string;
+  primary: boolean;
+  onAddCredits?: (() => void) | undefined;
+}) {
+  if (onAddCredits) {
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant={primary ? "default" : "outline"}
+        onClick={() => {
+          noteTurnFailureAction("buy_credits");
+          onAddCredits();
+        }}
+        {...analyticsAction("buy_credits")}
+      >
+        Add credits
+      </Button>
+    );
+  }
   return (
     <Button asChild size="sm" variant={primary ? "default" : "outline"}>
       <Link
@@ -221,7 +256,7 @@ function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary
         onClick={() => noteTurnFailureAction("buy_credits")}
         {...analyticsAction("buy_credits")}
       >
-        Buy credits
+        Add credits
       </Link>
     </Button>
   );

@@ -1699,6 +1699,11 @@ and validate epochs/authority.
 Nothing from a vault is injected into compute. `{{secret:…}}` references in
 tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
+Opengeni's own hand-off tools (sessions, messages, goals, schedules, notes,
+Knowledge, artifacts, notifications and any new first-party tool) never resolve
+them: they store or forward reference text, and the receiving work resolves it
+at its own execution boundary. Only a short, justified list of first-party
+tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -2839,14 +2844,6 @@ fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).
-PostgreSQL 18's additional NOT NULL catalog rows are handled by the closed,
-source-hash-checked `packages/db/src/migration-postgres-compatibility.ts` adapter
-at execution of historical 0345/0598. It changes only their constraint-catalog
-reads, not published SQL bytes, ledger names, release hashes, or schema guards;
-older servers execute the original source. Already-applied migrations stay
-skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
-The same hash-pinned adapter stabilizes 0807 policy deparsing for dedicated
-schemas without changing its exact helper matcher or published SQL history.
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,

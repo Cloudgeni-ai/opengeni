@@ -1,16 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import type postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession, withWorkspaceRls } from "../src";
-import { executeMigrationFile } from "../src/migrate";
 import { listSessionEventSlices, type SessionEventSliceOptions } from "../src/session-event-slices";
 
-const migrations = [
-  "0943_session_event_tool_name_pages.sql",
-  "0944_session_event_tool_name_fallback_pages.sql",
-];
 const indexes = ["session_events_tool_name_page_idx", "session_events_tool_name_fallback_page_idx"];
 let fixture: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -19,9 +13,7 @@ let accountId: string;
 let workspaceId: string;
 let sessionId: string;
 beforeAll(async () => {
-  const shared = await acquireSharedTestDatabase("tool-name-event-pages", {
-    withheldMigrations: migrations,
-  });
+  const shared = await acquireSharedTestDatabase("tool-name-event-pages");
   if (!shared) throw Error("Real PostgreSQL required");
   fixture = shared;
   client = createDb(shared.appUrl, { max: 1 });
@@ -114,71 +106,50 @@ test("actual tool-name pages preserve keysets and use both partial indexes under
   const queries: Array<{ options: SessionEventSliceOptions; query: Query }> = [];
   for (const options of cases) queries.push({ options, query: await capture(options) });
   const observations: unknown[] = [];
-  const previousRows = new Map<string, string>();
-  for (const phase of ["before", "after"]) {
-    if (phase === "after") {
-      for (const file of migrations) {
-        const source = await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
-        await executeMigrationFile(fixture.admin, file, source);
-        const before = await fixture.admin`select oid from pg_class where relname=any(${indexes})`;
-        await executeMigrationFile(fixture.admin, file, source);
-        expect(await fixture.admin`select oid from pg_class where relname=any(${indexes})`).toEqual(
-          before,
-        );
-      }
-      expect([
-        ...(await fixture.admin`select indisvalid,indisready from pg_index join pg_class on indexrelid=oid where relname=any(${indexes})`),
-      ]).toEqual([
-        { indisvalid: true, indisready: true },
-        { indisvalid: true, indisready: true },
-      ]);
-      await fixture.admin`analyze session_events`;
-    }
-    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
-      for (const [i, { options, query }] of queries.entries()) {
-        await withWorkspaceRls(client.db, workspaceId, async (tx) => {
-          await tx.execute(sql.raw(`set local plan_cache_mode=${mode}`));
-          await tx.execute(sql.raw(`prepare tool_name_page as ${query.text}`));
-          const args = query.params.map(literal).join(",");
-          try {
-            const rows = await tx.execute(sql.raw(`execute tool_name_page(${args})`));
-            const direction =
-              options.direction ?? (options.before === undefined ? "after" : "before");
-            // Former predicate, same scoped transaction. All fixture events are
-            // claimed/non-human; the original prompt exclusion is vacuous here.
-            const expected = await tx.execute(sql`select id,sequence,type,turn_id,
+  expect([
+    ...(await fixture.admin`select indisvalid,indisready from pg_index join pg_class on indexrelid=oid where relname=any(${indexes})`),
+  ]).toEqual([
+    { indisvalid: true, indisready: true },
+    { indisvalid: true, indisready: true },
+  ]);
+  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    for (const [i, { options, query }] of queries.entries()) {
+      await withWorkspaceRls(client.db, workspaceId, async (tx) => {
+        await tx.execute(sql.raw(`set local plan_cache_mode=${mode}`));
+        await tx.execute(sql.raw(`prepare tool_name_page as ${query.text}`));
+        const args = query.params.map(literal).join(",");
+        try {
+          const rows = await tx.execute(sql.raw(`execute tool_name_page(${args})`));
+          const direction =
+            options.direction ?? (options.before === undefined ? "after" : "before");
+          // The plain predicate, same scoped transaction. All fixture events are
+          // claimed/non-human; the original prompt exclusion is vacuous here.
+          const expected = await tx.execute(sql`select id,sequence,type,turn_id,
                 turn_association,duplicate_of_event_id from session_events
               where workspace_id=${workspaceId} and session_id=${sessionId}
                 and sequence > ${options.after ?? 0} and sequence < ${options.before ?? 2147483647}
                 and type='agent.toolCall.created' and coalesce(tool_name,payload->>'name')=${options.toolName}
                 ${options.callId === undefined ? sql`` : sql`and coalesce(tool_call_id,payload->>'callId',payload->>'call_id',payload->>'id')=${options.callId}`}
               order by sequence ${sql.raw(direction === "before" ? "desc" : "asc")} limit 9`);
-            expect(rows).toEqual(expected);
-            const key = `${mode}:${i}`;
-            if (phase === "before") previousRows.set(key, JSON.stringify(rows));
-            else expect(JSON.stringify(rows)).toBe(previousRows.get(key)!);
-            const result = await tx.execute(
-              sql.raw(`explain(analyze,buffers,format json) execute tool_name_page(${args})`),
-            );
-            const plan = (result[0] as Record<string, any>)["QUERY PLAN"][0];
-            const accesses = nodes(plan.Plan).filter(
-              (p) => p["Relation Name"] === "session_events" && p["Actual Loops"] > 0,
-            );
-            if (phase === "after") {
-              expect(accesses.map((p) => p["Index Name"]).sort()).toEqual([...indexes].sort());
-            }
-            observations.push({
-              phase,
-              mode,
-              case: i,
-              ms: plan["Execution Time"],
-              buffers: plan.Plan["Shared Hit Blocks"],
-            });
-          } finally {
-            await tx.execute(sql.raw("deallocate tool_name_page"));
-          }
-        });
-      }
+          expect(rows).toEqual(expected);
+          const result = await tx.execute(
+            sql.raw(`explain(analyze,buffers,format json) execute tool_name_page(${args})`),
+          );
+          const plan = (result[0] as Record<string, any>)["QUERY PLAN"][0];
+          const accesses = nodes(plan.Plan).filter(
+            (p) => p["Relation Name"] === "session_events" && p["Actual Loops"] > 0,
+          );
+          expect(accesses.map((p) => p["Index Name"]).sort()).toEqual([...indexes].sort());
+          observations.push({
+            mode,
+            case: i,
+            ms: plan["Execution Time"],
+            buffers: plan.Plan["Shared Hit Blocks"],
+          });
+        } finally {
+          await tx.execute(sql.raw("deallocate tool_name_page"));
+        }
+      });
     }
   }
   const page = await listSessionEventSlices(client.db, workspaceId, sessionId, {

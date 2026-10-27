@@ -20,6 +20,9 @@ export type BrowserImageFrame = Readonly<{
   scrollY: number;
   data: Uint8Array;
   capturedAt: string;
+  /** A full-page capture could not keep some scrollbars' space, so content
+   * next to them may be up to a scrollbar's width off. Not frame metadata. */
+  inexactScrollbars?: true;
 }>;
 
 export type BrowserScreenshotOptions = Readonly<{

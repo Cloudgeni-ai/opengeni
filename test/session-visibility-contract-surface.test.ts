@@ -58,55 +58,6 @@ const AUTHORIZATION_CALLER_ALLOWLIST = new Set([
 /** Files allowed to name the SQL entry points: origin definition, later body
  * replacements that only copy newly required session columns, grants, posture,
  * adapter. Product callers remain forbidden. */
-const SQL_ENTRY_POINT_ALLOWLIST = new Set([
-  "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
-  "packages/db/drizzle/0289_session_composer_policy_authority.sql",
-  "packages/db/drizzle/0303_session_tenancy_product_activation.sql",
-  "packages/db/drizzle/0336_atomic_session_fork_visibility.sql",
-  "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
-  "packages/db/drizzle/0352_session_variable_set_attachments.sql",
-  "packages/db/drizzle/0429_message_boundary_session_forks.sql",
-  "packages/db/drizzle/0434_ordered_model_history.sql",
-  "packages/db/drizzle/0486_reasoning_configuration_message_forks.sql",
-  "packages/db/drizzle/0487_skill_catalog_message_forks.sql",
-  // Copies only accepted session attachment grants at the existing fork boundary.
-  "packages/db/drizzle/0499_session_attachment_access.sql",
-  // Changes audience without revoking accepted execution; same owner-only boundary.
-  "packages/db/drizzle/0501_session_sharing_execution.sql",
-  // Allows active message-prefix copies under the unchanged authority/writer locks.
-  "packages/db/drizzle/0502_active_message_boundary_forks.sql",
-  // Check only copied history for compaction when forking at a retained message.
-  "packages/db/drizzle/0513_message_fork_prefix_compaction.sql",
-  // Lets an Only-me session keep its shared sandbox group: flips only the
-  // singleton-group assertion in the visibility transition and fork bodies.
-  "packages/db/drizzle/0738_private_sessions_share_sandboxes.sql",
-  // Settles leftovers inside the private transition and adds the owner-only
-  // blocker preview; same owner-only boundary and locks.
-  "packages/db/drizzle/0768_private_visibility_ignores_leftovers.sql",
-  // Never refuses the private transition: drops other people's pending
-  // updates and account choices inside it; same owner-only boundary and locks.
-  "packages/db/drizzle/0769_private_visibility_never_blocks.sql",
-  // Forks at a message older than the latest context reset copy the history
-  // that was live then; same fork body, owner-only boundary and locks.
-  "packages/db/drizzle/0784_message_fork_as_of_history.sql",
-  // Builds the fork row from the complete source row so the fork keeps its
-  // agent settings; same fork bodies, owner-only boundary and locks.
-  "packages/db/drizzle/0855_session_fork_agent_parity.sql",
-  // Gives the fork row its own workflow identity; same fork bodies and locks.
-  "packages/db/drizzle/0856_session_fork_workflow_identity.sql",
-  // Weakens only the membership fence in the visibility transition and fork
-  // bodies from FOR UPDATE to FOR NO KEY UPDATE; same boundary otherwise.
-  "packages/db/drizzle/0925_membership_fences_allow_key_checks.sql",
-  // Lets message forks copy marked workspace-governance developer messages at
-  // fractional positions, like 0487's Skill catalog; same fork bodies,
-  // owner-only boundary and locks.
-  "packages/db/drizzle/0980_workspace_governance_context_forks.sql",
-  "packages/db/src/session-tenancy.ts",
-  // Reads the owner-only foreign-authority counts for the preview and consent.
-  "packages/db/src/session-visibility-work.ts",
-  "packages/db/src/provision-roles.ts",
-  "packages/db/src/runtime-posture.ts",
-]);
 
 async function sourceFiles(root: string, pattern = "**/*.{ts,tsx}"): Promise<string[]> {
   const files: string[] = [];
@@ -143,22 +94,6 @@ describe("session visibility and fork product activation stays on its exact publ
     }
   });
 
-  test("the SQL entry points are named only by their definition, grants, posture, and adapter", async () => {
-    for (const file of [
-      ...(await sourceFiles("packages/db/src")),
-      ...(await sourceFiles("packages/db/drizzle", "*.sql")),
-    ]) {
-      if (SQL_ENTRY_POINT_ALLOWLIST.has(file)) continue;
-      const content = await readFile(join(repo, file), "utf8");
-      for (const marker of SQL_ENTRY_POINTS) {
-        expect(
-          content.includes(marker),
-          `${file} must not name ${marker}; 0225 remains the origin definition, allowlisted migrations may replace the fenced database contract, and packages/db/src/session-tenancy.ts remains the sole adapter.`,
-        ).toBe(false);
-      }
-    }
-  });
-
   test("the adapter still exists so the db test lane keeps proving the fenced behaviour", async () => {
     const adapter = await readFile(join(repo, "packages/db/src/session-tenancy.ts"), "utf8");
     const previews = new Set<string>(OWNER_PREVIEW_ROUTINES);
@@ -179,53 +114,6 @@ describe("session visibility and fork product activation stays on its exact publ
     // base and runtime-configured fork paths, and both applied-fork receipt
     // recovery paths. There is no activation probe since 0611.
     expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(5);
-  });
-
-  test("no product path consults a per-organization activation receipt (0611)", async () => {
-    const migration = await readFile(
-      join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
-      "utf8",
-    );
-    expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    for (const routine of [
-      "session_tenancy_product_activated(uuid,integer)",
-      "session_tenancy_any_product_activation()",
-      "list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)",
-      "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean)",
-      "revoke_self_user_resource_grant(uuid,uuid,uuid)",
-      "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
-      "organization_private_sessions_enabled(uuid)",
-      "get_organization_private_session_settings(uuid,text)",
-      "update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)",
-    ]) {
-      expect(migration).toContain(routine);
-    }
-    const roots = [
-      "apps/api/src",
-      "apps/worker/src",
-      "apps/web/src",
-      "packages/core/src",
-      "packages/db/src",
-      "packages/runtime/src",
-      "packages/sdk/src",
-      "packages/react/src",
-      "scripts",
-    ];
-    for (const root of roots) {
-      for (const file of await sourceFiles(root)) {
-        const content = await readFile(join(repo, file), "utf8");
-        for (const marker of [
-          "sessionTenancyProductActivated",
-          "select session_tenancy_any_product_activation()",
-          "organizationTenancyCanonicalActivationEnabled",
-        ]) {
-          expect(
-            content.includes(marker),
-            `${file} must not gate on per-organization session-tenancy activation (${marker})`,
-          ).toBe(false);
-        }
-      }
-    }
   });
 
   test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {

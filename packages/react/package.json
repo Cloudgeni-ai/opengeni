@@ -33,6 +33,10 @@
       "types": "./src/desktop.ts",
       "default": "./src/desktop.ts"
     },
+    "./desktop-dictation": {
+      "types": "./src/desktop-dictation.ts",
+      "default": "./src/desktop-dictation.ts"
+    },
     "./sites": {
       "types": "./src/sites.ts",
       "default": "./src/sites.ts"

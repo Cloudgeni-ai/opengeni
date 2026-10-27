@@ -3,6 +3,7 @@ import { createElement } from "react";
 import {
   BotIcon,
   KeyRoundIcon,
+  MonitorIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -131,5 +132,45 @@ describe("settings search", () => {
     expect(labels("sécurité")).toEqual([]);
     expect(labels("Sécurity")).toContain("Security");
     expect(labels("   ")).toEqual([]);
+  });
+
+  test("in the desktop app, dictation finds the shortcut setting first", () => {
+    const desktop: SettingsRailSection[] = [
+      {
+        id: "workspace",
+        label: "Workspace",
+        groups: [
+          {
+            items: [
+              {
+                id: "workspace:general",
+                label: "General",
+                icon: SlidersHorizontalIcon,
+                link: link({ section: "general" }),
+              },
+              {
+                id: "workspace:/workspaces/$workspaceId/computer-use",
+                label: "Computer use",
+                icon: MonitorIcon,
+                link: link({}),
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const found = (query: string) =>
+      searchSettings(settingsSearchEntries(desktop), query).map(
+        (entry) => `${entry.label} (${entry.location})`,
+      );
+    expect(found("dictation")).toEqual([
+      "Dictation (Workspace · Computer use)",
+      "Voice input (Workspace · General)",
+      "Computer use (Workspace)",
+    ]);
+    expect(found("hotkey")[0]).toBe("Dictation (Workspace · Computer use)");
+    expect(found("vocabulary")).toEqual(["Dictation (Workspace · Computer use)"]);
+    // Outside the desktop app there is no Computer use page, so no Dictation either.
+    expect(labels("dictation")).toEqual(["Voice input"]);
   });
 });
