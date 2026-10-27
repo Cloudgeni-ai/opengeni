@@ -1840,25 +1840,29 @@ export const englishMessages = {
     "Unknown transcription adapter failure.",
   "hooks.useTurnQueue.thatQueuedPromptChangedBefore":
     "That queued prompt changed before Steer could be sent.",
+  "humanInputForm.back": "Back",
   "humanInputForm.loadingTheExactSkillFiles": "Loading the exact Skill files…",
   "humanInputForm.loadTheExactSkillFiles": "Load the exact Skill files before saving.",
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
+  "humanInputForm.next": "Next",
   "humanInputForm.orSkipAndLetThe": "Or skip and let the agent decide.",
   "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
+  "humanInputForm.questionOfTotal": "Question {current} of {total}",
   "humanInputForm.retryPreview": "Retry preview",
   "humanInputForm.savingActivatesTheseExactFiles":
     "Saving activates these exact files. No additional review is required.",
   "humanInputForm.scopeLengthFiles": "· {scope} · {length} files",
   "humanInputForm.skill": "Skill",
+  "humanInputForm.somethingElse": "Something else…",
   "humanInputForm.theRequestedSkillRevisionCould":
     "The requested Skill revision could not be verified.",
   "humanInputForm.thisClientCannotPreviewSkill":
     "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
-  "humanInputForm.typeAValue": "Type a value…",
+  "humanInputForm.typeYourAnswer": "Type your answer…",
   "humanInputModel.apiKey": "API key",
   "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
   "humanInputModel.chooseAtLeastMin": "Choose at least {min}.",
