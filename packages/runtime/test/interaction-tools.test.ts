@@ -6056,13 +6056,17 @@ describe("interaction attempt tools", () => {
       reason: "Approve the sign-in on your phone.",
       expiresInSeconds: 900,
     };
-    // Only a request that leaves a generation out, without an auth run, is read.
-    expect(interactionRequestNeedingCurrentTarget(named)).toBeNull();
+    // Every request without an auth run is read: the reading fills the
+    // generations it left out and checks the ones it supplied.
+    expect(interactionRequestNeedingCurrentTarget(named)).toBe(named);
     expect(
       interactionRequestNeedingCurrentTarget({ operation: "wait", interventionId: randomUUID() }),
     ).toBeNull();
     const { expectedDocumentGeneration: _document, ...partial } = named;
     expect(interactionRequestNeedingCurrentTarget(partial)).toBe(partial);
+    expect(interactionRequestNeedingCurrentTarget({ ...named, authRunId: randomUUID() })).toBe(
+      null,
+    );
     expect(interactionRequestNeedingCurrentTarget({ ...partial, authRunId: randomUUID() })).toBe(
       null,
     );

@@ -896,9 +896,8 @@ import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
   type InteractionRequestCurrentTarget,
+  InteractionRequestRefusedError,
   InteractionResourceStateError,
-  interactionRequestRefusalText,
-  isInteractionResourceRefusal,
   persistAttemptInteractionInterventionInTransaction,
   resolveInteractionInterventionInTransaction,
   settleSessionMaintenanceInTransaction,
@@ -42569,6 +42568,32 @@ export async function listTurnOpenSuffixToolCalls(
 }
 
 /**
+ * The interaction_request_human calls of a turn that hold an intervention: a
+ * request recorded at a pause, or a wait attached to one. Any status counts;
+ * a call not listed was refused (or never reached a pause).
+ */
+export async function listRecordedInteractionToolCallIds(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; toolCallIds: string[] },
+): Promise<Set<string>> {
+  if (input.toolCallIds.length === 0) return new Set();
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ toolCallId: schema.interactionInterventions.originatingToolCallId })
+      .from(schema.interactionInterventions)
+      .where(
+        and(
+          eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+          eq(schema.interactionInterventions.originatingSessionId, input.sessionId),
+          eq(schema.interactionInterventions.originatingTurnId, input.turnId),
+          inArray(schema.interactionInterventions.originatingToolCallId, input.toolCallIds),
+        ),
+      );
+    return new Set(rows.flatMap((row) => (row.toolCallId ? [row.toolCallId] : [])));
+  });
+}
+
+/**
  * Remove completed receipts only after the full SDK call/result batch is
  * durable. Until then every raw result remains available to an attempt-ending
  * transaction, including reverse-completing parallel calls.
@@ -83188,18 +83213,18 @@ export async function applySessionTurnSettlement(
               );
             });
           } catch (error) {
-            if (!isInteractionResourceRefusal(error)) throw error;
-            // The target changed or is gone. The agent learns it as this
-            // call's result: the same pause records a system rejection, so
-            // the turn resumes at once instead of failing. One decision
-            // resumes a pause; any other refused request re-freezes and is
-            // answered the same way.
+            if (!(error instanceof InteractionRequestRefusedError)) throw error;
+            // The agent learns why as this call's result: the pause records
+            // a system rejection, so the turn resumes at once instead of
+            // failing. One decision resumes a pause, so a second refused call
+            // stays pending; the worker's re-freeze after the first is
+            // answered passes it here again and it is refused the same way.
             interactionRefusalEvent ??= {
               type: "user.approvalDecision",
               payload: {
                 approvalId: request.toolCallId,
                 decision: "reject",
-                refusal: interactionRequestRefusalText(error.message),
+                refusal: error.refusal,
               },
               clientEventId: `system:interaction-request-refused:${request.id}:${turn.executionGeneration}`,
             };

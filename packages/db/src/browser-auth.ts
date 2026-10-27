@@ -3071,35 +3071,56 @@ export type InteractionRequestCurrentTarget = {
   documentGeneration: string | null;
 };
 
-/** True for the refusals a model-owned interaction request can act on. */
-export function isInteractionResourceRefusal(
-  error: unknown,
-): error is
-  | InteractionResourceNotFoundError
-  | InteractionResourceConflictError
-  | InteractionResourceStateError {
-  return (
-    error instanceof InteractionResourceNotFoundError ||
-    error instanceof InteractionResourceConflictError ||
-    error instanceof InteractionResourceStateError
+/**
+ * An interaction_request_human call the pause could not record. `refusal` is
+ * the call's tool result: what happened in plain words and what to do next.
+ * Nothing was written for the call.
+ */
+export class InteractionRequestRefusedError extends Error {
+  readonly name = "InteractionRequestRefusedError";
+  get refusal(): string {
+    return this.message;
+  }
+}
+
+const OBSERVE_AND_ASK_AGAIN =
+  "Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.";
+const ASK_WITHOUT_GENERATIONS =
+  "Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.";
+const ASK_WITHOUT_AUTH_RUN =
+  "Call interaction_request_human again without authRunId and the expected generation fields, or wait with operation=wait and the interventionId browser_auth returned.";
+const WAIT_ONLY_FOR_RETURNED =
+  "Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.";
+
+function plainReason(reason: string): string {
+  return reason.trim().replace(/[.\s]+$/u, "");
+}
+
+function refuseRequest(reason: string, next: string): InteractionRequestRefusedError {
+  return new InteractionRequestRefusedError(
+    `Nothing was requested: ${plainReason(reason)}. ${next}`,
   );
 }
 
-/**
- * The tool result an agent reads when its interaction_request_human call was
- * refused at the pause: nobody was asked, and what to do next.
- */
-export function interactionRequestRefusalText(reason: string): string {
-  const trimmed = reason.trim().replace(/[.\s]+$/u, "");
-  return `Nothing was requested: ${trimmed}. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.`;
+function refuseWait(reason: string, next: string): InteractionRequestRefusedError {
+  return new InteractionRequestRefusedError(`Not waiting: ${plainReason(reason)}. ${next}`);
+}
+
+function isOpenInterventionUniqueViolation(error: unknown): boolean {
+  const constraint = postgresConstraint(error);
+  return (
+    constraint === "interaction_interventions_open_target_kind_uq" ||
+    constraint === "interaction_interventions_open_auth_run_uq"
+  );
 }
 
 /**
  * Persist one interaction interruption inside the same transaction as its
  * frozen Agent RunState. This is deliberately transaction-local: callers must
  * already hold the session/turn/attempt settlement locks and RLS context.
- * A request that cannot be recorded throws one of the InteractionResource
- * errors before writing anything.
+ * A call that cannot be recorded throws InteractionRequestRefusedError, whose
+ * refusal becomes the call's result; callers run this in a savepoint so the
+ * refusal leaves nothing behind.
  */
 export async function persistAttemptInteractionInterventionInTransaction(
   db: Database,
@@ -3107,38 +3128,46 @@ export async function persistAttemptInteractionInterventionInTransaction(
 ): Promise<InteractionInterventionValue> {
   const input = RequestHumanInteractionToolInput.parse(raw.input);
   if (Buffer.byteLength(raw.toolCallId) < 1 || Buffer.byteLength(raw.toolCallId) > 1_024) {
-    throw new InteractionResourceStateError("Interaction tool call id is invalid");
+    throw new Error("Interaction tool call id is invalid");
   }
   if (input.operation === "wait") {
+    const interventionId = input.interventionId;
     const [current] = await db
       .select()
       .from(schema.interactionInterventions)
       .where(
         and(
           eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
-          eq(schema.interactionInterventions.id, input.interventionId),
+          eq(schema.interactionInterventions.id, interventionId),
         ),
       )
       .for("update")
       .limit(1);
-    if (!current) throw new InteractionResourceNotFoundError("Interaction intervention not found");
+    if (!current) {
+      throw refuseWait(`intervention ${interventionId} was not found`, WAIT_ONLY_FOR_RETURNED);
+    }
     if (current.status !== "open" || current.expiresAt.getTime() <= Date.now()) {
-      throw new InteractionResourceStateError("Interaction intervention is no longer open");
+      throw refuseWait(
+        `intervention ${interventionId} is no longer open; it was finished, dismissed or expired`,
+        "Observe the tab or window again, then call interaction_request_human with operation=request if a person still needs to act there.",
+      );
     }
     if (
       current.originatingSessionId !== raw.originatingSessionId ||
       current.originatingTurnId !== raw.originatingTurnId
     ) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention belongs to another agent operation",
+      throw refuseWait(
+        `intervention ${interventionId} was opened by another agent turn`,
+        WAIT_ONLY_FOR_RETURNED,
       );
     }
     if (
       current.originatingToolCallId !== null &&
       current.originatingToolCallId !== raw.toolCallId
     ) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention already has another waiting tool call",
+      throw refuseWait(
+        `another interaction_request_human call already waits for intervention ${interventionId}`,
+        "That call's result says how the person finished; do not wait for it twice.",
       );
     }
     const row =
@@ -3162,7 +3191,12 @@ export async function persistAttemptInteractionInterventionInTransaction(
               )
               .returning()
           )[0];
-    if (!row) throw new InteractionResourceConflictError("Intervention wait lost its fence");
+    if (!row) {
+      throw refuseWait(
+        `intervention ${interventionId} changed while this call started waiting`,
+        "Call interaction_request_human with operation=wait again.",
+      );
+    }
     return interventionFromRow(row);
   }
 
@@ -3206,14 +3240,40 @@ export async function persistAttemptInteractionInterventionInTransaction(
   let authRun: AuthRunRow | null = null;
   if (input.authRunId) {
     if (input.resourceKind !== "browser_session") {
-      throw new InteractionResourceStateError("Only browser interventions can belong to auth runs");
+      throw refuseRequest(
+        "authRunId applies only to browser tabs",
+        "Call interaction_request_human again without authRunId.",
+      );
     }
     authRun = await loadAuthRunRow(db, raw.workspaceId, input.authRunId);
-    if (!authRun) throw new InteractionResourceNotFoundError("Auth run not found");
+    if (!authRun) {
+      throw refuseRequest(`auth run ${input.authRunId} was not found`, ASK_WITHOUT_AUTH_RUN);
+    }
   }
+  const suppliedGenerations =
+    input.expectedControllerGeneration !== undefined ||
+    input.expectedTargetGeneration !== undefined ||
+    input.expectedDocumentGeneration !== undefined;
   // Generations the request left out come from its auth run, else from the
-  // target as the worker read it at this pause.
-  const current = typeof raw.currentTarget === "object" ? raw.currentTarget : null;
+  // target as the worker read it at this pause. Supplied ones must match that
+  // reading (an auth run is matched below). When the target could not be
+  // read, only a request that supplied all three is recorded, as given; its
+  // controller is still checked against the session below.
+  const current = authRun ? null : typeof raw.currentTarget === "object" ? raw.currentTarget : null;
+  if (
+    current &&
+    ((input.expectedControllerGeneration !== undefined &&
+      input.expectedControllerGeneration !== current.controllerGeneration) ||
+      (input.expectedTargetGeneration !== undefined &&
+        input.expectedTargetGeneration !== current.targetGeneration) ||
+      (input.expectedDocumentGeneration !== undefined &&
+        input.expectedDocumentGeneration !== current.documentGeneration))
+  ) {
+    throw refuseRequest(
+      "the expected generation values given do not match the tab or window as it is now",
+      ASK_WITHOUT_GENERATIONS,
+    );
+  }
   const source = authRun ?? current;
   const controllerGeneration =
     input.expectedControllerGeneration ?? source?.controllerGeneration ?? null;
@@ -3229,18 +3289,53 @@ export async function persistAttemptInteractionInterventionInTransaction(
     targetGeneration === null ||
     documentGeneration === undefined
   ) {
-    throw new InteractionResourceStateError(
+    throw refuseRequest(
       typeof raw.currentTarget === "string"
         ? raw.currentTarget
-        : "The target's current state could not be read",
+        : "the tab or window could not be read when the turn paused",
+      OBSERVE_AND_ASK_AGAIN,
     );
   }
-  await assertActiveInteractionResource(db, {
-    workspaceId: raw.workspaceId,
-    resourceKind: input.resourceKind,
-    resourceId: input.resourceId,
-    expectedControllerGeneration: controllerGeneration,
-  });
+  const sessionLabel = input.resourceKind === "browser_session" ? "browser" : "computer";
+  try {
+    await assertActiveInteractionResource(db, {
+      workspaceId: raw.workspaceId,
+      resourceKind: input.resourceKind,
+      resourceId: input.resourceId,
+      expectedControllerGeneration: controllerGeneration,
+    });
+  } catch (error) {
+    if (error instanceof InteractionResourceNotFoundError) {
+      throw refuseRequest(
+        `${sessionLabel} session ${input.resourceId} was not found`,
+        OBSERVE_AND_ASK_AGAIN,
+      );
+    }
+    if (error instanceof InteractionResourceStateError) {
+      throw refuseRequest(
+        `${sessionLabel} session ${input.resourceId} is not active`,
+        OBSERVE_AND_ASK_AGAIN,
+      );
+    }
+    if (error instanceof InteractionResourceConflictError) {
+      if (authRun) {
+        throw refuseRequest(
+          `the browser session restarted after auth run ${authRun.id} started`,
+          ASK_WITHOUT_AUTH_RUN,
+        );
+      }
+      throw input.expectedControllerGeneration !== undefined
+        ? refuseRequest(
+            "the expected generation values given do not match the tab or window as it is now",
+            ASK_WITHOUT_GENERATIONS,
+          )
+        : refuseRequest(
+            `the ${sessionLabel} session restarted while the request was being made`,
+            OBSERVE_AND_ASK_AGAIN,
+          );
+    }
+    throw error;
+  }
   if (
     authRun &&
     (authRun.browserSessionId !== input.resourceId ||
@@ -3250,8 +3345,11 @@ export async function persistAttemptInteractionInterventionInTransaction(
       authRun.documentGeneration !== documentGeneration ||
       authRun.settledAt)
   ) {
-    throw new InteractionResourceConflictError(
-      "Interaction intervention does not match the active auth run",
+    throw refuseRequest(
+      authRun.settledAt
+        ? `auth run ${authRun.id} has already finished`
+        : `auth run ${authRun.id} is for another tab or page${suppliedGenerations ? ", or the expected generation values given do not match it" : ""}`,
+      ASK_WITHOUT_AUTH_RUN,
     );
   }
   // One open request per target and kind (and per auth run); the resource
@@ -3277,35 +3375,50 @@ export async function persistAttemptInteractionInterventionInTransaction(
       ),
     )
     .limit(1);
+  const alreadyOpenNext =
+    "If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.";
   if (alreadyOpen) {
-    throw new InteractionResourceConflictError(
-      `Another open request (intervention ${alreadyOpen.id}) already asks a person to act on this target; if browser_auth returned it, wait for it with operation=wait`,
+    throw refuseRequest(
+      `another open request (intervention ${alreadyOpen.id}) already asks a person to act on this tab or window`,
+      alreadyOpenNext,
     );
   }
-  const [row] = await db
-    .insert(schema.interactionInterventions)
-    .values({
-      id: raw.id,
-      accountId: raw.accountId,
-      workspaceId: raw.workspaceId,
-      resourceKind: input.resourceKind,
-      resourceId: input.resourceId,
-      targetId: input.targetId,
-      controllerGeneration,
-      targetGeneration,
-      documentGeneration,
-      kind: input.kind,
-      reason: input.reason,
-      authRunId: input.authRunId ?? null,
-      originatingSessionId: raw.originatingSessionId,
-      originatingTurnId: raw.originatingTurnId,
-      originatingAttemptId: raw.originatingAttemptId,
-      originatingToolOperationId: raw.operationId,
-      originatingToolCallId: raw.toolCallId,
-      operationId: raw.operationId,
-      expiresAt: sql`now() + (${input.expiresInSeconds} * interval '1 second')`,
-    })
-    .returning();
+  let inserted: Array<typeof schema.interactionInterventions.$inferSelect>;
+  try {
+    inserted = await db
+      .insert(schema.interactionInterventions)
+      .values({
+        id: raw.id,
+        accountId: raw.accountId,
+        workspaceId: raw.workspaceId,
+        resourceKind: input.resourceKind,
+        resourceId: input.resourceId,
+        targetId: input.targetId,
+        controllerGeneration,
+        targetGeneration,
+        documentGeneration,
+        kind: input.kind,
+        reason: input.reason,
+        authRunId: input.authRunId ?? null,
+        originatingSessionId: raw.originatingSessionId,
+        originatingTurnId: raw.originatingTurnId,
+        originatingAttemptId: raw.originatingAttemptId,
+        originatingToolOperationId: raw.operationId,
+        originatingToolCallId: raw.toolCallId,
+        operationId: raw.operationId,
+        expiresAt: sql`now() + (${input.expiresInSeconds} * interval '1 second')`,
+      })
+      .returning();
+  } catch (error) {
+    // A request opened concurrently by a writer that does not take the
+    // resource lock (or committed after this snapshot) is the same refusal.
+    if (!isOpenInterventionUniqueViolation(error)) throw error;
+    throw refuseRequest(
+      "another open request already asks a person to act on this tab or window",
+      alreadyOpenNext,
+    );
+  }
+  const [row] = inserted;
   if (!row) throw new Error("Interaction interruption insert returned no row");
   if (authRun) {
     const linked = await db
@@ -3325,7 +3438,10 @@ export async function persistAttemptInteractionInterventionInTransaction(
       )
       .returning({ id: schema.authRuns.id });
     if (linked.length !== 1) {
-      throw new InteractionResourceConflictError("Auth run changed before intervention link");
+      throw refuseRequest(
+        `auth run ${authRun.id} changed while the request was being made`,
+        ASK_WITHOUT_AUTH_RUN,
+      );
     }
   }
   await advanceWorkspaceInteractionRevision(db, raw.accountId, raw.workspaceId);

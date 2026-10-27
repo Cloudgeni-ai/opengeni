@@ -3777,18 +3777,15 @@ export type InteractionRequestTargetReader = (
 ) => Promise<InteractionRequestTargetReading>;
 
 /**
- * The request a pause must read its target for: one that leaves a generation
- * out and names no auth run (an auth run supplies its own).
+ * The request a pause must read its target for: every request that names no
+ * auth run (an auth run supplies its own generations). The reading fills the
+ * generations a request left out and checks the ones it supplied.
  */
 export function interactionRequestNeedingCurrentTarget(
   input: RequestHumanInteractionToolInput,
 ): Extract<RequestHumanInteractionToolInput, { operation: "request" }> | null {
   if (input.operation !== "request" || input.authRunId) return null;
-  return input.expectedControllerGeneration === undefined ||
-    input.expectedTargetGeneration === undefined ||
-    input.expectedDocumentGeneration === undefined
-    ? input
-    : null;
+  return input;
 }
 
 const INTERACTION_REQUEST_TARGET_READ_TIMEOUT_MS = 15_000;
