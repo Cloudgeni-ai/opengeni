@@ -17,6 +17,7 @@ import {
 import {
   ACTIVE_RUN_SCAN_DEADLINE_MS,
   approvalOnlyRun,
+  bindingKey,
   config,
   digest,
   emptyLedger,
@@ -593,6 +594,89 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(result.action.kind).toBe("build");
     expect(result.manifest).not.toBeNull();
     expect((await f.git.remoteRefs(f.origin.dir)).get(foreign)).toBe(f.base);
+  });
+  const withConflictingMembers = async () => {
+    const f = await fixture();
+    const conflicting: Pull[] = [];
+    for (const [number, text] of [
+      [2, "second"],
+      [3, "third"],
+    ] as const) {
+      const sha = await f.commit({ base: "base", feature: text }, [f.base]);
+      await f.git.fetch(f.origin.dir, [sha]);
+      const pull = {
+        ...f.makePull(sha),
+        number,
+        headRef: `conflict-${number}`,
+      };
+      pull.binding.at = new Date(Date.parse(NOW) + number * 1000).toISOString();
+      conflicting.push(pull);
+    }
+    f.api.pulls = [conflicting[0]!, f.makePull(), conflicting[1]!];
+    return { ...f, conflicting };
+  };
+  test("every conflicting member is ejected and announced in the same publishing step", async () => {
+    const f = await withConflictingMembers();
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("build");
+    expect(result.reason).toBe("Merge conflict in PR #2, PR #3");
+    expect(result.manifest?.pulls.map((p) => p.number)).toEqual([1]);
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    expect(refs.get(`refs/heads/${f.cfg.branchPrefix}${result.manifest!.batchId}`)).toBe(
+      result.manifest!.tipSha,
+    );
+    // One fenced state transition carries the publication and both ejections.
+    const state = await f.state();
+    expect(await f.git.exec(["rev-parse", `${state.sha}^`])).toBe(f.initializedSha);
+    expect(state.ledger.ejected.map((e) => [e.pull.number, e.pull.headSha])).toEqual(
+      f.conflicting.map((p) => [p.number, p.headSha]),
+    );
+    const comments = Object.values(state.ledger.effects).filter((e) => e.kind === "comment");
+    for (const ejection of state.ledger.ejected) {
+      expect(ejection.effectId).toBeDefined();
+      const effect = state.ledger.effects[ejection.effectId!];
+      expect(effect?.kind === "comment" && effect.body).toContain(
+        `<!-- batcher-ejection:${bindingKey(ejection.pull)} -->`,
+      );
+    }
+    expect(comments).toHaveLength(3);
+    // Ejected exact heads stay out; the planner needs no announce step.
+    const next = await f.controller().step();
+    expect(next.action.kind).not.toBe("build");
+    expect(next.action.kind).not.toBe("announce");
+    for (let i = 0; i < 6; i++) await f.executor().maintain();
+    const posted = f.api.comments.filter((body) => body.includes("batcher-ejection:"));
+    expect(posted).toHaveLength(2);
+    for (const pull of f.conflicting)
+      expect(posted.filter((body) => body.includes(pull.headSha))).toHaveLength(1);
+  });
+  test("a speculative local build persists every ejection without publishing", async () => {
+    const f = await withConflictingMembers();
+    f.api.busy = true;
+    const result = await f.controller().step();
+    expect(result.action).toMatchObject({ kind: "build", publish: false });
+    expect(result.manifest?.pulls.map((p) => p.number)).toEqual([1]);
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    expect([...refs.keys()].some((ref) => ref.includes(f.cfg.branchPrefix))).toBe(false);
+    const state = await f.state();
+    expect(state.ledger.ejected.map((e) => e.pull.number)).toEqual([2, 3]);
+    expect(state.ledger.ejected.every((e) => e.effectId)).toBe(true);
+    expect(Object.values(state.ledger.effects)).toHaveLength(2);
+  });
+  test("when every member conflicts, all are ejected and announced without a candidate", async () => {
+    const f = await withConflictingMembers();
+    const advanced = await f.commit({ base: "base", feature: "main" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/main", advanced]);
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("build");
+    expect(result.manifest).toBeNull();
+    expect(result.reason).toBe("Merge conflict in PR #1, PR #2, PR #3");
+    const state = await f.state();
+    expect(await f.git.exec(["rev-parse", `${state.sha}^`])).toBe(f.initializedSha);
+    expect(state.ledger.ejected.map((e) => e.pull.number)).toEqual([1, 2, 3]);
+    expect(state.ledger.ejected.every((e) => e.effectId)).toBe(true);
+    expect(Object.values(state.ledger.effects)).toHaveLength(3);
+    expect((await f.controller().step()).action.kind).toBe("wait");
   });
   test("publication passes invisible predecessor reservation to the final provider slot check", async () => {
     const f = await fixture();
