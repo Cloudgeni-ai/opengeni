@@ -9,7 +9,6 @@ import {
   createConnection,
   createDb,
   createOrganizationApiKey,
-  createRecording,
   createWorkspace,
   encryptEnvironmentValue,
   ensureExternalIdentity,
@@ -519,129 +518,26 @@ describe("recording routes", () => {
     expect(JSON.stringify(issued)).not.toContain("workspaces/");
   });
 
-  test("a person's own Only me meetings are theirs in every workspace of the organization, and nobody else's", async () => {
+  test("an app's own user's Only me meetings stay in the workspace that stores them", async () => {
+    // A product may give each of its tenants a workspace of one organization;
+    // its users' meetings never move between them.
     const scope = await fixture();
     const sales = await scope.otherWorkspace("Sales");
     await scope.owner.join(sales.id);
-    await scope.other.join(sales.id);
-    const track = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }];
-    const create = async (
-      person: typeof scope.owner,
-      workspaceId: string,
-      title: string,
-      startedAt: string,
-    ) => {
-      const recordingId = crypto.randomUUID();
-      const created = await person.callIn(workspaceId, "POST", "/recordings", {
-        recordingId,
-        title,
-        startedAt,
-        tracks: track,
-      });
-      expect(created.status).toBe(201);
-      return recordingId;
-    };
-    const older = await create(scope.owner, sales.id, "Pipeline review", "2026-10-26T08:00:00Z");
-    const newer = await create(scope.owner, sales.id, "Forecast", "2026-10-27T08:00:00Z");
-    const allHands = await create(scope.owner, sales.id, "All hands", "2026-10-27T09:00:00Z");
-    expect(
-      (
-        await scope.owner.callIn(sales.id, "PATCH", `/recordings/${allHands}`, {
-          visibility: "workspace",
-        })
-      ).status,
-    ).toBe(200);
-    const theirs = await create(scope.other, sales.id, "Someone else's", "2026-10-27T10:00:00Z");
-    const here = await create(scope.owner, scope.workspaceId, "Here", "2026-10-27T11:00:00Z");
-    // Another organization's workspace the same person belongs to.
-    const [elsewhereAccount] =
-      await shared.admin`insert into managed_accounts (name) values ('Another organization') returning id`;
-    const otherOrganization = await createWorkspace(db.db, {
-      accountId: String(elsewhereAccount!.id),
-      name: "Other organization",
-    });
-    await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
-      values (${String(elsewhereAccount!.id)}, ${otherOrganization.id}, ${scope.owner.subjectId}, '["sessions:read"]'::jsonb)`;
-    const foreign = crypto.randomUUID();
-    await createRecording(db.db, {
-      recordingId: foreign,
-      accountId: String(elsewhereAccount!.id),
-      workspaceId: otherOrganization.id,
-      subjectId: scope.owner.subjectId,
-      title: "Other organization's meeting",
-      startedAt: new Date("2026-10-27T12:00:00Z"),
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.callIn(sales.id, "POST", "/recordings", {
+      recordingId,
+      title: "Pipeline review",
       tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
     });
-
-    // The Team workspace lists the owner's own Only me Sales meetings in its
-    // normal list, each saying where it is stored; never the shared one, the
-    // other person's, or another organization's.
+    expect(created.status).toBe(201);
     const listed = await scope.owner.call("GET", "/recordings");
     expect(listed.status).toBe(200);
-    const rows = listed.body.recordings.map(
-      (row: { id: string; sourceWorkspace?: { id: string; name: string } | null }) => [
-        row.id,
-        row.sourceWorkspace?.name ?? null,
-      ],
-    );
-    expect(rows).toEqual([
-      [here, null],
-      [newer, "Sales"],
-      [older, "Sales"],
-    ]);
-    expect(JSON.stringify(listed.body)).not.toContain("Other organization");
-    // Pages continue across workspaces.
-    const first = await scope.owner.call("GET", "/recordings?limit=2");
-    expect(first.body.recordings.map((row: { id: string }) => row.id)).toEqual([here, newer]);
-    const cursor = first.body.nextBefore;
-    const second = await scope.owner.call(
-      "GET",
-      `/recordings?limit=2&beforeStartedAt=${encodeURIComponent(cursor.startedAt)}&beforeId=${cursor.id}`,
-    );
-    expect(second.body.recordings.map((row: { id: string }) => row.id)).toEqual([older]);
-
-    // It opens in place here, with its transcript, notes and title, as the owner.
-    const opened = await scope.owner.call("GET", `/recordings/${newer}`);
-    expect(opened).toMatchObject({
-      status: 200,
-      body: { id: newer, workspaceId: sales.id, sourceWorkspace: { id: sales.id, name: "Sales" } },
-    });
-    expect((await scope.owner.call("GET", `/recordings/${newer}/notes`)).status).toBe(200);
+    expect(JSON.stringify(listed.body)).not.toContain("Pipeline review");
+    expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
     expect(
-      (await scope.owner.call("PUT", `/recordings/${newer}/notes/notes`, { body: "Follow up" }))
-        .status,
-    ).toBe(200);
-    expect(
-      (await scope.owner.callIn(sales.id, "GET", `/recordings/${newer}/notes`)).body.notes[0],
-    ).toMatchObject({ body: "Follow up" });
-    expect(
-      await scope.owner.call("PATCH", `/recordings/${newer}`, { title: "Forecast, Q4" }),
-    ).toMatchObject({
-      status: 200,
-      body: { title: "Forecast, Q4", sourceWorkspace: { name: "Sales" } },
-    });
-    // Sharing it shares it with Sales, so that happens there.
-    expect(
-      await scope.owner.call("PATCH", `/recordings/${newer}`, { visibility: "workspace" }),
-    ).toMatchObject({ status: 409 });
-
-    // Shared, someone else's and another organization's meetings stay where they are.
-    for (const id of [allHands, theirs, foreign]) {
-      expect((await scope.owner.call("GET", `/recordings/${id}`)).status).toBe(404);
-      expect((await scope.owner.call("GET", `/recordings/${id}/notes`)).status).toBe(404);
-    }
-    // The other member belongs to both workspaces and sees only their own.
-    const others = await scope.other.call("GET", "/recordings");
-    expect(others.body.recordings.map((row: { id: string }) => row.id)).toEqual([theirs]);
-    expect((await scope.other.call("GET", `/recordings/${newer}`)).status).toBe(404);
-    expect((await scope.other.callIn(sales.id, "GET", `/recordings/${newer}`)).status).toBe(404);
-
-    // Leaving Sales takes its meetings with it.
-    await shared.admin`delete from workspace_memberships
-      where workspace_id = ${sales.id} and subject_id = ${scope.owner.subjectId}`;
-    const afterLeaving = await scope.owner.call("GET", "/recordings");
-    expect(afterLeaving.body.recordings.map((row: { id: string }) => row.id)).toEqual([here]);
-    expect((await scope.owner.call("GET", `/recordings/${newer}`)).status).toBe(404);
+      (await scope.owner.callIn(sales.id, "GET", `/recordings/${recordingId}`)).body,
+    ).toMatchObject({ id: recordingId, workspaceId: sales.id });
   });
 
   test("a workspace default shares new recordings; only the owner deletes", async () => {

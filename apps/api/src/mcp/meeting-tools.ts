@@ -13,7 +13,7 @@ import {
   type RecordingSpeaker,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
+import { hasPermission, siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   getManagedUserProfilesByIds,
   getRecording,
@@ -24,10 +24,12 @@ import {
   listRecordingsWithOwnElsewhere,
   listRecordingTranscriptVersions,
   ownRecordingHome,
+  ownRecordingWorkspaces,
   recordingVisible,
   RecordingConflictError,
   RecordingNotFoundError,
   saveRecordingNote,
+  type OwnRecordingWorkspace,
   type RecordingActor,
 } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -180,20 +182,38 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   }
 
   /**
+   * The person's other workspaces of this organization where they may do
+   * this now: their own live permissions there (their membership, or their
+   * Personal workspace), never only this session's.
+   */
+  async function ownElsewhere(
+    who: RecordingActor,
+    permission: "sessions:read" | "sessions:create",
+  ): Promise<OwnRecordingWorkspace[]> {
+    const workspaces = await ownRecordingWorkspaces(deps.db, {
+      ...who,
+      accountId: grant.accountId,
+    });
+    return workspaces.filter((workspace) => hasPermission(workspace.permissions, permission));
+  }
+
+  /**
    * The person, in the workspace storing the meeting: this one, or for their
-   * own Only me meeting, another workspace of this organization they belong to.
+   * own Only me meeting, another workspace of this organization where they
+   * hold the permission themselves.
    */
   async function actorForMeeting(
     meetingId: string,
+    permission: "sessions:read" | "sessions:create",
   ): Promise<{ who: RecordingActor; recordedIn: string | null }> {
     const who = await actor();
     if (await recordingVisible(deps.db, { ...who, recordingId: meetingId })) {
       return { who, recordedIn: null };
     }
     const home = await ownRecordingHome(deps.db, {
-      ...who,
-      accountId: grant.accountId,
+      subjectId: who.subjectId,
       recordingId: meetingId,
+      workspaces: await ownElsewhere(who, permission),
     });
     return home
       ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
@@ -241,7 +261,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       const who = await actor();
       const page = await listRecordingsWithOwnElsewhere(deps.db, {
         ...who,
-        accountId: grant.accountId,
+        elsewhere: await ownElsewhere(who, "sessions:read"),
         query: request.query?.trim() || undefined,
         person: request.person?.trim() || undefined,
         startedFrom: request.startedFrom ? new Date(request.startedFrom) : undefined,
@@ -347,7 +367,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (from === null || to === null) {
         return failure(json, "invalid_time", 'Give from and to as "m:ss" or "h:mm:ss".');
       }
-      const { who, recordedIn } = await actorForMeeting(request.meetingId);
+      const { who, recordedIn } = await actorForMeeting(request.meetingId, "sessions:read");
       let recording: Recording;
       try {
         recording = await getRecording(deps.db, { ...who, recordingId: request.meetingId });
@@ -478,7 +498,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
-      const { who } = await actorForMeeting(request.meetingId);
+      const { who } = await actorForMeeting(request.meetingId, "sessions:create");
       try {
         const saved = await saveRecordingNote(deps.db, {
           ...who,

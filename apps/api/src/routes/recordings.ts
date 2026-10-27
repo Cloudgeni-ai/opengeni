@@ -53,6 +53,7 @@ import {
   listRecordingPeople,
   listRecordingsWithOwnElsewhere,
   ownRecordingHome,
+  ownRecordingWorkspaces,
   recordingVisible,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
@@ -154,7 +155,9 @@ export function registerRecordingRoutes(
    * Who is asking, in which workspace. On a meeting's own routes that is the
    * workspace storing it: the person's own Only me meeting from another
    * workspace of the same organization opens in place in every workspace of it
-   * they belong to, so it is read and changed where it is stored, as them.
+   * they belong to, so it is read and changed where it is stored, as them, and
+   * only with the access this request has there (the same permission, for the
+   * same person). Without it the meeting is not found.
    */
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
@@ -165,19 +168,67 @@ export function registerRecordingRoutes(
       accountId: grant.accountId,
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
-      /** The workspace the request came through, when the meeting is stored in another. */
+      /** The workspace that stores the meeting, when it is another than this one. */
       sourceWorkspace: null as { id: string; name: string } | null,
     };
     const recordingId = c.req.param("recordingId");
     if (
-      recordingId &&
-      z.string().uuid().safeParse(recordingId).success &&
-      !(await recordingVisible(db, { ...actor, recordingId }))
+      !recordingId ||
+      !z.string().uuid().safeParse(recordingId).success ||
+      (await recordingVisible(db, { ...actor, recordingId }))
     ) {
-      const home = await ownRecordingHome(db, { ...actor, recordingId });
-      if (home) return { ...actor, workspaceId: home.id, sourceWorkspace: home };
+      return actor;
     }
-    return actor;
+    const home = await ownRecordingHome(db, {
+      subjectId: actor.subjectId,
+      recordingId,
+      workspaces: await ownRecordingWorkspaces(db, actor),
+    });
+    const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
+    if (!home || !there) return actor;
+    return {
+      ...actor,
+      workspaceId: home.id,
+      accountId: there.accountId,
+      creditAttribution: creditDebitAttributionForGrant(there),
+      sourceWorkspace: { id: home.id, name: home.name },
+    };
+  }
+
+  /**
+   * This request's grant in another workspace of the organization, for the
+   * same person, with the permission; null without one (a key or delegation
+   * scoped to this workspace, a narrower role there, or no access).
+   */
+  async function sameGrantIn(
+    c: Context,
+    workspaceId: string,
+    permission: "sessions:read" | "sessions:create",
+    actor: { subjectId: string; accountId: string },
+  ) {
+    const grant = await requireAccessGrant(c, deps, workspaceId, permission).catch(() => null);
+    return grant && grant.subjectId === actor.subjectId && grant.accountId === actor.accountId
+      ? grant
+      : null;
+  }
+
+  /** The person's other workspaces of the organization this request may list meetings in. */
+  async function ownListableElsewhere(
+    c: Context,
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+  ): Promise<{ id: string; name: string }[]> {
+    const candidates = await ownRecordingWorkspaces(db, actor);
+    const allowed: { id: string; name: string }[] = [];
+    for (let start = 0; start < candidates.length; start += 8) {
+      const batch = candidates.slice(start, start + 8);
+      const grants = await Promise.all(
+        batch.map((workspace) => sameGrantIn(c, workspace.id, "sessions:read", actor)),
+      );
+      batch.forEach((workspace, index) => {
+        if (grants[index]) allowed.push({ id: workspace.id, name: workspace.name });
+      });
+    }
+    return allowed;
   }
 
   /** A meeting as the workspace the request came through shows it. */
@@ -544,7 +595,10 @@ export function registerRecordingRoutes(
     // With the person's own Only me meetings from their other workspaces of
     // this organization, each saying where it is stored.
     const page = await listRecordingsWithOwnElsewhere(db, {
-      accountId: actor.accountId,
+      elsewhere:
+        (purpose.data ?? "meeting") === "meeting" && !externalRef
+          ? await ownListableElsewhere(c, actor)
+          : [],
       workspaceId: actor.workspaceId,
       subjectId: actor.subjectId,
       query: query || undefined,

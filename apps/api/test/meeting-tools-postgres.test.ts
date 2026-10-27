@@ -164,7 +164,7 @@ async function fixture() {
   /** A workspace the owner (and anyone named) belongs to, in this organization or another. */
   async function workspace(
     name: string,
-    options: { accountId?: string; members?: string[] } = {},
+    options: { accountId?: string; members?: string[]; permissions?: string[] } = {},
   ): Promise<{ accountId: string; workspaceId: string }> {
     const account =
       options.accountId ??
@@ -173,10 +173,11 @@ async function fixture() {
           .id,
       );
     const created = await createWorkspace(db, { accountId: account, name });
+    const permissions = JSON.stringify(options.permissions ?? ["sessions:read", "sessions:create"]);
     for (const subjectId of [owner, ...(options.members ?? [])]) {
       await shared!
         .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
-        values (${account}, ${created.id}, ${subjectId}, '["sessions:read"]'::jsonb)`;
+        values (${account}, ${created.id}, ${subjectId}, ${permissions}::jsonb)`;
     }
     return { accountId: account, workspaceId: created.id };
   }
@@ -501,9 +502,27 @@ describe("meeting tools", () => {
     expect(await tools("meeting_read", { meetingId: foreign })).toMatchObject({ found: false });
     expect(JSON.stringify(await tools("meetings_search", {}))).not.toContain("board");
 
+    // Only allowed to read in Finance: the agent can read it there, never write.
+    const finance = await scope.workspace("Finance", {
+      accountId: scope.accountId,
+      permissions: ["sessions:read"],
+    });
+    const budget = await scope.meeting({
+      title: "Budget review",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Budget holds." }],
+      in: finance,
+    });
+    expect((await tools("meeting_read", { meetingId: budget })).lines).toContain("Budget holds.");
+    expect(
+      await tools("meeting_notes_save", { meetingId: budget, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
+
     // Leaving Sales takes its meetings with it.
     await scope.leave(sales.workspaceId);
     expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
-    expect((await tools("meetings_search", {})).meetings).toEqual([]);
+    expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      budget,
+    ]);
   });
 });

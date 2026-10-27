@@ -906,7 +906,9 @@ export function createRecordingActivities(
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
         // Out of time: whatever the abort broke, the reason is the budget.
-        if (budget.signal.aborted) return await fail("timed_out", error);
+        // Once it is being charged and saved it is never failed for time: a
+        // retry saves it, and the charge is settled once by its source id.
+        if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
         if (error instanceof PermanentRecordingFailure) return await fail(error.code, error);
         if (error instanceof RecordingAudioError) {
           if (error.code === "missing_chunk") {

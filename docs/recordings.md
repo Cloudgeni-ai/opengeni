@@ -19,19 +19,25 @@ switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
 A recording is stored in the workspace it was recorded in, and a shared one
-stays there. A person's own Only me meetings are theirs across their
-organization: every workspace of the same organization they belong to lists
-them in `GET …/recordings` (and agents acting for them find them with
+stays there. A signed-in person's (`user:`) own Only me meetings are theirs
+across their organization: every workspace of the same organization they
+belong to, their Personal workspace included, lists them in
+`GET …/recordings` (and agents acting for them find them with
 `meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
 storing workspace; `recordedIn` for agents). They open in place: every
 `…/recordings/:recordingId` route reads and changes them in the storing
 workspace, as the person, so transcript, notes, speakers and re-runs work from
 any of those workspaces, and the React Meetings pages label them with where
-they were recorded. Sharing one (`visibility: "workspace"`) is done in the
-storing workspace and returns 409 elsewhere. Nobody else's Only me meetings
-and no shared ones cross workspaces, nothing crosses organizations, and a
-person who leaves the storing workspace or the organization no longer sees
-them elsewhere.
+they were recorded. The request must hold the same access in the storing
+workspace that the route needs (the person's role there, and an API key's or
+delegated token's workspace scope); without it the meeting is not found.
+Re-runs are billed and checked against the allowance of the storing workspace.
+Sharing one (`visibility: "workspace"`) is done in the storing workspace and
+returns 409 elsewhere. An app's own users (external users) keep their meetings
+in the workspace that stores them, and `externalRef` lists only this
+workspace. Nobody else's Only me meetings and no shared ones cross
+workspaces, nothing crosses organizations, and a person who leaves the
+storing workspace or the organization no longer sees them elsewhere.
 
 ## Language
 
