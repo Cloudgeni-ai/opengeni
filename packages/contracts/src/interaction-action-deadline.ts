@@ -88,6 +88,7 @@ export function browserActionMaxWaitMs(action: BrowserAction): number {
         return locators(action.locator);
       case "activate":
       case "viewport":
+      case "viewport_reset":
       case "pointer":
       case "handle_dialog":
       case "permission":

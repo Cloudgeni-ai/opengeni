@@ -145,3 +145,43 @@ test("an extension that predates focus emulation still drives its tabs", async (
     await driver.close();
   }
 });
+
+test("the person's own Chrome refuses viewport emulation and its reset plainly, sending neither", async () => {
+  const bridge = new BackgroundTabBridge(true);
+  const { driver, observation } = await start(bridge);
+  try {
+    for (const action of [
+      { type: "viewport", width: 768, height: 1024, mobile: false },
+      { type: "viewport_reset" },
+    ] as const) {
+      await expect(
+        driver.dispatch({
+          protocolVersion: 1,
+          actor: { kind: "agent", subjectId: "agent:test" },
+          operationId: randomUUID(),
+          browserSessionId: observation.browserSessionId,
+          controllerGeneration: observation.target.controllerGeneration,
+          targetId: observation.target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedDocumentGeneration: observation.target.documentGeneration!,
+          expectedFrameId: observation.frameId,
+          observationMode: "none",
+          action,
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        message: "this browser engine does not support viewport emulation",
+      });
+    }
+    expect(
+      bridge.commands.filter(
+        (command) =>
+          command.type === "debugger.command" &&
+          String(command.method).startsWith("Emulation.") &&
+          command.method !== FOCUS_EMULATION,
+      ),
+    ).toEqual([]);
+  } finally {
+    await driver.close();
+  }
+});
