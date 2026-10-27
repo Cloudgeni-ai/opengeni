@@ -1438,13 +1438,21 @@ export type FinalizeRecordingInput = RecordingActor & {
   tracks: ReadonlyArray<{ trackNumber: number; chunkCount: number }>;
   transcription: RecordingTranscriptionChoice;
   versionId: string;
+  /**
+   * The transcript can't start, for example because the payer has no credits
+   * for the model: capture still ends, and version 1 is stored already
+   * failed with this code, so the meeting reads as failed with a reason
+   * instead of waiting for a finalize that is refused every time.
+   */
+  transcriptRefusedCode?: string | undefined;
 };
 
 /**
  * End capture. Every track's chunks 0..chunkCount-1 must be uploaded and no
  * other chunk may exist. Queues transcript version 1 and records
- * `recording.finished`. Finalizing again with the same counts returns the
- * existing state.
+ * `recording.finished` (and `recording.transcript.failed` when the transcript
+ * was refused). Finalizing again with the same counts returns the existing
+ * state.
  */
 export async function finalizeRecording(
   db: Database,
@@ -1558,10 +1566,11 @@ export async function finalizeRecording(
       throw new RecordingConflictError("This recording has no audio", "empty_recording");
     }
     const endedAt = input.endedAt ?? new Date();
+    const refusedCode = input.transcriptRefusedCode?.slice(0, 128) ?? null;
     const [finalized] = await tx
       .update(schema.recordings)
       .set({
-        state: "processing",
+        state: refusedCode ? "failed" : "processing",
         captureEndedAt: endedAt < recording.startedAt ? recording.startedAt : endedAt,
         durationMilliseconds: recordingDuration,
         updatedAt: sql`clock_timestamp()`,
@@ -1586,12 +1595,24 @@ export async function finalizeRecording(
         options: input.transcription.options,
         requestedBySubjectId: input.subjectId,
         creditAttribution: input.transcription.creditAttribution ?? null,
+        ...(refusedCode
+          ? { state: "failed" as const, errorCode: refusedCode, completedAt: sql`clock_timestamp()` }
+          : {}),
       })
       .returning();
     await insertEvent(tx, finalized!, "recording.finished", {
       durationMilliseconds: recordingDuration,
       versionId: version!.id,
     });
+    if (refusedCode) {
+      await insertEvent(tx, finalized!, "recording.transcript.failed", {
+        versionId: version!.id,
+        versionNumber: version!.versionNumber,
+        providerId: version!.providerId,
+        model: version!.model,
+        errorCode: refusedCode,
+      });
+    }
     const [view] = await loadViews(tx, input.workspaceId, [finalized!]);
     return { recording: view!, version: recordingTranscriptVersionView(version!), finalized: true };
   });

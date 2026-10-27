@@ -33,7 +33,10 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { testSettings } from "@opengeni/testing/settings";
 import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
-import { createRecordingActivities } from "../src/activities/recordings";
+import {
+  createRecordingActivities,
+  recordingTranscriptBudgetMilliseconds,
+} from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
@@ -194,6 +197,7 @@ function activities(
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
   aligner: RecordingWordAligner | null = null,
+  now?: () => number,
 ) {
   const warnings: string[] = [];
   const services = async () =>
@@ -213,11 +217,85 @@ function activities(
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
       aligner: () => aligner,
+      ...(now ? { now } : {}),
     }),
   };
 }
 
+test("a transcript's time budget grows with the audio, up to twelve hours", () => {
+  const minutes = (value: number) => value * 60_000;
+  expect(recordingTranscriptBudgetMilliseconds(0)).toBe(minutes(30));
+  // The 51-minute meeting that sat in Transcribing for hours.
+  expect(recordingTranscriptBudgetMilliseconds(minutes(51))).toBe(minutes(30 + 153));
+  expect(recordingTranscriptBudgetMilliseconds(minutes(600))).toBe(minutes(720));
+  expect(recordingTranscriptBudgetMilliseconds(-5)).toBe(minutes(30));
+});
+
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
+  test("past its time budget a transcript fails as timed_out, with no audio sent", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let called = false;
+    const provider = fakeProvider(async () => {
+      called = true;
+      throw new Error("never asked");
+    });
+    // A retry that starts a day after the meeting was asked to be transcribed.
+    const later = () => Date.now() + 24 * 60 * 60_000;
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        later,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(called).toBe(false);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  });
+
+  test("a provider still working when the budget runs out fails the version as timed_out", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let aborted = false;
+    // It never answers and ignores the abort, like a stuck alignment step.
+    const provider = fakeProvider(async (request) => {
+      request.signal?.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return await new Promise<never>(() => undefined);
+    });
+    // A few seconds of the budget are left: enough to prepare the audio.
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const nearlyOut = () => Date.now() + budget - 8_000;
+    const started = Date.now();
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        nearlyOut,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(aborted).toBe(true);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
+
   test("prepares each track, keeps the microphone as one speaker and diarizes the rest", async () => {
     if (!client) return;
     const storage = memoryStorage();

@@ -79,6 +79,7 @@ import {
   createSpeechToTextDeployment,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextServesMeetings,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
@@ -113,6 +114,12 @@ function storedTranscription(
 ): RecordingTranscriptionOptions {
   const { language, ...rest } = requested;
   return { ...rest, ...(language ? { language } : {}) };
+}
+
+/** The billing code a credit refusal carries (insufficient_credits, allowance_exhausted, ...). */
+function refusalCode(refused: ApiHttpError): string {
+  const code = refused.details?.code;
+  return typeof code === "string" && code ? code : refused.code;
 }
 
 /**
@@ -216,7 +223,13 @@ export function registerRecordingRoutes(
   async function transcriptionChoice(
     actor: { workspaceId: string; accountId: string; subjectId: string },
     requested: RecordingTranscriptionRequest,
-  ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    /** Nobody chose the model: not the request, the workspace or a pinned deployment. */
+    automatic: boolean;
+  }> {
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     // A request that names its provider takes no default, not even its model.
@@ -251,6 +264,7 @@ export function registerRecordingRoutes(
       providerId,
       model: found.spec.model,
       options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+      automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
     };
   }
 
@@ -318,7 +332,11 @@ export function registerRecordingRoutes(
    * The transcription a recording's next version uses, with who it is
    * billed to. A model the deployment pays for is admitted against the
    * payer's credits first, where credit billing is on, so a payer without
-   * credits is refused before any audio is sent.
+   * credits is refused before any audio is sent. When nobody chose that
+   * model, a usable one the deployment doesn't pay for (a connected
+   * subscription or the workspace's own key) runs instead. Otherwise a
+   * meeting's refusal is returned, not thrown, so finalizing still ends
+   * capture and stores a failed transcript that says why.
    */
   async function versionChoice(
     actor: {
@@ -329,40 +347,67 @@ export function registerRecordingRoutes(
     },
     recording: Recording,
     requested: RecordingTranscriptionRequest,
-  ) {
-    const choice =
+  ): Promise<{
+    providerId: string;
+    model: string;
+    options: RecordingTranscriptionOptions;
+    creditAttribution: CreditDebitAttribution;
+    /** The credit refusal a meeting's transcript can't start without fixing. */
+    refused: ApiHttpError | null;
+  }> {
+    const { automatic, ...choice } =
       recording.purpose === "dictation"
-        ? await dictationChoice(actor, recording)
+        ? { ...(await dictationChoice(actor, recording)), automatic: false }
         : await transcriptionChoice(actor, requested);
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
-    if (
+    const refused =
       provider?.funding === "deployment" &&
       voiceInputCreditBillingActive(deps.settings) &&
       (recording.purpose === "dictation" || spec?.creditPricing)
-    ) {
-      await admitCredits(() =>
-        deps.transcription?.admit?.({
-          providerId: choice.providerId,
-          accountId: actor.accountId,
-          workspaceId: actor.workspaceId,
-          attribution: actor.creditAttribution,
-        }),
-      );
+        ? await creditRefusal(() =>
+            deps.transcription?.admit?.({
+              providerId: choice.providerId,
+              accountId: actor.accountId,
+              workspaceId: actor.workspaceId,
+              attribution: actor.creditAttribution,
+            }),
+          )
+        : null;
+    if (refused && automatic) {
+      const free = await meetingModelWithoutCreditsFor(deployment, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+      });
+      const found = free
+        ? findRecordingTranscriptionModel(registry, free.providerId, free.model)
+        : null;
+      if (free && found) {
+        return {
+          ...choice,
+          providerId: free.providerId,
+          model: found.spec.model,
+          creditAttribution: actor.creditAttribution,
+          refused: null,
+        };
+      }
     }
-    return {
-      ...choice,
-      creditAttribution: actor.creditAttribution,
-    };
+    // A dictation is the composer's: it shows the refusal where the person typed.
+    if (refused && recording.purpose === "dictation") throw refused;
+    return { ...choice, creditAttribution: actor.creditAttribution, refused };
   }
 
-  /** A credit refusal as the same 402 or 429 a session admission gives. */
-  async function admitCredits(admit: () => Promise<void> | undefined): Promise<void> {
+  /** A credit refusal as the same 402 or 429 a session admission gives; null when admitted. */
+  async function creditRefusal(
+    admit: () => Promise<void> | undefined,
+  ): Promise<ApiHttpError | null> {
     try {
       await admit();
+      return null;
     } catch (error) {
       if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
-      throw new ApiHttpError(error.status, {
+      return new ApiHttpError(error.status, {
         code:
           error.code === "allowance_exhausted"
             ? "allowance_exhausted"
@@ -716,7 +761,14 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await versionChoice(actor, current, current.transcription);
+    // Capture always ends here. A transcript the payer can't pay for is stored
+    // failed with the refusal's code, so the meeting says what to fix and can
+    // be transcribed again once it is fixed, instead of staying unfinished.
+    const { refused, ...transcription } = await versionChoice(
+      actor,
+      current,
+      current.transcription,
+    );
     const result = await guard(() =>
       finalizeRecording(db, {
         ...actor,
@@ -725,6 +777,7 @@ export function registerRecordingRoutes(
         tracks: body.tracks,
         transcription,
         versionId: crypto.randomUUID(),
+        transcriptRefusedCode: refused ? refusalCode(refused) : undefined,
       }),
     );
     // Finalizing again restarts a lost start; a running workflow is left alone.
@@ -752,11 +805,12 @@ export function registerRecordingRoutes(
     }
     // Dictations are paid for with credits, which their ledger debit counts.
     if (recording.purpose !== "dictation") await admitRecordingUsage(actor);
-    const transcription = await versionChoice(
+    const { refused, ...transcription } = await versionChoice(
       actor,
       recording,
       body.transcription ?? recording.transcription,
     );
+    if (refused) throw refused;
     const version = await guard(() =>
       createRecordingTranscriptVersion(db, {
         ...actor,

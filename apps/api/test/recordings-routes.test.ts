@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { SessionWorkflowClient, TranscriptionService } from "@opengeni/core";
+import {
+  TranscriptionBillingRefusedError,
+  type SessionWorkflowClient,
+  type TranscriptionService,
+} from "@opengeni/core";
 import {
   createConnection,
   createDb,
@@ -181,7 +185,134 @@ async function fixture(
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
+/** Uploads one chunk to a new one-microphone recording, ready to finalize. */
+async function capturedRecording(
+  scope: Awaited<ReturnType<typeof fixture>>,
+  transcription?: Record<string, unknown>,
+): Promise<string> {
+  const recordingId = crypto.randomUUID();
+  const created = await scope.owner.call("POST", "/recordings", {
+    recordingId,
+    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    ...(transcription ? { transcription } : {}),
+  });
+  expect(created.status).toBe(201);
+  const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+  const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+    trackNumber: 0,
+    chunks: [
+      {
+        chunkNumber: 0,
+        byteLength: bytes.byteLength,
+        sha256: sha(bytes),
+        startMilliseconds: 0,
+        durationMilliseconds: 1_000,
+      },
+    ],
+  });
+  scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+  const complete = await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+    trackNumber: 0,
+    chunkNumbers: [0],
+  });
+  expect(complete.body).toEqual({ uploaded: [0], missing: [] });
+  return recordingId;
+}
+
 describe("recording routes", () => {
+  test("a payer without credits still ends capture: a failed transcript says why, or a free model runs", async () => {
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("the worker transcribes meetings");
+      },
+      admit: async () => {
+        throw new TranscriptionBillingRefusedError({
+          code: "insufficient_credits",
+          message: "No credits.",
+        });
+      },
+    };
+    // Credits are charged for the deployment's text-only model, its default
+    // here even once the workspace has its own key for another provider.
+    const scope = await fixture({
+      transcription,
+      settings: {
+        recordingWordAlignment: true,
+        usageLimitsMode: "managed",
+        recordingTranscriptionDefault: "openai/gpt-transcribe",
+      },
+    });
+    const finalize = async (recordingId: string) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+
+    // Chosen for this recording, the refused model isn't swapped for another.
+    const chosen = await capturedRecording(scope, { providerId: "openai", model: "gpt-transcribe" });
+    const failed = await finalize(chosen);
+    expect(failed.status).toBe(200);
+    expect(failed.body.recording.state).toBe("failed");
+    expect(failed.body.transcript).toMatchObject({
+      providerId: "openai",
+      model: "gpt-transcribe",
+      state: "failed",
+      errorCode: "insufficient_credits",
+    });
+    expect(scope.started).toEqual([]);
+    const events = await shared.admin`
+      select type from recording_events where recording_id = ${chosen}`;
+    expect(events.map((row) => row.type)).toContain("recording.transcript.failed");
+    // Finalizing again (an uploader resuming) returns the same failed version.
+    const again = await finalize(chosen);
+    expect(again.body.transcript.id).toBe(failed.body.transcript.id);
+    expect(scope.started).toEqual([]);
+    // Transcribing again with a model that still needs credits is refused as before.
+    const refused = await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {});
+    expect(refused).toMatchObject({
+      status: 402,
+      body: { error: { details: { code: "insufficient_credits" } } },
+    });
+
+    // Once the workspace has its own ElevenLabs key, a recording nobody chose
+    // a model for runs on it instead of the refused default, since it costs
+    // the payer no credits.
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "workspace-eleven-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    expect((await scope.owner.call("GET", "/recording-models")).body.default).toEqual({
+      providerId: "openai",
+      model: "gpt-transcribe",
+    });
+    const automatic = await capturedRecording(scope);
+    const ran = await finalize(automatic);
+    expect(ran.body.recording.state).toBe("processing");
+    expect(ran.body.transcript).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      state: "queued",
+    });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([automatic]);
+    // The failed meeting is fixed by transcribing it with the free model.
+    const retried = await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {
+      transcription: { providerId: "elevenlabs", model: "scribe_v2" },
+    });
+    expect(retried.status).toBe(202);
+    expect(retried.body).toMatchObject({ state: "queued", providerId: "elevenlabs" });
+  });
+
   test("a used-up usage allowance refuses new recordings and re-runs", async () => {
     const scope = await fixture();
     const recordingId = crypto.randomUUID();
