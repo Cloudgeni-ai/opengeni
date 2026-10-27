@@ -1813,12 +1813,6 @@ export async function scrubScratchRoleGrants(
 }
 
 /**
- * Record this process as the owner of a scratch role a test just created on
- * the shared cluster (named to match SCRATCH_ROLE_PATTERN), so the reaper can
- * drop it, with its memberships, if the test dies before dropping it. Best
- * effort: without the record the reaper falls back to its idle-window rule.
- */
-/**
  * Remove every role membership (both directions) of scratch test roles whose
  * owner provably died and that have no connection. A run killed mid-test can
  * leave its scratch role a member of `opengeni_app`, which makes every other
@@ -1862,6 +1856,16 @@ export async function detachDeadScratchRoles(
             .unsafe(`${revoke} GRANTED BY ${quoteIdent(grantor)}`)
             .catch(() => sql.unsafe(revoke));
         }
+        // A plain REVOKE of someone else's grant only warns: report what is
+        // actually gone.
+        const [left] = await sql<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM pg_auth_members m
+            JOIN pg_roles r ON r.rolname = ${role.rolname}
+           WHERE m.member = r.oid OR m.roleid = r.oid`;
+        if ((left?.n ?? 0) > 0) {
+          void reaperNote(`could not detach ${role.rolname}: ${left?.n} membership(s) remain`);
+          continue;
+        }
         detached.push(role.rolname);
       } catch (error) {
         void reaperNote(`could not detach ${role.rolname}: ${String(error)}`);
@@ -1900,6 +1904,12 @@ async function detachDeadScratchRolesOnce(): Promise<void> {
   }
 }
 
+/**
+ * Record this process as the owner of a scratch role a test just created on
+ * the shared cluster (named to match SCRATCH_ROLE_PATTERN), so the reaper can
+ * drop it, with its memberships, if the test dies before dropping it. Best
+ * effort: without the record the reaper falls back to its idle-window rule.
+ */
 export async function recordTestRoleOwner(sql: postgres.Sql, roleName: string): Promise<void> {
   await sql
     .unsafe(`COMMENT ON ROLE ${quoteIdent(roleName)} IS ${quoteLiteral(databaseOwnerComment())}`)
@@ -1969,7 +1979,11 @@ export type ReapOptions = {
   /** Only databases whose names start with this (and match the scheme). */
   scopePrefix?: string;
   templatePrefix?: string;
-  /** Scratch roles considered: `<rolePrefix><32 hex>`. */
+  /**
+   * Scratch roles considered: `<rolePrefix><32 hex>`. Defaults to
+   * `<scopePrefix>bypass_` when `scopePrefix` is set, else the global
+   * SCRATCH_ROLE_PATTERN.
+   */
   rolePrefix?: string;
   /** Idle window for scratch roles without an owner record. */
   unownedRoleIdleWindowMs?: number;
@@ -2178,7 +2192,12 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     }
 
     await reapScratchRoles(sql, {
-      rolePrefix: options.rolePrefix,
+      // A pass confined to a scope never judges roles outside it either.
+      rolePrefix:
+        options.rolePrefix ??
+        (options.scopePrefix && options.scopePrefix !== "og_"
+          ? `${options.scopePrefix}bypass_`
+          : undefined),
       scopePrefix,
       templatePrefix,
       adminUrl: options.adminUrl,

@@ -372,6 +372,30 @@ describe("reaping a real cluster", () => {
   );
 
   test(
+    "a scoped pass never judges scratch roles outside its scope",
+    async () => {
+      if (!admin) return;
+      const { reap } = subScope("g");
+      // A globally named scratch role whose owner this test's identity would
+      // judge dead; every other reaper sees that owner as foreign.
+      const global = `opengeni_bypass_${crypto.randomUUID().replace(/-/g, "")}`;
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(global)} NOLOGIN`);
+      try {
+        await admin.unsafe(
+          `COMMENT ON ROLE ${quoteIdent(global)} IS ${quoteLiteral(databaseOwnerComment(deadOwner))}`,
+        );
+        const result = await reap({ pruneTemplates: false });
+        expect(result.rolesDropped).toEqual([]);
+        const [kept] = await admin`SELECT 1 FROM pg_roles WHERE rolname = ${global}`;
+        expect(kept).toBeDefined();
+      } finally {
+        await admin.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(global)}`);
+      }
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "unverifiable databases go only after staying idle across their window",
     async () => {
       if (!admin) return;
