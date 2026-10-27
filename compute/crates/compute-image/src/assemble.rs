@@ -96,7 +96,9 @@ pub fn finish(root: &Path, guest: &Path, image: &ImageConfig) -> Result<Added> {
         &mut serde_json::to_vec_pretty(image)?.as_slice(),
         0o644,
     )?;
-    // The kernel starts /sbin/init; the image's own init, if any, never runs.
+    // The host boots the kernel with init= naming our init, so the image's
+    // own init, if any, never runs. /sbin/init points at it too, for an
+    // older host and for anything in the image that looks there.
     let init = at(root, "sbin/init")?;
     if let Some(parent) = init.parent() {
         fs::create_dir_all(parent)?;

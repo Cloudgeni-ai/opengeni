@@ -225,7 +225,9 @@ struct ServeArgs {
     pager_record_ms: u64,
     /// The guest kernel's command line. The engine adds the clock source and
     /// the free-page reporting order for the host's memory profile unless
-    /// this names them.
+    /// this names them. The agent adds `init=/opengeni/init`, the init every
+    /// image has, so a sandbox whose packages replaced `/sbin/init` still
+    /// boots.
     #[arg(
         long,
         default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1"
