@@ -574,10 +574,11 @@ People get the app four ways, all from the same releases:
   version-less file name (`Opengeni-mac.dmg`, `Opengeni-windows.exe`,
   `Opengeni-linux-amd64.deb`, `SHA256SUMS`, ...) to that file on the current
   release, and `GET /desktop/latest` to the release page. The current release
-  is the newest stable `desktop-v` tag, looked up on GitHub and cached for ten
-  minutes, unless the operator pins `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's
-  own "latest release" can't be used: agent and package releases share the
-  repository.
+  is the newest stable `desktop-v` tag, listed over Git's smart HTTP protocol
+  (the REST API's unauthenticated limit is shared by every caller behind the
+  same outbound address) and cached for ten minutes, unless the operator pins
+  `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's own "latest release" can't be
+  used: agent and package releases share the repository.
 - **With one command.** `curl -fsSL https://<server>/desktop/install.sh | sh`
   installs or updates the app on macOS (into `/Applications`, after checking
   the checksum, signature and notarization) and Linux (deb through apt, rpm

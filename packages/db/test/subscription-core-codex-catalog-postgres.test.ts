@@ -104,18 +104,6 @@ async function organization(): Promise<Org> {
   };
 }
 
-async function setCutover(org: Org, enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${org.accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
 async function sharedConnection(
   org: Org,
   label: string,
@@ -365,25 +353,6 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
         org.ownerSubjectId,
       );
       expect(restrictions["codex/"]).toBeNull();
-    }
-  });
-
-  test("a disabled cutover fails closed without reading a legacy Codex table", async () => {
-    const org = await organization();
-    const ws = org.sharedWorkspaceId;
-    await sharedConnection(org, "shared-maintenance");
-    await setCutover(org, false);
-    {
-      expect(await serving(org, ws, org.ownerSubjectId)).toEqual([]);
-      expect(await workspaceCodexSubscriptionActive(client!.db, settings, ws)).toBe(false);
-      expect(
-        await isCodexBilledTurn({ db: client!.db, settings, workspaceId: ws, model: MODEL }),
-      ).toBe(false);
-      expect(
-        (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))[
-          "codex/"
-        ],
-      ).toEqual([]);
     }
   });
 

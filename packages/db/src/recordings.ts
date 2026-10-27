@@ -3153,6 +3153,129 @@ export async function listRecordingNotes(
   });
 }
 
+/**
+ * The built-in meeting summary (docs/recordings.md, "Built-in summary"): Opengeni's own
+ * chat that writes a meeting's notes once its transcript is ready. It is
+ * created by this service, for exactly one meeting, with exactly these tools,
+ * and `createSession` refuses any other session claiming to be one.
+ */
+export const MEETING_SUMMARY_SUBJECT_ID = "meeting-summary";
+export const MEETING_SUMMARY_POLICY_ROLE = "meeting_summary";
+/** Session metadata naming the one meeting a summary chat may read and write. */
+export const MEETING_SUMMARY_RECORDING_METADATA_KEY = "meetingSummaryRecordingId";
+export const MEETING_SUMMARY_TOOLS = ["meeting_read", "meeting_notes_save"] as const;
+
+export type MeetingSummaryCandidate =
+  | {
+      start: true;
+      recording: {
+        id: string;
+        title: string;
+        ownerSubjectId: string;
+        visibility: RecordingVisibility;
+      };
+    }
+  | {
+      start: false;
+      reason: "not_a_meeting" | "not_current" | "turned_off" | "has_notes" | "own_automation";
+    };
+
+/**
+ * Whether a just-completed transcript version should start the built-in
+ * summary: a meeting (not a dictation or an agent's browser recording) whose
+ * shown transcript is this version, in a workspace that has not turned it off
+ * (`settings.recordings.autoSummary: false`), with no notes saved yet. It
+ * steps aside when the meeting's owner has their own active automation for
+ * `recording.transcript.ready`, such as the "Meeting notes" template, which
+ * then writes the notes instead (only while event triggers run).
+ */
+export async function meetingSummaryCandidate(
+  db: Database,
+  input: RecordingActor & {
+    recordingId: string;
+    versionId: string;
+    eventTriggersEnabled: boolean;
+  },
+): Promise<MeetingSummaryCandidate> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [recording] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    if (!recording || recording.purpose !== "meeting" || recording.state === "deleting") {
+      return { start: false, reason: "not_a_meeting" };
+    }
+    const [version] = await tx
+      .select({ id: schema.recordingTranscriptVersions.id })
+      .from(schema.recordingTranscriptVersions)
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.recordingId, recording.id),
+          eq(schema.recordingTranscriptVersions.id, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "complete"),
+          eq(schema.recordingTranscriptVersions.isCurrent, true),
+        ),
+      );
+    if (!version) return { start: false, reason: "not_current" };
+    const [workspace] = await tx
+      .select({ settings: schema.workspaces.settings })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, input.workspaceId));
+    const settings = workspace?.settings as { recordings?: { autoSummary?: unknown } } | undefined;
+    if (settings?.recordings?.autoSummary === false) return { start: false, reason: "turned_off" };
+    const [notes] = await tx
+      .select({ kind: schema.recordingNotes.kind })
+      .from(schema.recordingNotes)
+      .where(
+        and(
+          eq(schema.recordingNotes.workspaceId, input.workspaceId),
+          eq(schema.recordingNotes.recordingId, recording.id),
+          eq(schema.recordingNotes.kind, "notes"),
+        ),
+      );
+    // Any saved notes, even cleared ones: the summary only ever writes the first.
+    if (notes) return { start: false, reason: "has_notes" };
+    if (input.eventTriggersEnabled) {
+      const [automation] = await tx
+        .select({ id: schema.eventTriggers.id })
+        .from(schema.eventTriggers)
+        .innerJoin(
+          schema.scheduledTasks,
+          and(
+            eq(schema.scheduledTasks.workspaceId, schema.eventTriggers.workspaceId),
+            eq(schema.scheduledTasks.id, schema.eventTriggers.taskId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.eventTriggers.workspaceId, input.workspaceId),
+            eq(schema.eventTriggers.status, "active"),
+            eq(schema.scheduledTasks.status, "active"),
+            sql`'recording.transcript.ready' = any(${schema.eventTriggers.eventTypes})`,
+            sql`coalesce(${schema.scheduledTasks.ownerSubjectId}, ${schema.scheduledTasks.createdBySubjectId}) = ${recording.ownerSubjectId}`,
+          ),
+        )
+        .limit(1);
+      if (automation) return { start: false, reason: "own_automation" };
+    }
+    return {
+      start: true,
+      recording: {
+        id: recording.id,
+        title: recording.title,
+        ownerSubjectId: recording.ownerSubjectId,
+        visibility: fromVisibility(recording.visibility),
+      },
+    };
+  });
+}
+
 export type SaveRecordingNoteInput = RecordingActor & {
   recordingId: string;
   kind: RecordingNoteKind;

@@ -1,15 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { createAndStartSessionWithOutcome, type ApiRouteDeps } from "@opengeni/core";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import {
   appendRecordingLiveSegments,
   claimRecordingTranscriptVersion,
+  claimSessionWorkForAttempt,
   completeRecordingTranscriptVersion,
   createDb,
   createRecording,
   createWorkspace,
   ensureManagedAccessForUser,
   finalizeRecording,
+  listRecordingNotes,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
   saveRecordingNote,
@@ -276,7 +281,10 @@ describe("meeting tools", () => {
       title: "Planning",
       status: "ready",
       recordedBy: "Ingrid Solberg",
-      speakers: [{ name: "Ingrid" }, { name: "Speaker 2" }],
+      speakers: [
+        { label: "speaker_0", name: "Ingrid" },
+        { label: "speaker_1", name: "Speaker 2" },
+      ],
     });
     expect(part.transcript).toMatchObject({ version: 1, model: "scribe_v2", current: true });
     const lines = part.lines.split("\n");
@@ -524,5 +532,160 @@ describe("meeting tools", () => {
     expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
       budget,
     ]);
+  });
+
+  test("a meeting-summary chat reaches only its own meeting", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const segments = [{ at: 0, label: "speaker_0", text: "Tomas orders the tiles." }];
+    const own = await scope.meeting({ title: "Roof planning", visibility: "private", segments });
+    const otherPrivate = await scope.meeting({ title: "1:1", visibility: "private", segments });
+    const allHands = await scope.meeting({ title: "All hands", visibility: "workspace", segments });
+    const otherShared = await scope.meeting({ title: "Retro", visibility: "workspace", segments });
+    // The owner's own Only me meeting in another workspace of the organization.
+    const sales = await scope.workspace("Sales", { accountId: scope.accountId });
+    const ownInSales = await scope.meeting({
+      title: "Pipeline",
+      visibility: "private",
+      segments,
+      in: sales,
+    });
+
+    /** The summary chat for one meeting, as the worker creates it, and its live attempt's tools. */
+    async function summaryTools(
+      recordingId: string,
+      visibility: "user_private" | "workspace_shared",
+    ) {
+      const { session } = await createAndStartSessionWithOutcome({
+        db: client!.db,
+        bus: new MemoryEventBus(),
+        workflowClient: { wakeSessionWorkflow: async () => undefined },
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        visibility,
+        meetingSummary: { recordingId, ownerSubjectId: scope.owner },
+        initialMessage: "Write the notes.",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        metadata: { meetingSummaryRecordingId: recordingId },
+        createdBy: {
+          kind: "service",
+          subjectId: "meeting-summary",
+          label: "Opengeni meeting notes",
+        },
+        model: testSettings().openaiModel,
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        turnExecutionPolicy: resolveTurnExecutionPolicyV1(testSettings(), {
+          modelId: testSettings().openaiModel,
+          requestedModelId: null,
+          modelSource: "deployment",
+          reasoningEffort: "medium",
+          reasoningSource: "deployment",
+          latencyMode: "standard",
+          latencyModeSource: "deployment",
+        }),
+        policyRole: "meeting_summary",
+        firstPartyMcpPermissions: ["sessions:read"],
+        firstPartyMcpTools: ["meeting_read", "meeting_notes_save"],
+        createIdempotencyKey: `meeting-summary:${crypto.randomUUID()}`,
+        subjectId: "meeting-summary",
+      });
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client!.db, scope.workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`not claimed: ${JSON.stringify(claimed)}`);
+      const grant: AccessGrant = {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        subjectId: "meeting-summary",
+        principalKind: "agent_attempt",
+        permissions: ["sessions:read"],
+        metadata: {
+          sessionId: session.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      };
+      return { session, call: toolsFor(grant, session.id) };
+    }
+
+    for (const [meeting, other, otherOfOwner, visibility] of [
+      [own, allHands, otherPrivate, "user_private"],
+      [allHands, otherShared, otherPrivate, "workspace_shared"],
+    ] as const) {
+      const { session, call } = await summaryTools(meeting, visibility);
+      expect(await call("meetings_search", { query: "tiles" })).toMatchObject({
+        isError: true,
+        error: { code: "not_allowed" },
+      });
+      for (const elsewhere of [other, otherOfOwner, ownInSales]) {
+        expect(await call("meeting_read", { meetingId: elsewhere })).toMatchObject({
+          found: false,
+        });
+        expect(
+          await call("meeting_notes_save", {
+            meetingId: elsewhere,
+            notes: "Not mine.",
+            expectedRevision: 0,
+          }),
+        ).toMatchObject({ found: false });
+      }
+      const read = await call("meeting_read", { meetingId: meeting });
+      expect(read.meeting).toMatchObject({ id: meeting, notes: { revision: 0 } });
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Tomas orders the tiles.",
+          expectedRevision: 0,
+        }),
+      ).toMatchObject({ saved: true, revision: 1 });
+      const notes = await listRecordingNotes(client.db, { ...scope.actor, recordingId: meeting });
+      expect(notes.find((note) => note.kind === "notes")).toMatchObject({
+        body: "Tomas orders the tiles.",
+        updatedBy: { sessionId: session.id },
+      });
+      // It may revise its own notes, but never replace a person's, even when
+      // it passes their current revision.
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Tomas orders the tiles by Friday.",
+          expectedRevision: 1,
+        }),
+      ).toMatchObject({ saved: true, revision: 2 });
+      await saveRecordingNote(client.db, {
+        ...scope.actor,
+        recordingId: meeting,
+        kind: "notes",
+        body: "Written by Ingrid.",
+        expectedRevision: 2,
+      });
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Overwritten.",
+          expectedRevision: 3,
+        }),
+      ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+      expect(
+        (await listRecordingNotes(client.db, { ...scope.actor, recordingId: meeting })).find(
+          (note) => note.kind === "notes",
+        ),
+      ).toMatchObject({ body: "Written by Ingrid.", revision: 3 });
+    }
+    for (const untouched of [otherPrivate, otherShared]) {
+      expect(
+        await listRecordingNotes(client.db, { ...scope.actor, recordingId: untouched }),
+      ).toEqual([]);
+    }
   });
 });

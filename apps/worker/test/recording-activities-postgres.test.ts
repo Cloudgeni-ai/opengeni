@@ -36,6 +36,7 @@ import { createHash } from "node:crypto";
 import {
   createRecordingActivities,
   recordingTranscriptBudgetMilliseconds,
+  type RecordingActivityOptions,
 } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
@@ -198,6 +199,7 @@ function activities(
   diarizer: RecordingDiarizer | null = null,
   aligner: RecordingWordAligner | null = null,
   now?: () => number,
+  startMeetingSummary?: RecordingActivityOptions["startMeetingSummary"],
 ) {
   const warnings: string[] = [];
   const services = async () =>
@@ -218,6 +220,7 @@ function activities(
       diarizer: () => diarizer,
       aligner: () => aligner,
       ...(now ? { now } : {}),
+      ...(startMeetingSummary ? { startMeetingSummary } : {}),
     }),
   };
 }
@@ -232,6 +235,75 @@ test("a transcript's time budget grows with the audio, up to twelve hours", () =
 });
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
+  test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Hello.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const started: unknown[] = [];
+    const ok = activities(
+      storage,
+      provider,
+      "key",
+      null,
+      null,
+      undefined,
+      async (_services, input) => {
+        started.push(input);
+        return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
+      },
+    );
+    expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "complete",
+    });
+    expect(started).toEqual([
+      {
+        accountId: recording.input.accountId,
+        workspaceId: recording.input.workspaceId,
+        recordingId: recording.input.recordingId,
+        versionId: recording.input.versionId,
+        ownerSubjectId: recording.input.ownerSubjectId,
+      },
+    ]);
+    // The same version again is already complete: no second summary.
+    expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "skipped",
+    });
+    expect(started).toHaveLength(1);
+
+    const again = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: again,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    const failing = activities(storage, provider, "key", null, null, undefined, async () => {
+      throw new Error("no account free");
+    });
+    expect(
+      await failing.activities.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: again,
+        processingOwner: again,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect(failing.warnings).toContain("meeting summary not started");
+  });
+
   test("past its time budget a transcript fails as timed_out, with no audio sent", async () => {
     if (!client) return;
     const storage = memoryStorage();

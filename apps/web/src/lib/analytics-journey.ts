@@ -16,6 +16,7 @@ const PAGES = new Set([
   "memory",
   "schedules",
   "automations",
+  "bot-templates",
   "artifacts",
   "settings",
   "organization",

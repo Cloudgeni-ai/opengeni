@@ -101,6 +101,7 @@ import {
   type RecordingPieceFormat,
 } from "./recording-audio";
 import type { ControlActivityServices } from "./types";
+import { startMeetingSummary } from "./meeting-summary";
 import {
   createLocalAligner,
   createLocalDiarizer,
@@ -193,6 +194,8 @@ export type RecordingActivityOptions = {
   dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
   /** Credit charges for meetings on deployment-funded models; defaults to voice input billing. */
   billing?: (settings: Settings, db: Database) => TranscriptionBilling;
+  /** Starts the built-in meeting summary once a meeting's transcript is ready. */
+  startMeetingSummary?: typeof startMeetingSummary;
   /** The clock a transcript's time budget is measured with; defaults to Date.now. */
   now?: () => number;
 };
@@ -630,6 +633,41 @@ export function createRecordingActivities(
       );
     }
 
+    /**
+     * The built-in meeting summary. A failure is only logged: the meeting
+     * keeps its transcript and shows "No notes yet", and its owner can still
+     * ask an agent to write them.
+     */
+    async function summarize(): Promise<void> {
+      try {
+        // Choosing the model can ask Codex upstream: keep the activity alive.
+        const outcome = await withHeartbeat(async () =>
+          (options.startMeetingSummary ?? startMeetingSummary)(await services(), {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: input.recordingId,
+            versionId: input.versionId,
+            ownerSubjectId: input.ownerSubjectId,
+          }),
+        );
+        observability.info("meeting summary", {
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+          ...(outcome.started
+            ? { started: true, sessionId: outcome.sessionId, model: outcome.model }
+            : { started: false, reason: outcome.reason }),
+        });
+      } catch (error) {
+        observability.warn("meeting summary not started", {
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+          ...(error instanceof Error ? { error: error.message.slice(0, 1_000) } : {}),
+        });
+      }
+    }
+
     async function transcribeClaimed(): Promise<RecordingTranscriptOutcome> {
       try {
         if (now() >= deadline) throw new PermanentRecordingFailure("timed_out");
@@ -864,7 +902,7 @@ export function createRecordingActivities(
             trackSpeakers.push({ label, memberSubjectId: input.ownerSubjectId, displayName });
           }
         }
-        return await measureRecordingStage("finish", async () => {
+        const stage = await measureRecordingStage("finish", async () => {
           // Past the budget the version has failed: work that kept going
           // regardless is neither charged nor saved.
           budget.signal.throwIfAborted();
@@ -901,8 +939,10 @@ export function createRecordingActivities(
             voices,
           });
           telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
-          return completed ? { outcome: "complete" } : { outcome: "skipped" };
+          return completed ? ({ outcome: "complete" } as const) : ({ outcome: "skipped" } as const);
         });
+        if (stage.outcome === "complete") await summarize();
+        return stage;
       } catch (error) {
         if (error instanceof RecordingNotFoundError) return { outcome: "skipped" };
         // Out of time: whatever the abort broke, the reason is the budget.
