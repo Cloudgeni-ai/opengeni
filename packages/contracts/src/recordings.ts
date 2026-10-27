@@ -885,6 +885,11 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
      * recording names another; null detects it. Absent from older servers.
      */
     language: z.string().nullable().optional(),
+    /**
+     * Whether this workspace's recorders start with the live transcript on
+     * (its `recordings.liveTranscript` setting). Absent from older servers.
+     */
+    liveTranscript: z.boolean().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;
