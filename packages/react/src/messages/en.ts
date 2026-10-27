@@ -4898,6 +4898,27 @@ export const englishMessages = {
   "timeline.patchApplyCommand.runsGitApplyInYour":
     "Runs git apply in your project folder. Works on macOS, Linux and Git Bash.",
   "timeline.patchApplyCommand.tryAgain": "Try again",
+  "timeline.paymentPage.balanceNow": "Balance {balance}",
+  "timeline.paymentPage.billingPortal": "Billing",
+  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.continueToPayment": "Continue to payment",
+  "timeline.paymentPage.checkFailed":
+    "Couldn't check your payment from here. If you paid, your credits still arrive.",
+  "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
+  "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
+  "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",
+  "timeline.paymentPage.linkExpired": "This link has expired. Ask here for a new one.",
+  "timeline.paymentPage.openBilling": "Open billing",
+  "timeline.paymentPage.opensBillingPage": "Opens your billing page in a new tab.",
+  "timeline.paymentPage.opensSecurePage": "Opens a secure payment page in a new tab.",
+  "timeline.paymentPage.opensSecurePageConfirms":
+    "Opens a secure payment page in a new tab. Your credits show up here once you've paid.",
+  "timeline.paymentPage.pay": "Pay",
+  "timeline.paymentPage.payAmount": "Pay {amount}",
+  "timeline.paymentPage.payForCredits": "{amount} in credits",
+  "timeline.paymentPage.subscribe": "Subscribe",
+  "timeline.paymentPage.waitingForPayment":
+    "Waiting for your payment. Come back here when you're done.",
   "timeline.platformActivityPresentation.compactingConversationFirst":
     "Compacting conversation first",
   "timeline.platformActivityPresentation.connectingTools": "Connecting tools",
