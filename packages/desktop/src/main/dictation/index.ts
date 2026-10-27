@@ -99,7 +99,7 @@ export interface DictationDeps {
   };
   clipboard: DictationClipboard;
   hud: DictationHudView;
-  /** The app's name, for "Open Vatra to dictate". */
+  /** The app's name, for "Open Acme to dictate". */
   productName: string;
   /** Bring the app's window to the front. */
   reveal(): void;

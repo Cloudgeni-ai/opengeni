@@ -39,7 +39,7 @@ export function electronClipboard(): DictationClipboard<ClipboardSnapshot> {
 }
 
 export interface CreateDesktopDictationOptions {
-  /** The app's name, as people know it ("Open Vatra to dictate"). */
+  /** The app's name, as people know it ("Open Acme to dictate"). */
   productName: string;
   /** Where the settings and recent dictations are kept: `app.getPath("userData")`. */
   dataDir: string;
