@@ -17,6 +17,12 @@ spec:
       port: {{ $cc.service.apiPort }}
       targetPort: http
       protocol: TCP
+    {{- if $cc.e2b.enabled }}
+    - name: e2b
+      port: {{ int64 $cc.e2b.port }}
+      targetPort: e2b
+      protocol: TCP
+    {{- end }}
     {{- with ($cc.metrics).port }}
     - name: metrics
       port: {{ int64 . }}

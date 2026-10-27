@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/compute-release.yml",
-      "sha256": "d855ba559b6fdaaed5dcba2680d1df4d4c93731fc1fdf61e49543896727456bb"
+      "sha256": "bb110865c8785d3d906761b6f5be4168c814bb0886de9eb83b0dfd2af589f3cb"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -1233,7 +1233,7 @@
       "workflow": ".github/workflows/compute-release.yml",
       "job": "control-image",
       "step": "Check the pushed image runs",
-      "sha256": "acb9b963deed51022b904165b935d3fb25476646187024e5b70934c455bce865"
+      "sha256": "9aedd531227f13ae825a84c0ed1d9b07ed93a44ef80bc4b2c0beb9f75c57d6e9"
     },
     {
       "workflow": ".github/workflows/compute-release.yml",
@@ -1263,7 +1263,7 @@
       "workflow": ".github/workflows/compute-release.yml",
       "job": "promote",
       "step": "Name the candidate",
-      "sha256": "448805c8f4036248eab08575cbcab4632f630f2b40ba11a231c1838099367a23"
+      "sha256": "5b127eb531560569f9dec2109484c2f9ba61a9180e6e5d75f9f8b4701d37c38f"
     },
     {
       "workflow": ".github/workflows/compute-release.yml",
@@ -1276,6 +1276,12 @@
       "job": "publish",
       "step": "SHA256SUMS",
       "sha256": "9c5b7317a003c784f2481e26bd0e9431154250b4de16517cbcefa97a5bb81c53"
+    },
+    {
+      "workflow": ".github/workflows/compute-release.yml",
+      "job": "runner-image",
+      "step": "Check the pushed image starts a runner",
+      "sha256": "d23c21c84cda264ab643ec9c7ac46360d9a0bbd3af103a9fb09d12015d4e88f0"
     },
     {
       "workflow": ".github/workflows/deprecate-pre-1.0.yml",

@@ -661,6 +661,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute-runners"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "form_urlencoded",
+ "futures",
+ "getrandom 0.3.4",
+ "object_store",
+ "pem",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "compute-storage"
 version = "0.0.0"
 dependencies = [

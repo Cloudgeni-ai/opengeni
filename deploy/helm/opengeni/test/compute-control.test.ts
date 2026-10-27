@@ -608,4 +608,328 @@ describe("computeControl", () => {
     expect(withPort.args).toContain("--metrics-listen=0.0.0.0:9464");
     expect(withPort.args.some((a: string) => a.startsWith("--host-metrics-to"))).toBe(false);
   });
+
+  test("opens the E2B front door only when asked, with the API's certificate", async () => {
+    const off = find(await render(enabled), "Deployment", "cc-opengeni-compute-control").spec
+      .template.spec.containers[0];
+    expect(off.args.some((a: string) => a.startsWith("--e2b-"))).toBe(false);
+    expect(off.ports.map((p: any) => p.name)).not.toContain("e2b");
+
+    const manifests = await render({
+      ...enabled,
+      networkPolicy: { enabled: true },
+      computeControl: {
+        ...enabled.computeControl,
+        apiTls: { secretName: "compute-api-tls" },
+        e2b: {
+          enabled: true,
+          templates: { base: "base:2x1024", "github-runner": "runner:4x8192x30720" },
+          ingressFrom: [{ podSelector: { matchLabels: { app: "e2b-client" } } }],
+        },
+      },
+    });
+    const container = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template
+      .spec.containers[0];
+    expect(container.args).toContain("--e2b-listen=0.0.0.0:3000");
+    expect(container.args).toContain("--e2b-domain=cc-opengeni-compute-control.default.svc");
+    expect(container.args).toContain("--e2b-tls-cert=/etc/compute/api-tls/tls.crt");
+    expect(container.args).toContain("--e2b-tls-key=/etc/compute/api-tls/tls.key");
+    expect(container.args).toContain("--e2b-template=base=base:2x1024");
+    expect(container.args).toContain("--e2b-template=github-runner=runner:4x8192x30720");
+    expect(container.ports).toContainEqual({ name: "e2b", containerPort: 3000 });
+    const service = find(manifests, "Service", "cc-opengeni-compute-control");
+    expect(service.spec.ports).toContainEqual({
+      name: "e2b",
+      port: 3000,
+      targetPort: "e2b",
+      protocol: "TCP",
+    });
+    // The hosts' Service never exposes it.
+    const hosts = find(manifests, "Service", "cc-opengeni-compute-control-hosts");
+    expect(hosts.spec.ports.map((p: any) => p.name)).toEqual(["hosts"]);
+    const policy = find(manifests, "NetworkPolicy", "cc-opengeni-compute-control");
+    const e2b = policy.spec.ingress.find((rule: any) => rule.ports?.[0]?.port === 3000);
+    expect(
+      e2b.from.map((from: any) => from.podSelector.matchLabels["app.kubernetes.io/component"]),
+    ).toEqual(["compute-runners", undefined]);
+    expect(e2b.from[1]).toEqual({ podSelector: { matchLabels: { app: "e2b-client" } } });
+
+    const plain = find(
+      await render({
+        ...enabled,
+        computeControl: { ...enabled.computeControl, e2b: { enabled: true, port: 3100 } },
+      }),
+      "Deployment",
+      "cc-opengeni-compute-control",
+    ).spec.template.spec.containers[0];
+    expect(plain.args).toContain("--e2b-listen=0.0.0.0:3100");
+    expect(plain.args).toContain("--e2b-domain=cc-opengeni-compute-control");
+    expect(plain.args.some((a: string) => a.startsWith("--e2b-tls"))).toBe(false);
+    expect(plain.args.some((a: string) => a.startsWith("--e2b-template"))).toBe(false);
+
+    const malformed = await helmTemplate({
+      ...enabled,
+      computeControl: {
+        ...enabled.computeControl,
+        e2b: { enabled: true, templates: { big: "runner:4x8G" } },
+      },
+    });
+    expect(malformed.exitCode).not.toBe(0);
+    expect(malformed.stderr).toContain(
+      "computeControl.e2b.templates.big must be image:VCPUSxMEMORY_MIB",
+    );
+  });
+});
+
+describe("computeRunners", () => {
+  const front = {
+    ...enabled,
+    computeControl: {
+      ...enabled.computeControl,
+      apiTls: { secretName: "compute-api-tls" },
+      e2b: { enabled: true, templates: { "github-runner": "runner:4x8192x30720" } },
+    },
+  };
+  const pool = {
+    name: "ci",
+    scope: "example-org/monorepo",
+    template: "github-runner",
+    github: { existingSecret: "ci-github" },
+    compute: { existingSecret: "ci-compute" },
+  };
+
+  function container(manifests: Manifest[], name = "cc-opengeni-runners-ci") {
+    return find(manifests, "Deployment", name).spec.template.spec.containers[0];
+  }
+
+  test("are off by default", async () => {
+    const manifests = await render(front);
+    expect(manifests.filter((m) => m.metadata.name.includes("runners"))).toEqual([]);
+  });
+
+  test("run a pool from the control image against the front door it trusts", async () => {
+    const manifests = await render({
+      ...front,
+      computeRunners: {
+        pools: [
+          {
+            ...pool,
+            labels: ["linux", "x64"],
+            minIdle: 1,
+            max: 6,
+            env: { CI_POOL: "ci" },
+          },
+        ],
+      },
+    });
+    const runner = container(manifests);
+    expect(runner.image).toBe(
+      "ghcr.io/cloudgeni-ai/opengeni-compute-control:sha-0123456789abcdef0123456789abcdef01234567",
+    );
+    expect(runner.command).toEqual(["compute-runners"]);
+    expect(runner.args).toEqual([
+      "serve",
+      "--name=ci",
+      "--scope=example-org/monorepo",
+      "--runner-group=default",
+      "--labels=linux,x64",
+      "--template=github-runner",
+      "--min-idle=1",
+      "--max=6",
+      "--timeout-s=21600",
+      "--env=CI_POOL=ci",
+      "--compute-url=https://cc-opengeni-compute-control.default.svc:3000",
+      "--compute-ca=/etc/compute-runners/compute-ca/ca.crt",
+      "--listen=0.0.0.0:8080",
+    ]);
+    // Credentials come only from Secrets, never arguments.
+    const env = Object.fromEntries(runner.env.map((e: any) => [e.name, e]));
+    expect(env.GITHUB_TOKEN.valueFrom.secretKeyRef).toEqual({
+      name: "ci-github",
+      key: "GITHUB_TOKEN",
+    });
+    expect(env.COMPUTE_API_KEY.valueFrom.secretKeyRef).toEqual({
+      name: "ci-compute",
+      key: "COMPUTE_API_KEY",
+    });
+    expect(env.COMPUTE_RUNNERS_CACHE_TOKEN).toBeUndefined();
+    const spec = find(manifests, "Deployment", "cc-opengeni-runners-ci").spec;
+    expect(spec.replicas).toBe(1);
+    expect(spec.template.spec.serviceAccountName).toBe("cc-opengeni-compute-runners");
+    const [ca] = spec.template.spec.volumes;
+    expect(spec.template.spec.volumes).toHaveLength(1);
+    expect(ca.name).toBe("compute-ca");
+    expect(ca.secret.secretName).toBe("compute-api-tls");
+    expect(ca.secret.items).toEqual([{ key: "ca.crt", path: "ca.crt" }]);
+    expect(runner.securityContext.readOnlyRootFilesystem).toBe(true);
+    expect(runner.readinessProbe.httpGet).toEqual({ path: "/healthz", port: "http" });
+    // Without a cache, nothing reaches a pool.
+    expect(manifests.some((m) => m.kind === "Service" && m.metadata.name.includes("runners"))).toBe(
+      false,
+    );
+    find(manifests, "ServiceAccount", "cc-opengeni-compute-runners");
+  });
+
+  test("authenticate as a GitHub App from a mounted key", async () => {
+    const runner = container(
+      await render({
+        ...front,
+        computeRunners: {
+          pools: [
+            {
+              ...pool,
+              github: {
+                existingSecret: "ci-app",
+                appId: "Iv1.0123",
+                appInstallation: 42,
+                appKeyKey: "private-key.pem",
+                url: "https://github.example.com",
+                apiUrl: "https://github.example.com/api/v3",
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(runner.args).toContain("--app-id=Iv1.0123");
+    expect(runner.args).toContain("--app-installation=42");
+    expect(runner.args).toContain("--app-key-file=/etc/compute-runners/github/app.pem");
+    expect(runner.args).toContain("--github-url=https://github.example.com");
+    expect(runner.args).toContain("--github-api-url=https://github.example.com/api/v3");
+    expect(runner.env.some((e: any) => e.name === "GITHUB_TOKEN")).toBe(false);
+    expect(runner.volumeMounts).toContainEqual({
+      name: "github",
+      mountPath: "/etc/compute-runners/github",
+      readOnly: true,
+    });
+  });
+
+  test("keep a warm template and serve a cache that runners reach from outside", async () => {
+    const manifests = await render({
+      ...front,
+      networkPolicy: { enabled: true },
+      computeRunners: {
+        serviceAccount: { annotations: { "iam.gke.io/gcp-service-account": "cache@example" } },
+        pools: [
+          {
+            ...pool,
+            replicaCount: 2,
+            warm: {
+              repo: "example-org/monorepo",
+              prepare: "bun install --frozen-lockfile",
+              everySeconds: 1800,
+            },
+            cache: {
+              store: "gs://example-cache/runners",
+              url: "https://runner-cache.example.com",
+              existingSecret: "ci-cache",
+              days: 7,
+              service: {
+                type: "LoadBalancer",
+                port: 443,
+                loadBalancerSourceRanges: ["10.0.0.0/8"],
+              },
+            },
+          },
+          { ...pool, name: "light", template: "github-runner" },
+        ],
+      },
+    });
+    const runner = container(manifests);
+    expect(runner.args).toContain("--warm-repo=example-org/monorepo");
+    expect(runner.args).toContain("--warm-prepare=bun install --frozen-lockfile");
+    expect(runner.args).toContain("--warm-every-s=1800");
+    expect(runner.args).toContain("--warm-within-s=3600");
+    expect(runner.args.some((a: string) => a.startsWith("--warm-branch"))).toBe(false);
+    expect(runner.args).toContain("--cache-store=gs://example-cache/runners");
+    expect(runner.args).toContain("--cache-url=https://runner-cache.example.com");
+    expect(runner.args).toContain("--cache-days=7");
+    const token = runner.env.find((e: any) => e.name === "COMPUTE_RUNNERS_CACHE_TOKEN");
+    expect(token.valueFrom.secretKeyRef).toEqual({
+      name: "ci-cache",
+      key: "COMPUTE_RUNNERS_CACHE_TOKEN",
+    });
+    expect(find(manifests, "Deployment", "cc-opengeni-runners-ci").spec.replicas).toBe(2);
+    expect(
+      find(manifests, "ServiceAccount", "cc-opengeni-compute-runners").metadata.annotations,
+    ).toEqual({ "iam.gke.io/gcp-service-account": "cache@example" });
+
+    const service = find(manifests, "Service", "cc-opengeni-runners-ci");
+    expect(service.spec.type).toBe("LoadBalancer");
+    expect(service.spec.loadBalancerSourceRanges).toEqual(["10.0.0.0/8"]);
+    expect(service.spec.ports).toEqual([
+      { name: "cache", port: 443, targetPort: "http", protocol: "TCP" },
+    ]);
+    expect(service.spec.selector["opengeni.ai/runner-pool"]).toBe("ci");
+    // Only the pool with a cache takes connections, on the cache's port.
+    const cachePolicy = find(manifests, "NetworkPolicy", "cc-opengeni-runners-ci");
+    expect(cachePolicy.spec.ingress).toEqual([{ ports: [{ protocol: "TCP", port: 8080 }] }]);
+    expect(
+      manifests.some(
+        (m) => m.metadata.name === "cc-opengeni-runners-light" && m.kind !== "Deployment",
+      ),
+    ).toBe(false);
+    const pools = find(manifests, "NetworkPolicy", "cc-opengeni-compute-runners");
+    expect(pools.spec.ingress).toEqual([]);
+    expect(container(manifests, "cc-opengeni-runners-light").args).not.toContain(
+      "--cache-store=gs://example-cache/runners",
+    );
+  });
+
+  test("refuse pools they cannot run", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [
+        { ...enabled, computeRunners: { pools: [pool] } },
+        "computeRunners.pools need computeControl.enabled and computeControl.e2b.enabled",
+      ],
+      [
+        { ...front, computeRunners: { pools: [{ ...pool, name: "CI" }] } },
+        'computeRunners.pools: name "CI" must be 1 to 40 lowercase letters',
+      ],
+      [
+        { ...front, computeRunners: { pools: [pool, pool] } },
+        'computeRunners.pools: two pools are named "ci"',
+      ],
+      [
+        { ...front, computeRunners: { pools: [{ ...pool, github: {} }] } },
+        "computeRunners.pools.ci.github.existingSecret is required",
+      ],
+      [
+        {
+          ...front,
+          computeRunners: { pools: [{ ...pool, github: { existingSecret: "a", appId: "1" } }] },
+        },
+        "computeRunners.pools.ci.github needs both appId and appInstallation",
+      ],
+      [
+        { ...front, computeRunners: { pools: [{ ...pool, compute: {} }] } },
+        "computeRunners.pools.ci.compute.existingSecret is required",
+      ],
+      [
+        {
+          ...front,
+          computeRunners: {
+            pools: [
+              { ...pool, cache: { store: "/var/cache", url: "https://c", existingSecret: "c" } },
+            ],
+          },
+        },
+        "computeRunners.pools.ci.cache.store must be object storage",
+      ],
+      [
+        {
+          ...front,
+          computeRunners: {
+            pools: [{ ...pool, cache: { store: "gs://b/p", existingSecret: "c" } }],
+          },
+        },
+        "computeRunners.pools.ci.cache.url is required",
+      ],
+    ];
+    for (const [values, message] of cases) {
+      const result = await helmTemplate(values);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain(message);
+    }
+  });
 });

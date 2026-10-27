@@ -165,6 +165,20 @@ spec:
             - --scale-min={{ int64 $cc.scaling.min }}
             - --scale-max={{ int64 $cc.scaling.max }}
             {{- end }}
+            {{- if $cc.e2b.enabled }}
+            - --e2b-listen=0.0.0.0:{{ int64 $cc.e2b.port }}
+            - --e2b-domain={{ $cc.e2b.domain | default (include "opengeni.computeControl.apiHost" .) }}
+            {{- if $cc.apiTls.secretName }}
+            - --e2b-tls-cert=/etc/compute/api-tls/tls.crt
+            - --e2b-tls-key=/etc/compute/api-tls/tls.key
+            {{- end }}
+            {{- range $id, $template := $cc.e2b.templates }}
+            {{- if not (regexMatch "^[^:]+:[0-9]+x[0-9]+(x[0-9]+)?$" (toString $template)) }}
+            {{- fail (printf "computeControl.e2b.templates.%s must be image:VCPUSxMEMORY_MIB or image:VCPUSxMEMORY_MIBxDISK_MIB" $id) }}
+            {{- end }}
+            - --e2b-template={{ $id }}={{ $template }}
+            {{- end }}
+            {{- end }}
             {{- range $cc.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -194,6 +208,10 @@ spec:
               containerPort: {{ $cc.service.apiPort }}
             - name: hosts
               containerPort: 8443
+            {{- if $cc.e2b.enabled }}
+            - name: e2b
+              containerPort: {{ int64 $cc.e2b.port }}
+            {{- end }}
             {{- with ($cc.metrics).port }}
             - name: metrics
               containerPort: {{ int64 . }}

@@ -1,0 +1,300 @@
+{{- if .Values.computeRunners.pools }}
+{{- include "opengeni.computeRunners.assert" . }}
+{{- $root := . }}
+{{- $cr := .Values.computeRunners }}
+{{- $cc := .Values.computeControl }}
+{{- if $cr.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "opengeni.computeRunners.serviceAccountName" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+  {{- with $cr.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+{{- end }}
+{{- range $pool := $cr.pools }}
+{{- $name := include "opengeni.computeRunners.poolName" (dict "root" $root "pool" $pool) }}
+{{- $github := $pool.github }}
+{{- $cache := $pool.cache }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "opengeni.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+    opengeni.ai/runner-pool: {{ $pool.name }}
+spec:
+  # One replica holds the pool's scale set; more stand by to take it over.
+  replicas: {{ int64 ($pool.replicaCount | default 1) }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: compute-runners
+      opengeni.ai/runner-pool: {{ $pool.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: compute-runners
+        opengeni.ai/runner-pool: {{ $pool.name }}
+    spec:
+      serviceAccountName: {{ include "opengeni.computeRunners.serviceAccountName" $root }}
+      enableServiceLinks: false
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with $cr.podSecurityContext }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: compute-runners
+          image: {{ include "opengeni.computeRunners.image" $root | quote }}
+          imagePullPolicy: {{ $cr.image.pullPolicy | default $cc.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - compute-runners
+          args:
+            - serve
+            - --name={{ $pool.name }}
+            - --scope={{ $pool.scope }}
+            - --runner-group={{ $pool.runnerGroup | default "default" }}
+            {{- with $pool.labels }}
+            - --labels={{ join "," . }}
+            {{- end }}
+            - --template={{ $pool.template }}
+            - --min-idle={{ int64 ($pool.minIdle | default 0) }}
+            - --max={{ int64 ($pool.max | default 10) }}
+            - --timeout-s={{ int64 ($pool.timeoutSeconds | default 21600) }}
+            {{- range $key, $value := $pool.env }}
+            - --env={{ $key }}={{ $value }}
+            {{- end }}
+            {{- with $github.url }}
+            - --github-url={{ . }}
+            {{- end }}
+            {{- with $github.apiUrl }}
+            - --github-api-url={{ . }}
+            {{- end }}
+            {{- if $github.appId }}
+            - --app-id={{ $github.appId }}
+            - --app-installation={{ $github.appInstallation }}
+            - --app-key-file=/etc/compute-runners/github/app.pem
+            {{- end }}
+            - --compute-url={{ include "opengeni.computeRunners.computeUrl" $root }}
+            {{- if $cc.apiTls.secretName }}
+            - --compute-ca=/etc/compute-runners/compute-ca/ca.crt
+            {{- end }}
+            {{- with $pool.warm }}
+            {{- if .repo }}
+            - --warm-repo={{ .repo }}
+            {{- with .branch }}
+            - --warm-branch={{ . }}
+            {{- end }}
+            {{- with .prepare }}
+            - --warm-prepare={{ . }}
+            {{- end }}
+            - --warm-every-s={{ int64 (.everySeconds | default 3600) }}
+            - --warm-within-s={{ int64 (.withinSeconds | default 3600) }}
+            {{- end }}
+            {{- end }}
+            {{- if $cache }}
+            - --cache-store={{ $cache.store }}
+            - --cache-url={{ $cache.url }}
+            - --cache-days={{ int64 ($cache.days | default 14) }}
+            {{- end }}
+            - --listen=0.0.0.0:8080
+          env:
+            - name: RUST_LOG
+              value: info
+            {{- if not $github.appId }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $github.existingSecret }}
+                  key: {{ $github.tokenKey | default "GITHUB_TOKEN" }}
+            {{- end }}
+            - name: COMPUTE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $pool.compute.existingSecret }}
+                  key: {{ $pool.compute.key | default "COMPUTE_API_KEY" }}
+            {{- if $cache }}
+            - name: COMPUTE_RUNNERS_CACHE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cache.existingSecret }}
+                  key: {{ $cache.tokenKey | default "COMPUTE_RUNNERS_CACHE_TOKEN" }}
+            {{- end }}
+            {{- with $cr.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml ($pool.resources | default $cr.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if $github.appId }}
+            - name: github
+              mountPath: /etc/compute-runners/github
+              readOnly: true
+            {{- end }}
+            {{- if $cc.apiTls.secretName }}
+            - name: compute-ca
+              mountPath: /etc/compute-runners/compute-ca
+              readOnly: true
+            {{- end }}
+            {{- with $cr.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- if $github.appId }}
+        - name: github
+          secret:
+            secretName: {{ $github.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $github.appKeyKey | default "app.pem" }}
+                path: app.pem
+        {{- end }}
+        {{- if $cc.apiTls.secretName }}
+        - name: compute-ca
+          secret:
+            secretName: {{ $cc.apiTls.secretName }}
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- with $cr.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $cr.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cr.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cr.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if $cache }}
+{{- $service := $cache.service | default (dict) }}
+---
+# The pool's cache, which its runners reach from outside the cluster at
+# cache.url, with its token.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "opengeni.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+    opengeni.ai/runner-pool: {{ $pool.name }}
+  {{- with $service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $service.type | default "ClusterIP" }}
+  {{- with $service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: cache
+      port: {{ int64 ($service.port | default 8080) }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "opengeni.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+    opengeni.ai/runner-pool: {{ $pool.name }}
+{{- if $root.Values.networkPolicy.enabled }}
+---
+# Runners call the cache from their sandboxes, outside the cluster, and
+# authenticate with the pool's token.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "opengeni.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+    opengeni.ai/runner-pool: {{ $pool.name }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: compute-runners
+      opengeni.ai/runner-pool: {{ $pool.name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# Pools take no connections but their caches' (each pool's own policy);
+# their egress follows networkPolicy.egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.computeRunners.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-runners
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-runners
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+  ingress: []
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

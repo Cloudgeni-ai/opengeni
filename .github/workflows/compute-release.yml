@@ -10,6 +10,10 @@ name: Compute Release
 #                  host bundle is reproducible and Compute CI has passed on
 #                  the same commit, a push to main moves `main` to it and a
 #                  compute-v<version> tag adds <version>.
+#   runner-image   ghcr.io/cloudgeni-ai/opengeni-compute-github-runner: the
+#                  sandbox image of GitHub runner pools
+#                  (compute/docker/github-runner.Dockerfile), pushed and
+#                  named the same way.
 #   host-bundle    compute-host-<version>-x86_64-linux.tar.gz: the host agent
 #                  as a static binary, the guest programs every sandbox
 #                  image gets, the systemd units, install.sh and the pinned
@@ -44,6 +48,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/cloudgeni-ai/opengeni-compute-control
+  RUNNER_IMAGE: ghcr.io/cloudgeni-ai/opengeni-compute-github-runner
   # Also the control image's toolchain (control.Dockerfile's RUST_VERSION).
   RUST_VERSION: 1.99.1
 
@@ -134,7 +139,66 @@ jobs:
           set -euo pipefail
           docker run --rm "$IMAGE@$DIGEST" --help >/dev/null
           docker run --rm --entrypoint /usr/local/bin/compute-host "$IMAGE@$DIGEST" sweep --help >/dev/null
+          docker run --rm --entrypoint /usr/local/bin/compute-runners "$IMAGE@$DIGEST" serve --help >/dev/null
           echo "Pushed the candidate \`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+  runner-image:
+    name: GitHub runner image
+    needs: guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push the candidate
+        id: build
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: compute
+          file: compute/docker/github-runner.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ env.RUNNER_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.guard.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Opengeni compute GitHub Actions runner
+          cache-from: type=gha,scope=compute-github-runner
+          cache-to: type=gha,mode=min,scope=compute-github-runner,ignore-error=true
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.RUNNER_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Check the pushed image starts a runner
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # A configuration the runner cannot read: it must start, read it
+          # from the environment, and refuse it.
+          out="$(docker run --rm --privileged -e ACTIONS_RUNNER_INPUT_JITCONFIG=bm90LWEtY29uZmln \
+            "$RUNNER_IMAGE@$DIGEST" 2>&1 || true)"
+          grep -q "Runner execution has finished" <<<"$out" || { echo "$out" >&2; exit 1; }
+          echo "Pushed the candidate \`$RUNNER_IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
 
   host-bundle:
     name: host bundle
@@ -197,7 +261,7 @@ jobs:
 
   promote:
     name: Promote once checked
-    needs: [guard, control-image, host-bundle]
+    needs: [guard, control-image, runner-image, host-bundle]
     if: ${{ github.ref == 'refs/heads/main' || needs.guard.outputs.release == 'true' }}
     runs-on: ubuntu-24.04
     # Compute CI's KVM job alone may take 75 minutes.
@@ -244,29 +308,34 @@ jobs:
       - name: Name the candidate
         env:
           DIGEST: ${{ needs.control-image.outputs.digest }}
+          RUNNER_DIGEST: ${{ needs.runner-image.outputs.digest }}
           VERSION: ${{ needs.guard.outputs.version }}
           RELEASE: ${{ needs.guard.outputs.release }}
         run: |
           set -euo pipefail
           # Copies the checked index, attestations included, under each
           # name: the digest, and so its provenance, stays the same.
-          tags=()
-          if [ "$GITHUB_REF" = refs/heads/main ]; then tags+=(--tag "$IMAGE:main"); fi
-          if [ "$RELEASE" = true ]; then tags+=(--tag "$IMAGE:$VERSION"); fi
-          docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"
-          for tag in "${tags[@]}"; do
-            [ "$tag" = --tag ] && continue
-            # Read the whole answer before parsing it: an awk that stops at the
-            # first match would end docker with SIGPIPE, and pipefail would
-            # fail the step after the tag had already moved.
-            inspected="$(docker buildx imagetools inspect "$tag")"
-            named="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspected")"
-            if [ "$named" != "$DIGEST" ]; then
-              echo "::error::$tag is $named, not the checked $DIGEST" >&2
-              exit 1
-            fi
-            echo "\`$tag\` is \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
-          done
+          name() {
+            local image="$1" digest="$2" tags=()
+            if [ "$GITHUB_REF" = refs/heads/main ]; then tags+=(--tag "$image:main"); fi
+            if [ "$RELEASE" = true ]; then tags+=(--tag "$image:$VERSION"); fi
+            docker buildx imagetools create "${tags[@]}" "$image@$digest"
+            for tag in "${tags[@]}"; do
+              [ "$tag" = --tag ] && continue
+              # Read the whole answer before parsing it: an awk that stops at the
+              # first match would end docker with SIGPIPE, and pipefail would
+              # fail the step after the tag had already moved.
+              inspected="$(docker buildx imagetools inspect "$tag")"
+              named="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspected")"
+              if [ "$named" != "$digest" ]; then
+                echo "::error::$tag is $named, not the checked $digest" >&2
+                exit 1
+              fi
+              echo "\`$tag\` is \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+          }
+          name "$IMAGE" "$DIGEST"
+          name "$RUNNER_IMAGE" "$RUNNER_DIGEST"
 
   publish:
     name: GitHub Release

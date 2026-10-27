@@ -380,6 +380,40 @@ for a gateway with a certificate of a private authority, give each host
 `--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
 authority alone for agent links.
 
+### Runner pools
+
+GitHub Actions runner pools ([ADR 23](adr/0023-github-actions-runner-pools.md))
+reach compute through its E2B front door. In the chart:
+
+1. **The front door.** Set `computeControl.e2b.enabled` and give the
+   runner template a shape with room for a job's disk, for example
+   `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
+   where `runner` is a stored image built from
+   `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   It listens on its own port (3000) of the API Service, with the API's
+   certificate under `apiTls`, and network policy admits only the pools
+   and `e2b.ingressFrom`.
+2. **A key.** Add a team for the pools to `computeControl.keys`; its
+   sandboxes are its own. Put the key in a Secret (`COMPUTE_API_KEY`).
+3. **GitHub.** A GitHub App installed on the organization or repository,
+   with administration access to self-hosted runners (repository
+   `administration: write`, or organization `self-hosted runners: write`)
+   and, for warm templates, `contents: read`; or a token with the same
+   rights. Its private key (`app.pem`) or token (`GITHUB_TOKEN`) goes in a
+   Secret.
+4. **The pool**, an entry of `computeRunners.pools`: name, scope,
+   template, `minIdle` and `max`, the two Secrets, and optionally `warm`
+   (repository, branch, prepare command) and `cache` (bucket, its address
+   as runners reach it, a token Secret). The cache's Service must be
+   reachable from the hosts, so give it a LoadBalancer or an Ingress and
+   name that address in `cache.url`; the pods' identity
+   (`computeRunners.serviceAccount.annotations`) needs read and write on
+   the bucket.
+
+Workflows say `runs-on: <pool name>`, and with a warm template check out
+with `clean: false` so the prepared dependencies stay. A pool's log shows
+each job it takes, each runner it starts and ends, and each warm refresh.
+
 ## Hosts
 
 - **Adding hosts.** On GCP the service grows the group itself as spare
