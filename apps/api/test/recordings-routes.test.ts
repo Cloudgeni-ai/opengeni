@@ -538,6 +538,12 @@ describe("recording routes", () => {
       where id = ${scope.workspaceId}`;
     // Recorders show it before the meeting starts.
     expect((await scope.owner.call("GET", "/recording-models")).body.language).toBe("no");
+    // So does whether they start with the live transcript on.
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(false);
+    await shared.admin`
+      update workspaces set settings = jsonb_set(settings, '{recordings,liveTranscript}', 'true')
+      where id = ${scope.workspaceId}`;
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(true);
     const create = async (transcription?: { language?: string | null }) => {
       const recordingId = crypto.randomUUID();
       const created = await scope.owner.call("POST", "/recordings", {

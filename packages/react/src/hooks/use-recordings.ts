@@ -1007,6 +1007,11 @@ export function useRecordingModels(
    * the server says, or when it is too old to.
    */
   language: string | null | undefined;
+  /**
+   * Whether the workspace's recorders start with the live transcript on, or
+   * undefined until the server says, or when it is too old to.
+   */
+  liveTranscript: boolean | undefined;
   loading: boolean;
   error: Error | null;
 } {
@@ -1029,6 +1034,7 @@ export function useRecordingModels(
     defaultModel: state.data?.default ?? null,
     pinned: state.data?.pinned === true,
     language: state.data ? state.data.language : undefined,
+    liveTranscript: state.data?.liveTranscript,
     loading: state.loading,
     error: state.error,
   };

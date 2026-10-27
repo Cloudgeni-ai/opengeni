@@ -76,4 +76,16 @@ function resolveOptions(props = {}) {
   };
 }
 
-module.exports = { SWIFT_FILE, intentsSource, resolveOptions };
+/**
+ * What the plugin sets up: calls when `call` is given (and is not false) or
+ * when nothing else is asked for, so the bare plugin keeps meaning calls;
+ * recording when `recording` is true. A meetings-only app passes just
+ * `recording: true` and gets no VoIP background mode or Siri intents.
+ */
+function pluginFeatures(props = {}) {
+  const recording = props?.recording === true;
+  const call = props?.call === false ? false : props?.call !== undefined || !recording;
+  return { call, recording };
+}
+
+module.exports = { SWIFT_FILE, intentsSource, pluginFeatures, resolveOptions };
