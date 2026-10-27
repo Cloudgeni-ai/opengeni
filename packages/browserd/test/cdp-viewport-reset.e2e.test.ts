@@ -75,13 +75,28 @@ const size = async (driver: AgentBrowserDriver, targetId: string) => {
   };
 };
 
+const pause = async (ms: number) => await new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The tab's own size once its window is laid out: a headed window that has
+ * just mapped can still change size for a moment. */
+const settledSize = async (driver: AgentBrowserDriver, targetId: string) => {
+  let last = await size(driver, targetId);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await pause(250);
+    const next = await size(driver, targetId);
+    if (JSON.stringify(next) === JSON.stringify(last)) return next;
+    last = next;
+  }
+  return last;
+};
+
 e2e(
   "a resized tab is reset to the window's own size and scale, and later tabs are not emulated",
   async () => {
     await withDriver(async (driver) => {
       const first = await driver.start(page("First"));
       const id = first.target.id;
-      const own = await size(driver, id);
+      const own = await settledSize(driver, id);
       expect(own.deviceScaleFactor).toBe(DISPLAY_SCALE);
       expect(own.maxTouchPoints).toBe(0);
 
@@ -114,6 +129,77 @@ e2e(
       expect(await size(driver, during.target.id)).toMatchObject({ width: 768, height: 1024 });
       await act(driver, during.target.id, { type: "viewport_reset" });
       expect(await size(driver, during.target.id)).toEqual(own);
+    });
+  },
+  90_000,
+);
+
+// A live view of the tab samples it with clipped screenshots, which change the
+// page's emulation for each capture and then put back what they saw first.
+e2e(
+  "a viewport change and its reset take, and stay, while the tab's frames stream",
+  async () => {
+    await withDriver(async (driver) => {
+      const first = await driver.start(page("Streamed"));
+      const id = first.target.id;
+      const own = await settledSize(driver, id);
+      const frames = await driver.subscribeFrames(id);
+      const iterator = frames[Symbol.asyncIterator]();
+      try {
+        await act(driver, id, {
+          type: "viewport",
+          width: 600,
+          height: 900,
+          mobile: false,
+          deviceScaleFactor: 2,
+        });
+        await act(driver, id, {
+          type: "viewport",
+          width: 800,
+          height: 600,
+          mobile: false,
+          deviceScaleFactor: 1,
+        });
+        const set = await size(driver, id);
+        expect(set.width).toBe(800);
+        expect(Math.abs(set.height! - 600)).toBeLessThanOrEqual(1);
+        expect(set.deviceScaleFactor).toBeCloseTo(1, 5);
+        await pause(1_000);
+        expect(await size(driver, id)).toEqual(set);
+
+        await act(driver, id, {
+          type: "viewport",
+          width: 600,
+          height: 900,
+          mobile: false,
+          deviceScaleFactor: 2,
+        });
+        await act(driver, id, { type: "viewport_reset" });
+        expect(await size(driver, id)).toEqual(own);
+        await pause(1_000);
+        expect(await size(driver, id)).toEqual(own);
+        // Frames keep coming once the change is applied.
+        const frame = await Promise.race([
+          iterator.next(),
+          pause(5_000).then(() => {
+            throw new Error("no frame after the reset");
+          }),
+        ]);
+        expect(frame.done).toBe(false);
+      } finally {
+        await frames.close();
+      }
+
+      // With the stream closed, a later resize and reset are exact too.
+      await act(driver, id, {
+        type: "viewport",
+        width: 600,
+        height: 900,
+        mobile: false,
+        deviceScaleFactor: 2,
+      });
+      await act(driver, id, { type: "viewport_reset" });
+      expect(await size(driver, id)).toEqual(own);
     });
   },
   90_000,

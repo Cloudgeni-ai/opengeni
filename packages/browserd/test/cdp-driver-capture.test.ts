@@ -166,6 +166,155 @@ async function dispatchViewport(
   });
 }
 
+async function dispatchAction(
+  fixture: Awaited<ReturnType<typeof captureFixture>>,
+  action: Parameters<AgentBrowserDriver["dispatch"]>[0]["action"],
+) {
+  const observation = await fixture.driver.observe("target-1");
+  return await fixture.driver.dispatch({
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId: observation.browserSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: "target-1",
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration,
+    expectedFrameId: observation.frameId!,
+    actor: { kind: "agent", subjectId: "viewport-capture-test" },
+    action,
+    observationMode: "none",
+  });
+}
+
+// What the page reports, in CSS pixels, at the window's own size and scale and
+// under a 390x844 emulation at scale 2.
+const ownMetrics = {
+  width: 1280,
+  height: 720,
+  visualWidth: 1280,
+  visualHeight: 720,
+  deviceScaleFactor: 1,
+  maxTouchPoints: 0,
+  screenWidth: 1920,
+  screenHeight: 1080,
+  outerWidth: 1280,
+  outerHeight: 800,
+};
+const emulatedMetrics = {
+  ...ownMetrics,
+  width: 390,
+  height: 844,
+  visualWidth: 390,
+  visualHeight: 844,
+  deviceScaleFactor: 2,
+  screenWidth: 390,
+  screenHeight: 844,
+};
+
+test("a viewport change waits for a frame capture already running and starts none while it applies", async () => {
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    fixture.setViewport(ownMetrics);
+    fixture.setViewportOn("Emulation.setDeviceMetricsOverride", emulatedMetrics);
+    fixture.setViewportOn("Emulation.clearDeviceMetricsOverride", ownMetrics);
+    await fixture.driver.start();
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    for (const action of [
+      { type: "viewport", width: 390, height: 844, mobile: true, deviceScaleFactor: 2 },
+      { type: "viewport_reset" },
+    ] as const) {
+      // A clipped capture puts back the emulation it saw when it began.
+      fixture.stallNext("Page.captureScreenshot");
+      await fixture.waitUntilStalled();
+      const capture = fixture.calls.length - 1;
+      const dispatched = dispatchAction(fixture, action);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const change =
+        action.type === "viewport"
+          ? "Emulation.setDeviceMetricsOverride"
+          : "Emulation.clearDeviceMetricsOverride";
+      expect(fixture.calls.slice(capture).some((call) => call.method === change)).toBe(false);
+      fixture.replyToStalled();
+      await dispatched;
+      const applied = fixture.calls.slice(capture);
+      const sent = applied.findIndex((call) => call.method === change);
+      const measured = applied
+        .map((call) => call.method === "Runtime.evaluate" && call.params?.expression)
+        .lastIndexOf(
+          "({width:innerWidth,height:innerHeight,screenWidth:screen.width,screenHeight:screen.height,outerWidth,outerHeight,deviceScaleFactor:devicePixelRatio})",
+        );
+      expect(sent).toBeGreaterThan(0);
+      expect(measured).toBeGreaterThan(sent);
+      expect(
+        applied.slice(sent, measured).filter((call) => call.method === "Page.captureScreenshot"),
+      ).toHaveLength(0);
+    }
+    // Frames resume once the change is applied.
+    const iterator = frames[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+  } finally {
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 10_000);
+
+test("a viewport change or reset the page did not take is an unknown outcome, never a success", async () => {
+  const fixture = await captureFixture();
+  try {
+    fixture.setViewport(ownMetrics);
+    await fixture.driver.start();
+    // The page keeps its own size: the override did not take.
+    await expect(
+      dispatchAction(fixture, {
+        type: "viewport",
+        width: 390,
+        height: 844,
+        mobile: true,
+        deviceScaleFactor: 2,
+      }),
+    ).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message:
+        "The viewport change was sent, but the tab did not take that size. Observe the tab to see its size now.",
+    });
+    // It was sent once more before giving up.
+    expect(
+      fixture.calls.filter((call) => call.method === "Emulation.setDeviceMetricsOverride"),
+    ).toHaveLength(2);
+
+    fixture.setViewportOn("Emulation.setDeviceMetricsOverride", emulatedMetrics);
+    await dispatchAction(fixture, {
+      type: "viewport",
+      width: 390,
+      height: 844,
+      mobile: true,
+      deviceScaleFactor: 2,
+    });
+    // A cleared emulation that leaves the page at the emulated layout size, as
+    // Chromium does after a capture put an earlier emulation back.
+    fixture.setViewportOn("Emulation.clearDeviceMetricsOverride", {
+      ...emulatedMetrics,
+      deviceScaleFactor: 1,
+      screenWidth: 1920,
+      screenHeight: 1080,
+    });
+    await expect(dispatchAction(fixture, { type: "viewport_reset" })).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message:
+        "The viewport reset was sent, but the tab did not return to its own size and scale. Observe the tab to see its size now.",
+    });
+    expect(
+      fixture.calls.filter((call) => call.method === "Emulation.clearDeviceMetricsOverride"),
+    ).toHaveLength(2);
+
+    fixture.setViewportOn("Emulation.clearDeviceMetricsOverride", ownMetrics);
+    await dispatchAction(fixture, { type: "viewport_reset" });
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test("a capture right after a viewport change waits for the new surface instead of the old one", async () => {
   const fixture = await captureFixture();
   try {
@@ -574,6 +723,8 @@ async function captureFixture(
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
+  // What the page reports from the moment a command is sent.
+  const viewportOn = new Map<string, unknown>();
   let viewportFailure: string | null = null;
   let stalledMethod: string | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
@@ -662,6 +813,7 @@ async function captureFixture(
   socket.send = (raw) => {
     const command = JSON.parse(raw) as (typeof calls)[number];
     calls.push(command);
+    if (viewportOn.has(command.method)) viewport = viewportOn.get(command.method);
     if (command.method === stalledMethod) {
       stalledMethod = null;
       stalled = command;
@@ -711,6 +863,9 @@ async function captureFixture(
     },
     setViewport(value: unknown) {
       viewport = value;
+    },
+    setViewportOn(method: string, value: unknown) {
+      viewportOn.set(method, value);
     },
     failViewport(message = "synthetic viewport failure") {
       viewportFailure = message;
