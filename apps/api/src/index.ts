@@ -823,6 +823,8 @@ export function temporalOverlapPolicy(policy: ScheduledTaskOverlapPolicy): Sched
   if (policy === "buffer_one") {
     return ScheduleOverlapPolicy.BUFFER_ONE;
   }
+  // Steer is decided in the chat at the running turn's next model step, so
+  // every fire must reach the chat.
   return ScheduleOverlapPolicy.ALLOW_ALL;
 }
 

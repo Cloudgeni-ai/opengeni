@@ -4,7 +4,15 @@
  * progress elsewhere or transcribing say so and update on their own.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
@@ -12,6 +20,7 @@ import {
   meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   useRecordingModels,
   useRecordings,
   useRecordingsClient,
@@ -74,6 +83,7 @@ function MeetingsListPageContent({
   notice = null,
   header = true,
   recordingOff = null,
+  viewerName = null,
 }: {
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
@@ -104,6 +114,8 @@ function MeetingsListPageContent({
    * already recorded stay listed, and a recording already underway keeps its controls.
    */
   recordingOff?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null;
 }) {
   const msg = useOpenGeniText();
   const columns: RowListColumn[] = [
@@ -119,8 +131,28 @@ function MeetingsListPageContent({
     ...(externalRef ? { externalRef } : {}),
   });
   const { client } = useRecordingsClient(override);
-  const { recorder, finished } = useMeetingRecorder();
+  const {
+    recorder,
+    finished,
+    workspaceId: recorderWorkspaceId,
+    openMeeting,
+  } = useMeetingRecorder();
   const online = useOnline();
+  // A recording started in another workspace keeps going here; its meeting
+  // opens in its own workspace.
+  const openRecorded = useCallback(
+    (recordingId: string) => {
+      if (
+        recorderWorkspaceId &&
+        recorderWorkspaceId !== workspaceId &&
+        openMeeting(recordingId, recorderWorkspaceId)
+      ) {
+        return;
+      }
+      onOpen(recordingId);
+    },
+    [recorderWorkspaceId, workspaceId, openMeeting, onOpen],
+  );
   const models = useRecordingModels(override);
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   // A desktop call notification's Record waits for the live model list, so
@@ -166,12 +198,13 @@ function MeetingsListPageContent({
         {showRecorder ? (
           <RecorderPanel
             recorder={recorder}
-            onStopped={onOpen}
-            onOpenNotes={onOpen}
+            onStopped={openRecorded}
+            onOpenNotes={openRecorded}
             defaultLanguage={defaultLanguage !== undefined ? defaultLanguage : models.language}
             autoStart={autoStart}
             externalRef={externalRef}
             notice={notice}
+            viewerName={viewerName}
             liveTranscript={
               liveTranscript && liveModel
                 ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
@@ -275,7 +308,7 @@ function MeetingsListPageContent({
                   <ListRow
                     key={recording.id}
                     leading={<LogoTile icon={<AudioLinesIcon />} />}
-                    title={recording.title}
+                    title={meetingTitle(recording, msg)}
                     titleAddon={
                       recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
@@ -337,7 +370,7 @@ function MeetingsListPageContent({
                       </DropdownMenuItem>
                     }
                     menuLabel={msg("meetings.listPage.moreActionsForTitle", {
-                      title: recording.title,
+                      title: meetingTitle(recording, msg),
                     })}
                     href={meetingHref(recording.id)}
                     linkProps={{ onClick: inAppClick(() => onOpen(recording.id)) }}
@@ -365,7 +398,9 @@ function MeetingsListPageContent({
         </div>
       </div>
       <DeleteMeetingDialog
-        recording={pendingDelete}
+        recording={
+          pendingDelete && { id: pendingDelete.id, title: meetingTitle(pendingDelete, msg) }
+        }
         onClose={() => setPendingDelete(null)}
         onDelete={async (recordingId) => {
           await client.deleteRecording(workspaceId, recordingId);

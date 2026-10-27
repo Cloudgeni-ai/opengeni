@@ -1036,6 +1036,26 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
     expect(got).toEqual(["workspace", "organization"]);
     expect(admin.container.textContent).toContain("Members of this organization");
     await admin.unmount();
+
+    const member = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        allowWorkspaceScope={false}
+        onApprove={(_screenControl, scope) => got.push(scope)}
+      />,
+    );
+    await flush();
+    const workspace = member.container.querySelector(
+      '[data-enrollment-scope="workspace"] input',
+    ) as HTMLInputElement;
+    expect(workspace.disabled).toBe(true);
+    expect(member.container.textContent).toContain("workspace admin required");
+    await actRun(() => workspace.click());
+    (member.container.querySelector("[data-approve]") as HTMLButtonElement).click();
+    await flush();
+    expect(got).toEqual(["workspace", "organization", "user"]);
+    await member.unmount();
   });
 
   test("scope copy truthfully follows the selected audience", async () => {

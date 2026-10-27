@@ -3,7 +3,6 @@ import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "@opengeni/contra
 import {
   prepareKnowledgeFile,
   updateScheduledTaskForApi,
-  captureScheduledTaskRestoreState,
   syncUpdatedScheduledTask,
   type AccessGrantAuthorization,
   type SessionWorkflowClient,
@@ -204,7 +203,7 @@ describe("unified Knowledge storage", () => {
       canonicalLocalHumanSession: false,
     };
     const source = { kind: "scheduled_task" as const, id: task.id };
-    const restoreState = await captureScheduledTaskRestoreState(client.db, task);
+    const restoreState = { task };
     await expect(
       updateScheduledTaskForApi(
         client.db,

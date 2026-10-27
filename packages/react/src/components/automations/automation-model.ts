@@ -325,6 +325,8 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_authority_unavailable: "automations.run.error.accessUnavailable",
   scheduled_authority_exhausted: "automations.run.error.accessUnavailable",
   scheduled_authority_snapshot_missing: "automations.run.error.accessUnavailable",
+  scheduled_run_authority_proof_rejected: "automations.run.error.accessUnavailable",
+  scheduled_causal_membership_changed: "automations.run.error.accessUnavailable",
   connection_account_unavailable: "automations.run.error.accountUnavailable",
   scheduled_model_unavailable: "automations.run.error.modelUnavailable",
   variable_set_unavailable: "automations.run.error.variableSetUnavailable",
@@ -505,7 +507,6 @@ export function automationCreateRequest(
       schedule,
       prompt,
       targetSessionId: destination.sessionId,
-      overlapPolicy: "buffer_one",
       ...eventsForCreate(draft),
     };
   }
@@ -679,4 +680,57 @@ export function sessionAutomationWaitWords(
           ? t("automations.wait.chip.nextRun", { time })
           : sessionAutomationWaitLabel(t, kind),
   };
+}
+
+/** One thing a chat's automations wait for, for a line in a hover card. */
+export interface SessionAutomationWaitLine {
+  kind: SessionAutomationWait | "none";
+  /** "message.received from Gmail", "Next run: Tomorrow, 09:00", "Nothing upcoming". */
+  text: string;
+}
+
+/**
+ * What a chat's automations wait for, one line per event and one for the
+ * soonest run, so a hover card can list them. A chat whose automations are
+ * all paused or finished gets one "Nothing upcoming" line.
+ */
+export function sessionAutomationWaitLines(
+  t: OpenGeniText,
+  session: Pick<
+    SessionListRow,
+    "hasSchedules" | "hasUpcomingSchedules" | "waitingForEvents" | "automationWait"
+  >,
+  { now, timeZone = viewerTimeZone() }: { now: Date; timeZone?: string },
+): SessionAutomationWaitLine[] {
+  const summary = session.automationWait;
+  if (!summary) {
+    const kind = sessionAutomationWait(session);
+    return [
+      kind
+        ? { kind, text: sessionAutomationWaitLabel(t, kind) }
+        : { kind: "none", text: t("automations.wait.none") },
+    ];
+  }
+  const events = summary.events ?? (summary.event ? [summary.event] : []);
+  const lines: SessionAutomationWaitLine[] = events.map((event) => ({
+    kind: "event",
+    text: waitEventWords(t, event),
+  }));
+  if (summary.nextRunAt) {
+    lines.push({
+      kind: "schedule",
+      text: t("automations.wait.nextRun", {
+        time: formatRunTime(new Date(summary.nextRunAt), { timeZone, now, text: t }),
+      }),
+    });
+  }
+  // A server that names only the first event leaves the rest to a count.
+  const more = summary.events ? 0 : summary.automations - 1;
+  if (more > 0) {
+    lines.push({ kind: "event", text: t("automations.wait.details.more", { count: more }) });
+  }
+  if (lines.length === 0) {
+    lines.push({ kind: "schedule", text: sessionAutomationWaitLabel(t, "schedule") });
+  }
+  return lines;
 }

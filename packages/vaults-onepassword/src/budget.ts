@@ -193,6 +193,3 @@ export function createAttemptProviderBudget(
     },
   };
 }
-
-/** Budget that never refuses (human-initiated install/link/sync routes). */
-export const unlimitedProviderBudget: ProviderCallBudget = { take() {} };

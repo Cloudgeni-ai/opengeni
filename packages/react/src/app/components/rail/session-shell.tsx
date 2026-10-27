@@ -49,10 +49,7 @@ export {
   SessionShellSlotsProvider,
   type SessionShellSlots,
 } from "./rail-sections";
-import {
-  SessionComputeIndicator,
-  sessionSupportsFleetSwitching,
-} from "../session/sandbox-switcher";
+import { SessionComputeIndicator } from "../session/sandbox-switcher";
 import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
 import { subscriptionAccountProvider } from "../session/subscription-account";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
@@ -645,9 +642,7 @@ function SessionRouteHeader({
         ) : null
       }
       sandboxSlot={
-        sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
-        ) : null
+        <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
       }
       accountSlot={
         policyReady && accountProvider ? (

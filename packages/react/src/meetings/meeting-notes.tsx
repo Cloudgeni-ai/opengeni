@@ -1,19 +1,26 @@
 /**
- * A meeting's notes, above its transcript: the written-up notes (summary,
- * decisions, action items) shown as Markdown with Edit, and the notepad
- * people jot into while the meeting is recorded, which saves as they type.
+ * A meeting's notes: the written-up notes (summary, decisions, action items)
+ * shown as Markdown with Edit, and the notepad people jot into while the
+ * meeting is recorded, which saves as they type.
  *
- * While the meeting is being recorded the notepad comes first; afterwards
- * the notes do. Notes an agent wrote say so and link to its chat.
+ * The meeting page shows them as its Summary and Notepad tabs. While the
+ * meeting is being recorded here they share one Notes section, notepad
+ * first. Notes an agent wrote say so and link to its chat; mentions of
+ * speakers and people show as chips (see ./meeting-mentions).
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
-import { BotIcon, LoaderCircleIcon, PencilIcon } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type ComponentProps } from "react";
+import { BotIcon, CheckIcon, CopyIcon, LoaderCircleIcon, PencilIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { RecordingNote } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Markdown } from "../components/markdown";
-import { useRecordingNotes, type RecordingsClientOverride } from "../recordings";
+import {
+  useRecordingNotes,
+  type RecordingsClientOverride,
+  type UseRecordingNotesResult,
+} from "../recordings";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { Button } from "../ui/button";
 import { DetailSection } from "../ui/detail-sheet";
 import { TextArea } from "../ui/field";
@@ -21,6 +28,12 @@ import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { Skeleton } from "../ui/skeleton";
 import { MeetingsOverlayScope } from "./overlay-scope";
+
+import {
+  meetingMentionLinkRenderer,
+  meetingNotesForCopy,
+  type MeetingMentionResolver,
+} from "./meeting-mentions";
 
 /** How long typing pauses before the notepad saves. */
 export const NOTEPAD_SAVE_DELAY_MS = 800;
@@ -50,17 +63,31 @@ function MeetingNotesContent({
   /** Opens the chat whose agent wrote the notes. */
   onOpenChat?: ((sessionId: string) => void) | undefined;
 }) {
-  const msg = useOpenGeniText();
   const notes = useRecordingNotes(recordingId, override);
+  return <MeetingNotesSection notes={notes} capturing={capturing} onOpenChat={onOpenChat} />;
+}
+
+/** The Notes section over notes the page already loads: notepad and written notes together. */
+export function MeetingNotesSection({
+  notes,
+  capturing,
+  onOpenChat,
+  mentions,
+}: {
+  notes: UseRecordingNotesResult;
+  /** The meeting is being recorded now, so the notepad comes first. */
+  capturing: boolean;
+  onOpenChat?: ((sessionId: string) => void) | undefined;
+  /** Resolves speaker and person mentions in the written notes. */
+  mentions?: MeetingMentionResolver | null | undefined;
+}) {
+  const msg = useOpenGeniText();
   const [editing, setEditing] = useState(false);
 
   if (notes.loading && !notes.notes && !notes.notepad) {
     return (
       <DetailSection title={msg("meetings.notes.title")}>
-        <div aria-busy="true" className="grid gap-2">
-          <Skeleton className="h-4 w-2/3" />
-          <Skeleton className="h-4 w-1/2" />
-        </div>
+        <NotesSkeleton />
       </DetailSection>
     );
   }
@@ -74,12 +101,13 @@ function MeetingNotesContent({
       save={(body) => notes.save("notes", body)}
       refresh={notes.refresh}
       onOpenChat={onOpenChat}
+      mentions={mentions}
     />
   );
   const notepad = (
     <Notepad
       note={notes.notepad}
-      prominent={capturing}
+      rows={capturing ? 6 : 3}
       // Alone under the Notes heading while recording, it needs no second heading.
       labelHidden={capturing && !notes.notes}
       save={(body) => notes.save("notepad", body)}
@@ -121,6 +149,164 @@ function MeetingNotesContent({
   );
 }
 
+function NotesSkeleton() {
+  return (
+    <div aria-busy="true" className="grid gap-2">
+      <Skeleton className="h-4 w-2/3" />
+      <Skeleton className="h-4 w-1/2" />
+    </div>
+  );
+}
+
+/**
+ * The Summary tab: the written notes as Markdown, who wrote them, Copy and
+ * Edit. Mentions of speakers and people show as chips with current names.
+ */
+export function MeetingSummary({
+  notes,
+  onOpenChat,
+  mentions,
+}: {
+  notes: UseRecordingNotesResult;
+  onOpenChat?: ((sessionId: string) => void) | undefined;
+  mentions: MeetingMentionResolver | null;
+}) {
+  const msg = useOpenGeniText();
+  const [editing, setEditing] = useState(false);
+  // A reload (such as after the window was hidden) never replaces an edit.
+  if (notes.loading && !notes.notes && !editing) return <NotesSkeleton />;
+  const note = notes.notes;
+  const hasBody = Boolean(note?.body.trim());
+  return (
+    <div className="grid gap-4">
+      {note && hasBody && !editing ? (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <NotesAttribution note={note} onOpenChat={onOpenChat} />
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <CopyNotesButton
+              text={() => (mentions ? meetingNotesForCopy(note.body, mentions) : note.body)}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setEditing(true)}
+              className="pointer-coarse:h-11"
+            >
+              <PencilIcon aria-hidden="true" />
+              {msg("meetings.notes.edit")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      <WrittenNotes
+        note={note}
+        editing={editing}
+        onEdit={() => setEditing(true)}
+        onDone={() => setEditing(false)}
+        save={(body) => notes.save("notes", body)}
+        refresh={notes.refresh}
+        onOpenChat={onOpenChat}
+        mentions={mentions}
+        attribution={false}
+      />
+    </div>
+  );
+}
+
+/** The Notepad tab: what people jot down, saved as they type. */
+export function MeetingNotepad({ notes }: { notes: UseRecordingNotesResult }) {
+  if (notes.loading && !notes.notepad) return <NotesSkeleton />;
+  return (
+    <Notepad
+      note={notes.notepad}
+      rows={10}
+      labelHidden
+      save={(body) => notes.save("notepad", body)}
+    />
+  );
+}
+
+const COPIED_MS = 1600;
+
+/** Copies the notes, then says Copied for a moment. */
+function CopyNotesButton({ text }: { text: () => string }) {
+  const msg = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      onClick={() =>
+        void copyTextToClipboard(text()).then((ok) => {
+          if (!ok) {
+            toast.error(msg("meetings.notes.couldNotCopy"));
+            return;
+          }
+          setCopied(true);
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(() => setCopied(false), COPIED_MS);
+        })
+      }
+      className="pointer-coarse:h-11"
+    >
+      {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+      <span aria-live="polite">
+        {copied ? msg("meetings.notes.copied") : msg("meetings.notes.copy")}
+      </span>
+    </Button>
+  );
+}
+
+/** "Written by an agent · time · Open the chat", or "Edited · time". */
+function NotesAttribution({
+  note,
+  onOpenChat,
+}: {
+  note: RecordingNote;
+  onOpenChat?: ((sessionId: string) => void) | undefined;
+}) {
+  const msg = useOpenGeniText();
+  const sessionId = note.updatedBy.sessionId;
+  return (
+    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-4 text-fg-muted">
+      {sessionId ? (
+        <>
+          <BotIcon aria-hidden="true" className="size-3.5" />
+          <span>
+            {msg("meetings.notes.writtenByAgent", {
+              time: formatAbsoluteTime(note.updatedAt, { text: msg }),
+            })}
+          </span>
+          {onOpenChat ? (
+            <button
+              type="button"
+              onClick={() => onOpenChat(sessionId)}
+              className="font-medium text-fg-label underline-offset-2 hover:underline pointer-coarse:min-h-11"
+            >
+              {msg("meetings.notes.openChat")}
+            </button>
+          ) : null}
+        </>
+      ) : (
+        <span>
+          {msg("meetings.notes.edited", {
+            time: formatAbsoluteTime(note.updatedAt, { text: msg }),
+          })}
+        </span>
+      )}
+    </p>
+  );
+}
+
 function WrittenNotes({
   note,
   editing,
@@ -129,6 +315,8 @@ function WrittenNotes({
   save,
   refresh,
   onOpenChat,
+  mentions,
+  attribution = true,
 }: {
   note: RecordingNote | null;
   editing: boolean;
@@ -137,12 +325,20 @@ function WrittenNotes({
   save: (body: string) => Promise<RecordingNote>;
   refresh: () => Promise<void>;
   onOpenChat?: ((sessionId: string) => void) | undefined;
+  mentions?: MeetingMentionResolver | null | undefined;
+  /** Say who wrote them under the notes; the Summary tab says it in its header. */
+  attribution?: boolean;
 }) {
   const msg = useOpenGeniText();
   const [draft, setDraft] = useState(note?.body ?? "");
   const [saving, setSaving] = useState(false);
   const [changedMeanwhile, setChangedMeanwhile] = useState(false);
   const editorId = useId();
+  const renderLink = useMemo(
+    // Without a resolver, mentions read as their link text, never a dead link.
+    () => meetingMentionLinkRenderer(mentions ?? (() => null)),
+    [mentions],
+  );
 
   useEffect(() => {
     // Start each edit from the notes as they are now.
@@ -237,37 +433,12 @@ function WrittenNotes({
     );
   }
 
-  const sessionId = note.updatedBy.sessionId;
   return (
     <div className="grid gap-3">
-      <Markdown className="text-sm">{note.body}</Markdown>
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-4 text-fg-muted">
-        {sessionId ? (
-          <>
-            <BotIcon aria-hidden="true" className="size-3.5" />
-            <span>
-              {msg("meetings.notes.writtenByAgent", {
-                time: formatAbsoluteTime(note.updatedAt, { text: msg }),
-              })}
-            </span>
-            {onOpenChat ? (
-              <button
-                type="button"
-                onClick={() => onOpenChat(sessionId)}
-                className="font-medium text-fg-label underline-offset-2 hover:underline pointer-coarse:min-h-11"
-              >
-                {msg("meetings.notes.openChat")}
-              </button>
-            ) : null}
-          </>
-        ) : (
-          <span>
-            {msg("meetings.notes.edited", {
-              time: formatAbsoluteTime(note.updatedAt, { text: msg }),
-            })}
-          </span>
-        )}
-      </p>
+      <Markdown className="text-sm" renderLink={renderLink}>
+        {note.body}
+      </Markdown>
+      {attribution ? <NotesAttribution note={note} onOpenChat={onOpenChat} /> : null}
     </div>
   );
 }
@@ -276,13 +447,14 @@ type NotepadStatus = "idle" | "saving" | "saved" | "failed";
 
 function Notepad({
   note,
-  prominent,
-  labelHidden,
+  rows,
+  labelHidden = false,
   save,
 }: {
   note: RecordingNote | null;
-  prominent: boolean;
-  labelHidden: boolean;
+  rows: number;
+  /** A heading or tab above already names it. */
+  labelHidden?: boolean;
   save: (body: string) => Promise<RecordingNote>;
 }) {
   const msg = useOpenGeniText();
@@ -362,7 +534,7 @@ function Notepad({
       )}
       <TextArea
         id={id}
-        rows={prominent ? 6 : 3}
+        rows={rows}
         value={draft}
         placeholder={msg("meetings.notes.notepadPlaceholder")}
         onChange={(event) => {

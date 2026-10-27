@@ -39,7 +39,7 @@ import {
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
-import { rigProviderImageSourceImage } from "../sandbox-images";
+import { rigProviderImageSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -62,7 +62,6 @@ import {
   resolveImageGenerationReferencesForTool,
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { withSandboxStartupPhases } from "./sandbox-startup-phase";
 import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
@@ -278,12 +277,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           "Sandbox image reference is unavailable",
         );
         const relativePath = path.slice("/workspace/".length);
-        const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
         const channel = new SandboxChannelAService({
           session: imageReferenceSandbox.session,
           workspaceRoot: "/workspace",
           leaseEpoch: imageReferenceSandbox.leaseEpoch,
-          ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
         });
         const read = await channel.fsRead({
           path: relativePath,
@@ -585,7 +582,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           if (referenceSandbox && !fence) {
             throw new Error("Video reference command fence is unavailable");
           }
-          const runAs = sandboxRunAs(eventing.modelRunSettings);
           let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
           try {
             accepted = await admitVideoGenerationRequest({
@@ -608,7 +604,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                         referenceSandbox.session as TurnSandboxCommandSession,
                         {
                           ...command,
-                          ...(runAs ? { runAs } : {}),
                         },
                       ),
                   }

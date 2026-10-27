@@ -368,8 +368,12 @@ export function buildGitHubAppManifest(input: {
   public: boolean;
   includeCiPermissions: boolean;
   setupUrl?: string;
+  /** Public address GitHub sends webhooks to when it differs from baseUrl
+   * (OPENGENI_WEBHOOK_BASE_URL, for a console that isn't public). */
+  webhookBaseUrl?: string | undefined;
 }): Record<string, unknown> {
   const base = input.baseUrl.replace(/\/+$/, "");
+  const webhookBase = (input.webhookBaseUrl?.trim() || base).replace(/\/+$/, "");
   const permissions: Record<string, string> = {
     metadata: "read",
     contents: "write",
@@ -409,8 +413,8 @@ export function buildGitHubAppManifest(input: {
   };
   // GitHub must be able to reach the receiver, so only a public https
   // deployment gets a webhook; others can add one later in the App settings.
-  if (githubCanDeliverTo(base)) {
-    manifest.hook_attributes = { url: `${base}/v1/webhooks/github`, active: true };
+  if (githubCanDeliverTo(webhookBase)) {
+    manifest.hook_attributes = { url: `${webhookBase}/v1/webhooks/github`, active: true };
     manifest.default_events = events;
   }
   if (input.setupUrl) {

@@ -230,8 +230,10 @@ describe("compiled CSS contract", () => {
     // excludes non-class sources; real UI growth raises this deliberately (the
     // web app's UI primitives moved into src/ui: ~404 KB; the session app in
     // src/app with its token bridge: ~475 KB; the plain connect, This computer
-    // and capability-card stylesheets its components import: ~573 KB).
-    expect(Buffer.byteLength(compiled)).toBeLessThan(600_000);
+    // and capability-card stylesheets its components import: ~573 KB; ordinary
+    // feature growth since then, with main within a few hundred bytes of the
+    // old limit so any styled fix tripped it: ~600 KB).
+    expect(Buffer.byteLength(compiled)).toBeLessThan(680_000);
   });
 
   test("never treats a root named inside :not() as scoping a host-page rule", () => {

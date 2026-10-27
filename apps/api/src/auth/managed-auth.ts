@@ -107,6 +107,16 @@ export function managedAuthUserCreateAdmission(
   // setup does not create users through Better Auth, so it is unaffected.
   if (settings.managedAuthNewSignupsEnabled === false) return false;
   if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
+  // `.invalid` addresses (RFC 2606) reach no one. Only passkey sign-up stores
+  // one, as the placeholder of an account without an email address; an
+  // account created any other way with such an address would pass for one.
+  if (
+    providerId !== "passkey" &&
+    typeof user.email === "string" &&
+    user.email.trim().toLowerCase().endsWith(".invalid")
+  ) {
+    return false;
+  }
   if (
     (settings.environment !== "local" || managedAuthRequiresEmailVerification(settings)) &&
     providerId !== "credential" &&
@@ -788,6 +798,9 @@ export async function sendManagedAuthEmail(
   transport: ManagedEmailTransport,
   input: Omit<ManagedEmailMessage, "from">,
 ): Promise<void> {
+  // Reserved `.invalid` addresses (RFC 2606), such as the placeholder of an
+  // account created with only a passkey, can never receive mail.
+  if (input.to.toLowerCase().endsWith(".invalid")) return;
   const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
 }

@@ -593,8 +593,6 @@ export const catalogOAuthProfileSchema = z
   })
   .strict();
 
-export type CatalogOAuthProfile = z.infer<typeof catalogOAuthProfileSchema>;
-
 function originOf(value: string): string {
   return new URL(value).origin;
 }

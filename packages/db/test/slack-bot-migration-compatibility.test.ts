@@ -256,6 +256,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the connected-command re-arm (0984).
       "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
+      // Nor the queued-turn hold summary (0988).
+      "runtime definer summarize_queued_turns_by_hold() is missing or ambiguous",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -339,6 +341,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime role lacks EXECUTE on private routine set_promotion_decision(uuid, text, text, text, jsonb, text, bigint)",
       "runtime role lacks EXECUTE on private routine set_promotion_detector_mode(text, text)",
       "runtime role lacks EXECUTE on private routine set_promotion_enforcement(boolean, text, text, boolean)",
+      "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
       "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
     ]);
   } finally {

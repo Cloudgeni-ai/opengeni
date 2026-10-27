@@ -3,7 +3,7 @@
 // renderers decide identically what a turn shows (preparing, working, waiting, worked).
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
-import type { ActivityItem, TimelineGroup, ToolCallItem } from "./types";
+import type { ActivityItem, TimelineGroup } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
@@ -200,8 +200,4 @@ export function rollingActivityItem(
       work.findIndex((entry) => entry.id === item.id),
     ),
   };
-}
-
-export function isToolCall(item: ActivityItem): item is ToolCallItem {
-  return item.kind === "tool-call";
 }

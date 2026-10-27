@@ -7,7 +7,7 @@ import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
-import { CdpTransportError } from "../src/cdp";
+import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 
 class DetachmentBridge implements AttachedBrowserBridgeTransport {
@@ -228,6 +228,101 @@ test("reattaches only the disconnected tab and invalidates its old causal fences
     connection.close();
   }
 });
+
+for (const after of ["a lost and refused reattach", "an unresponsive tab"] as const)
+  test(`an activation followed by ${after} is an unknown outcome, not a failure`, async () => {
+    // The tab really was brought to the front before the failure, so the
+    // action may have taken effect.
+    class RefusingBridge extends DetachmentBridge {
+      refuse = false;
+      override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "debugger.attach" && this.refuse) {
+          this.commands.push(payload);
+          throw new AttachedBrowserBridgeError(
+            "driver_rejected",
+            "Another debugger is already attached to the tab with id: 7.",
+            false,
+          );
+        }
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new RefusingBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    let activated = false;
+    let timedOut = false;
+    const wrapped: BrowserCdpConnection = {
+      on: connection.on.bind(connection),
+      waitForEvent: connection.waitForEvent.bind(connection),
+      close: connection.close.bind(connection),
+      async send<T>(
+        method: string,
+        params: Readonly<Record<string, unknown>> = {},
+        options: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+      ) {
+        if (after === "an unresponsive tab" && activated && options.sessionId) {
+          timedOut = true;
+          throw new CdpCommandTimeoutError(method, options.sessionId);
+        }
+        const reply = await connection.send<T>(method, params, options);
+        if (method === "Target.activateTarget") {
+          activated = true;
+          if (after === "a lost and refused reattach") {
+            bridge.refuse = true;
+            bridge.detach("7", "target_closed");
+            await drainDetach(bridge);
+          }
+        }
+        return reply;
+      },
+    };
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `fixture-${randomUUID()}`;
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      engine: "chrome",
+      focusEmulation: false,
+      runner: {
+        async run<T>() {
+          return { cdpUrl: "opengeni-attached://local" } as T;
+        },
+      },
+      connect: async () => wrapped,
+    });
+    await driver.start();
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const observation = await controller.observe("7");
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: { type: "activate" },
+      });
+      expect(after === "a lost and refused reattach" ? bridge.refuse : timedOut).toBe(true);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error?.code).toBe(
+        after === "a lost and refused reattach" ? "resource_unavailable" : "tab_not_responding",
+      );
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
 
 function barrier() {
   let entered!: () => void;

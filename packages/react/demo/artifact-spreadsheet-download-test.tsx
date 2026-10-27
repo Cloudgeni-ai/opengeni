@@ -1,6 +1,6 @@
 import { OpenGeniClient } from "@opengeni/sdk/artifacts";
 import type { OpenedEditableArtifact } from "@opengeni/react/artifacts";
-import { downloadSpreadsheet } from "../../../apps/web/src/lib/editable-spreadsheet-download";
+import { downloadEditableArtifact as downloadSpreadsheet } from "../../../apps/web/src/lib/editable-artifact-download";
 import { mountSpreadsheetUxFixture } from "./artifact-spreadsheet-ux-fixture";
 import "./styles.css";
 

@@ -245,10 +245,6 @@ export function itemKindForRecordType(type: string | undefined): {
   return { type: "note", category: type ? vaultItemCategoryToken(type) : null };
 }
 
-export function itemTypeForRecordType(type: string | undefined): VaultItemType {
-  return itemKindForRecordType(type).type;
-}
-
 /**
  * The record type an item is created as, and the `opengeni.type` marker it
  * needs when that record type does not already say its type and category.

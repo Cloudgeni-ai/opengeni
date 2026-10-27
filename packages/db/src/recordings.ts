@@ -1,5 +1,6 @@
 import {
   defaultRecordingSpeakerName,
+  recordingMicrophoneIsOwner,
   type Recording,
   type RecordingDiarization,
   type RecordingPerson,
@@ -315,6 +316,12 @@ export type CreateRecordingInput = RecordingActor & {
     mimeType: string;
   }>;
   transcription?: RecordingTranscriptionOptions | undefined;
+  /**
+   * The owner's name. With computer or tab audio beside the microphone, the
+   * microphone is the owner, so they are added to the speaker directory (if
+   * not there yet) for everyone following the live preview to see who it is.
+   */
+  ownerName?: string | null | undefined;
 };
 
 /** Create a recording in `capturing`. Creating the same id again returns it unchanged. */
@@ -360,6 +367,15 @@ export async function createRecording(
         startedAt: startedAt.toISOString(),
         trackCount: input.tracks.length,
       });
+      if (recordingMicrophoneIsOwner(input.tracks)) {
+        await memberPersonId(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          memberSubjectId: input.subjectId,
+          displayName: input.ownerName,
+        });
+      }
     }
     const [row] = await tx
       .select()
@@ -1694,6 +1710,12 @@ export type RecordingTranscriptionJob = {
   processingOwner: string;
   /** How long the version waited before its first attempt; null on later attempts. */
   queuedMilliseconds: number | null;
+  /**
+   * Which attempt at this version this claim is, from 1. It counts every
+   * claim, also those of a workflow started again, so each attempt can ask
+   * the provider afresh under its own request identity.
+   */
+  attempt: number;
 };
 
 /**
@@ -1767,6 +1789,7 @@ export async function claimRecordingTranscriptVersion(
         claimed.attemptCount === 1 && claimed.processingStartedAt
           ? Math.max(0, claimed.processingStartedAt.getTime() - claimed.createdAt.getTime())
           : null,
+      attempt: claimed.attemptCount,
     };
   });
 }
@@ -1805,6 +1828,65 @@ export type CompletedRecordingSegment = {
 /** Labels that name a whole track ("track-0") mean the same speaker in every version. */
 export function isTrackSpeakerLabel(label: string): boolean {
   return /^track-[0-7]$/u.test(label);
+}
+
+/**
+ * A whole track's speaker that the capture itself identifies. With
+ * `memberSubjectId` it is that workspace member's person in the directory,
+ * added under `displayName` when they have none yet (as "It's me" does).
+ */
+export type TrackSpeaker = {
+  label: string;
+  displayName?: string | null | undefined;
+  personId?: string | null | undefined;
+  memberSubjectId?: string | null | undefined;
+};
+
+/**
+ * A member's person in the speaker directory, added when they have none and
+ * a name is known. Adding one gives no agreement to remember their voice.
+ */
+async function memberPersonId(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    memberSubjectId: string;
+    displayName?: string | null | undefined;
+  },
+): Promise<string | null> {
+  const existing = async () =>
+    (
+      await tx
+        .select({ id: schema.recordingPeople.id })
+        .from(schema.recordingPeople)
+        .where(
+          and(
+            eq(schema.recordingPeople.workspaceId, input.workspaceId),
+            eq(schema.recordingPeople.memberSubjectId, input.memberSubjectId),
+          ),
+        )
+        .limit(1)
+    )[0]?.id ?? null;
+  const found = await existing();
+  const displayName = Array.from(input.displayName?.trim() ?? "")
+    .slice(0, 200)
+    .join("")
+    .trim();
+  if (found || !displayName) return found;
+  await tx
+    .insert(schema.recordingPeople)
+    .values({
+      id: crypto.randomUUID(),
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      displayName,
+      memberSubjectId: input.memberSubjectId,
+      createdBySubjectId: input.subjectId,
+    })
+    .onConflictDoNothing();
+  return await existing();
 }
 
 type TimedLabel = {
@@ -1928,7 +2010,7 @@ export async function completeRecordingTranscriptVersion(
     audioMilliseconds: number;
     segments: readonly CompletedRecordingSegment[];
     /** Speakers the capture itself identifies, such as the microphone's owner. */
-    trackSpeakers?: ReadonlyArray<{ label: string; displayName: string; personId?: string | null }>;
+    trackSpeakers?: ReadonlyArray<TrackSpeaker>;
     /**
      * Diarized speakers' voices, passed only while the workspace recognizes
      * voices. They are kept with the version and matched against the
@@ -2026,31 +2108,57 @@ export async function completeRecordingTranscriptVersion(
       ordered.map((segment) => segment.speakerLabel).filter((label): label is string => !!label),
     );
     const assignments = new Map<string, typeof schema.recordingSpeakerAssignments.$inferInsert>();
+    const carried = previous
+      ? await tx
+          .select()
+          .from(schema.recordingSpeakerAssignments)
+          .where(eq(schema.recordingSpeakerAssignments.versionId, previous.id))
+      : [];
+    // A name a person gave a whole track wins over who the capture says it is.
+    const namedByPeople = new Set(
+      carried
+        .filter(
+          (assignment) => assignment.source === "confirmed" || assignment.source === "carried_over",
+        )
+        .map((assignment) => assignment.speakerLabel),
+    );
     for (const speaker of input.trackSpeakers ?? []) {
-      if (!labels.has(speaker.label)) continue;
+      if (!labels.has(speaker.label) || namedByPeople.has(speaker.label)) continue;
+      const personId = speaker.memberSubjectId
+        ? await memberPersonId(tx, {
+            accountId: recording.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            memberSubjectId: speaker.memberSubjectId,
+            displayName: speaker.displayName,
+          })
+        : (speaker.personId ?? null);
+      const displayName = personId ? null : speaker.displayName?.trim() || null;
+      if (!personId && !displayName) continue;
       assignments.set(speaker.label, {
         accountId: recording.accountId,
         workspaceId: input.workspaceId,
         recordingId: recording.id,
         versionId: version.id,
         speakerLabel: speaker.label,
-        personId: speaker.personId ?? null,
-        displayName: speaker.displayName,
+        personId,
+        displayName,
         source: "track",
       });
     }
     if (previous) {
-      const carried = await tx
-        .select()
-        .from(schema.recordingSpeakerAssignments)
-        .where(eq(schema.recordingSpeakerAssignments.versionId, previous.id));
       const byPreviousLabel = new Map(
         carried.map((assignment) => [assignment.speakerLabel, assignment]),
       );
       for (const assignment of carried) {
         if (!isTrackSpeakerLabel(assignment.speakerLabel)) continue;
         if (!labels.has(assignment.speakerLabel)) continue;
-        if (assignment.source !== "confirmed" && assignments.has(assignment.speakerLabel)) continue;
+        if (
+          !namedByPeople.has(assignment.speakerLabel) &&
+          assignments.has(assignment.speakerLabel)
+        ) {
+          continue;
+        }
         assignments.set(assignment.speakerLabel, {
           accountId: recording.accountId,
           workspaceId: input.workspaceId,

@@ -16,8 +16,10 @@ import {
   type ComponentProps,
 } from "react";
 import {
+  ChevronDownIcon,
   CircleIcon,
   InfoIcon,
+  LanguagesIcon,
   MicIcon,
   NotebookPenIcon,
   PauseIcon,
@@ -28,13 +30,23 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuNote,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { Checkbox } from "../ui/field";
 import { Input } from "../ui/input";
 import { Notice } from "../ui/notice";
-import { NativeSelect } from "../ui/select-menu";
 import { cn } from "../app/lib/utils";
 
-import { defaultMeetingTitle, formatClock } from "../recordings";
+import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -51,8 +63,7 @@ export function recorderErrorText(
   msg: OpenGeniText = defaultText,
 ): { title: string; body: string } {
   if (systemAudioKind === "desktop" && error.code === "system_audio_unavailable") {
-    // The desktop app's own sentence says what to do on this computer.
-    return { title: msg("meetings.recorderPanel.canTRecordComputerAudio"), body: error.message };
+    return desktopSystemAudioErrorText(error.reason, msg);
   }
   switch (error.code) {
     case "microphone_denied":
@@ -92,6 +103,27 @@ export function recorderErrorText(
       };
     default:
       return { title: msg("meetings.recorderPanel.recordingStopped"), body: error.message };
+  }
+}
+
+/** Why the desktop app couldn't record computer audio, and what to do on this computer. */
+function desktopSystemAudioErrorText(
+  reason: RecorderError["reason"],
+  msg: OpenGeniText,
+): { title: string; body: string } {
+  const title = msg("meetings.recorderPanel.canTRecordComputerAudio");
+  switch (reason) {
+    case "permission_denied":
+      return {
+        title: msg("meetings.recorderPanel.computerAudioIsnTAllowed"),
+        body: msg("meetings.recorderPanel.allowThisAppToRecordComputerAudio"),
+      };
+    case "sound_server_unavailable":
+      return { title, body: msg("meetings.recorderPanel.noSoundServerIsRunning") };
+    case "unavailable":
+      return { title, body: msg("meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio") };
+    default:
+      return { title, body: msg("meetings.recorderPanel.computerAudioDidnTStart") };
   }
 }
 
@@ -218,12 +250,13 @@ function LevelMeter({
     return () => cancelAnimationFrame(frame);
   }, [levels, trackNumber, paused]);
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="w-24 shrink-0 truncate text-xs leading-4 text-fg-muted">{label}</span>
-      <span
-        aria-hidden="true"
-        className="relative h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2"
-      >
+    // Label and bar are cells of the parent grid, so every label fits its
+    // column and the bars line up.
+    <div className="contents">
+      <span className="min-w-0 max-w-44 truncate text-xs leading-4 text-fg-muted" title={label}>
+        {label}
+      </span>
+      <span aria-hidden="true" className="relative h-1.5 overflow-hidden rounded-full bg-surface-2">
         <span
           ref={barRef}
           className="absolute inset-0 origin-left rounded-full bg-status-idle transition-transform duration-75 motion-reduce:transition-none"
@@ -247,14 +280,26 @@ function trackLabel(
   return msg("meetings.recorderPanel.audio");
 }
 
-/** Who a track's live text is from, named like its level meter. */
+/**
+ * Who a track's live text is from. Beside computer or tab audio the
+ * microphone is the person recording (`ownerName`, else "You") and the other
+ * track is "Others". A microphone alone may pick up a whole room, so it is
+ * named like its level meter.
+ */
 export function liveSpeakerName(
   recorder: Pick<MeetingRecorder, "tracks" | "systemAudioKind">,
   trackNumber: number,
   msg: OpenGeniText = defaultText,
+  ownerName?: string | null,
 ): string {
+  const owned = ownerLiveLaneName(
+    recorder.tracks,
+    trackNumber,
+    ownerName?.trim() || msg("meetings.liveTranscript.you"),
+    msg,
+  );
+  if (owned) return owned;
   const source = recorder.tracks.find((track) => track.trackNumber === trackNumber)?.source;
-  // The level meters' names: a microphone may pick up a whole room, so not "You".
   return trackLabel(source ?? "", recorder.systemAudioKind, msg);
 }
 
@@ -376,7 +421,13 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
   );
 }
 
-function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
+function RecorderLiveTranscript({
+  recorder,
+  viewerName,
+}: {
+  recorder: MeetingRecorder;
+  viewerName: string | null;
+}) {
   const msg = useOpenGeniText();
   const live = recorder.live;
   const lines = useMemo(() => recorderLiveLines({ live: live ?? null }), [live]);
@@ -399,7 +450,7 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
       className="mt-4 border-t border-border pt-4"
       lines={lines}
       partials={live.map((track) => ({ trackNumber: track.trackNumber, text: track.partial }))}
-      speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+      speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, viewerName)}
       status={status}
       empty={
         recorder.state === "paused"
@@ -541,6 +592,7 @@ function RecorderPanelContent({
   autoStart = null,
   externalRef = null,
   notice = null,
+  viewerName = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
@@ -566,11 +618,12 @@ function RecorderPanelContent({
   externalRef?: string | null | undefined;
   /** A short line shown before every start, such as a reminder to tell the people present. */
   notice?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null | undefined;
 }) {
   const msg = useOpenGeniText();
   const titleId = useId();
   const tabAudioId = useId();
-  const liveId = useId();
   const [title, setTitle] = useState("");
   const [languageChoice, setLanguage] = useState<string | null>(null);
   const language = languageChoice ?? defaultLanguage ?? DETECT_LANGUAGE;
@@ -633,7 +686,7 @@ function RecorderPanelContent({
         <RecordingTitle recorder={recorder} />
         <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
           <RecordingClock recorder={recorder} stalled={stalled} />
-          <div className="grid min-w-48 flex-1 gap-2">
+          <div className="grid min-w-48 flex-1 grid-cols-[minmax(0,max-content)_minmax(4rem,1fr)] items-center gap-x-3 gap-y-2">
             {recorder.tracks.map((track) => (
               <LevelMeter
                 key={track.trackNumber}
@@ -670,7 +723,7 @@ function RecorderPanelContent({
             {line}
           </p>
         ) : null}
-        <RecorderLiveTranscript recorder={recorder} />
+        <RecorderLiveTranscript recorder={recorder} viewerName={viewerName} />
       </section>
     );
   }
@@ -729,34 +782,20 @@ function RecorderPanelContent({
               : msg("meetings.recorderPanel.includeATabSAudio")}
           </label>
         ) : null}
-        {liveTranscript ? (
-          <label
-            htmlFor={liveId}
-            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11 max-sm:self-start"
-            title={msg("meetings.recorderPanel.showsWhatSSaidAs")}
-          >
-            <Checkbox
-              id={liveId}
-              checked={liveOn}
-              disabled={starting}
-              onCheckedChange={setLiveChoice}
-            />
-            {msg("meetings.recorderPanel.liveTranscript")}
-          </label>
-        ) : null}
-        <div className="w-40 shrink-0 max-sm:w-full">
-          <NativeSelect
-            aria-label={msg("meetings.recorderPanel.meetingLanguage")}
-            options={meetingLanguageOptions(
-              language,
-              msg("meetings.recorderPanel.detectLanguage"),
-              msg,
-            )}
-            value={language}
-            onValueChange={setLanguage}
-            disabled={starting}
-          />
-        </div>
+        <RecorderOptions
+          language={language}
+          onLanguageChange={setLanguage}
+          live={
+            liveTranscript
+              ? {
+                  on: liveOn,
+                  usdPerHour: liveTranscript.usdPerHour ?? null,
+                  onChange: setLiveChoice,
+                }
+              : null
+          }
+          disabled={starting}
+        />
         <Button
           type="submit"
           disabled={!recorder || starting}
@@ -780,17 +819,91 @@ function RecorderPanelContent({
       {notice ? <p className="px-1 text-sm leading-5 text-fg-label">{notice}</p> : null}
       <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
         {startHint}
-        {liveOn && !starting ? ` ${liveCostHint(liveTranscript?.usdPerHour ?? null, msg)}` : null}
       </p>
     </section>
   );
 }
 
-/** The live preview is billed on top of the transcript, so say so where it's switched on. */
+/**
+ * The meeting's language and the live transcript: set once in Meetings
+ * settings, so they wait in one small menu beside Start instead of crowding it.
+ */
+export function RecorderOptions({
+  language,
+  onLanguageChange,
+  live,
+  disabled,
+  defaultOpen = false,
+}: {
+  language: string;
+  onLanguageChange: (language: string) => void;
+  live: { on: boolean; usdPerHour: number | null; onChange: (on: boolean) => void } | null;
+  disabled: boolean;
+  /** Tests open it without a pointer. */
+  defaultOpen?: boolean;
+}) {
+  const msg = useOpenGeniText();
+  const options = meetingLanguageOptions(
+    language,
+    msg("meetings.recorderPanel.detectLanguage"),
+    msg,
+  );
+  const current = options.find((option) => option.value === language)?.label ?? language;
+  return (
+    <DropdownMenu defaultOpen={defaultOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={disabled}
+          aria-label={msg("meetings.recorderPanel.recordingOptionsLanguage", { language: current })}
+          className="shrink-0 rounded-[10px] text-fg-label pointer-coarse:h-11 max-sm:-ml-3 max-sm:self-start"
+        >
+          <LanguagesIcon aria-hidden="true" />
+          {current}
+          <ChevronDownIcon aria-hidden="true" className="text-fg-subtle" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        {/* The live transcript first, so it never hides below the languages. */}
+        {live ? (
+          <>
+            <DropdownMenuCheckboxItem
+              checked={live.on}
+              onCheckedChange={(checked) => live.onChange(checked === true)}
+              onSelect={(event) => event.preventDefault()}
+            >
+              {msg("meetings.recorderPanel.liveTranscript")}
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuNote>
+              {[msg("meetings.recorderPanel.showsWhatSSaidAs"), liveCostHint(live.usdPerHour, msg)]
+                .filter(Boolean)
+                .join(" ")}
+            </DropdownMenuNote>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        <DropdownMenuLabel>{msg("meetings.recorderPanel.meetingLanguage")}</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={language} onValueChange={onLanguageChange}>
+          {options.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * What the live preview adds to the bill, where it's switched on; empty when
+ * this workspace isn't charged by the hour for it.
+ */
 export function liveCostHint(usdPerHour: number | null, msg: OpenGeniText = defaultText): string {
   return usdPerHour !== null
     ? msg("meetings.recorderPanel.theLiveTranscriptAddsAbout", { value: usdPerHour.toFixed(2) })
-    : msg("meetings.recorderPanel.theLiveTranscriptUsesExtra");
+    : "";
 }
 
 function recorderHint(

@@ -3,6 +3,7 @@ import {
   createRecordingTranscriptionProviderRegistry,
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
   type RecordingDiarizer,
   type RecordingWordAligner,
   type RecordingTranscriptionProvider,
@@ -19,10 +20,12 @@ import {
   finalizeRecording,
   getRecording,
   getRecordingTranscriptPage,
+  listRecordingPeople,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
   reserveRecordingChunks,
+  setRecordingTrackPrepared,
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
@@ -105,6 +108,7 @@ async function capturedRecording(
     model: "scribe_v2",
     options: { language: "en" },
   },
+  sources: ReadonlyArray<"microphone" | "system"> = ["microphone", "system"],
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -116,6 +120,7 @@ async function capturedRecording(
     workspaceExternalId: suffix,
     workspaceName: "Recording activities",
     subjectId: `subject-${suffix}`,
+    subjectLabel: "Ingrid Solberg",
   });
   const grant = access.workspaceGrants[0]!;
   const actor = { workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
@@ -126,12 +131,13 @@ async function capturedRecording(
     recordingId,
     title: "Planning",
     visibility: "private",
-    tracks: [
-      { trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" },
-      { trackNumber: 1, source: "system", mimeType: "audio/webm;codecs=opus" },
-    ],
+    tracks: sources.map((source, trackNumber) => ({
+      trackNumber,
+      source,
+      mimeType: "audio/webm;codecs=opus",
+    })),
   });
-  for (const trackNumber of [0, 1]) {
+  for (const trackNumber of sources.keys()) {
     const audio = opusWebm(2, trackNumber === 0 ? 440 : 660);
     const half = Math.ceil(audio.length / 2);
     const parts = [audio.slice(0, half), audio.slice(half)];
@@ -166,10 +172,7 @@ async function capturedRecording(
     ...actor,
     recordingId,
     versionId,
-    tracks: [
-      { trackNumber: 0, chunkCount: 2 },
-      { trackNumber: 1, chunkCount: 2 },
-    ],
+    tracks: sources.map((_, trackNumber) => ({ trackNumber, chunkCount: 2 })),
     transcription,
   });
   return {
@@ -271,8 +274,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.webm`,
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.webm`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.timeline.webm`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.timeline.webm`,
     ]);
     const stored = await getRecording(client.db, {
       ...recording.actor,
@@ -290,6 +293,51 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["track-0", "Hello team."],
       ["speaker_0", "Hi"],
       ["speaker_1", "Yes"],
+    ]);
+    // Beside the computer audio, the microphone is the person recording.
+    const [me] = await listRecordingPeople(client.db, recording.actor);
+    expect(me).toMatchObject({
+      displayName: "Ingrid Solberg",
+      memberSubjectId: recording.actor.subjectId,
+      voice: null,
+    });
+    expect(page.speakers.find((speaker) => speaker.label === "track-0")).toMatchObject({
+      name: "Ingrid Solberg",
+      personId: me!.id,
+      source: "track",
+    });
+
+    // A file prepared under the old name (before tracks kept their timeline)
+    // is built again, and the old file is removed.
+    const prefix = `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/`;
+    const current = storage.objects.get(`${prefix}track-1.timeline.webm`)!;
+    storage.objects.delete(`${prefix}track-1.timeline.webm`);
+    storage.objects.set(`${prefix}track-1.webm`, current);
+    await setRecordingTrackPrepared(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      trackNumber: 1,
+      objectKey: `${prefix}track-1.webm`,
+      bytes: current.bytes.byteLength,
+      durationMilliseconds: 2_000,
+    });
+    const rebuilt = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: rebuilt,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    expect(
+      await run.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: rebuilt,
+        processingOwner: rebuilt,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect([...storage.objects.keys()].filter((key) => key.startsWith(prefix)).sort()).toEqual([
+      `${prefix}track-0.timeline.webm`,
+      `${prefix}track-1.timeline.webm`,
     ]);
 
     // A re-run reuses the prepared audio rather than rebuilding it.
@@ -310,7 +358,45 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         processingOwner: second,
       }),
     ).toEqual({ outcome: "complete" });
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(6);
+  });
+
+  test("a microphone alone may be a whole room, so its speakers are told apart and nobody is assumed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, undefined, ["microphone"]);
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: true,
+      words: [
+        {
+          text: "Hi",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: "a",
+          spaceBefore: false,
+        },
+        {
+          text: "Yes",
+          startMilliseconds: 900,
+          endMilliseconds: 1_200,
+          speaker: "b",
+          spaceBefore: true,
+        },
+      ],
+    }));
+    const { activities: run } = activities(storage, provider);
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(page.speakers.map((speaker) => [speaker.label, speaker.name, speaker.source])).toEqual([
+      ["speaker_0", "Speaker 1", null],
+      ["speaker_1", "Speaker 2", null],
+    ]);
+    expect(await listRecordingPeople(client.db, recording.actor)).toEqual([]);
   });
 
   test("our diarizer names the speakers when asked, and the model's stay if it fails", async () => {
@@ -461,6 +547,50 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       recordingId: recording.input.recordingId,
     });
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
+  });
+
+  test("a retry asks the provider afresh, under a request identity no attempt used", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    // Like a subscription provider: one request identity is sent at most once.
+    const sent = new Set<string>();
+    let lost = true;
+    const provider = fakeProvider(async (request) => {
+      const identity = request.scope!.requestId;
+      if (sent.has(identity)) {
+        throw new RecordingTranscriptionError("already sent", "network", true);
+      }
+      sent.add(identity);
+      // The first attempt's worker goes away mid-meeting.
+      if (lost) throw new RecordingTranscriptionError("lost", "network", true);
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 2_000,
+        diarized: false,
+        words: [
+          {
+            text: "Again.",
+            startMilliseconds: 100,
+            endMilliseconds: 400,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    await expect(
+      activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
+    ).rejects.toMatchObject({ type: "provider_network" });
+    lost = false;
+    expect(
+      await activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "complete" });
+    expect([...sent]).toEqual([
+      `${recording.input.versionId}:a1:0`,
+      `${recording.input.versionId}:a2:0`,
+      `${recording.input.versionId}:a2:1`,
+    ]);
   });
 
   test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
@@ -760,6 +890,42 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     ).rejects.toThrow();
     // Already gone is done.
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a retried dictation asks afresh and is still billed once per piece", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const calls: TranscriptionRequest[] = [];
+    let lost = true;
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      if (lost) {
+        throw new TranscriptionServiceError({ code: "network", message: "lost", retryable: true });
+      }
+      return {
+        text: "Again.",
+        languages: ["en"],
+        providerId: "voice-one",
+        audioSeconds: 3,
+        latencyMs: 5,
+        creditCostMicros: 1_200,
+      };
+    });
+    await expect(run.transcribeRecordingVersion(dictation.input)).rejects.toMatchObject({
+      type: "voice_network",
+    });
+    lost = false;
+    expect(await run.transcribeRecordingVersion(dictation.input)).toMatchObject({
+      outcome: "complete",
+    });
+    expect(calls.map((call) => call.requestId)).toEqual([
+      `${dictation.input.versionId}:a1:0`,
+      `${dictation.input.versionId}:a2:0`,
+    ]);
+    expect(new Set(calls.map((call) => call.billing!.sourceId))).toEqual(
+      new Set([`${dictation.input.recordingId}:${dictation.input.versionId}:0`]),
+    );
   });
 
   test("a credit refusal fails the dictation without retrying", async () => {

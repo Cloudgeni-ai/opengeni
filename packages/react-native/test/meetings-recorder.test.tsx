@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { useEffect, useState, type ReactNode } from "react";
+import { act, useEffect, useMemo, useState, type ReactNode } from "react";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
 
 registerDom();
@@ -8,6 +8,7 @@ registerDom();
 // how the provider holds a recorder, not about recording.
 const started: string[] = [];
 const stopped: string[] = [];
+const setStates = new Map<string, (state: string) => void>();
 mock.module("../src/recordings", () => ({
   useNativeRecorderPlatform: (options: { storeScope?: string }) => ({
     scope: options.storeScope ?? "",
@@ -16,8 +17,10 @@ mock.module("../src/recordings", () => ({
 mock.module("@opengeni/react/recordings", () => ({
   useRecorder: (options: { workspaceId?: string; platform: { scope: string } }) => {
     const id = `${options.platform.scope}/${options.workspaceId ?? ""}`;
-    const [recorder] = useState(() => ({ state: "idle", recordingId: null, id }));
+    const [state, setState] = useState("idle");
+    const recorder = useMemo(() => ({ state, recordingId: null, id }), [state, id]);
     useEffect(() => {
+      setStates.set(id, setState);
       started.push(id);
       return () => void stopped.push(id);
     }, [id]);
@@ -69,6 +72,32 @@ describe("MeetingRecorderProvider", () => {
     expect(seen.at(-1)).toBeNull();
     await rendered.rerender(tree({ storeScope: "a", workspaceId: "w1" }));
     expect(seen.at(-1)).toBe("a/w1");
+    await rendered.unmount();
+  });
+
+  test("a recording keeps going in its workspace when another is chosen, then the recorder follows", async () => {
+    seen = [];
+    stopped.length = 0;
+    const rendered = await renderComponent(tree({ storeScope: "a", workspaceId: "w1" }));
+    await act(async () => setStates.get("a/w1")!("recording"));
+
+    await rendered.rerender(tree({ storeScope: "a", workspaceId: "w2" }));
+    expect(stopped).not.toContain("a/w1");
+    expect(seen.at(-1)).toBe("a/w1");
+
+    await act(async () => setStates.get("a/w1")!("stopped"));
+    expect(stopped).toContain("a/w1");
+    expect(seen.at(-1)).toBe("a/w2");
+    await rendered.unmount();
+  });
+
+  test("a new account still ends a recording at once", async () => {
+    stopped.length = 0;
+    const rendered = await renderComponent(tree({ storeScope: "a", workspaceId: "w1" }));
+    await act(async () => setStates.get("a/w1")!("recording"));
+    await rendered.rerender(tree({ storeScope: "b", workspaceId: "w1" }));
+    expect(stopped).toContain("a/w1");
+    expect(seen.at(-1)).toBe("b/w1");
     await rendered.unmount();
   });
 

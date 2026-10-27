@@ -1580,10 +1580,3 @@ export function cookieFromHeader(url: string, header: string): CookiesSetDetails
   }
   return details;
 }
-
-export function showSimpleNotification(title: string, body: string, onClick?: () => void): void {
-  if (!Notification.isSupported()) return;
-  const notification = new Notification({ title, body });
-  if (onClick) notification.on("click", onClick);
-  notification.show();
-}

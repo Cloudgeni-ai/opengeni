@@ -6327,6 +6327,19 @@ export function browserTabDiagnosisError(error: unknown): unknown {
     failure.cause = error;
     return failure;
   }
+  // A controller conflict that can clear on its own (another debugger holding
+  // an attached tab, say) keeps its retry advice; a plain 409 would read as
+  // final to the caller.
+  if (code === "operation_conflict" && error.status === 409 && error.retryable) {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message: error.error.message,
+      retryable: true,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (code !== "tab_not_responding" && code !== "tab_crashed") return error;
   const failure = new ApiHttpError(409, {
     code,

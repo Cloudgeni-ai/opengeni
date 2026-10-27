@@ -2341,6 +2341,11 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0988_browser_session_display.sql",
+      "0998_managed_auth_passkeys.sql",
+      "0996_personal_machine_reconnect_elsewhere.sql",
+      "0995_membership_same_role_keeps_authority.sql",
+      "0991_artifact_catalog_session_tree.sql",
+      "0988_queued_turn_hold_observability.sql",
       "0987_event_source_custom_webhooks.sql",
       "0986_provider_vault_passkeys.sql",
       "0984_connected_commands_rearm_on_runner_report.sql",

@@ -186,6 +186,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
@@ -1660,7 +1661,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         actorSubjectId: grant.subjectId,
         targetSubjectId: subjectId,
         mode: "add",
-        subjectLabel: candidate.name?.trim() || candidate.email || subjectId,
+        subjectLabel: candidate.name?.trim() || accountContactEmail(candidate.email) || subjectId,
         role: payload.role ?? "member",
         permissions: payload.permissions,
       });

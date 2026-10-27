@@ -990,11 +990,6 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   updateSite: "site",
 };
 
-/** A built-in step's icon. */
-export function toolStepIconKind(step: ToolStepId): ToolIconKind {
-  return TOOL_STEP_ICONS[step];
-}
-
 /**
  * The icon for a tool by name: a built-in tool draws its step's icon; other
  * tools fall back to their family's icon, then the generic wrench.
