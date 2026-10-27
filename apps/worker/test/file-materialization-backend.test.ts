@@ -89,7 +89,7 @@ describe("worker pre-materialization effective backend", () => {
       home: "modal",
       active: "selfhosted",
       group: "modal",
-      root: "/Users/example",
+      root: "/Users/user",
       guidance: false,
     },
   ] as const)("$name", async ({ home, active, group, root, guidance }) => {
