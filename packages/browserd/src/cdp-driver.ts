@@ -87,6 +87,7 @@ import {
   LatestBrowserFrameSubscription,
   assertImageDimensions,
   decodeBoundedBase64Image,
+  fitImageWithin,
   imageDimensions,
   normalizeFrameStreamOptions,
   normalizeScreenshotOptions,
@@ -724,7 +725,8 @@ type TargetState = {
    * capture and puts back what it saw when it began, which would undo a
    * change that landed in between. */
   framesPaused?: Promise<void> | undefined;
-  /** Clipped captures of this tab Chromium has not answered yet. */
+  /** Captures of this tab Chromium has not answered yet. At most one runs at
+   * a time (see sendCapture). */
   capturesRunning: Set<Promise<void>>;
 };
 
@@ -2094,12 +2096,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                         ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
                         : timeoutMs;
                     try {
-                      return await this.sendTarget<{ data?: unknown }>(
-                        state,
-                        "Page.captureScreenshot",
-                        capture,
-                        { timeoutMs: stallBound },
-                      );
+                      // Never overlaps a frame capture of the tab: a full-page
+                      // capture is clipped (see sendCapture).
+                      return await this.sendCapture<{ data?: unknown }>(state, capture, stallBound);
                     } catch (error) {
                       if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
                         throw new InteractionControllerError(
@@ -4590,17 +4589,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ).catch(() => undefined);
   }
 
-  /** Sends a clipped Page.captureScreenshot. Chromium changes the page's
-   * emulation while such a capture runs and puts back what it saw when it
-   * began, so the capture counts as running until Chromium answers it, even
-   * after the caller stops waiting or its frame stream closes. */
+  /** Sends a Page.captureScreenshot. Chromium serves a clipped capture, or
+   * any capture of an emulated device, by changing the page's emulation and
+   * drawing the tab at the capture's size, and puts back the size and
+   * emulation it saw when the capture began. A capture that began while
+   * another ran would take that temporary size for the tab's own and put it
+   * back last, leaving the tab drawn small for good. So a capture counts as
+   * running until Chromium answers it, even after the caller stops waiting or
+   * its frame stream closes, and the next capture of the tab starts only
+   * after it, within its own deadline. */
   private async sendCapture<T>(
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
   ): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    while (state.capturesRunning.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId);
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all([...state.capturesRunning]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    // Registered in the same step as the check above, so two waiting
+    // captures cannot both start.
     const answered = this.sendTarget<T>(state, "Page.captureScreenshot", params, {
-      timeoutMs: SCREENSHOT_CAPTURE_TIMEOUT_MS,
+      timeoutMs: Math.max(SCREENSHOT_CAPTURE_TIMEOUT_MS, timeoutMs),
     });
     const running = answered.then(
       () => undefined,
@@ -4615,7 +4635,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new CdpCommandTimeoutError("Page.captureScreenshot", state.sessionId)),
-            timeoutMs,
+            Math.max(0, deadline - Date.now()),
           );
         }),
       ]);
@@ -5770,69 +5790,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (state.screencasts.get(expected.key) !== expected) return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
-      // Reuse the accepted clip scale for this viewport. Inferring a new device
-      // scale from rounded image pixels feeds quantization back into every frame
-      // and makes an unchanged mobile viewport oscillate in size.
-      const previous = expected.captureScale;
-      let scale =
-        previous?.width === viewport.width && previous.height === viewport.height
-          ? previous.scale
-          : Math.min(
-              1,
-              expected.options.maxWidth / viewport.width,
-              expected.options.maxHeight / viewport.height,
-            );
-      let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
-      let dimensions = { width: 0, height: 0 };
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        // A stream closed meanwhile no longer holds off viewport changes.
-        if (state.screencasts.get(expected.key) !== expected) return;
-        const response = await this.sendCapture<{ data?: unknown }>(
-          state,
-          {
-            format: expected.options.format,
-            ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
-            fromSurface: true,
-            captureBeyondViewport: false,
-            clip: {
-              x: viewport.x,
-              y: viewport.y,
-              width: viewport.width,
-              height: viewport.height,
-              scale,
-            },
-          },
-          FRAME_CAPTURE_TIMEOUT_MS,
-        );
-        data = decodeBoundedBase64Image(response.data);
-        dimensions = imageDimensions(data, expected.options.format);
-        if (
-          dimensions.width <= expected.options.maxWidth &&
-          dimensions.height <= expected.options.maxHeight
-        ) {
-          break;
-        }
-        scale *= Math.min(
-          expected.options.maxWidth / dimensions.width,
-          expected.options.maxHeight / dimensions.height,
-        );
-      }
-      if (
-        dimensions.width > expected.options.maxWidth ||
-        dimensions.height > expected.options.maxHeight
-      ) {
-        throw new Error("browser screenshot could not honor the frame dimension bound");
-      }
+      const captured =
+        this.engine === "chrome"
+          ? await this.captureOwnChromeFrame(state, expected, viewport)
+          : await this.captureClippedFrame(state, expected, viewport);
+      if (!captured) return;
       if (state.screencasts.get(expected.key) !== expected) return;
-      expected.captureScale = { width: viewport.width, height: viewport.height, scale };
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,
         format: expected.options.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+        data: captured.data,
+        width: captured.width,
+        height: captured.height,
+        deviceScaleFactor: captured.deviceScaleFactor,
         scrollX: viewport.x,
         scrollY: viewport.y,
       });
@@ -5845,6 +5816,125 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } finally {
       if (expected.capturePromise === capture) expected.capturePromise = null;
     }
+  }
+
+  /**
+   * A frame of a tab in a person's own Chrome. Chromium serves a clipped
+   * capture by drawing the tab itself at the clip's scaled size until the
+   * capture is answered, which the person sees: their tab shrinks into a
+   * corner on every frame, and stays shrunk when a capture of a tab they
+   * are not looking at outlives the next one. A capture without a clip
+   * changes nothing on the tab (the driver never emulates a device there),
+   * so the frame is captured whole and scaled down here.
+   */
+  private async captureOwnChromeFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    const response = await this.sendCapture<{ data?: unknown }>(
+      state,
+      {
+        format: expected.options.format,
+        ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      FRAME_CAPTURE_TIMEOUT_MS,
+    );
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    const data = decodeBoundedBase64Image(response.data);
+    const dimensions = imageDimensions(data, expected.options.format);
+    const fitted = await fitImageWithin(data, dimensions, expected.options);
+    // A classic scrollbar is in the image but not in the CSS viewport, so the
+    // axis with less scrollbar gives the closer scale, as for screenshots.
+    const captureScale = Math.min(
+      dimensions.width / viewport.width,
+      dimensions.height / viewport.height,
+    );
+    return {
+      ...fitted,
+      deviceScaleFactor: finiteScale(captureScale * (fitted.width / dimensions.width)),
+    };
+  }
+
+  /** A frame captured with a clip that scales it to the stream's bound. */
+  private async captureClippedFrame(
+    state: TargetState,
+    expected: TargetScreencast,
+    viewport: { x: number; y: number; width: number; height: number },
+  ): Promise<{
+    data: Uint8Array;
+    width: number;
+    height: number;
+    deviceScaleFactor: number;
+  } | null> {
+    // Reuse the accepted clip scale for this viewport. Inferring a new device
+    // scale from rounded image pixels feeds quantization back into every frame
+    // and makes an unchanged mobile viewport oscillate in size.
+    const previous = expected.captureScale;
+    let scale =
+      previous?.width === viewport.width && previous.height === viewport.height
+        ? previous.scale
+        : Math.min(
+            1,
+            expected.options.maxWidth / viewport.width,
+            expected.options.maxHeight / viewport.height,
+          );
+    let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
+    let dimensions = { width: 0, height: 0 };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      // A stream closed meanwhile no longer holds off viewport changes.
+      if (state.screencasts.get(expected.key) !== expected) return null;
+      const response = await this.sendCapture<{ data?: unknown }>(
+        state,
+        {
+          format: expected.options.format,
+          ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width,
+            height: viewport.height,
+            scale,
+          },
+        },
+        FRAME_CAPTURE_TIMEOUT_MS,
+      );
+      data = decodeBoundedBase64Image(response.data);
+      dimensions = imageDimensions(data, expected.options.format);
+      if (
+        dimensions.width <= expected.options.maxWidth &&
+        dimensions.height <= expected.options.maxHeight
+      ) {
+        break;
+      }
+      scale *= Math.min(
+        expected.options.maxWidth / dimensions.width,
+        expected.options.maxHeight / dimensions.height,
+      );
+    }
+    if (
+      dimensions.width > expected.options.maxWidth ||
+      dimensions.height > expected.options.maxHeight
+    ) {
+      throw new Error("browser screenshot could not honor the frame dimension bound");
+    }
+    if (state.screencasts.get(expected.key) !== expected) return null;
+    expected.captureScale = { width: viewport.width, height: viewport.height, scale };
+    return {
+      data,
+      width: dimensions.width,
+      height: dimensions.height,
+      deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+    };
   }
 
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {

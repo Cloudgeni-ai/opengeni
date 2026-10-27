@@ -1,0 +1,5 @@
+---
+"@opengeni/browserd": patch
+---
+
+Streaming the live view of a tab in a person's own Chrome no longer changes how the tab looks. Each frame used to be a clipped screenshot scaled to the viewer's size, and Chrome takes a clipped screenshot by redrawing the tab itself at that size until it answers. On a 2x display, the tab the person was looking at shrank into its top-left corner on every frame (a blink several times a second). A tab Chrome was not drawing (behind another tab) never answered its capture, so the next frame's capture began on top of it, took the shrunken size for the tab's own and put it back last: the tab stayed drawn small until its window was resized. Frames of attached Chrome are now whole-viewport captures, which leave the tab untouched, scaled down to the viewer's size in browserd. For every browser, a capture of a tab now begins only after Chrome answered the previous one (full-page screenshots included), within its own deadline, so no capture can leave a tab at another capture's size.
