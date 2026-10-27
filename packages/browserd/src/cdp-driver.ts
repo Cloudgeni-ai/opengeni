@@ -1265,6 +1265,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw error;
       }
     }
+    await this.closeLeftBlankTarget(connection, previousSelection);
     return createdState;
   }
 
@@ -1329,9 +1330,49 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const targetId = this.browserTargetIdOf(tabId);
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
+    const previousSelection = this.selectedTargetId;
     this.selectedTargetId = targetId;
     this.ownedTabsChanged();
+    await this.closeLeftBlankTarget(connection, previousSelection);
     return await this.observe(tabId);
+  }
+
+  /** Close the tab this session just moved away from when the session opened
+   * it and it is still blank, such as the empty tab a new session starts in.
+   * The agent has moved on to another tab, and an empty tab would otherwise
+   * stay in the person's browser until the session is released or ends.
+   * Never touches a tab the session did not open, a tab showing a page, or a
+   * tab another session is using. Best effort: a tab that could not be
+   * closed stays recorded, so the session's cleanup closes it later. */
+  private async closeLeftBlankTarget(
+    connection: BrowserCdpConnection,
+    targetId: string | null,
+  ): Promise<void> {
+    if (!this.ownedTabs || targetId === null || targetId === this.selectedTargetId) return;
+    if (!this.createdTargetIds.has(targetId) || this.ownedTabs.inUseElsewhere?.(targetId)) return;
+    try {
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      if (!info || !isBlankTabUrl(info.url)) return;
+      await this.closeTargetAndSettle(connection, targetId);
+    } catch {
+      return;
+    }
+    this.recordClosedBlankTarget(targetId);
+    this.ownedTabsChanged();
+  }
+
+  /** Forget a blank tab this session opened and has just closed, keeping its
+   * ID so a later call that names it learns why it is gone. */
+  private recordClosedBlankTarget(targetId: string): void {
+    this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
+    this.closedBlankTargetIds.delete(targetId);
+    this.closedBlankTargetIds.add(targetId);
+    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
+      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
+    }
   }
 
   async closeTarget(tabId: string): Promise<BrowserTargetValue[]> {
@@ -1404,17 +1445,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       try {
         await this.closeTargetAndSettle(connection, targetId);
-        this.removeState(targetId);
-        this.createdTargetIds.delete(targetId);
-        this.closedBlankTargetIds.delete(targetId);
-        this.closedBlankTargetIds.add(targetId);
+        this.recordClosedBlankTarget(targetId);
       } catch {
         // Kept, so a later cleanup closes it.
         settled = false;
       }
-    }
-    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
-      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
     }
     this.ownedTabsChanged();
     return settled;
@@ -9288,7 +9323,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const current = this.selectedTargetId ? this.tabIdOf(this.selectedTargetId) : null;
     return new InteractionDefiniteDriverError(
       "target_not_found",
-      `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
+      `browser target does not exist: this session closed this empty tab after it stopped using it${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
     );
   }
 

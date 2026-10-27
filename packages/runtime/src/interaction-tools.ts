@@ -1515,6 +1515,9 @@ export function createInteractionAttemptToolDefinitions(
       // When even the browser's state can't be read, the original refusal stands.
       return null;
     }
+    // Every call waiting on this browser gets the same plain answer.
+    if (isReconnectedAttachedBrowser(before))
+      throw reconnectedAttachedBrowserError(browserSessionId);
     if (!isResumablePausedBrowser(before)) return null;
     const response = await input.transport.resumeBrowserSession(
       input.workspaceId,
@@ -1865,6 +1868,7 @@ export function createInteractionAttemptToolDefinitions(
     },
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
+      const reattached: ReattachedBrowserRecord = { from: null };
       const opened = await reportingChatMove(
         chatMove,
         async () =>
@@ -1886,6 +1890,7 @@ export function createInteractionAttemptToolDefinitions(
                     context,
                     extension.installUrl,
                     chatMove,
+                    reattached,
                   ),
               ),
           ),
@@ -1898,6 +1903,13 @@ export function createInteractionAttemptToolDefinitions(
       const notes: Array<{ type: "text"; text: string }> = chatMove.moved
         ? [{ type: "text", text: CHAT_MOVED_NOTE }]
         : [];
+      if (reattached.from !== null) {
+        currentTab.forgetSession(reattached.from);
+        notes.push({
+          type: "text",
+          text: reattachedBrowserNote(reattached.from, opened.session.id),
+        });
+      }
       if (!value.includeScreenshot)
         return notes.length ? new InteractionExecutionResult(opened, notes) : opened;
       // The browser is already open. A failed capture must not turn its result
@@ -3763,13 +3775,40 @@ const RESUMABLE_LOST_BROWSER_FAILURES: ReadonlySet<string> = new Set([
 ]);
 
 /** A browser that is not running but continues from its saved working copy
- * when resumed: suspended, or lost to a restarted controller. */
+ * when resumed: suspended, or lost to a restarted controller. A session in
+ * the person's own Chrome has no working copy: it never resumes. */
 function isResumablePausedBrowser(session: z.infer<typeof BrowserSession>): boolean {
   return (
-    session.lifecycle === "suspended" ||
-    // A browser lost to a restarted controller continues from its preserved
-    // working copy. The resume refuses, and says why, when it cannot.
-    (session.lifecycle === "lost" && RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))
+    (session.lifecycle === "suspended" ||
+      // A browser lost to a restarted controller continues from its preserved
+      // working copy. The resume refuses, and says why, when it cannot.
+      (session.lifecycle === "lost" &&
+        RESUMABLE_LOST_BROWSER_FAILURES.has(session.failureCode ?? ""))) &&
+    session.placement.kind !== "attached_device"
+  );
+}
+
+/** A session in the person's own Chrome that ended because that Chrome
+ * reconnected (Chrome, or its extension's background worker, restarted). The
+ * new connection cannot inherit the old one's tabs and debugger attachments,
+ * so the session stays lost; a new session on the same profile continues. */
+function isReconnectedAttachedBrowser(session: z.infer<typeof BrowserSession>): session is z.infer<
+  typeof BrowserSession
+> & {
+  placement: { kind: "attached_device"; deviceId: string };
+} {
+  return (
+    session.lifecycle === "lost" &&
+    session.failureCode === "controller_transition_expired" &&
+    session.placement.kind === "attached_device"
+  );
+}
+
+function reconnectedAttachedBrowserError(browserSessionId: string): OpenGeniApiError {
+  return new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId} ended when the person's Chrome reconnected (Chrome or its extension restarted). Call browser_open with this browserSessionId to continue in the same Chrome profile.`,
+    { code: "attached_browser_reconnected", retryable: false },
   );
 }
 
@@ -4087,6 +4126,7 @@ async function openBrowser(
   context: AttemptToolExecutionContext,
   extensionUrl: string,
   chatMove: ChatMoveRecord = { moved: false },
+  reattached: ReattachedBrowserRecord = { from: null },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
@@ -4096,6 +4136,21 @@ async function openBrowser(
   let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
+    if (isReconnectedAttachedBrowser(session)) {
+      // Continue in the same Chrome profile: reuse this chat's live session
+      // there, or open one, exactly as an open of that profile would.
+      reattached.from = session.id;
+      const { browserSessionId: _ended, ...rest } = value;
+      return await openBrowser(
+        transport,
+        workspaceId,
+        sourceSessionId,
+        { ...rest, placement: { kind: "attached_device", deviceId: session.placement.deviceId } },
+        context,
+        extensionUrl,
+        chatMove,
+      );
+    }
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
@@ -4769,6 +4824,16 @@ class MachineMoveRefusedError extends OpenGeniApiError {
 
 /** Whether an open moved this chat to the machine it named. */
 type ChatMoveRecord = { moved: boolean };
+
+/** The session in the person's Chrome an open replaced, when the one it named
+ * had ended because that Chrome reconnected. */
+type ReattachedBrowserRecord = { from: string | null };
+
+/** The line an open's result adds when it continued in a new session because
+ * the one it named had ended: later calls must use the new ID. */
+function reattachedBrowserNote(endedBrowserSessionId: string, browserSessionId: string): string {
+  return `BrowserSession ${endedBrowserSessionId} ended when the person's Chrome reconnected; this continues in the same Chrome profile as BrowserSession ${browserSessionId}. Use the new ID from now on.`;
+}
 
 /** The line an open's result adds when it moved this chat to another machine:
  * the move outlasts the open, so later commands and files run there too. */
