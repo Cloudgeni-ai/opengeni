@@ -586,10 +586,13 @@ The built-in **Meeting notes** template listens on "This workspace" for
 `data.recordedByYou` is true (two people using the template each write up
 their own meetings, never each other's shared ones), and asks the
 agent to read the meeting named by `data.recordingId` and write notes from the
-transcript and the person's own notes: a short summary, decisions and action
-items with owners and due dates. It replies with the notes and also saves them
-on the meeting when its tools can. Where notes are kept is the meetings
-tools' business, not the template's.
+transcript and the person's own notes, in the same format as the built-in
+meeting summary ([recordings](../recordings.md#built-in-summary)): an overview,
+topics, decisions and action items with owners and due dates, with people
+linked as `speaker:` and `person:` mentions. It saves them with
+`meeting_notes_save` unless the meeting already has notes, and replies with
+them. While a person's own automation like this one is active, the built-in
+summary steps aside for their meetings.
 
 **Where they show.** The web app has a Templates page (Automations, then
 Templates) with the built-in templates and the workspace's saved ones; New

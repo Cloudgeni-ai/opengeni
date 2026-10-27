@@ -494,7 +494,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQL", () => {
-  test("named signup creates only owner + Personal, activates private sessions, and administers shared workspaces", async () => {
+  test("cloud signup auto-names the organization, creates only owner + Personal, and administers shared workspaces", async () => {
     if (!browser || !owned) throw new Error("acceptance harness unavailable");
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
@@ -505,21 +505,27 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
     await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
-    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
-    await page.getByRole("heading", { name: "Create your organization" }).waitFor();
-    expect(await page.getByLabel("Organization name").count()).toBe(1);
-    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
-    expect(await page.getByText(/create another organization/i).count()).toBe(0);
-    await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
     const setupSettled = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
     );
-    await page.getByRole("button", { name: "Create organization" }).click();
-    expect((await setupSettled).ok()).toBe(true);
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
+    const setupResponse = await setupSettled;
+    expect(setupResponse.ok()).toBe(true);
+    expect(setupResponse.request().postDataJSON()).toMatchObject({
+      organizationName: "Onboarding Owner",
+      useCase: "cloud",
+    });
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
+    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
+    expect(await page.getByText(/create another organization/i).count()).toBe(0);
+    await page
+      .getByText("Your organization is called Onboarding Owner.", {
+        exact: false,
+      })
+      .waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
@@ -617,7 +623,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     const peopleUrl = `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`;
     await page.goto(peopleUrl, { waitUntil: "domcontentloaded" });
-    const people = page.getByRole("list", { name: "People in Onboarding Greenfield Org" });
+    const people = page.getByRole("list", { name: "People in Onboarding Owner" });
     await people
       .getByText("Only owner", { exact: true })
       .filter({ visible: true })
@@ -712,7 +718,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     ).toMatchObject({
       state: "pending",
       organizationId,
-      organizationName: "Onboarding Greenfield Org",
+      organizationName: "Onboarding Owner",
       targetEmail: invitedEmail,
       organizationRole: "member",
       sharedWorkspaceAccess: [
@@ -728,7 +734,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.goto(firstUrl(setupEmail), {
       waitUntil: "domcontentloaded",
     });
-    await setupPage.getByRole("heading", { name: "Join Onboarding Greenfield Org" }).waitFor();
+    await setupPage.getByRole("heading", { name: "Join Onboarding Owner" }).waitFor();
     let observedSetupCopy = "";
     await waitFor(
       async () => {
@@ -756,7 +762,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(await setupPage.locator("body").textContent()).not.toContain(token);
     const setupCopy = await setupPage.locator("body").textContent();
     expect(setupCopy).toContain("Launch Operations: Member");
-    expect(setupCopy).toContain("Onboarding Greenfield Org");
+    expect(setupCopy).toContain("Onboarding Owner");
     expect(setupCopy).toContain(invitedEmail);
     await setupPage.getByText("This does not share anyone's Personal workspace.").waitFor();
     await expectNoAxeViolations(setupPage, "body");
@@ -1151,7 +1157,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     if (!alternateSetupEmail) throw new Error("alternate invitation email was not captured");
     await registeredPage.reload({ waitUntil: "domcontentloaded" });
     await registeredPage.getByRole("heading", { name: "Invitation pending" }).waitFor();
-    await registeredPage.getByText("Onboarding Greenfield Org").waitFor();
+    await registeredPage.getByText("Onboarding Owner", { exact: true }).waitFor();
     await registeredPage.getByText("Onboarding Alternate Org").waitFor();
     const invitationChoices = registeredPage.locator("article");
     expect(await invitationChoices.count()).toBe(2);
@@ -1164,7 +1170,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       fullPage: true,
     });
     await invitationChoices
-      .filter({ hasText: "Onboarding Greenfield Org" })
+      .filter({ hasText: "Onboarding Owner" })
       .getByRole("button", { name: "Join organization" })
       .click();
     await registeredPage.waitForURL(/\/workspaces\//, { timeout: 20_000 });

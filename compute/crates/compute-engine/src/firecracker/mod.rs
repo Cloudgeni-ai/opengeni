@@ -241,6 +241,20 @@ impl Firecracker {
         Ok(self)
     }
 
+    /// Lets the VMs hold at most `bytes` of memory together before the
+    /// kernel slows them down (the parent group's `memory.high`), or lifts
+    /// that for `None`, which also undoes what an earlier agent set. Their
+    /// VMMs, pagers and the page cache of their disks and images count,
+    /// as in each VM's own group. A guest past it waits on its own
+    /// allocations while the kernel reclaims from the VMs' groups first,
+    /// so the host's other processes keep their memory; nothing is ended.
+    /// Returns without waiting for the kernel to reclaim down to it; see
+    /// [`Cgroup::set_memory_high`].
+    pub fn with_memory_high(self, bytes: Option<u64>) -> io::Result<Self> {
+        self.cgroups.set_memory_high(bytes)?;
+        Ok(self)
+    }
+
     /// The VM's own cgroup; it exists only while the jailer's work does.
     fn cgroup_of(&self, spec: &VmSpec) -> Cgroup {
         Cgroup::at(self.cgroups.path().join(&spec.name))
@@ -1033,6 +1047,23 @@ impl Engine for Firecracker {
         self.cgroups
             .remove_empty_children()
             .map_err(|error| EngineError::io("clean_up_left_behind", error))
+    }
+
+    fn memory_room(&self) -> Result<Option<u64>, EngineError> {
+        // The limit as it is now, not as the agent set it: an operator may
+        // lift it while the agent runs.
+        let Some(high) = self
+            .cgroups
+            .memory_high()
+            .map_err(|error| EngineError::io("memory_room", error))?
+        else {
+            return Ok(None);
+        };
+        let held = self
+            .cgroups
+            .memory_held()
+            .map_err(|error| EngineError::io("memory_room", error))?;
+        Ok(Some(high.saturating_sub(held)))
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {

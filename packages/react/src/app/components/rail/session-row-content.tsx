@@ -6,7 +6,7 @@ import {
   TriangleAlertIcon,
   ZapIcon,
 } from "lucide-react";
-import { Children, isValidElement, useId } from "react";
+import { Children, isValidElement, useId, type ReactNode } from "react";
 
 import { CreatorMonogram } from "../creator-monogram";
 import { type CreatorRef, creatorAnnouncement, creatorInitials } from "../../lib/creator-initials";
@@ -269,7 +269,10 @@ export function SessionRowContent({
   jumpKey,
   creator,
   quickActionSlots = 0,
+  leading,
 }: {
+  /** Before the title: a bot's avatar. */
+  leading?: ReactNode | undefined;
   title: string;
   stateLabel: string;
   depthLabel?: string | null | undefined;
@@ -292,6 +295,7 @@ export function SessionRowContent({
       {/* Inert for the row's accessible name, which its `aria-label` owns -
           including the creator. Kept as-is so this change regresses nothing. */}
       <span className="sr-only">{stateLabel}. </span>
+      {leading}
       <span className="flex min-w-0 flex-1 flex-col leading-tight">
         <span data-session-row-title className="block min-w-0 overflow-hidden whitespace-nowrap">
           {title}

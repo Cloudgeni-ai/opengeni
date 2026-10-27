@@ -190,7 +190,10 @@ import {
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
+  type LiteralSecretScope,
   type SecretArgumentMode,
 } from "./secret-argument-resolution";
 import {

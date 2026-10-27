@@ -31,6 +31,18 @@ export type CodexUsageHeaderSnapshot = {
   checkedAt: Date;
 };
 
+/**
+ * Every usage window a Codex response reported, whether or not its duration
+ * identifies it as the 5-hour or weekly window. Credit admission needs only
+ * whether one is used up, so this also covers responses that cannot become a
+ * `CodexUsageHeaderSnapshot`, such as a weekly-only account's (one identified
+ * window). It is never cached as labeled windows.
+ */
+export type CodexReportedUsage = {
+  windows: Array<{ usedPercent: number; resetAt: Date | null }>;
+  checkedAt: Date;
+};
+
 export type CodexResponseTimeoutClass = "connect" | "headers" | "idle_stream" | "whole_request";
 
 export type CodexResponseTimeoutPolicy = {
@@ -131,6 +143,11 @@ export type CodexRequestContext = {
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
   /** Awaited best-effort sink for every actual reading, independently of latest-only caches. */
   persistUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => Promise<void>;
+  /**
+   * Sync, non-throwing sink for every response that reports any usage window,
+   * identified or not. Request-boundary credit admission observes this.
+   */
+  onReportedUsage?: (usage: CodexReportedUsage) => void;
   /** Optional per-run override, primarily for deterministic transport tests. */
   responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
   /**

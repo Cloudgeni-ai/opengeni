@@ -1,13 +1,11 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { TranscriptionServiceError } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../src/codex-realtime";
 import { createCodexSubscriptionTranscriptionProvider } from "@opengeni/core/transcription-service";
 
-// Transcription and realtime for an organization with a Codex cutover row.
-// Every legacy Codex accessor is poisoned: a core or maintenance path that
-// reached legacy state fails loudly.
+// Codex transcription and realtime on the shared core.
 
 const ACCOUNT = "00000000-0000-4000-8000-0000000000c3";
 const WS = "00000000-0000-4000-8000-0000000000a1";
@@ -22,25 +20,17 @@ const restores: Array<() => void> = [];
 afterEach(() => {
   while (restores.length) restores.pop()!();
 });
+// The legacy Codex token resolver must never run on the core path.
+beforeEach(() => {
+  mock("buildCodexTokenResolver", () => {
+    throw new Error("legacy Codex token resolver must not run");
+  });
+});
 
 function mock<K extends keyof typeof opengeniDb>(name: K, impl: (...args: never[]) => unknown) {
   const spy = spyOn(opengeniDb, name as never).mockImplementation(impl as never);
   restores.push(() => (spy as { mockRestore(): void }).mockRestore());
   return spy as unknown as { mock: { calls: unknown[][] } };
-}
-
-function cutover(disposition: "core" | "maintenance") {
-  mock("readCodexCutoverDisposition", async () => disposition);
-  for (const legacy of [
-    "listCodexAccountStatuses",
-    "buildCodexTokenResolver",
-    "getCodexCredentialStatus",
-    "getSessionCodexState",
-  ] as const) {
-    mock(legacy, () => {
-      throw new Error(`legacy Codex accessor ${legacy} must not run`);
-    });
-  }
 }
 
 function coreLease() {
@@ -97,7 +87,6 @@ const request = {
 
 describe("Codex transcription on the shared core", () => {
   test("a sessionless operation leases a shared connection with explicit caller context", async () => {
-    cutover("core");
     const candidates = mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
@@ -147,7 +136,6 @@ describe("Codex transcription on the shared core", () => {
   });
 
   test("a selected core operation that fails is never retried through another provider", async () => {
-    cutover("core");
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
@@ -175,7 +163,6 @@ describe("Codex transcription on the shared core", () => {
   });
 
   test("disconnect after dispatch preserves the whole transcription body before lease release", async () => {
-    cutover("core");
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
@@ -209,7 +196,6 @@ describe("Codex transcription on the shared core", () => {
   });
 
   test("a 401 after disconnect cannot reuse its bearer for a retry", async () => {
-    cutover("core");
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
@@ -239,7 +225,6 @@ describe("Codex transcription on the shared core", () => {
   });
 
   test("a truncated transcription body is unknown and not replayed", async () => {
-    cutover("core");
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
     ]);
@@ -266,19 +251,10 @@ describe("Codex transcription on the shared core", () => {
     expect(settled.mock.calls[0]?.[2]).toMatchObject({ outcome: "unknown" });
     expect(released.mock.calls).toHaveLength(1);
   });
-
-  test("a disabled cutover row is unavailable and reads no legacy table", async () => {
-    cutover("maintenance");
-    const provider = createCodexSubscriptionTranscriptionProvider({ settings, db });
-    expect(await provider.available({ workspaceId: WS, accountId: ACCOUNT } as never)).toBe(false);
-    const failure = await provider.transcribe(request, null).catch((error: unknown) => error);
-    expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
-  });
 });
 
 describe("Codex realtime on the shared core", () => {
   function realtimeFixture() {
-    cutover("core");
     mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICE, planType: "pro", explicit: false },
@@ -348,7 +324,6 @@ describe("Codex realtime on the shared core", () => {
   });
 
   test("places a voice-capable shared connection under the session owner with a realtime lease", async () => {
-    cutover("core");
     mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
     mock("listSubscriptionCoreCodexOperationCandidates", async () => [
       { connectionId: VOICELESS, planType: "free", explicit: true },
@@ -384,19 +359,5 @@ describe("Codex realtime on the shared core", () => {
       connectionId: VOICE,
     });
     expect(released.mock.calls).toHaveLength(1);
-  });
-
-  test("a disabled cutover row fails closed without legacy reads", async () => {
-    cutover("maintenance");
-    const broker = buildSessionCodexRealtimeBroker(
-      db,
-      settings,
-      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
-      fetch,
-    );
-    const failure = await broker({ request: { sdp: "v=0", version: "v3" } as never }).catch(
-      (error: unknown) => error,
-    );
-    expect((failure as CodexRealtimeBrokerError).reason).toBe("subscription_disabled");
   });
 });

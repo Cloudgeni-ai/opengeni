@@ -18,13 +18,8 @@ import {
   canonicalConnectionId,
   coreConnectRefused,
   deliverPoolCoreWake,
-  requireSubscriptionCoreRoute,
   type SubscriptionPoolCore,
 } from "./routes/subscription-pool-core";
-
-/** The runtime serving Claude for the organization (one receipt read; maintenance is a typed 503). */
-export const claudeCoreRoute = (deps: ApiRouteDeps, accountId: () => Promise<string>) =>
-  requireSubscriptionCoreRoute(deps, "claude", "Claude", accountId);
 
 /** Deliver a core Claude wake after commit (best effort, as every pool wake). */
 export const deliverClaudeCoreWake = (

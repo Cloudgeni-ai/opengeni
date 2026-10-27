@@ -30,6 +30,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { dropScratchBypassRole, reapStaleBypassRoles } from "./scratch-bypass-role";
 import {
   captureRetainedRouterOutput,
   createProviderCommandRetainer,
@@ -539,6 +540,8 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
+  // Earlier runs killed before their cleanup can leave a bypass role behind.
+  await reapStaleBypassRoles(admin, shared.adminUrl);
 }, 180_000);
 
 afterAll(async () => {
@@ -5305,7 +5308,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expect(await readReconciliationState()).toEqual(beforeBypass);
     } finally {
       await bypassClient?.close();
-      await admin.unsafe(`drop role if exists ${quotedBypassRole}`);
+      // Memberships first, then grants that migrations elsewhere copied to it.
+      // A short deadline keeps this inside the test's own limit; anything
+      // left is for the stale-role cleanup or the shared reaper.
+      const leftovers = await dropScratchBypassRole(admin, shared!.adminUrl, bypassRole, {
+        deadline: Date.now() + 20_000,
+      });
+      if (leftovers.length > 0) console.warn(leftovers.join("; "));
     }
 
     const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {

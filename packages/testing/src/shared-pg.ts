@@ -88,41 +88,52 @@ function databaseUrl(database: string, role?: string, password?: string): string
 // contract. The container OUTLIVES checkouts — it persists across sessions and
 // is shared by every worktree on the machine — so a bare name would freeze the
 // schema/ACLs at whichever checkout first built it. Baking every template input
-// into the name gives each exact contract its own immutable template.
+// into the name gives each exact contract its own immutable template. Inputs are
+// identified by their path INSIDE the db package, never by absolute path, so
+// every checkout with the same contract (parallel worktrees, fresh clones)
+// shares one template instead of building its own.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
-/** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
-const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+/** This checkout's @opengeni/db package, whose `migrate()` builds the template. */
+const DB_PACKAGE_DIR = fileURLToPath(new URL("../../db", import.meta.url));
+/** Template inputs besides the migrations, relative to the db package. */
 const TEMPLATE_CONTRACT_FILES = [
-  fileURLToPath(new URL("../../db/src/migrate.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/migration-baseline.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/provision-roles.ts", import.meta.url)),
-  fileURLToPath(new URL("../../db/src/runtime-posture.ts", import.meta.url)),
+  "src/migrate.ts",
+  "src/migration-baseline.ts",
+  "src/provision-roles.ts",
+  "src/runtime-posture.ts",
 ] as const;
 
 let templateDbNameMemo: string | undefined;
 
-/** `og_test_template_<12-hex>` — the fingerprint of THIS checkout's migration
- *  chain. Memoized (the chain cannot change within a process lifetime). */
-async function templateDbName(): Promise<string> {
-  if (templateDbNameMemo) {
-    return templateDbNameMemo;
-  }
-  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => file.endsWith(".sql")).sort();
+/**
+ * `og_test_template_<12-hex>` for the migration chain and template contract of
+ * the db package at `dbPackageDir`. Depends only on file names and contents
+ * relative to that package, so identical checkouts get the same template.
+ */
+export async function sharedTestTemplateName(dbPackageDir: string): Promise<string> {
+  const migrationsDir = join(dbPackageDir, "drizzle");
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const hasher = new Bun.CryptoHasher("sha256");
   for (const file of files) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
+    hasher.update(await readFile(join(migrationsDir, file)));
     hasher.update("\0");
   }
   for (const file of TEMPLATE_CONTRACT_FILES) {
     hasher.update(file);
     hasher.update("\0");
-    hasher.update(await readFile(file));
+    hasher.update(await readFile(join(dbPackageDir, file)));
     hasher.update("\0");
   }
-  templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+  return `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+}
+
+/** THIS checkout's template name. Memoized (the chain cannot change within a
+ *  process lifetime). */
+async function templateDbName(): Promise<string> {
+  templateDbNameMemo ??= await sharedTestTemplateName(DB_PACKAGE_DIR);
   return templateDbNameMemo;
 }
 

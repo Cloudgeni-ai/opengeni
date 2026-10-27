@@ -29,28 +29,51 @@ let catalog: (options: Record<string, unknown>) => Promise<unknown> = async () =
   nextCursor: null,
 });
 
+type SearchOptions = {
+  search?: string;
+  archiveStatus?: string;
+  limit?: number;
+  signal?: AbortSignal;
+};
+const sessionCalls: Array<{ projection: string; workspaceId: string; options: SearchOptions }> = [];
+const searchPage = (_workspaceId: string, options: SearchOptions) => ({
+  pinned: [],
+  sessions: options.search?.toLowerCase().includes("usage")
+    ? [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          workspaceId,
+          parentSessionId: null,
+          title: "Usage report follow-up",
+          titleSource: "user",
+          status: "idle",
+          pinned: false,
+          archived: false,
+          createdAt: "2026-10-20T10:00:00.000Z",
+          updatedAt: "2026-10-20T10:00:00.000Z",
+        },
+      ]
+    : [],
+  nextCursor: null,
+});
+type SearchPage = Omit<ReturnType<typeof searchPage>, "pinned"> & {
+  pinned: ReturnType<typeof searchPage>["sessions"];
+};
+let summarySearch: (id: string, options: SearchOptions) => Promise<SearchPage> = async (
+  id,
+  options,
+) => searchPage(id, options);
+const listSessionSummaryPage = async function (this: unknown, id: string, options: SearchOptions) {
+  expect(this).toBe(client);
+  sessionCalls.push({ projection: "summary", workspaceId: id, options });
+  return summarySearch(id, options);
+};
 const client = {
-  listSessionPage: async (_workspaceId: string, options: { search?: string }) => ({
-    pinned: [],
-    sessions: options.search?.toLowerCase().includes("usage")
-      ? [
-          {
-            id: "33333333-3333-4333-8333-333333333333",
-            workspaceId,
-            parentSessionId: null,
-            title: "Usage report follow-up",
-            titleSource: "user",
-            status: "idle",
-            pinned: false,
-            archived: false,
-            createdAt: "2026-10-20T10:00:00.000Z",
-            updatedAt: "2026-10-20T10:00:00.000Z",
-          },
-        ]
-      : [],
-    nextCursor: null,
-  }),
-  listSessionSummaryPage: async () => ({ pinned: [], sessions: [], nextCursor: null }),
+  listSessionPage: async (id: string, options: SearchOptions) => {
+    sessionCalls.push({ projection: "full", workspaceId: id, options });
+    return searchPage(id, options);
+  },
+  listSessionSummaryPage: listSessionSummaryPage as typeof listSessionSummaryPage | undefined,
   getSession: async () => {
     throw new Error("not needed");
   },
@@ -143,6 +166,9 @@ afterEach(async () => {
   root = null;
   host = null;
   catalogCalls.length = 0;
+  sessionCalls.length = 0;
+  client.listSessionSummaryPage = listSessionSummaryPage;
+  summarySearch = async (id, options) => searchPage(id, options);
   opened.length = 0;
   newTabs.length = 0;
   closes.length = 0;
@@ -210,6 +236,141 @@ test("the field says Sites are searched too", async () => {
   await openMenu();
   expect(input().getAttribute("aria-label")).toBe("Search chats, Sites and actions");
   expect(input().placeholder).toBe("Search chats and Sites, or run an action…");
+});
+
+test("chat title search uses summaries without requesting full session configuration", async () => {
+  const chats: string[] = [];
+  currentEnv = env({ openChat: (id) => chats.push(id) });
+  await openMenu();
+  await type("usage");
+  expect(sessionCalls).toHaveLength(1);
+  expect(sessionCalls[0]).toEqual({
+    projection: "summary",
+    workspaceId,
+    options: {
+      search: "usage",
+      archiveStatus: "all",
+      limit: 20,
+      signal: expect.objectContaining({ aborted: false }),
+    },
+  });
+  await act(async () => {
+    option("Usage report follow-up").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(chats).toEqual(["33333333-3333-4333-8333-333333333333"]);
+  expect(closes).toEqual([false]);
+});
+
+test("older clients without the optional summary method retain full-page title search", async () => {
+  client.listSessionSummaryPage = undefined;
+  await openMenu();
+  await type("usage");
+  expect(sessionCalls.map((call) => call.projection)).toEqual(["full"]);
+  expect(option("Usage report follow-up")).toBeTruthy();
+});
+
+test("summary errors do not retry the expensive full-page route", async () => {
+  summarySearch = async () => {
+    throw new Error("unavailable");
+  };
+  await openMenu();
+  await type("unavailable");
+  expect(sessionCalls.map((call) => call.projection)).toEqual(["summary"]);
+  expect(input()).toBeTruthy();
+});
+
+test("replacing a title query and unmounting abort their summary requests", async () => {
+  summarySearch = () => new Promise(() => {});
+  await openMenu();
+  await type("first");
+  const first = sessionCalls[0]!.options.signal!;
+  expect(first.aborted).toBe(false);
+  await type("second");
+  expect(first.aborted).toBe(true);
+  expect(sessionCalls.map((call) => call.options.search)).toEqual(["first", "second"]);
+  expect(sessionCalls.map((call) => call.projection)).toEqual(["summary", "summary"]);
+  const second = sessionCalls[1]!.options.signal!;
+  await act(async () => root!.unmount());
+  root = null;
+  expect(second.aborted).toBe(true);
+});
+
+test("summary search preserves per-workspace limits and combines pinned and unpinned rows", async () => {
+  const otherWorkspace = "11111111-1111-4111-8111-111111111112";
+  currentEnv = env({
+    workspaces: [
+      ...env().workspaces,
+      {
+        id: otherWorkspace,
+        name: "Support",
+        organization: "Acme",
+        personal: false,
+      },
+    ],
+  });
+  summarySearch = async (id, options) => {
+    const page = searchPage(id, options);
+    const row = { ...page.sessions[0]!, workspaceId: id };
+    return id === workspaceId
+      ? page
+      : {
+          pinned: [
+            {
+              ...row,
+              id: "33333333-3333-4333-8333-333333333334",
+              title: "Usage pinned support",
+              pinned: true,
+            },
+          ],
+          sessions: [
+            { ...row, id: "33333333-3333-4333-8333-333333333335", title: "Usage support" },
+          ],
+          nextCursor: null,
+        };
+  };
+  await openMenu();
+  await type("usage");
+  expect(
+    sessionCalls.map(({ workspaceId: id, projection, options }) => [
+      id,
+      projection,
+      options.limit,
+      options.archiveStatus,
+    ]),
+  ).toEqual([
+    [workspaceId, "summary", 20, "all"],
+    [otherWorkspace, "summary", 6, "all"],
+  ]);
+  expect(option("Usage pinned support")).toBeTruthy();
+  expect(option("Usage support")).toBeTruthy();
+});
+
+test("late summary answers cannot replace results for a newer query", async () => {
+  let resolveFirst!: (page: ReturnType<typeof searchPage>) => void;
+  summarySearch = (id, options) =>
+    options.search === "old"
+      ? new Promise((resolve) => {
+          resolveFirst = resolve;
+        })
+      : Promise.resolve(searchPage(id, options));
+  await openMenu();
+  await type("old");
+  await type("usage");
+  await act(async () =>
+    resolveFirst({
+      pinned: [],
+      sessions: [
+        {
+          ...searchPage(workspaceId, { search: "usage" }).sessions[0]!,
+          id: "33333333-3333-4333-8333-333333333336",
+          title: "Usage stale summary",
+        },
+      ],
+      nextCursor: null,
+    }),
+  );
+  expect(groups().flatMap((group) => group.options)).not.toContain("Usage stale summary");
+  expect(option("Usage report follow-up")).toBeTruthy();
 });
 
 test("before anything is typed, a few recent Sites show without asking the server", async () => {

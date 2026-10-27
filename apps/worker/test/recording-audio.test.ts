@@ -88,6 +88,73 @@ describe("recording audio", () => {
     },
   );
 
+  test.skipIf(!hasFfmpeg)(
+    "a header split across the first chunks still starts the track",
+    async () => {
+      // Chromium can hand out a session's first byte on its own before any audio arrives.
+      const bytes = opusWebm(3);
+      const parts = [bytes.slice(0, 1), ...split(bytes.slice(1), 3)];
+      let progress = 0;
+      const prepared = await prepareRecordingTrackAudio({
+        chunks: parts.map((_, index) => ({
+          chunkNumber: index,
+          startMilliseconds: index * 1_000,
+          durationMilliseconds: 1_000,
+          objectKey: `k${index}`,
+        })),
+        mimeType: "audio/webm;codecs=opus",
+        ffmpegPath,
+        readChunk: async (chunk) => parts[chunk.chunkNumber]!,
+        onProgress: () => {
+          progress += 1;
+        },
+      });
+      expect(prepared.offsetMilliseconds).toBe(0);
+      expect(Math.abs(prepared.durationMilliseconds - 3_000)).toBeLessThan(150);
+      expect(startsContainer(prepared.bytes)).toBe(true);
+      expect(progress).toBe(parts.length + 1);
+    },
+  );
+
+  test.skipIf(!hasFfmpeg)(
+    "a later session whose header is split over short chunks lands at its own start time",
+    async () => {
+      const first = split(opusWebm(2), 2);
+      const second = opusWebm(2, 880);
+      const parts = [
+        ...first,
+        second.slice(0, 1),
+        second.slice(1, 3),
+        ...split(second.slice(3), 2),
+      ];
+      const starts = [0, 1_000, 5_000, 5_000, 5_000, 6_000];
+      const prepared = await prepareRecordingTrackAudio({
+        chunks: parts.map((_, index) => ({
+          chunkNumber: index,
+          startMilliseconds: starts[index]!,
+          durationMilliseconds: index === 2 || index === 3 ? 0 : 1_000,
+          objectKey: `k${index}`,
+        })),
+        mimeType: "audio/webm",
+        ffmpegPath,
+        readChunk: async (chunk) => parts[chunk.chunkNumber]!,
+      });
+      // Two seconds, a three-second gap of silence, then two more seconds.
+      expect(Math.abs(prepared.durationMilliseconds - 7_000)).toBeLessThan(200);
+    },
+  );
+
+  test("a track of only the start of a header is invalid", async () => {
+    await expect(
+      prepareRecordingTrackAudio({
+        chunks: [{ chunkNumber: 0, startMilliseconds: 0, durationMilliseconds: 1, objectKey: "k" }],
+        mimeType: "audio/webm",
+        ffmpegPath,
+        readChunk: async () => new Uint8Array([0x1a]),
+      }),
+    ).rejects.toBeInstanceOf(RecordingAudioError);
+  });
+
   /** A phone's ADTS stream cut into chunks of whole frames, about a second each. */
   function adtsChunks(seconds: number, startMilliseconds: number, frequency = 440) {
     const frames = adtsFrames(adtsAac(seconds, frequency));
