@@ -5342,7 +5342,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await bypassClient?.close();
       // Memberships first, then grants that migrations elsewhere copied to it.
       // A short deadline keeps this inside the test's own limit; anything
-      // left is picked up by the next run's beforeAll cleanup.
+      // left is for the stale-role cleanup or the shared reaper.
       const leftovers = await dropScratchBypassRole(admin, shared!.adminUrl, bypassRole, {
         deadline: Date.now() + 20_000,
       });
