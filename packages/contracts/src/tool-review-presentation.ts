@@ -507,7 +507,9 @@ function plainText(content: string, contentType: unknown): string {
           return shown ? `${text} (${target.replace(/[<>]/g, "")})` : target.replace(/[<>]/g, "");
         },
       )
-      .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+      // Paragraphs and headings keep the blank line the email will show.
+      .replace(/<\/(p|h[1-6]|blockquote)\s*>/gi, "\n\n")
+      .replace(/<br\s*\/?>|<\/(div|li|tr)\s*>/gi, "\n")
       .replace(/<[^>]*>/g, ""),
   )
     .replace(/\u00a0/g, " ")

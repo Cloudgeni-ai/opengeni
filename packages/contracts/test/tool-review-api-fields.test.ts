@@ -54,7 +54,7 @@ test("a wrapped message, HTML text, events and places read plainly", () => {
   ).toEqual([
     ["To", "a@example.com"],
     ["Subject", "Hello"],
-    ["Message", "Hello there & welcome\nBye"],
+    ["Message", "Hello there & welcome\n\nBye"],
     ["Save to sent items", "Yes"],
   ]);
   expect(
@@ -133,7 +133,7 @@ test("an HTML message shows where its links go, with entities and comments read 
   expect(rows({ body: { body: { contentType: "HTML", content: html } } })).toEqual([
     [
       "Message",
-      "Pay on our usual portal (https://pay.example.net/i/42) — it's due Friday…\nQuestions? kari@example.com or top.",
+      "Pay on our usual portal (https://pay.example.net/i/42) — it's due Friday…\n\nQuestions? kari@example.com or top.",
     ],
   ]);
 });
