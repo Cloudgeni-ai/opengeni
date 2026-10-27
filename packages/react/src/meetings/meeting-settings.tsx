@@ -69,6 +69,21 @@ export function transcriptionModelUnavailableReason(
   }
 }
 
+/**
+ * "Not supported in EU" when no live model is available and the server
+ * switched them off for the region, otherwise null.
+ */
+export function liveTranscriptRestriction(
+  liveModels: readonly Pick<RecordingTranscriptionModel, "available" | "unavailableReason">[],
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (liveModels.some((entry) => entry.available)) return null;
+  return regionRestrictedText(
+    msg,
+    liveModels.find((entry) => entry.unavailableReason)?.unavailableReason,
+  );
+}
+
 /** "30 days", "1 year", "2 years". */
 export function retentionPeriodName(days: number, msg: OpenGeniText = defaultText): string {
   if (days % 365 === 0) return msg("meetings.settings.countYears", { count: days / 365 });
@@ -251,6 +266,7 @@ function MeetingDefaultsViewContent({
   const liveTranscript = current.liveTranscript === true;
   const liveModel = models.liveModels[0] ?? null;
   const liveAvailable = models.liveModels.some((entry) => entry.available);
+  const liveRestricted = liveTranscriptRestriction(models.liveModels, msg);
   const chooseLiveTranscript = (next: boolean) => {
     if (next === liveTranscript) return;
     const { liveTranscript: _previous, ...rest } = current;
@@ -419,17 +435,20 @@ function MeetingDefaultsViewContent({
       {liveModel ? (
         <SettingRow
           label={msg("meetings.settings.liveTranscript")}
-          description={msg("meetings.settings.showsWhatSSaidWhile", {
-            value:
-              liveModel.usdPerHour !== null
-                ? msg("meetings.settings.providernameChargesAboutValuePer", {
-                    providerName: liveModel.providerName,
-                    value: liveModel.usdPerHour.toFixed(2),
-                  })
-                : "",
-          })}
+          description={
+            liveRestricted ??
+            msg("meetings.settings.showsWhatSSaidWhile", {
+              value:
+                liveModel.usdPerHour !== null
+                  ? msg("meetings.settings.providernameChargesAboutValuePer", {
+                      providerName: liveModel.providerName,
+                      value: liveModel.usdPerHour.toFixed(2),
+                    })
+                  : "",
+            })
+          }
           hint={
-            !models.loading && !liveAvailable ? (
+            !models.loading && !liveAvailable && !liveRestricted ? (
               onConnectModels ? (
                 <SettingRowLink onClick={onConnectModels}>
                   {msg("meetings.settings.connectProvidernameToShowA", {
@@ -446,10 +465,14 @@ function MeetingDefaultsViewContent({
           control={
             <Switch
               aria-label={msg("meetings.settings.liveTranscript")}
-              checked={liveTranscript}
+              checked={liveTranscript && !liveRestricted}
               pending={saving}
-              disabled={!canManage}
-              {...(reason ? { disabledReason: reason } : {})}
+              disabled={!canManage || liveRestricted !== null}
+              {...(liveRestricted
+                ? { disabledReason: liveRestricted }
+                : reason
+                  ? { disabledReason: reason }
+                  : {})}
               onCheckedChange={chooseLiveTranscript}
             />
           }

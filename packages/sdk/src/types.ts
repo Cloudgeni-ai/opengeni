@@ -4954,6 +4954,7 @@ export type InferenceFeatureId =
   | "realtime_voice"
   | "voice_input"
   | "meeting_transcription"
+  | "live_transcription"
   | "knowledge_embeddings"
   | "code_search";
 
@@ -8391,6 +8392,8 @@ export type VideoGenerationFundingOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** `region_restricted` when EU-only inference switched this source off. */
+  unavailableCode?: FeatureUnavailableReason | undefined;
 };
 
 export type WorkspaceVideoGenerationSettings = {
@@ -11161,6 +11164,8 @@ export type ClientAgentConfig = {
     id: AgentCapabilityId;
     available: boolean;
     reason?: string | undefined;
+    /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+    code?: FeatureUnavailableReason | undefined;
   }>;
 };
 

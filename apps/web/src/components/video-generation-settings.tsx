@@ -8,7 +8,7 @@ import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { inferenceFeatureRestriction } from "@opengeni/react";
+import { inferenceFeatureRestriction, regionRestrictedText } from "@opengeni/react";
 import { t } from "@opengeni/react/app/lib/console-text";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
@@ -125,7 +125,12 @@ export function VideoGenerationPreferenceRow({
     disabled: !option.available,
     ...(option.available
       ? {}
-      : { disabledReason: option.unavailableReason ?? "Not available in this workspace." }),
+      : {
+          disabledReason:
+            regionRestrictedText(t, option.unavailableCode) ??
+            option.unavailableReason ??
+            "Not available in this workspace.",
+        }),
   }));
   const noFunding =
     Boolean(settings) && !settings!.fundingOptions.some((option) => option.available);

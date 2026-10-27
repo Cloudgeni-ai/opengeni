@@ -286,8 +286,9 @@ session's effective tools omit them.
 - Every model picker shows a model whose availability reason is
   `region_restricted` as **Not supported in EU** and does not let it be chosen.
 - A feature reported with `region_restricted` (from `inferenceFeatures`, agent
-  capabilities, live voice, transcription models and errors, video funding)
-  shows **Not supported in EU** and is switched off. Surfaces read the reason
+  capabilities, live voice, transcription and live transcript models and
+  errors, video funding) shows **Not supported in EU** and is switched off.
+  Surfaces read the reason
   through one helper, `inferenceFeatureRestriction` / `regionRestrictedText` in
   `@opengeni/react`.
 - No label says EU: names and labels never decide residency.

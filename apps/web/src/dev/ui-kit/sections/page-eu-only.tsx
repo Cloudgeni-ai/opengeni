@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import type { WorkspaceRecordingSettings } from "@opengeni/contracts";
 import {
   OpenGeniApiError,
   type ClientConfig,
@@ -14,6 +15,8 @@ import {
   type AgentCapabilityDraft,
 } from "@opengeni/react/app/lib/agent-capabilities";
 import { t } from "@opengeni/react/app/lib/console-text";
+import { MeetingDefaultsView } from "@opengeni/react/meetings";
+import { createMeetingsFixture } from "@opengeni/react/testing/meetings";
 import { Section } from "@opengeni/react/ui/section";
 import { InferenceResidencyRow } from "@/components/organization/security-page";
 import { galleryModelRows } from "@/dev/composer-chrome-fixtures";
@@ -237,7 +240,50 @@ export default function EuOnlySection() {
             />
           </div>
         </StateCell>
+        <StateCell label="Meeting settings" align="stretch" span="full">
+          <div data-preview="meeting-settings" className="w-full max-w-[720px]">
+            <EuOnlyMeetingSettings />
+          </div>
+        </StateCell>
       </StatesGrid>
     </KitSection>
+  );
+}
+
+/** Meeting settings where the server switched the live model off for the region. */
+function EuOnlyMeetingSettings() {
+  const fixture = useMemo(() => createMeetingsFixture(), []);
+  const recordings = useMemo(
+    () => ({
+      ...fixture.client,
+      listRecordingModels: async (workspaceId: string) => {
+        const listed = await fixture.client.listRecordingModels(workspaceId);
+        return {
+          ...listed,
+          models: listed.models.map((entry) =>
+            entry.capabilities.live
+              ? { ...entry, available: false, unavailableReason: "region_restricted" as const }
+              : entry,
+          ),
+        };
+      },
+    }),
+    [fixture],
+  );
+  const [settings, setSettings] = useState<WorkspaceRecordingSettings>({ liveTranscript: true });
+  return (
+    <MeetingDefaultsView
+      workspaceId={fixture.workspaceId}
+      recordings={recordings}
+      settings={settings}
+      personal={false}
+      canManage
+      viewer={{ subjectId: fixture.viewerSubjectId, name: "Ingrid Solberg" }}
+      onConnectModels={() => {}}
+      onSave={async (next) => {
+        setSettings(next);
+        return true;
+      }}
+    />
   );
 }

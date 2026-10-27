@@ -12,7 +12,10 @@ import {
   REGION_RESTRICTED,
   regionRestrictedText,
 } from "../src/inference-region";
-import { transcriptionModelUnavailableReason } from "../src/meetings/meeting-settings";
+import {
+  liveTranscriptRestriction,
+  transcriptionModelUnavailableReason,
+} from "../src/meetings/meeting-settings";
 import { createOpenGeniText } from "../src/messages/runtime";
 import {
   availabilityReasonLabel,
@@ -96,11 +99,14 @@ describe("features in an EU-only workspace", () => {
       capabilities: [
         { id: "webSearch", available: false, reason: NOT_SUPPORTED },
         { id: "media", available: false, reason: "Missing provider" },
+        // Current servers send the code; the reason text may say anything.
+        { id: "browser", available: false, reason: "Off here", code: REGION_RESTRICTED },
         { id: "knowledge", available: true },
       ],
     } as never);
     expect(availability.isAvailable("webSearch")).toBe(false);
     expect(availability.unavailableReason("webSearch")).toBe(NOT_SUPPORTED);
+    expect(availability.unavailableReason("browser")).toBe(NOT_SUPPORTED);
     expect(availability.unavailableReason("media")).toBe(UNAVAILABLE_CAPABILITY_REASON);
     expect(availability.isAvailable("knowledge")).toBe(true);
   });
@@ -117,6 +123,14 @@ describe("features in an EU-only workspace", () => {
     } as RecordingTranscriptionModel;
     expect(transcriptionModelUnavailableReason(model)).toBe(NOT_SUPPORTED);
     expect(transcriptErrorText(REGION_RESTRICTED)).toBe(NOT_SUPPORTED);
+  });
+
+  test("the live transcript says Not supported in EU only when no live model is left", () => {
+    const restricted = { available: false, unavailableReason: REGION_RESTRICTED } as const;
+    expect(liveTranscriptRestriction([restricted])).toBe(NOT_SUPPORTED);
+    expect(liveTranscriptRestriction([restricted, { available: true }])).toBeNull();
+    expect(liveTranscriptRestriction([{ available: false, unavailableReason: null }])).toBeNull();
+    expect(liveTranscriptRestriction([])).toBeNull();
   });
 });
 

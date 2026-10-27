@@ -121,7 +121,7 @@ export function capabilityAvailability(
   for (const entry of config?.capabilities ?? []) {
     if (entry.available) continue;
     unavailable.add(entry.id);
-    const regionRestricted = regionRestrictedText(t, entry.reason);
+    const regionRestricted = regionRestrictedText(t, entry.code ?? entry.reason);
     if (regionRestricted) reasons.set(entry.id, regionRestricted);
   }
   return {
