@@ -550,4 +550,197 @@ describe("bots through the API (real PostgreSQL)", () => {
       (await app.request(avatarUrl({ kind: "image", artifactId: crypto.randomUUID() }))).status,
     ).toBe(404);
   }, 180_000);
+
+  test("the agent suggests a bot only after repeated work, and only records it", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots suggest");
+    const auth = await bearer(workspace, "bots-person", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    /** A chat people have sent `requests` messages, and the agent's tools in it. */
+    const chatWithRequests = async (requests: number, extra: Record<string, unknown> = {}) => {
+      const created = await call(auth, "POST", base, {
+        initialMessage: "Check this invoice against the PO",
+        model: "scripted-model",
+        ...extra,
+      });
+      expect(created.status).toBe(202);
+      const id = created.json.id as string;
+      for (let sent = 1; sent < requests; sent += 1) {
+        const event = await call(auth, "POST", `${base}/${id}/events`, {
+          type: "user.message",
+          payload: { text: `Same check again, number ${sent + 1}` },
+        });
+        expect(event.status).toBeLessThan(300);
+      }
+      const server = buildOpenGeniMcpServer(deps, {
+        ...agentGrant(workspace, id),
+        metadata: { delegated: true, sessionId: id, firstPartyMcpTools: ["bot_suggest"] },
+      });
+      return { id, server };
+    };
+    const invoiceChecker = {
+      kind: "create",
+      name: "Invoice checker",
+      description: "Checks supplier invoices against purchase orders",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+      setupInstructions: "Check each invoice against its PO and list mismatches.",
+      reason: "You have asked for three invoice checks in this chat.",
+    };
+
+    // Too little repetition is refused: the agent's own count, and people's real requests.
+    const early = await chatWithRequests(2);
+    expect(
+      (await callTool(early.server, "bot_suggest", { ...invoiceChecker, similarRequestsInARow: 3 }))
+        .body,
+    ).toMatchObject({ status: "not_suggested", code: "too_few_similar_requests" });
+    const mixed = await chatWithRequests(5);
+    expect(
+      (await callTool(mixed.server, "bot_suggest", { ...invoiceChecker, similarRequestsInARow: 2 }))
+        .body,
+    ).toMatchObject({ status: "not_suggested", code: "too_few_similar_requests" });
+    for (const chat of [early, mixed]) {
+      expect(
+        (await getSession(client.db, workspace.workspaceId, chat.id))?.botSuggestion,
+      ).toBeUndefined();
+    }
+
+    const { id: sessionId, server } = await chatWithRequests(3);
+    const before = await getSession(client.db, workspace.workspaceId, sessionId);
+    const suggested = await callTool(server, "bot_suggest", {
+      ...invoiceChecker,
+      similarRequestsInARow: 3,
+    });
+    expect(suggested.isError).toBe(false);
+    expect(suggested.body).toMatchObject({
+      type: "bot_suggestion",
+      status: "suggested",
+      kind: "create",
+      name: "Invoice checker",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+    });
+    // Recorded as display state only: the chat keeps its name, look and activity time.
+    const after = await getSession(client.db, workspace.workspaceId, sessionId);
+    expect(after?.botSuggestion).toMatchObject({ id: suggested.body.id, name: "Invoice checker" });
+    expect(after?.avatar).toBeNull();
+    expect(after?.description).toBeNull();
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    // Once per chat, so a dismissed card never comes back.
+    expect(
+      (await callTool(server, "bot_suggest", { ...invoiceChecker, similarRequestsInARow: 4 })).body,
+    ).toMatchObject({ status: "not_suggested", code: "already_suggested" });
+
+    const bot = await chatWithRequests(3, {
+      keepLive: true,
+      profile: { title: "SRE bot", avatar: { kind: "icon", icon: "shield-check", hue: 200 } },
+    });
+    const template = await call(
+      auth,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/bot-templates`,
+      {
+        name: "Release owner",
+        setupInstructions: "Own releases.",
+      },
+    );
+    const templateId = template.json.template.id as string;
+
+    // A taken name points the agent at what already exists.
+    const taken = await callTool((await chatWithRequests(3)).server, "bot_suggest", {
+      kind: "create",
+      name: "sre BOT",
+      similarRequestsInARow: 3,
+      reason: "Production keeps coming up.",
+    });
+    expect(taken.body).toMatchObject({ status: "not_suggested", code: "name_taken" });
+    expect(taken.body.bots).toEqual([
+      expect.objectContaining({ sessionId: bot.id, name: "SRE bot" }),
+    ]);
+    expect(taken.body.templates).toEqual([
+      expect.objectContaining({ templateId, name: "Release owner" }),
+    ]);
+
+    // Reuse points at a bot chat or a template, never at a plain chat.
+    const reuseBot = await callTool((await chatWithRequests(3)).server, "bot_suggest", {
+      kind: "reuse",
+      sessionId: bot.id,
+      similarRequestsInARow: 3,
+      reason: "The SRE bot already watches production.",
+    });
+    expect(reuseBot.body).toMatchObject({
+      status: "suggested",
+      kind: "reuse",
+      sessionId: bot.id,
+      name: "SRE bot",
+      avatar: { kind: "icon", icon: "shield-check", hue: 200 },
+    });
+    const reuseTemplate = await callTool((await chatWithRequests(3)).server, "bot_suggest", {
+      kind: "reuse",
+      templateId,
+      similarRequestsInARow: 3,
+      reason: "Releases have a template.",
+    });
+    expect(reuseTemplate.body).toMatchObject({ kind: "reuse", templateId, name: "Release owner" });
+    // Someone else's Only me template is never revealed or pointed at.
+    const someoneElse = await bearer(workspace, "bots-someone-else", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+    ]);
+    const privateTemplate = await call(
+      someoneElse,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/bot-templates`,
+      { name: "Private helper", setupInstructions: "Help privately.", visibility: "private" },
+    );
+    expect(privateTemplate.status).toBe(201);
+    expect(
+      (
+        await callTool((await chatWithRequests(3)).server, "bot_suggest", {
+          kind: "reuse",
+          templateId: privateTemplate.json.template.id,
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ status: "not_suggested", code: "not_found" });
+    const refusals = await chatWithRequests(3);
+    expect(
+      (
+        await callTool(refusals.server, "bot_suggest", {
+          kind: "reuse",
+          sessionId: refusals.id,
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "already_here" });
+    expect(
+      (
+        await callTool(refusals.server, "bot_suggest", {
+          kind: "reuse",
+          sessionId: bot.id,
+          templateId,
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "invalid_target" });
+
+    // A chat that is already a bot is not offered one.
+    expect(
+      (
+        await callTool(bot.server, "bot_suggest", {
+          kind: "create",
+          name: "Ops",
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "already_a_bot" });
+  }, 180_000);
 });

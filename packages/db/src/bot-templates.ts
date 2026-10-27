@@ -1,10 +1,17 @@
-import { and, asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import {
   BOT_TEMPLATES_PER_WORKSPACE_MAX,
+  SessionBotSuggestion as SessionBotSuggestionSchema,
   type BotTemplateVisibility,
   type SessionAvatar,
+  type SessionBotSuggestion,
 } from "@opengeni/contracts";
-import { withWorkspaceRls, type Database } from "./database";
+import {
+  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
+  withWorkspaceSubjectRls,
+  type Database,
+} from "./database";
 import * as schema from "./schema";
 
 /**
@@ -204,5 +211,110 @@ export async function deleteBotTemplate(
       )
       .returning({ id: schema.botTemplates.id });
     return rows.length > 0;
+  });
+}
+
+// --- Bot suggestions (migration 1219) --------------------------------------
+
+/** A stored suggestion, or null when it is absent or no longer parses. */
+export function storedSessionBotSuggestion(value: unknown): SessionBotSuggestion | null {
+  if (value === null || value === undefined) return null;
+  const parsed = SessionBotSuggestionSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Record (or clear) the newest bot suggestion in a chat. Display state: it is
+ * not activity, so the chat's `updated_at` is left as it was.
+ */
+export async function setSessionBotSuggestion(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; suggestion: SessionBotSuggestion | null },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const rows = await scoped
+      .update(schema.sessions)
+      .set({
+        botSuggestion: input.suggestion,
+        updatedAt: sql`${schema.sessions.updatedAt}`,
+      })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    return rows.length > 0;
+  });
+}
+
+/** A bot chat as a suggestion or mention sees it. */
+export interface WorkspaceBotSession {
+  id: string;
+  title: string;
+  description: string | null;
+  /** As stored; read it back through the contract's schema. */
+  avatar: unknown;
+}
+
+/**
+ * The workspace's live bot chats (a chat with a description or avatar) that
+ * `subjectId` may see, most recently active first. Private chats of other
+ * people never appear.
+ */
+export async function listWorkspaceBotSessions(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; limit?: number },
+): Promise<WorkspaceBotSession[]> {
+  const limit = Math.min(Math.max(input.limit ?? 20, 1), 50);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const rows = await scoped
+      .select({
+        id: schema.sessions.id,
+        title: schema.sessions.title,
+        description: schema.sessions.description,
+        avatar: schema.sessions.avatar,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          isNotNull(schema.sessions.title),
+          isNull(schema.sessions.contentArchiveState),
+          or(isNotNull(schema.sessions.avatar), isNotNull(schema.sessions.description)),
+        ),
+      )
+      .orderBy(desc(schema.sessions.updatedAt), asc(schema.sessions.id))
+      .limit(limit);
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title!,
+      description: row.description,
+      avatar: row.avatar,
+    }));
+  });
+}
+
+/**
+ * How many requests people sent this chat: human and API prompts, never agent
+ * messages, schedules or goal continuations. The floor under `bot_suggest`.
+ */
+export async function countSessionHumanRequests(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; sessionId: string },
+): Promise<number> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [row] = await scoped
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          sql`${schema.sessionTurns.initiatorKind} = 'subject' and ${schema.sessionTurns.source} in ('user', 'api') and ${schema.sessionTurns.surface} is distinct from 'agent'`,
+        ),
+      );
+    return row?.count ?? 0;
   });
 }

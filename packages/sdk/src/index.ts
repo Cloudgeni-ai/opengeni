@@ -20,6 +20,7 @@ export type {
   BotTemplateVisibility,
   SessionAvatar,
   SessionAvatarIcon,
+  SessionBotSuggestion,
   CreateBotTemplateRequest,
   ListBotTemplatesResponse,
   UpdateBotTemplateRequest,

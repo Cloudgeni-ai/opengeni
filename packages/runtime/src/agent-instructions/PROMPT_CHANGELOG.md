@@ -1,5 +1,18 @@
 # Modular prompt changelog
 
+Offering a bot. When the `bot_suggest` tool may exist, Working with the user
+adds one sentence after the repeated-ask rule. A chat used mostly for the same
+kind of work, with at least three such requests in a row (the tool refuses
+fewer), can now offer the person a bot, once: make this chat one (a name,
+description and avatar the agent chooses, plus a draft template), or open a
+bot chat or template that already does the work. The tool only records a card
+on the chat; nothing changes until the person accepts. Only the modular
+composition can render it; legacy bytes are unchanged.
+
+```diff
++ When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `bot_suggest` once in that chat, preferring a bot that already does the work: it offers them a bot as a card and changes nothing until they accept.
+```
+
 Finished background commands report themselves. When a command the agent
 left running finishes during the turn, its exit status and the start and end
 of its output follow the next plain-text tool result, and the durable

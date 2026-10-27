@@ -44,6 +44,10 @@ function workingWithTheUser(context: AgentPromptContext): string {
       "Larger or riskier work, and research or comparison questions, still get the full effort they need.",
     ),
     'When the user repeats an ask, such as "check again", "run it again", or the same question for a new time window, reuse the approach, query, script, or session from the earlier turn with the new inputs instead of rediscovering the environment.',
+    // Offering a bot is described only while `bot_suggest` may exist.
+    toolAvailable(context, "bot_suggest")
+      ? "When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `bot_suggest` once in that chat, preferring a bot that already does the work: it offers them a bot as a card and changes nothing until they accept."
+      : null,
     `## Progress updates
 
 A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them. Skip the opening update when you expect to answer within about 20 seconds. Web searches take several seconds each, so before searching the web, write the opening update in a few words. During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context. Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested. Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance. Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it. ${
