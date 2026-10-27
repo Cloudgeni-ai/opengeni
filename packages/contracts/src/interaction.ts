@@ -268,6 +268,12 @@ export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
       headless: primitives.boolean,
+      /** How a headed managed browser shows on its machine, as its controller
+       * launched it: "window" is a native window on the machine's screen,
+       * "offscreen" is the same browser with no window (for example a managed
+       * browser on a person's Mac). Absent when unknown, headless, remote or
+       * the person's own Chrome. */
+      display: z.enum(["window", "offscreen"]).optional(),
       identityId: primitives.nullableUuid,
       baseRevisionId: primitives.nullableUuid,
       networkRouteId: primitives.nullableUuid,
