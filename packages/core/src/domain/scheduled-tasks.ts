@@ -95,7 +95,6 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   currentSiteSessionOrigin,
@@ -272,18 +271,6 @@ export async function scheduledConnectionTools(
         ? await workspaceSessionToolPolicyDefaultServerIds(db, workspaceId, settings, subjectId)
         : [],
   }).toolRefs;
-}
-
-/** Native publication surfaces are retired; MCP uses the ordinary selected-tool policy. */
-export function scheduledConnectionSurfaceEligibility(
-  _settings: Settings,
-  _target:
-    | (Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> &
-        Partial<Pick<Session, "toolPolicy" | "agent">>)
-    | null,
-  _workspaceSettings: unknown = {},
-): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  return { googleDrivePublicationEnabled: false, atlassianEnabled: false };
 }
 
 /**
@@ -476,7 +463,11 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
+  if (
+    knowledgeAction &&
+    input.payload.overlapPolicy !== "skip" &&
+    input.payload.overlapPolicy !== "buffer_one"
+  )
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
@@ -595,11 +586,6 @@ export async function createValidatedScheduledTask(input: {
       resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
       source: personalConnectionDelegationSourceForGrant(input.grant),
       authoritySelections: requestedPins ?? [],
-      ...scheduledConnectionSurfaceEligibility(
-        effectiveRuntimeSettings,
-        target,
-        creationWorkspaceSettings,
-      ),
     });
   }
   const storedAgentConfig = knowledgeAction
@@ -1712,10 +1698,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       action: knowledgeSource,
     });
   }
-  if (
-    knowledgeSource &&
-    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
-  )
+  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
+  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&
@@ -2087,13 +2071,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
-    const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
-      runtimeSettings,
-      nextTarget,
-      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
-    );
-    if (nextSurfaceEligibility.googleDrivePublicationEnabled)
-      nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
     if (personalGitHubRepositoryResources(nextConnectionResources).length)
       nextAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
     // Removing a connector or repository also removes its pin. Pins the
@@ -2119,7 +2096,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
       authoritySelections: input.payload.pinnedAccounts ?? [],
-      ...nextSurfaceEligibility,
     });
     update.agentConfig = withScheduledTaskPins(
       nextAgentConfig,
@@ -2230,13 +2206,6 @@ export type ScheduledTaskRestoreState = {
     expectedVersion: number;
   };
 };
-
-export async function captureScheduledTaskRestoreState(
-  _db: Database,
-  task: ScheduledTask,
-): Promise<ScheduledTaskRestoreState> {
-  return { task };
-}
 
 export async function restoreScheduledTask(
   db: Database,

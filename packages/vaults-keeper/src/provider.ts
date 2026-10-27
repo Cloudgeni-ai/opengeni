@@ -31,6 +31,7 @@ import {
   totpParamsFor,
 } from "./mapping";
 import { safeSecretName } from "./naming";
+import { keeperPasskeys, raiseKeeperPasskeySignCount } from "./passkeys";
 import { restrictToOperations } from "@opengeni/vaults";
 import {
   type CapturedConsole,
@@ -449,7 +450,8 @@ export function createKeeperVaultProvider(
         // Legacy flag means file writes; reads are declared in operations.readFiles.
         files: false,
         groupGrants: false,
-        passkeys: false,
+        // Login records can hold passkeys; see readPasskeys.
+        passkeys: true,
         operations: {
           ...KEEPER_OPERATIONS,
           createItemTypes: [...KEEPER_OPERATIONS.createItemTypes],
@@ -585,6 +587,26 @@ export function createKeeperVaultProvider(
       attemptRecordCaches.get(ctx.budget)?.clear();
       attemptListCaches.get(ctx.budget)?.clear();
       return meta;
+    },
+
+    async readPasskeys(ctx, externalVaultId, externalItemId) {
+      assertUids(externalVaultId, externalItemId);
+      return await operation(ctx, "read", "read record passkeys", async (keeper) =>
+        keeperPasskeys(await fetchRecord(keeper, externalVaultId, externalItemId)),
+      );
+    },
+
+    async updatePasskeySignCount(ctx, externalVaultId, externalItemId, update) {
+      assertUids(externalVaultId, externalItemId);
+      await operation(ctx, "write", "update passkey counter", async (keeper) => {
+        const record = await fetchRecord(keeper, externalVaultId, externalItemId);
+        if (!raiseKeeperPasskeySignCount(record, update.credentialId, update.signCount)) return;
+        keeper.tracker.mutating = true;
+        await keeper.sdk.updateSecret2(keeper.options, record);
+        keeper.tracker.mutating = false;
+      });
+      attemptRecordCaches.get(ctx.budget)?.clear();
+      attemptListCaches.get(ctx.budget)?.clear();
     },
 
     async archiveItem() {

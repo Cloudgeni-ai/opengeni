@@ -3,6 +3,7 @@ import { MeetingsList } from "@opengeni/react-native/meetings";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
+import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { WorkspaceGate } from "@/meetings";
@@ -49,7 +50,8 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         liveTranscriptDefault={liveDefault}
         focused={focused}
-        bottomInset={insets.bottom}
+        // iOS keeps the list clear of the home indicator by itself.
+        bottomInset={Platform.OS === "ios" ? 0 : insets.bottom}
         onOpen={(id) => router.push(`/meeting/${id}`)}
       />
     </>

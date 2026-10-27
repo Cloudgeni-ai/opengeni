@@ -21,6 +21,7 @@ import {
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
+import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   decideVoiceDeployment,
@@ -853,8 +854,19 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
     let code: string | null = null;
     let message = "Authentication request failed";
     try {
-      const payload = JSON.parse(text) as { code?: unknown; message?: unknown };
-      if (typeof payload.code === "string" && payload.code.trim()) {
+      const body = JSON.parse(text) as {
+        code?: unknown;
+        message?: unknown;
+        error?: { code?: unknown; message?: unknown; details?: { managedAuthCode?: unknown } };
+      };
+      // Better Auth emits a flat body; API admission failures use the common
+      // envelope and retain their auth-specific code in safe details.
+      const payload = body.error ?? body;
+      const authCode = body.error?.details?.managedAuthCode;
+      if (typeof authCode === "string" && authCode.trim()) {
+        code = authCode.trim();
+      }
+      if (code === null && typeof payload.code === "string" && payload.code.trim()) {
         code = payload.code.trim();
       }
       if (typeof payload.message === "string" && payload.message.trim()) {
@@ -881,6 +893,7 @@ export async function fetchAuthSession(): Promise<AuthSession | null> {
 }
 
 export async function signUpEmail(input: {
+  signupChallengeToken?: string;
   name: string;
   email: string;
   password: string;
@@ -978,6 +991,35 @@ export async function signInEmail(input: {
   });
 }
 
+/** Signs in with a passkey the browser offers; leaves the session cookie set. */
+export async function signInPasskey(): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-in/options", {
+    method: "POST",
+    body: "{}",
+  });
+  const response = await askForPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-in", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
+/** Creates an account with only a name and a new passkey, and signs in to it. */
+export async function signUpPasskey(input: {
+  name: string;
+  signupChallengeToken?: string;
+}): Promise<unknown> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/sign-up/options", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  const response = await createPasskey(ceremony);
+  return await authRequest<unknown>("/passkey/sign-up", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
 /**
  * Where sign-in returns: home, or the agent, app or Site sign-in page a
  * signed-out person started from, so the pending sign-in continues instead of
@@ -994,7 +1036,10 @@ function authReturnBase(): string {
     : "/";
 }
 
-export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
+export async function startManagedSocialSignIn(
+  provider: "google" | "github",
+  signupChallengeToken?: string,
+): Promise<void> {
   const reauthentication = window.location.pathname === "/settings/security";
   const returnUrl = (path: string) => new URL(path, window.location.origin).toString();
   const callbackURL = returnUrl(
@@ -1007,6 +1052,7 @@ export async function startManagedSocialSignIn(provider: "google" | "github"): P
     method: "POST",
     body: JSON.stringify({
       provider,
+      ...(signupChallengeToken ? { signupChallengeToken } : {}),
       callbackURL,
       errorCallbackURL: reauthentication
         ? callbackURL

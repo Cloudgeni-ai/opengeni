@@ -1,12 +1,21 @@
 /**
- * The transcript as a person reads it: turns of one speaker, each with its
- * time, the line playing now highlighted. A speaker's name opens "Who is
- * this?" (someone from the people directory, or a new name); a turn's ⋯ menu
- * moves it to another speaker or corrects its words. A name recognized by
- * voice is marked suggested until someone confirms or turns it down.
+ * The transcript as a person reads it: turns of one speaker, each a soft
+ * bubble under the speaker's name in their colour, with its time and the line
+ * playing now highlighted. A speaker's name opens "Who is this?" (someone from
+ * the people directory, or a new name); a turn's pencil corrects its words and
+ * its ⋯ menu moves it to another speaker. A name recognized by voice is marked
+ * suggested until someone confirms or turns it down.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type CSSProperties,
+} from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -50,10 +59,11 @@ import {
   speakerIsNamed,
   type TranscriptTurn,
 } from "../recordings";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
-/** The chart palette, one hue per voice. Text stays in fg; only the dot carries color. */
 const defaultText = createOpenGeniText();
 
+/** The chart palette, one hue per voice. */
 const SPEAKER_DOT: Record<number, string> = {
   1: "bg-chart-1",
   2: "bg-chart-2",
@@ -62,6 +72,42 @@ const SPEAKER_DOT: Record<number, string> = {
   5: "bg-chart-5",
   6: "bg-chart-6",
 };
+
+/**
+ * A voice's hue, for its name and mentions; the shared rules below mix it.
+ * Set inline, so the six slots cost no stylesheet rules.
+ */
+export function speakerHueStyle(slot: number | undefined): CSSProperties | undefined {
+  return slot !== undefined && SPEAKER_DOT[slot]
+    ? ({ "--speaker-hue": `var(--color-chart-${slot})` } as CSSProperties)
+    : undefined;
+}
+
+/**
+ * The hue mixed toward the text colour, so it reads on both themes: darker on
+ * light, lighter on dark. Light takes more of the text colour (about 5:1 or
+ * better on the page and on a mention's tint); dark keeps more hue at the
+ * same contrast.
+ */
+const SPEAKER_TEXT =
+  "text-[color-mix(in_oklab,var(--speaker-hue)_50%,var(--color-fg))] dark:text-[color-mix(in_oklab,var(--speaker-hue)_62%,var(--color-fg))]";
+
+/** A faint fill in the voice's hue, for a mention of that speaker. */
+const SPEAKER_TINT = "bg-[color-mix(in_oklab,var(--speaker-hue)_14%,transparent)]";
+
+/** The text colour of a speaker's colour slot, with {@link speakerHueStyle}; muted when there is none. */
+export function speakerTextClass(slot: number | undefined): string {
+  return speakerHueStyle(slot) ? SPEAKER_TEXT : "text-fg-muted";
+}
+
+/** The faint fill of a speaker's colour slot, with {@link speakerHueStyle}; the chip surface when there is none. */
+export function speakerTintClass(slot: number | undefined): string {
+  return speakerHueStyle(slot) ? SPEAKER_TINT : "bg-surface-2";
+}
+
+/** A turn's pencil and ⋯: shown on hover or focus of the turn, always on touch. */
+const TURN_ACTION =
+  "size-7 rounded-[8px] text-fg-subtle opacity-0 transition-opacity duration-[120ms] group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 motion-reduce:transition-none pointer-coarse:size-11 pointer-coarse:opacity-100";
 
 export function SpeakerDot({ slot, className }: { slot: number | undefined; className?: string }) {
   return (
@@ -505,7 +551,7 @@ function EditTurnDialog({
   );
 }
 
-export function MeetingTranscript({
+function MeetingTranscriptContent({
   segments,
   speakers,
   tracks,
@@ -564,10 +610,15 @@ export function MeetingTranscript({
           const name = nameOf(turn.speakerLabel);
           const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
           const suggested = speakerIsSuggested(turn.speakerLabel, speakers);
-          const active = turn.segments.some((segment) => segment.index === activeSegment);
+          const slot = turn.speakerLabel ? slots.get(turn.speakerLabel) : undefined;
+          const at = formatClock(turn.startMilliseconds);
           return (
-            <li key={turn.key} className="group/turn grid min-w-0 gap-1.5">
-              <div className="flex min-w-0 items-center gap-2">
+            <li
+              key={turn.key}
+              data-turn={turn.key}
+              className="group/turn grid max-w-[72ch] min-w-0 gap-1.5"
+            >
+              <div className="flex min-w-0 items-center gap-2 pl-1">
                 {turn.speakerLabel ? (
                   <SpeakerNameMenu
                     label={turn.speakerLabel}
@@ -586,10 +637,15 @@ export function MeetingTranscript({
                             ? msg("meetings.transcript.nameSuggestedFromTheirVoice", { name: name })
                             : msg("meetings.transcript.nameChangeWhoThisIs", { name: name })
                       }
-                      className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
+                      className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
                     >
-                      <SpeakerDot slot={slots.get(turn.speakerLabel)} />
-                      <span className={cn("truncate", unnamed && "text-fg-label")}>{name}</span>
+                      <span
+                        data-speaker-name=""
+                        className={cn("truncate", speakerTextClass(slot))}
+                        style={speakerHueStyle(slot)}
+                      >
+                        {name}
+                      </span>
                       {suggested ? (
                         <span className="shrink-0 rounded-full border border-dashed border-border-strong px-1.5 text-xs leading-4 font-normal text-fg-muted">
                           {msg("meetings.transcript.suggested")}
@@ -610,10 +666,7 @@ export function MeetingTranscript({
                     </button>
                   </SpeakerNameMenu>
                 ) : (
-                  <span className="flex items-center gap-2 text-sm leading-5 font-semibold text-fg-muted">
-                    <SpeakerDot slot={undefined} />
-                    {name}
-                  </span>
+                  <span className="text-sm leading-5 font-semibold text-fg-muted">{name}</span>
                 )}
                 {onSeek ? (
                   <button
@@ -621,16 +674,27 @@ export function MeetingTranscript({
                     onClick={() => onSeek(turn.startMilliseconds)}
                     className="rounded-[6px] px-1 text-xs leading-4 text-fg-muted tabular-nums underline-offset-2 transition-colors duration-[120ms] hover:text-fg hover:underline pointer-coarse:min-h-11"
                     aria-label={msg("meetings.transcript.playFromFormatclock", {
-                      formatClock: formatClock(turn.startMilliseconds),
+                      formatClock: at,
                     })}
                   >
-                    {formatClock(turn.startMilliseconds)}
+                    {at}
                   </button>
                 ) : (
-                  <span className="text-xs leading-4 text-fg-muted tabular-nums">
-                    {formatClock(turn.startMilliseconds)}
-                  </span>
+                  <span className="text-xs leading-4 text-fg-muted tabular-nums">{at}</span>
                 )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={msg("meetings.transcript.correctTheWordsOfNameAt", {
+                    name: name,
+                    formatClock: at,
+                  })}
+                  onClick={() => setEditing(turn)}
+                  className={cn("ml-auto", TURN_ACTION)}
+                >
+                  <PencilIcon />
+                </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
@@ -639,9 +703,9 @@ export function MeetingTranscript({
                       size="icon-sm"
                       aria-label={msg("meetings.transcript.moreActionsForNameAt", {
                         name: name,
-                        formatClock: formatClock(turn.startMilliseconds),
+                        formatClock: at,
                       })}
-                      className="ml-auto size-7 rounded-[8px] text-fg-subtle opacity-0 group-hover/turn:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
+                      className={TURN_ACTION}
                     >
                       <MoreHorizontalIcon />
                     </Button>
@@ -684,11 +748,10 @@ export function MeetingTranscript({
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
+              {/* A soft bubble, left-aligned for everyone, like a chat. */}
               <p
-                className={cn(
-                  "max-w-[72ch] text-[15px] leading-6 text-pretty text-fg",
-                  active && "text-fg",
-                )}
+                data-turn-bubble=""
+                className="w-fit max-w-full rounded-[14px] rounded-tl-[4px] bg-surface-2 px-3.5 py-2 text-[15px] leading-6 text-pretty text-fg"
               >
                 {turn.segments.map((segment, position) => (
                   <span key={segment.index}>
@@ -727,5 +790,13 @@ export function MeetingTranscript({
         actions={actions}
       />
     </>
+  );
+}
+
+export function MeetingTranscript(props: ComponentProps<typeof MeetingTranscriptContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingTranscriptContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

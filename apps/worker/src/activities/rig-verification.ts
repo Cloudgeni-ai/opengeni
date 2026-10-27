@@ -59,7 +59,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
-import { rigProviderImageSourceImage } from "./sandbox-images";
+import { rigProviderImageSourceImage } from "@opengeni/core";
 import { currentActivityContext } from "./streaming";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;

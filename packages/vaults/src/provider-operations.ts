@@ -59,5 +59,18 @@ export function restrictToOperations<P extends VaultProvider>(
       if (!effective().archiveItem) refused("Archiving items");
       return provider.archiveItem(ctx, vaultId, itemId);
     },
+    ...(provider.readPasskeys
+      ? {
+          readPasskeys: (ctx, vaultId, itemId) => provider.readPasskeys!(ctx, vaultId, itemId),
+        }
+      : {}),
+    ...(provider.updatePasskeySignCount
+      ? {
+          async updatePasskeySignCount(ctx, vaultId, itemId, update) {
+            if (!effective().updateItem) refused("Updating items");
+            return provider.updatePasskeySignCount!(ctx, vaultId, itemId, update);
+          },
+        }
+      : {}),
   };
 }

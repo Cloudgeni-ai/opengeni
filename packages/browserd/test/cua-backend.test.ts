@@ -39,6 +39,8 @@ class Fixture implements CuaDesktopRuntime {
   title = "Fixture";
   /** The name of the window element the reading carries, when it has one. */
   windowName?: string;
+  /** Whether the reading shows the Apply button focused. */
+  applyFocused = false;
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -82,6 +84,7 @@ class Fixture implements CuaDesktopRuntime {
               label: this.applyLabel,
               actions: ["AXPress"],
               frame: { x: 60, y: 60, w: 40, h: 20 },
+              ...(this.applyFocused ? { focused: true } : {}),
             },
             {
               element_index: 1,
@@ -846,6 +849,104 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("keys fenced on a reading another read has since replaced go where that reading showed the focus", async () => {
+    const fixture = new Fixture();
+    fixture.applyFocused = true;
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      // The caller's reading, then another read of the window before the
+      // keys arrive (the person's viewer, or a read run alongside them).
+      const planned = await backend.observe(target.id);
+      const between = await backend.observe(target.id);
+      expect(between.observationId).not.toBe(planned.observationId);
+      expect(between.focusedRef).toBe(planned.focusedRef);
+      const escape = (observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        });
+      await escape(planned);
+      // The keys go to the focused element of the latest reading, whose
+      // token belongs to the snapshot CUA holds now.
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({ key: "escape", element_token: `s${fixture.snapshot - 1}:0` });
+      // When the focus moved since the caller's reading, no keys are sent.
+      const before = await backend.observe(target.id);
+      fixture.applyFocused = false;
+      await backend.observe(target.id);
+      const sent = fixture.calls.filter((call) => call.name === "press_key").length;
+      await expect(escape(before)).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message:
+          "The focused element of this window changed since that observation, so no keys were sent; observe the window again",
+      });
+      expect(fixture.calls.filter((call) => call.name === "press_key")).toHaveLength(sent);
+      // A reading this window never had is still refused as before.
+      await expect(
+        backend.dispatch({
+          ...command(before),
+          expectedObservationId: "unknown:s1",
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        }),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        message: "CUA action requires the current semantic observation",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("keys fenced on a replaced reading are refused when nothing was focused or the document changed", async () => {
+    const fixture = new Fixture();
+    fixture.windowName = "Report A";
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const type = (observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "type", value: "secret" },
+        });
+      const typed = () => fixture.calls.filter((call) => call.name === "type_text").length;
+      const refused = {
+        code: "observation_stale",
+        dispatched: false,
+        message: "CUA action requires the current semantic observation",
+      };
+      // Nothing focused, then the window shows another document, still with
+      // nothing focused: the keys would land wherever the focus is by then.
+      const planned = await backend.observe(target.id);
+      expect(planned.focusedRef).toBeNull();
+      fixture.windowName = "Report B";
+      expect((await backend.observe(target.id)).focusedRef).toBeNull();
+      await expect(type(planned)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // Nothing focused in the same document: only the latest reading fences
+      // the keys.
+      const same = await backend.observe(target.id);
+      await backend.observe(target.id);
+      await expect(type(same)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // An element focused in both readings, but of another document.
+      fixture.applyFocused = true;
+      const focused = await backend.observe(target.id);
+      expect(focused.focusedRef).not.toBeNull();
+      fixture.windowName = "Report C";
+      expect((await backend.observe(target.id)).focusedRef).not.toBeNull();
+      await expect(type(focused)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // The latest reading still fences them.
+      await type(await backend.observe(target.id));
+      expect(typed()).toBe(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("Windows delivers pointer and keyboard input in the foreground with Windows modifiers", async () => {
     const fixture = new WindowsFixture();
     const backend = await CuaComputerBackend.open(fixture, "windows");
@@ -1075,6 +1176,74 @@ describe("CUA desktop boundary", () => {
       expect(cut.roots.length).toBeGreaterThan(0);
       partial = false;
       expect((await backend.observe(target.id)).incomplete).toBeUndefined();
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("reads an app that did not answer in time as an incomplete observation, keeping its refs", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let busy = false;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && busy) {
+        // An app tracking an open menu answers no accessibility request:
+        // CUA reads nothing, keeps the last snapshot and says why.
+        const state = JSON.parse(response.structuredJson!);
+        delete state.snapshot_id;
+        Object.assign(state, {
+          elements: [],
+          tree_markdown: "",
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_pending: 1,
+          degraded: true,
+          degraded_reason: "ax_app_unresponsive: pid 42 did not answer accessibility",
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const first = await backend.observe(target.id);
+      busy = true;
+      const unanswered = await backend.observe(target.id);
+      expect(unanswered.roots).toEqual([]);
+      expect(unanswered.incomplete).toEqual({ reason: "time_budget", unreadCount: 1 });
+      expect(unanswered.observationId).not.toBe(first.observationId);
+      // It shows no focused element, so keys sent on it are refused rather
+      // than sent to the last reading's focused element.
+      for (const keys of [
+        { type: "keyboard", action: "press", value: "Enter" },
+        { type: "keyboard", action: "type", value: "Hello" },
+      ] as const)
+        await expect(
+          backend.dispatch({
+            ...command(first),
+            expectedObservationId: unanswered.observationId,
+            action: keys,
+          }),
+        ).rejects.toMatchObject({
+          code: "invalid_action",
+          dispatched: false,
+          message:
+            "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        });
+      expect(
+        fixture.calls.filter((call) => call.name === "press_key" || call.name === "type_text"),
+      ).toEqual([]);
+      // A ref of the last reading still acts, naming the unanswered reading.
+      await backend.dispatch({
+        ...command(first),
+        expectedObservationId: unanswered.observationId,
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:0",
+      });
     } finally {
       await backend.close();
     }
@@ -4067,6 +4236,22 @@ describe("CUA desktop boundary", () => {
             dispatched: true,
             message:
               "CUA stopped the batch at action 2: That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // Pointer or key input to an item of a menu the app has open over the
+        // window was refused before anything was sent: say what reaches it.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_in_open_menu",
+            message: "CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },

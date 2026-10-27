@@ -9,8 +9,6 @@ import type { ComponentType } from "react";
 
 export type AlternativeId = "a" | "b" | "c";
 
-export const ALTERNATIVE_IDS: readonly AlternativeId[] = ["a", "b", "c"];
-
 /**
  * A few open style questions (Button styles) compare more than three versions.
  * Pages and primitives still map `AlternativeId`; only the fork chrome, the

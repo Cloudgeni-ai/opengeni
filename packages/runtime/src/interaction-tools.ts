@@ -216,6 +216,10 @@ const BrowserAgentView = z
       .optional(),
     removedRefCount: z.number().int().positive().optional(),
     clippedFieldCount: z.number().int().positive().optional(),
+    /** The page was too large to read whole: at least this many elements
+     * were left unread (the outline keeps its structure and what is on
+     * screen). */
+    unreadNodeCount: z.number().int().positive().optional(),
   })
   .strict();
 /** A tab as the model needs it: identity, page, selection and the generations
@@ -1352,7 +1356,7 @@ export function createInteractionAttemptToolDefinitions(
   ): Promise<unknown> => {
     if (requestedId === undefined || !isMissingSessionError(error, kind)) return error;
     const open = await ownOpenSessions(kind).catch(() => null);
-    return open === null ? error : missingSessionError(error, kind, open, use);
+    return open === null ? error : missingSessionError(error, kind, open, use, requestedId);
   };
   /** Run a call that names a session directly, answering a missing id with
    * the open sessions of that kind this chat may use. */
@@ -5328,6 +5332,8 @@ function projectBrowserObservation(
       ? omittedBrowserRegions(ranked, new Set(projected.nodes.map((node) => node.ref)))
       : [];
   const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const unreadNodeCount =
+    semantic?.kind === "snapshot" && semantic.incomplete ? semantic.incomplete.unreadCount : 0;
   const viewport = observation.viewport;
   const diagnostics = observation.diagnostics;
   const hasDiagnostics =
@@ -5366,6 +5372,7 @@ function projectBrowserObservation(
       ...(projected.clippedFieldCount > 0
         ? { clippedFieldCount: projected.clippedFieldCount }
         : {}),
+      ...(unreadNodeCount > 0 ? { unreadNodeCount } : {}),
     },
   };
 }
@@ -5834,7 +5841,11 @@ type MissingSessionUse = "current" | "required" | "open";
 /** The most open sessions a missing-id hint lists. */
 const MISSING_SESSION_HINT_LIMIT = 5;
 
-/** The API found no session of this kind with the requested id. */
+/** The API found no session of this kind with the requested id. Read from the
+ * API's own refusal in the response body, never the display message: a hint
+ * already added to it lists session names, which could contain any text.
+ * Opening a browser linked to a computer that does not exist is refused as
+ * "Linked ComputerSession not found". */
 function isMissingSessionError(
   error: unknown,
   kind: InteractionSessionKind,
@@ -5842,8 +5853,27 @@ function isMissingSessionError(
   return (
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(error.message)
+    new RegExp(`(?:^|: )(?:Linked )?${kind} not found\\b`, "u").test(apiRefusalText(error))
   );
+}
+
+/** The refusal text the API sent: the message of its JSON error envelope
+ * (nested under "error" or flat), or else the plain-text body. */
+function apiRefusalText(error: OpenGeniApiError): string {
+  try {
+    const decoded: unknown = JSON.parse(error.body);
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      const record = decoded as Record<string, unknown>;
+      const envelope =
+        record.error && typeof record.error === "object" && !Array.isArray(record.error)
+          ? (record.error as Record<string, unknown>)
+          : record;
+      if (typeof envelope.message === "string") return envelope.message;
+    }
+  } catch {
+    // A plain-text body.
+  }
+  return error.body.trim();
 }
 
 /** The API's refusal for a missing session id, followed by the open sessions
@@ -5852,12 +5882,26 @@ function isMissingSessionError(
 function missingSessionError(
   error: OpenGeniApiError,
   kind: InteractionSessionKind,
-  open: ReadonlyArray<{ id: string; name: string }>,
+  openSessions: ReadonlyArray<{ id: string; name: string }>,
   use: MissingSessionUse,
+  requestedId: string,
 ): OpenGeniApiError {
+  // A session the API did not find is never listed as open, even if this
+  // chat's listing still shows it (it ended between the call and the
+  // listing). An id that nearly matches an open one is named as differing
+  // from it: a slip of a few characters in a long id is easy to read past.
+  const sent = requestedId.trim().toLowerCase();
+  const stillListed = openSessions.some((session) => session.id.toLowerCase() === sent);
+  const open = openSessions.filter((session) => session.id.toLowerCase() !== sent);
   const listed = open.slice(0, MISSING_SESSION_HINT_LIMIT);
   const opener = kind === "BrowserSession" ? "browser_open" : "computer_open";
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
+  const nearMiss = stillListed ? null : nearMissSession(requestedId, listed);
+  const sentNote = stillListed
+    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended.`
+    : nearMiss
+      ? ` The ${parameter} you sent, ${requestedId}, is not ${nearMiss.id}: they differ in ${nearMiss.difference} character${nearMiss.difference === 1 ? "" : "s"}.`
+      : "";
   const instead =
     use === "current"
       ? `, or omit ${parameter} to use the one you used last`
@@ -5882,7 +5926,7 @@ function missingSessionError(
     retryable: false,
     outcomeUnknown: false,
     correlationId: error.correlationId,
-    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."} ${hint}`,
+    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."}${sentNote} ${hint}`,
   });
 }
 
@@ -5892,6 +5936,46 @@ function sessionHintLabel(name: string): string {
   // character into a lone surrogate.
   const characters = Array.from(name.replace(/\s+/gu, " ").trim());
   return characters.length <= 60 ? characters.join("") : `${characters.slice(0, 59).join("")}…`;
+}
+
+/** The most characters a sent id may differ from an open session's id in
+ * and still be named as a near miss of it. Two random UUIDs differ in about
+ * 34 of their 36 characters; a model copying an id slips on a few. */
+const NEAR_MISS_MAX_DIFFERENCE = 8;
+
+/** How many characters must be inserted, removed or changed to turn one
+ * string into the other (Levenshtein distance). */
+function characterDifference(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      current[column] = Math.min(
+        previous[column]! + 1,
+        current[column - 1]! + 1,
+        previous[column - 1]! + (left[row - 1] === right[column - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
+}
+
+/** The open session whose id the sent one most nearly matches, when it is
+ * close enough to be a slip in copying that id. */
+function nearMissSession(
+  requestedId: string,
+  open: ReadonlyArray<{ id: string }>,
+): { id: string; difference: number } | null {
+  const sent = requestedId.trim().toLowerCase();
+  let best: { id: string; difference: number } | null = null;
+  for (const session of open) {
+    const difference = characterDifference(sent, session.id.toLowerCase());
+    if (difference > 0 && difference <= NEAR_MISS_MAX_DIFFERENCE) {
+      if (!best || difference < best.difference) best = { id: session.id, difference };
+    }
+  }
+  return best;
 }
 
 /** The named tab no longer exists, while its browser does: the controller's

@@ -18,10 +18,10 @@ import {
   type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
-  type DesktopSystemAudioError,
   type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
+import { systemAudioBridge } from "./system-audio";
 
 function argument(name: string): string | null {
   const prefix = `--${name}=`;
@@ -180,42 +180,7 @@ if (origin && window.location.origin === origin) {
     },
     ...(systemAudio
       ? {
-          systemAudio: {
-            start: async () => {
-              const result = (await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStart)) as
-                | { ok: true; captureId: string; sampleRate: number }
-                | { ok: false; error: DesktopSystemAudioError };
-              if (!result.ok) throw result.error;
-              return {
-                captureId: result.captureId,
-                sampleRate: result.sampleRate,
-              };
-            },
-            stop: async (captureId: string) => {
-              await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStop, captureId);
-            },
-            onSamples: (listener: (captureId: string, samples: Float32Array) => void) => {
-              const handler = (_event: IpcRendererEvent, id: string, samples: Float32Array) =>
-                listener(id, samples);
-              ipcRenderer.on(DESKTOP_IPC.systemAudioSamples, handler);
-              return () => {
-                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioSamples, handler);
-              };
-            },
-            onEnded: (
-              listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
-            ) => {
-              const handler = (
-                _event: IpcRendererEvent,
-                id: string,
-                error: DesktopSystemAudioError | null,
-              ) => listener(id, error);
-              ipcRenderer.on(DESKTOP_IPC.systemAudioEnded, handler);
-              return () => {
-                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioEnded, handler);
-              };
-            },
-          },
+          systemAudio: systemAudioBridge(ipcRenderer),
           meetingDetection: {
             status: () =>
               ipcRenderer.invoke(

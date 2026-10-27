@@ -1036,6 +1036,20 @@ const SettingsSchema = z.object({
     .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
     .optional(),
   /**
+   * The model a recorder streams to for the live transcript, as
+   * `provider/model`. Defaults to ElevenLabs Scribe v2 Realtime. With
+   * OPENGENI_SPEECH_TO_TEXT_PINNED, the live transcript goes only to the
+   * pinned provider or this model.
+   */
+  recordingLiveTranscription: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-openai/gpt-4o-transcribe",
+    )
+    .optional(),
+  /**
    * One speech-to-text model for every use (meetings, dictation), as
    * `provider/model`. Workspaces then cannot pick another, and nothing else
    * hears the audio. Unset lets each workspace choose.
@@ -2133,6 +2147,10 @@ const SettingsSchema = z.object({
   prReviewGithubAppSlug: z.string().optional(),
   prReviewGithubWebhookSecret: z.string().optional(),
   prReviewGithubAppPrivateKey: z.string().optional(),
+  signupChallengeEnabled: EnvBoolean.default(false),
+  signupChallengeSiteKey: z.string().optional(),
+  signupChallengeSecretKey: z.string().optional(),
+  signupChallengeHostnames: z.string().default(""),
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
@@ -2180,6 +2198,13 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Lets a person create a managed account with only a passkey: no email
+  // address and no password. Off by default, because such an account has no
+  // email to verify, invite, notify or recover through; the deployment's
+  // sign-up switches, signup challenge and email allowlist still apply (an
+  // allowlist refuses passkey-only accounts). Passkey sign-in, and adding a
+  // passkey to an existing account, need no setting.
+  managedAuthPasskeySignUpEnabled: EnvBoolean.default(false),
   // Unset retains environment-based verification (required outside local).
   managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
@@ -2746,10 +2771,18 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
         "2025-04-01-preview";
       const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
       const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
+      // Without a key or a fixed token, the deployment's own Microsoft Entra
+      // identity signs in to a speech deployment named for voice input, as it
+      // does for the recordings' Speech account.
+      const signsInAsDeployment =
+        Boolean(settings.voiceInputAzureEndpoint || settings.voiceInputAzureDeployment) &&
+        deploymentAzureEntraCredential(settings) !== null;
       if (
         !endpoint ||
         !deployment ||
-        (!isUsableVoiceInputSecret(apiKey) && !isUsableVoiceInputSecret(adToken))
+        (!isUsableVoiceInputSecret(apiKey) &&
+          !isUsableVoiceInputSecret(adToken) &&
+          !signsInAsDeployment)
       ) {
         continue;
       }
@@ -5651,6 +5684,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
     recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
     recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    recordingLiveTranscription: optional("OPENGENI_RECORDING_LIVE_TRANSCRIPTION"),
     speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
@@ -6076,6 +6110,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
     prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
     prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
+    signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
+    signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
+    signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
+    signupChallengeHostnames: optional("OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES"),
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
@@ -6106,6 +6144,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthPasskeySignUpEnabled: optional("OPENGENI_MANAGED_AUTH_PASSKEY_SIGNUP_ENABLED"),
     managedAuthRequireEmailVerification: optional(
       "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
     ),
@@ -8128,13 +8167,6 @@ function configuredCostForModel(
   if (credentialSource.kind === "organization_connection") return "organization";
   if (credentialSource.kind === "connected_subscription") return "subscription";
   return parseModelCostPolicyJson(settings.modelCostPolicyJson)[productModelId] ?? "credits";
-}
-
-export function modelCostClassForConfiguredModel(
-  _settings: Settings,
-  model: Pick<ConfiguredModel, "cost">,
-): ConfiguredModelCostClass {
-  return model.cost;
 }
 
 function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
@@ -11595,6 +11627,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
   }
   for (const [env, value] of [
     ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_RECORDING_LIVE_TRANSCRIPTION", settings.recordingLiveTranscription],
     ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
   ] as const) {
     const provider = value?.split("/")[0];
@@ -11653,6 +11686,25 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
+    }
+    if (settings.signupChallengeEnabled) {
+      if (
+        !settings.signupChallengeSiteKey ||
+        !settings.signupChallengeSecretKey ||
+        !settings.signupChallengeHostnames.trim()
+      ) {
+        throw new Error(
+          "Signup challenge requires site key, secret key, and explicit allowed hostnames",
+        );
+      }
+      if (
+        !["local", "test"].includes(settings.environment) &&
+        [settings.signupChallengeSiteKey, settings.signupChallengeSecretKey].some((key) =>
+          /^(1x|2x|3x)0+/.test(key),
+        )
+      ) {
+        throw new Error("Turnstile test keys are forbidden outside local/test");
+      }
     }
     if (!settings.betterAuthSecret) {
       throw new Error(

@@ -35,7 +35,7 @@ import {
   type MintedRunGitCredentials,
   type SandboxCodemodeAuthority,
 } from "../environment";
-import { rigProviderImageSourceImage } from "../sandbox-images";
+import { rigProviderImageSourceImage } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
 import {

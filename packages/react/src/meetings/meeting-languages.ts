@@ -31,7 +31,10 @@ export function meetingLanguageOptions(
   detectLabel: string | undefined = undefined,
   msg: OpenGeniText = defaultText,
 ): SelectOption[] {
-  const codes: string[] = [...MEETING_LANGUAGES];
+  // A host that names Bokmål or Nynorsk gets it in Norwegian's place, not as a second Norwegian.
+  const codes: string[] = MEETING_LANGUAGES.map((code) =>
+    code === "no" && (current === "nb" || current === "nn") ? current : code,
+  );
   if (current && current !== DETECT_LANGUAGE && !codes.includes(current)) codes.push(current);
   return [
     { value: DETECT_LANGUAGE, label: detectLabel ?? msg("meetings.languages.detectAutomatically") },

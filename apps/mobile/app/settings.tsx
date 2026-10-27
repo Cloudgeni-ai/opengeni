@@ -1,3 +1,4 @@
+import { wakePhraseSetupAvailable } from "@opengeni/react-native";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
@@ -21,6 +22,7 @@ import { dismissToHome } from "@/navigation";
 import { startFeedback } from "@/feedback/draft";
 import { setShakeToSendFeedback, useShakeToSendFeedback } from "@/feedback/preference";
 import { AppThemeProvider } from "@/theme";
+import { callAssistantName } from "@/wake-phrase";
 import { openOnWeb, webPaths } from "@/web-links";
 
 export default function SettingsScreen() {
@@ -179,6 +181,21 @@ function Settings() {
       },
     })),
   });
+  if (wakePhraseSetupAvailable()) {
+    sections.push({
+      id: "wake-phrase",
+      footer: `Say a phrase of your own, like “Hey ${callAssistantName()}”, and a call starts without touching the phone.`,
+      rows: [
+        {
+          kind: "action",
+          id: "wake-phrase",
+          title: `Set up “Hey ${callAssistantName()}”`,
+          symbol: "waveform",
+          onPress: () => router.push("/wake-phrase"),
+        },
+      ],
+    });
+  }
   if (account) {
     sections.push({
       id: "feedback",

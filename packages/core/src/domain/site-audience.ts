@@ -1,14 +1,12 @@
 import type { AccessGrant, WorkspaceArtifactVisibility } from "@opengeni/contracts";
 import {
   getVisibleSessionTenancyVisibility,
-  scheduledTaskViewerSubject,
   type Database,
   type WorkspaceArtifactViewer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import type { PrivacySettings } from "../application/organization-privacy";
-import { mayStartOnlyMe } from "./scheduled-task-audience";
-import { creationInitiatorForGrant } from "./sessions";
+import { mayStartOnlyMe, scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
 
 /**
  * A Site has an audience, like a chat and a schedule: the whole workspace, or
@@ -35,13 +33,7 @@ export async function siteViewerForGrant(
   db: Database,
   grant: AccessGrant,
 ): Promise<WorkspaceArtifactViewer> {
-  const creator = creationInitiatorForGrant(grant);
-  const subjectId = await scheduledTaskViewerSubject(db, {
-    workspaceId: grant.workspaceId,
-    ...(creator.initiator ? { createdBy: creator.initiator } : {}),
-    ...(creator.context ? { createdByContext: creator.context } : {}),
-    createdByActor: creator.actor ?? null,
-  });
+  const subjectId = await scheduledTaskViewerSubjectForGrant(db, grant);
   return { subjectId };
 }
 

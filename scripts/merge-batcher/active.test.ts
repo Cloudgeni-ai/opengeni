@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubActiveExecutor } from "./active";
-import { main } from "./main";
+import { controllerOwner, main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import { proveHeadRefresh } from "./head-refresh";
@@ -335,9 +335,10 @@ async function fixture() {
     beforeCreate: (() => void) | null = null;
     followups: (FollowupPull & { sourceRepository: string; sourceRef: string; body: string })[] =
       [];
-    override async ready() {
+    conflicts: { number: number; headSha: string }[] = [];
+    override async ready(): ReturnType<GitHubReader["ready"]> {
       this.onReady?.();
-      return { ready: structuredClone(this.pulls), excluded: [] };
+      return { ready: structuredClone(this.pulls), excluded: [], conflicts: this.conflicts };
     }
     override async runs(_manifest: Manifest, branch: string) {
       return structuredClone(this.workflowRuns.filter((r) => r.branch === branch));
@@ -625,7 +626,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(checked).toBe(true);
     expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
   });
-  test("landing checks evidence without reserving another hosted slot", async () => {
+  test("landing checks evidence without any hosted-slot or headroom read", async () => {
     const f = await fixture();
     const purposes: Array<string | undefined> = [];
     // Seed the already-published candidate before simulating occupied slots.
@@ -637,8 +638,46 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     };
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(purposes).toContain("observe");
-    expect(purposes).toContain("land");
+    // Landing uses no runner, so the effect boundary no longer rereads headroom.
+    expect(purposes).not.toContain("land");
     expect(purposes).not.toContain("publish");
+  });
+  test("a trusted green root lands on the next step while every headroom read is blocked", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    const purposes: Array<string | undefined> = [];
+    f.api.mainBusy = async (purpose) => {
+      purposes.push(purpose);
+      f.api.lastHeadroom = {
+        allowed: false,
+        reason: "Active workflow observation exceeded its scan deadline",
+        budget: 52,
+        occupied: 60,
+        reservedMain: 30,
+        candidateSlots: 18,
+        occupiedBatchSlots: f.cfg.maxInflight,
+        publicationBlocked: true,
+      };
+      return true;
+    };
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(manifest.tipSha);
+    expect((await f.state()).ledger.landed).toContain(manifest.batchId);
+    expect(purposes.every((purpose) => purpose === "observe")).toBe(true);
+  });
+  test("blocked headroom does not bypass landing head rereads", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    f.api.mainBusy = async () => true;
+    // The source branch moves after observation: landing must refuse without a write.
+    f.api.onSnapshot = () => {
+      f.api.snapshot.branchHeadSha = f.newer;
+    };
+    await expect(f.controller().step()).rejects.toThrow("Final source branch head changed");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
   async function refreshedFixture() {
     const f = await fixture();
@@ -1044,6 +1083,95 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       f.writer.transaction([{ ref: f.cfg.stateRef, expected: old.sha, next }]),
     ).rejects.toThrow("Stale");
   });
+  test("supervisor-supplied owner is validated and otherwise each process gets its own", () => {
+    const id = "0f8b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d";
+    expect(controllerOwner({ BATCHER_OWNER_ID: id })).toBe(id);
+    expect(controllerOwner({ BATCHER_OWNER_ID: ` ${id.toUpperCase()} ` })).toBe(id);
+    const a = controllerOwner({}),
+      b = controllerOwner({ BATCHER_OWNER_ID: "" });
+    expect(a).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a).not.toBe(b);
+    for (const bad of ["controller-a", "0f8b1c2d3e4f4a5b8c6d7e8f9a0b1c2d", `${id}x`])
+      expect(() => controllerOwner({ BATCHER_OWNER_ID: bad })).toThrow("must be a UUID");
+  });
+  test("a generation owner shared by sequential children renews its live lease; others stay fenced", async () => {
+    const f = await fixture();
+    // Child 1 of the generation publishes and leaves a live lease.
+    const m = await f.publish();
+    f.verdict(m);
+    const before = await f.state();
+    expect(before.ledger.owner).toBe("controller-a");
+    expect(Date.parse(before.ledger.expiresAt)).toBeGreaterThan(Date.parse(NOW));
+    // A different owner (for example an old or new generation) must wait.
+    const blocked = await f.controller("other-generation").step();
+    expect(blocked.reason).toBe("another controller owns the durable lease");
+    expect(await f.executor("other-generation").maintain()).toBeNull();
+    expect((await f.state()).sha).toBe(before.sha);
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    // Child 2 of the same generation renews immediately, still through the CAS.
+    await f.controller().step();
+    const after = await f.state();
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+    expect(after.ledger.owner).toBe("controller-a");
+    expect(after.ledger.epoch).toBeGreaterThan(before.ledger.epoch);
+    // Sharing the owner never bypasses the state-ref compare-and-swap.
+    const stale = await f.git.stateCommit(before.ledger, before.sha, NOW);
+    await expect(
+      f.writer.transaction([{ ref: f.cfg.stateRef, expected: before.sha, next: stale }]),
+    ).rejects.toThrow("Stale");
+  });
+  test("maintenance submits a due candidate rerun before an older comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-due"] = { ...base, id: "rerun-due", kind: "rerun", run, nextAt: NOW };
+    });
+    await f.executor().maintain();
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-due"]?.status).not.toBe("pending");
+    // The rerun went first; the comment still gets this tick's second slot.
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
+  });
+  test("a rerun held by busy main does not starve the comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-held"] = { ...base, id: "rerun-held", kind: "rerun", run, nextAt: NOW };
+    });
+    f.api.busy = true;
+    for (let tick = 0; tick < 5; tick++) {
+      await f.executor().maintain();
+      f.advance(120);
+    }
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-held"]?.status).toBe("pending");
+    expect(effects["rerun-held"]?.attempts).toBe(0);
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
+  });
   test("accepted push with lost response reconciles instead of republishing", async () => {
     const f = await fixture();
     f.writer.loseResponse = true;
@@ -1066,9 +1194,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication and retry, never a tested landing", async () => {
     // This stub models incomplete/unknown evidence or an occupied Batch slot.
     // Valid numeric/main-capacity estimates are informational in the live reader.
+    // Landing uses no runner, so the same blocked evidence does not hold it.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -1083,8 +1212,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     f.api.workflowRuns = [];
     f.verdict(m);
-    expect((await f.controller().step()).action.kind).toBe("wait");
-    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
   });
   test.each(["publish", "retry", "land"] as const)(
     "live capacity observation permits %s while preserving executor checks",
@@ -1097,10 +1226,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           const path = String(url);
           if (path.includes("/jobs?"))
             return Response.json({
-              total_count: 4,
+              // One queued job after the MAIN_PRE_FANOUT_JOBS pre-plan jobs.
+              total_count: 5,
               jobs: [
                 { status: "queued" },
-                ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+                ...Array.from({ length: 4 }, () => ({ status: "completed" })),
               ],
             });
           const status = new URL(path).searchParams.get("status");
@@ -1339,6 +1469,39 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(f.api.calls).toHaveLength(1);
     },
   );
+  test("main conflict comments are durable once per head, including restart and changed head", async () => {
+    const f = await fixture();
+    f.api.pulls = [];
+    f.api.conflicts = [{ number: 1, headSha: "a".repeat(40) }];
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    const effects = Object.values((await f.state()).ledger.effects);
+    expect(effects[0]?.kind).toBe("comment");
+    expect(JSON.stringify(effects)).toContain("batcher-effect:");
+    expect(JSON.stringify(effects)).toContain("Rebase or merge main");
+    f.api.conflicts = [{ number: 1, headSha: "b".repeat(40) }];
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(2);
+    // The predecessor-only path shares the head key, not its ready-event key.
+    f.api.conflicts = [];
+    await f.seed((ledger) =>
+      ledger.ejected.push({
+        pull: f.makePull("b".repeat(40)),
+        batchId: "c".repeat(64),
+        reason: "merge-tree conflict against candidate predecessor",
+        announced: false,
+      }),
+    );
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(2);
+    expect((await f.state()).ledger.ejected[0]?.announced).toBe(true);
+  });
   test("crash after durable claim blocks boundedly; explicit CAS recovery resumes", async () => {
     const f = await fixture();
     await f.seed((l) => {
@@ -1546,12 +1709,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
       f.verdict(m);
       // Main-CI observation failure must not become an indirect admission gate.
+      f.api.conflicts = [{ number: 99, headSha: "a".repeat(40) }];
       f.api.baseCI = async () => {
         throw Error("full main CI unavailable");
       };
       expect((await f.controller().step()).action.kind).toBe("land");
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
       expect((await f.state()).ledger.landed).toContain(m.batchId);
+      expect(
+        Object.values((await f.state()).ledger.effects).some(
+          (effect) => effect.kind === "comment" && effect.number === 99,
+        ),
+      ).toBe(true);
       expect(f.api.comments).toHaveLength(1);
       expect(f.api.comments[0]).toContain("landed the exact tested PR head");
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
@@ -1873,9 +2042,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           { id: 1, status: "queued", ...MAIN },
           { id: 3, status: "queued", ...MAIN, head_branch: "production" },
         ],
-        // Fan-out already instantiated (more than the 3 pre-plan jobs listed).
+        // Fan-out already instantiated (more than the 4 pre-plan jobs listed).
         {
-          1: page(jobs("waiting", "waiting", "completed", "completed")),
+          1: page(jobs("waiting", "waiting", "completed", "completed", "completed")),
           3: page(jobs("queued", "in_progress")),
         },
       );
@@ -1890,13 +2059,24 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
         "Incomplete",
       ],
-      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
       ["malformed job page", { total_count: 0 }, "Incomplete"],
     ] as const)("%s holds", async (_name, jobPage, reason) => {
       const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }, "1000");
       expect(await r.mainBusy()).toBe(true);
       expect(r.lastHeadroom?.reason).toContain(reason);
       expect(r.lastHeadroom?.allowed).toBe(false);
+    });
+    test("a truncated job page survives one re-read as returned rows with a warning", async () => {
+      // Formerly a hold. Job counts are informational for slot one, so the live
+      // reader uses the rows GitHub returned; extra slots stay closed.
+      const r = reader(
+        [{ id: 2, status: "queued", ...OTHER }],
+        { 2: { total_count: 2, jobs: jobs("queued") } },
+        "1000",
+      );
+      expect(await r.mainBusy()).toBe(false);
+      expect(r.lastHeadroom).toMatchObject({ allowed: true, occupied: 1 });
+      expect(r.lastHeadroom?.reason).toContain("warning: job listing for run(s) 2");
     });
     test("idle run volume is allowed but malformed inventories still hold", async () => {
       const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
@@ -2098,7 +2278,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         run: { id: 1000, status: "waiting", ...MAIN },
         jobs: () =>
           approved
-            ? page(jobs("queued", "queued", "completed", "completed"))
+            ? page(jobs("queued", "queued", "completed", "completed", "completed"))
             : page(jobs("waiting", "waiting", "completed")),
       };
       const fixtures = [transition, ...idleOther(32)];
@@ -2173,11 +2353,6 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ["unknown job status", page(jobs("waiting", "action_required")), "Unrecognized"],
         ["missing job status", page(jobs("waiting", undefined)), "Unrecognized"],
         [
-          "truncated job page",
-          { total_count: 3, jobs: jobs("waiting", "completed") },
-          "Incomplete",
-        ],
-        [
           "oversized job page",
           { total_count: 101, jobs: jobs("waiting", ...Array(100).fill("completed")) },
           "Incomplete",
@@ -2194,6 +2369,19 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           expect.stringContaining(reason),
         ]);
       }
+      // A truncated job page is used as returned (with a warning) after one
+      // re-read, but a partial listing never proves a run approval-only.
+      nextId = 1;
+      const truncated = reader(
+        [
+          ...approvalMain(40),
+          ...runs(1, "waiting", MAIN, { total_count: 3, jobs: jobs("waiting", "completed") }),
+        ],
+        "1000",
+      );
+      expect(await truncated.github.mainBusy()).toBe(false);
+      expect(truncated.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 40 });
+      expect(truncated.github.lastHeadroom?.reason).toContain("warning: job listing for run(s)");
       // Provider errors on a job page or a run-list page reject; callers hold.
       // Each failed read makes all five bounded attempts with real backoff.
       nextId = 1;
@@ -2431,6 +2619,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         },
         mainQueuedJobs: 0,
         preFanoutMainRuns: [],
+        attestedMainRuns: [],
       });
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
@@ -2487,6 +2676,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         // One queued job: the newly approved run has not instantiated its fan-out.
         mainQueuedJobs: 1,
         preFanoutMainRuns: [1],
+        attestedMainRuns: [],
       });
       // Completed runs listed between pages are not scanned; invalid identities hold.
       expect(
@@ -2608,6 +2798,13 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       old = await f.publish();
     f.verdict(old);
     expect((await f.controller().step()).action.kind).toBe("land");
+    // A settled batch whose finish the ledger never recorded (for example one
+    // settled before stages were kept) has no terminal evidence of its own.
+    await f.seed((ledger) => {
+      ledger.stages[old.batchId]!.landedAt = null;
+      ledger.stages[old.batchId]!.ciCompletedAt = null;
+    });
+    await rm(f.controller().journal.path, { force: true });
     f.api.workflowRuns = [];
     f.api.cache.get = async () => null; // Disposable provider cache is unavailable after restart.
     f.change();
@@ -2662,6 +2859,43 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       recovered.ledger.missingRuns[old.batchId]?.recovery,
     );
     expect((await f.state()).ledger.ejected).toEqual([]);
+  });
+  test("a cold cache never turns a batch the ledger records as landed into a held Batch slot", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect((await f.state()).ledger.stages[old.batchId]?.landedAt).not.toBeNull();
+    // Restart on a fresh host: run history and the local journal are gone.
+    await rm(f.controller().journal.path, { force: true });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
+  });
+  test("an earlier missing-run hold on a batch the ledger records as landed is dropped", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    await f.seed((ledger) => {
+      ledger.missingRuns[old.batchId] = {
+        firstSeenAt: NOW,
+        status: "abandoned",
+        updatedAt: NOW,
+        kind: "historical-run-history",
+      };
+    });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
   });
   test("failed landing does not record fabricated measured landed time", async () => {
     const f = await fixture(),
@@ -2892,5 +3126,99 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         new GitHubReader({ ...settings, mode: "shadow" }, new GitHubAuth({}), transport),
       ).createFollowup(request),
     ).rejects.toThrow("Shadow mode");
+  });
+});
+
+describe("main-fix priority lane", () => {
+  const setup = async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    const running = f.verdict(manifest);
+    Object.assign(running, { status: "in_progress", outcome: "unknown", completedAt: null });
+    const fixHead = await f.commit({ base: "base", fix: "fix" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/fix", fixHead]);
+    const fix: Pull = { ...f.makePull(fixHead), number: 2, headRef: "fix" };
+    const control = { priority: [2] };
+    f.api.ready = async () => ({
+      ready: [...structuredClone(f.api.pulls), structuredClone(fix)],
+      excluded: [],
+      ...(control.priority.length ? { priority: control.priority } : {}),
+    });
+    const snapshot = f.api.pullSnapshot.bind(f.api);
+    f.api.pullSnapshot = async (number: number) =>
+      number === 2
+        ? {
+            ...(await snapshot(1)),
+            number: 2,
+            headSha: fixHead,
+            branchHeadSha: fixHead,
+            headRef: "fix",
+          }
+        : snapshot(number);
+    const cancels: string[] = [];
+    const original = f.api.transport;
+    Object.defineProperty(f.api, "transport", {
+      value: (async (url, init) => {
+        if (!String(url).endsWith("/cancel")) return original(url, init);
+        cancels.push(String(url));
+        return new Response("{}", { status: 202 });
+      }) as typeof fetch,
+    });
+    const cancelEffects = async () =>
+      Object.values((await f.state()).ledger.effects).filter((e) => e.kind === "cancel");
+    return { f, manifest, running, fix, control, cancels, cancelEffects };
+  };
+  test("a red base lets a priority fix abandon a running batch, cancel its Batch CI and run alone", async () => {
+    const x = await setup();
+    x.f.api.baseStatus = "green";
+    expect((await x.f.controller().step()).action.kind).not.toBe("abandon");
+    expect(await x.cancelEffects()).toEqual([]);
+
+    x.f.api.baseStatus = "red";
+    const abandoned = await x.f.controller().step();
+    expect(abandoned.action.kind).toBe("abandon");
+    const state = await x.f.state();
+    expect(state.ledger.invalidated).toContain(x.manifest.batchId);
+    expect(await x.cancelEffects()).toMatchObject([
+      { batchId: x.manifest.batchId, status: "pending", run: { id: 100, attempt: 1 } },
+    ]);
+
+    await x.f.executor().maintain();
+    expect(x.cancels).toEqual([
+      `https://api.github.com/repos/${x.f.cfg.repository}/actions/runs/100/cancel`,
+    ]);
+    expect((await x.cancelEffects())[0]?.status).toBe("done");
+    // The slot stays reserved until the provider reports the run terminal.
+    const reserved = await x.f.controller().step();
+    expect(reserved.action).toMatchObject({ kind: "build", publish: false });
+    Object.assign(x.running, { status: "completed", outcome: "cancelled", completedAt: NOW });
+    const published = await x.f.controller().step();
+    expect(published.action).toMatchObject({ kind: "build", publish: true });
+    expect(published.manifest?.pulls.map((p) => p.number)).toEqual([2]);
+    expect(published.manifest?.baseSha).toBe(x.f.base);
+    await x.f.executor().maintain();
+    expect(x.cancels).toHaveLength(1);
+  });
+  test("a cancel intent whose candidate is no longer abandoned is suppressed without a POST", async () => {
+    const x = await setup();
+    x.f.api.baseStatus = "red";
+    expect((await x.f.controller().step()).action.kind).toBe("abandon");
+    await x.f.seed((ledger) => {
+      ledger.invalidated = ledger.invalidated.filter((id) => id !== x.manifest.batchId);
+    });
+    expect(await x.f.executor().maintain()).toContain("obsolete priority cancellation suppressed");
+    expect(x.cancels).toEqual([]);
+    expect((await x.cancelEffects())[0]?.status).toBe("blocked");
+  });
+  test("only batcher-owned Batch CI runs can be cancelled", async () => {
+    const x = await setup();
+    const mutations = new GitHubMutations(x.f.api);
+    await expect(
+      mutations.cancel({ ...x.running, workflow: ".github/workflows/ci.yml" }),
+    ).rejects.toThrow("batcher-owned");
+    await expect(mutations.cancel({ ...x.running, branch: "main" })).rejects.toThrow(
+      "batcher-owned",
+    );
+    expect(x.cancels).toEqual([]);
   });
 });

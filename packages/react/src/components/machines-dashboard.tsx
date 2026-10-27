@@ -16,6 +16,8 @@ export type MachinesDashboardProps = {
   /** The sandbox id currently being attached/swapped to (disables that card). */
   attachingSandboxId?: string | null | undefined;
   onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  /** Which machines `onUpdateAgent` may update. Every machine when omitted. */
+  canUpdateMachine?: ((machine: MachineView) => boolean) | undefined;
   updatingEnrollmentId?: string | null | undefined;
   /** Short recent history per machine (keyed by sandboxId) — drives card sparklines. */
   seriesByMachine?: Record<string, MetricSample[]> | undefined;
@@ -108,6 +110,7 @@ export function MachinesDashboard({
   onAttach,
   attachingSandboxId,
   onUpdateAgent,
+  canUpdateMachine,
   updatingEnrollmentId,
   seriesByMachine,
   onOpenDetail,
@@ -168,7 +171,9 @@ export function MachinesDashboard({
               }}
               onAttach={onAttach}
               attaching={attachingSandboxId === machine.sandboxId}
-              onUpdateAgent={onUpdateAgent}
+              onUpdateAgent={
+                canUpdateMachine && !canUpdateMachine(machine) ? undefined : onUpdateAgent
+              }
               updatingAgent={updatingEnrollmentId === machine.enrollmentId}
               series={seriesByMachine?.[machine.sandboxId]}
               onOpenDetail={onOpenDetail}

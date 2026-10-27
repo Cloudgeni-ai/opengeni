@@ -43,7 +43,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
@@ -74,7 +74,7 @@ import {
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
-import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
+import { permissionsRequiredByFirstPartyTools } from "@opengeni/contracts";
 import {
   createOpenGeniSlackBotInteractionClient,
   verifyScheduledTaskSlackChannel,
@@ -412,7 +412,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = authorization.grant;
     const taskId = c.req.param("taskId");
     const existing = await requireVisibleScheduledTask(db, grant, taskId);
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const body = await readRequestJson(c);
     const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
@@ -470,7 +470,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const viewer = await scheduledTaskViewerForGrant(db, grant, deps.settings);
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
     const adminPause = viewer.admin && !ownerPause;
     const task = adminPause
@@ -491,7 +491,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
-    const previous = await captureScheduledTaskRestoreState(db, existing);
+    const previous: ScheduledTaskRestoreState = { task: existing };
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

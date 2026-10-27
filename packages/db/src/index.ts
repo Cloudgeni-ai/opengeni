@@ -242,6 +242,7 @@ export {
   type SubscriptionCoreCodexRefreshResult,
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -2709,7 +2710,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
-  const subjectLabel = input.email || input.name;
+  const subjectLabel = accountContactEmail(input.email) || input.name;
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
@@ -4018,6 +4019,36 @@ export async function getManagedUserProfilesByIds(
       sql`, `,
     )})`,
   );
+}
+
+/**
+ * A workspace member's name as the workspace's people list shows it: their
+ * profile name, else the label their membership was given, else their email.
+ * Null when none is known.
+ */
+export async function workspaceMemberDisplayName(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<string | null> {
+  // A deployment without managed profiles still has membership labels.
+  const [profile] = input.subjectId.startsWith("user:")
+    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)]).catch(() => [])
+    : [];
+  const name = profile?.name?.trim();
+  if (name) return name;
+  const [membership] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb
+      .select({ subjectLabel: schema.workspaceMemberships.subjectLabel })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1),
+  );
+  return membership?.subjectLabel?.trim() || profile?.email?.trim() || null;
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
@@ -6525,6 +6556,7 @@ export async function applyCreditDebitUpToBalance(
         input.accountId,
         input.creditPolicyRevision,
         settledAt,
+        true,
       );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
@@ -6614,7 +6646,7 @@ export async function applyCreditDebitAfterUse(
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt),
+          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
@@ -7657,6 +7689,8 @@ export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
   name: string;
+  /** The catalog item's category ("communication", "files"), naming the need it serves. */
+  category?: string;
   url: string;
   allowedTools?: string[];
   timeoutMs?: number;
@@ -10098,7 +10132,8 @@ export async function upsertCapabilityCatalogItem(
         credentialFacts: values.credentialFacts,
         tier: values.tier,
         provenance: values.provenance,
-        logoAssetPath: values.logoAssetPath,
+        // A workspace item's logo comes from its server's advertised icon
+        // (setWorkspaceCapabilityCatalogItemLogo); editing the item keeps it.
         importBatchId: values.importBatchId,
         stale: values.stale,
         staleAt: values.staleAt,
@@ -10117,6 +10152,39 @@ export async function upsertCapabilityCatalogItem(
         throw new Error("Failed to upsert capability catalog item");
       }
       return mapCapabilityCatalogItem(row);
+    },
+  );
+}
+
+/**
+ * Sets the logo of a workspace-owned catalog item (a custom MCP server) to a
+ * stored `catalog-assets/...` key. Shared registry rows are never changed from a
+ * workspace connection. Returns whether a row changed.
+ */
+export async function setWorkspaceCapabilityCatalogItemLogo(
+  db: Database,
+  input: { accountId: string; workspaceId: string; id: string; logoAssetPath: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.capabilityCatalogItems)
+        .set({ logoAssetPath: input.logoAssetPath, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.id),
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            or(
+              isNull(schema.capabilityCatalogItems.logoAssetPath),
+              ne(schema.capabilityCatalogItems.logoAssetPath, input.logoAssetPath),
+            ),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return rows.length > 0;
     },
   );
 }
@@ -11466,6 +11534,7 @@ export async function listEnabledMcpCapabilityServers(
         capabilityId: item.id,
         id: mcpServerIdForCapability(item.id, metadata),
         name: item.name,
+        ...(item.category ? { category: item.category } : {}),
         url: item.endpointUrl,
         ...(allowedTools ? { allowedTools } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
@@ -31405,6 +31474,27 @@ export async function getSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
+export async function getSessionModelGate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "model" | "codexCompactionMode"> | null> {
+  const session = await readSession(db, workspaceId, sessionId, "model_gate");
+  return session
+    ? { model: session.model, codexCompactionMode: session.codexCompactionMode }
+    : null;
+}
+
+async function readSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  presentation: "full" | "model_gate",
+): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -31421,8 +31511,21 @@ export async function getSession(
       false,
     );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
-    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
+    const grouped =
+      presentation === "full"
+        ? await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id])
+        : null;
+    return await mapSessionWithControl(
+      scopedDb,
+      session,
+      grouped?.get(row.id) ?? [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      presentation,
+    );
   });
 }
 
@@ -33738,7 +33841,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{
     needsYouCount: number;
     groups: SessionListTotals["groups"];
-    sites: SiteConversationGroup[] | null;
+    sites: Array<SiteConversationGroup & { rankAt?: string | null }> | null;
   }>(
     db,
     sql`
@@ -33911,9 +34014,10 @@ async function sessionListTotalsInScope(
       }
     ), site_conv_totals as (
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
-        max(updated_at) as updated_at, max(created_at) as created_at,
+        min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
-          filter (where origin_title is not null))[1] as origin_title
+          filter (where origin_title is not null))[1] as origin_title,
+        max(updated_at) as activity_at
       from site_conv group by site_id, row_channel_id
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
@@ -33961,38 +34065,37 @@ async function sessionListTotalsInScope(
     ), site_keys as (
       select * from site_conv_totals
       union all
-      select site_id, channel_id, 0, null, null, null from site_home
+      select site_id, channel_id, 0, null, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
-      -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its newest published version (creation
-      -- is version 1) and the chats that published its versions (the chat
-      -- that created it and any used to edit it), as far as this viewer can
-      -- see them. Opening a Site is not activity, as opening a chat is not;
-      -- an open only lists it. Archive, restore, rollback and other updates
-      -- to the Site's record are not activity either, so they never lift a
-      -- Site for everyone. One extra row reports truncation.
+      -- conversations needs a live Site the viewer can see. A row's time is
+      -- the Site's newest published version (creation is version 1) and
+      -- nothing else: messages and turns in its conversations, or in the chat
+      -- that created or published it, never move it, nor does opening it (an
+      -- open only lists it). Archive, restore, rollback (Undo) and other
+      -- updates to the Site's record add no version, so they never lift it
+      -- either. A viewer who cannot read the Site sees no publishes, so its
+      -- row keeps the time its first conversation here started, which
+      -- messages do not change. Which rows the bound keeps is a separate
+      -- question: pinned rows first, then the later of the newest publish and
+      -- conversation activity, so a Site whose conversation runs or needs this
+      -- person is never cut for an old publish. One extra row reports
+      -- truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
-        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt",
+        greatest(site.published_at, key.activity_at, key.first_created_at) as "rankAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at,
-          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
-            join ${schema.sessions} source
-              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-            join ${schema.sessions} editor
-              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
-            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
-            as edited_at
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
@@ -34006,7 +34109,7 @@ async function sessionListTotalsInScope(
       -- This person's archived Sites leave their sidebar; pinned ones lead.
       where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 7 desc, 5 desc, 1, 2
+      order by 7 desc, 9 desc nulls last, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -34036,7 +34139,8 @@ async function sessionListTotalsInScope(
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
       coalesce((select jsonb_agg(to_jsonb(site_grouped)
-        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        order by site_grouped.pinned desc, site_grouped."rankAt" desc nulls last,
+          site_grouped."siteId", site_grouped."channelId")
         from site_grouped), '[]'::jsonb) as sites
   `,
   );
@@ -34049,21 +34153,37 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
-      ...site,
-      updatedAt: iso(site.updatedAt)!,
-      createdAt: iso(site.createdAt)!,
-      attentionSince: iso(site.attentionSince),
-      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
-      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
-    })),
+    // The bound keeps rows in rank order; the kept rows then sort by their
+    // time, the newest publish.
+    sites: sites
+      .slice(0, SITE_CONVERSATION_GROUP_LIMIT)
+      .map(({ pinned, pinnedAt, rankAt: _rankAt, ...site }) => ({
+        ...site,
+        updatedAt: iso(site.updatedAt)!,
+        createdAt: iso(site.createdAt)!,
+        attentionSince: iso(site.attentionSince),
+        // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+        ...(pinned ? { pinned: true as const, pinnedAt: iso(pinnedAt ?? null) } : {}),
+      }))
+      .sort(
+        (a, b) =>
+          compareCodePoints(b.updatedAt, a.updatedAt) ||
+          compareCodePoints(a.siteId, b.siteId) ||
+          // As SQL orders it: a Site's Default row (no project) last.
+          compareCodePoints(a.channelId ?? "\uffff", b.channelId ?? "\uffff"),
+      ),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
- * for a long time fall past it; the Artifacts page lists every Site.
+ * Bound on Site rows per read. Pinned rows are kept first, then by the later of
+ * the newest publish and conversation activity, so Sites nobody touched for a
+ * long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
@@ -37600,6 +37720,62 @@ type LineageIdRow = {
   cycle: boolean;
 };
 
+/** Descendants a lineage read lists: depth 5 and this many rows at most. */
+export const SESSION_TREE_DESCENDANT_LIMIT = 200;
+
+/**
+ * Descendants of a session, shallower before deeper and newest first within a
+ * level, so a long fleet loses its oldest grandchildren first. Returns one row
+ * more than the limit when there are more.
+ */
+async function selectSessionDescendantRows(
+  scopedDb: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<LineageIdRow[]> {
+  return (await scopedDb.execute(sql<LineageIdRow>`
+    with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+      select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and child.parent_session_id = ${sessionId}
+      union all
+      select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
+      from ${schema.sessions} child
+      join descendants on child.parent_session_id = descendants.id
+      where child.workspace_id = ${workspaceId}
+        and descendants.depth < 5
+        and not child.id = any(descendants.path)
+    )
+    select id, parent_session_id as "parentSessionId", depth, path, false as cycle
+    from descendants
+    order by depth, created_at desc, id desc
+    limit ${SESSION_TREE_DESCENDANT_LIMIT + 1}
+  `)) as LineageIdRow[];
+}
+
+/**
+ * A session and the descendants its lineage lists, in that order, or null when
+ * the session is not visible in the workspace. Ids only: callers authorize
+ * each session before using it.
+ */
+export async function listSessionTreeIds(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) return null;
+    const rows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
+    return [sessionId, ...rows.slice(0, SESSION_TREE_DESCENDANT_LIMIT).map((row) => row.id)];
+  });
+}
+
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
@@ -37616,7 +37792,7 @@ export async function getSessionLineage(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionLineage | null> {
-  const descendantLimit = 200;
+  const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -37665,25 +37841,7 @@ export async function getSessionLineage(
     }
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
-    const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
-        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
-        from ${schema.sessions} child
-        where child.workspace_id = ${workspaceId}
-          and child.parent_session_id = ${sessionId}
-        union all
-        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and descendants.depth < 5
-          and not child.id = any(descendants.path)
-      )
-      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
-      from descendants
-      order by depth, created_at desc, id desc
-      limit ${descendantLimit + 1}
-    `)) as LineageIdRow[];
+    const childRows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
     const truncated = childRows.length > descendantLimit;
     const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
@@ -42656,12 +42814,29 @@ export type ApplyContextCompactionResult =
     }
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
+const RETAINED_ROW_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function retainedRowTurnId(
+  turnId: string | null | undefined,
+  sessionTurnIds: ReadonlySet<string>,
+): string | null {
+  return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
  * existing row. A paused, replaced, recovered, or terminal attempt cannot
  * mutate conversation truth.
+ *
+ * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
+ * retained message came from, so a later compaction can still pair a request
+ * with its own turn's answer. (Retained reply copies are passed as null and
+ * record their turn in the item, so turn-keyed readers such as message forks
+ * never see two rows of one reply.) An id that is not a turn of
+ * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(
   db: Database,
@@ -42673,12 +42848,19 @@ export async function applyContextCompaction(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
+    replacementTurnIds?: ReadonlyArray<string | null | undefined>;
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
+  if (
+    input.replacementTurnIds !== undefined &&
+    input.replacementTurnIds.length !== input.replacementItems.length
+  ) {
+    throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -42732,6 +42914,30 @@ export async function applyContextCompaction(
               eq(schema.sessionHistoryItems.active, true),
             ),
           );
+        const requestedTurnIds = [
+          ...new Set(
+            (input.replacementTurnIds ?? []).filter(
+              (turnId): turnId is string =>
+                typeof turnId === "string" && RETAINED_ROW_TURN_ID_PATTERN.test(turnId),
+            ),
+          ),
+        ];
+        const sessionTurnIds = new Set(
+          requestedTurnIds.length === 0
+            ? []
+            : (
+                await tx
+                  .select({ id: schema.sessionTurns.id })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                      eq(schema.sessionTurns.sessionId, input.sessionId),
+                      inArray(schema.sessionTurns.id, requestedTurnIds),
+                    ),
+                  )
+              ).map((row) => row.id),
+        );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
             withLosslessContentWriteVersion(
@@ -42739,7 +42945,7 @@ export async function applyContextCompaction(
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: null,
+                turnId: retainedRowTurnId(input.replacementTurnIds?.[index], sessionTurnIds),
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
                 active: true,
@@ -43064,12 +43270,14 @@ export async function recordSkippedContextCompaction(
 /**
  * Whether a Steer is waiting for this session's running turn: a queued prompt
  * marked `delivery: "steer"` (human, API, or a queue row an agent steered) or
- * a pending Agent Steer instruction. Steer admission leaves a live attempt
- * running, and the worker reads this before each model request: a pending
- * Steer is delivered at that model-step boundary by settling the running turn
- * `superseded` (reason `steer`, `atModelStep`), after the completed step's
- * tool calls and results are recorded, so nothing in flight is cut off. The
- * Steer then runs next on the same history.
+ * a pending Agent Steer instruction, or, while the running turn is a run of an
+ * automation whose overlap is `steer`, a pending later run of that same
+ * automation. Steer admission leaves a live attempt running, and the worker
+ * reads this before each model request: a pending Steer is delivered at that
+ * model-step boundary by settling the running turn `superseded` (reason
+ * `steer`, `atModelStep`), after the completed step's tool calls and results
+ * are recorded, so nothing in flight is cut off. The Steer then runs next on
+ * the same history.
  *
  * This unlocked read only decides whether that settlement is worth trying.
  * The settlement's `requirePendingSteer` precondition re-checks the same
@@ -43145,7 +43353,63 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  return agentSteer !== undefined;
+  if (agentSteer) return true;
+  return await pendingAutomationSteerExists(db, workspaceId, sessionId, turnId);
+}
+
+/**
+ * A later run of the automation that owns the running turn waits in the chat,
+ * and that automation hands its running turn over (`overlapPolicy: "steer"`).
+ * Only the automation's own turn yields: a person's turn, a goal continuation
+ * or another automation's run never matches, so they finish first and the run
+ * is delivered after them as usual. The waiting run must be deliverable as it
+ * stands (dispatched with its accepted execution, the claim's own preclaim
+ * rule), so a run the claim would refuse never ends the turn for nothing.
+ */
+async function pendingAutomationSteerExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  const turns = schema.sessionTurns;
+  const runs = schema.scheduledTaskRuns;
+  const tasks = schema.scheduledTasks;
+  const updates = schema.sessionSystemUpdates;
+  const [row] = await rawRows<{ present: number }>(
+    db,
+    sql`select 1 as present
+      from ${turns} running_turn
+      join ${runs} running_run
+        on running_run.workspace_id = running_turn.workspace_id
+        and running_run.id = running_turn.scheduled_task_run_id
+      join ${tasks} task
+        on task.workspace_id = running_run.workspace_id
+        and task.id = running_run.task_id
+      where running_turn.workspace_id = ${workspaceId}
+        and running_turn.session_id = ${sessionId}
+        and running_turn.id = ${turnId}
+        and task.overlap_policy = 'steer'
+        and task.status = 'active'
+        and task.deleted_at is null
+        and exists (
+          select 1
+          from ${updates} waiting
+          join ${runs} waiting_run
+            on waiting_run.workspace_id = waiting.workspace_id
+            and waiting_run.id = waiting.scheduled_task_run_id
+          where waiting.workspace_id = running_turn.workspace_id
+            and waiting.session_id = running_turn.session_id
+            and waiting.kind = 'scheduled_occurrence'
+            and waiting.state = 'pending'
+            and waiting_run.task_id = task.id
+            and waiting_run.id <> running_run.id
+            and waiting_run.status = 'dispatched'
+            and waiting_run.accepted_execution_snapshot is not null
+        )
+      limit 1`,
+  );
+  return row !== undefined;
 }
 
 /**
@@ -55354,6 +55618,74 @@ export async function summarizeSessionRecoveryBacklog(
   return summary;
 }
 
+/** What currently holds a durable queued turn, from its session's own state. */
+export const QUEUED_TURN_HOLDS = [
+  "ready",
+  "behind_active_turn",
+  "paused",
+  "failed",
+  "requires_action",
+  "waiting_capacity",
+  "cancelled",
+] as const;
+
+export type QueuedTurnHold = (typeof QUEUED_TURN_HOLDS)[number];
+
+export type QueuedTurnHoldSummary = {
+  count: number;
+  /** Age of the oldest queued turn in this class; 0 when the class is empty. */
+  oldestAgeSeconds: number;
+};
+
+const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
+
+/**
+ * Content-free cross-workspace classification of every `status = 'queued'`
+ * turn by what holds it (migration 0988). The classes sum to
+ * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
+ * the rest wait for a running turn, Resume, a new message, or a person.
+ *
+ * 0988 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this returns null. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function summarizeQueuedTurnsByHold(
+  db: Database,
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return null;
+  const summary = Object.fromEntries(
+    QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
+  ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const rows = await rawRows<{
+    hold: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select hold, count, oldest_age_seconds
+      from opengeni_private.summarize_queued_turns_by_hold()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.hold in summary)) continue;
+    summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
+    };
+  }
+  return summary;
+}
+
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
   oldestStartedAt: Date | null;
@@ -65372,12 +65704,15 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
 //
-// A personal machine belongs to the workspace it was first connected from, and
-// finalize_scoped_enrollment reuses the owner's enrollment for the same public
-// key wherever that is. Credentials and connection lookups are per workspace,
-// so a personal finalize from any other workspace is refused with
-// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
-// so nothing is written and a single-use token is not claimed.
+// A live personal machine belongs to the workspace it was connected from, and
+// finalize_scoped_enrollment reuses the owner's live enrollment for the same
+// public key wherever that is. Credentials and connection lookups are per
+// workspace, so a personal finalize from any other workspace while it is live
+// is refused with PersonalMachineConnectedElsewhereError (the machine serves
+// the owner's other workspaces through grants instead). The caller's
+// transaction rolls back, so nothing is written and a single-use token is not
+// claimed. Once removed, the machine can be connected again from any of the
+// owner's workspaces: a new enrollment is made there (0996).
 export class PersonalMachineConnectedElsewhereError extends Error {
   constructor() {
     super("this machine was first connected as a personal machine from another workspace");
@@ -90286,6 +90621,7 @@ async function mapSessionWithControl(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
+  presentation: "full" | "model_gate" = "full",
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -90306,6 +90642,7 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
     // Temporal acknowledgement proves that a worker has admitted a turn.
@@ -91846,3 +92183,5 @@ export * from "./boot-connect";
 export * from "./teams-conversations";
 
 export * from "./teams-private-session";
+
+export { recordMachinePromotionProof } from "./promotion-abuse";

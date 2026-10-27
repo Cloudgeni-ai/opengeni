@@ -2,8 +2,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /**
  * Webhook signature schemes event sources use: Standard Webhooks (used by
- * custom senders and by MCP Events webhook delivery) and the plain hex
- * HMAC-SHA256 of the raw body that Linear and Sentry send.
+ * Opengeni's own format, Svix-based apps and MCP Events webhook delivery), an
+ * HMAC-SHA256 of the raw body (Linear, Sentry and many others), a timestamped
+ * `t=…,v1=…` HMAC-SHA256 (Stripe, Tailscale) and a shared token.
  */
 
 /** Standard Webhooks rejects deliveries signed more than this long ago or ahead. */
@@ -127,6 +128,147 @@ export function signHexBodyHmac(secret: string, body: Uint8Array | string): stri
   return createHmac("sha256", Buffer.from(secret, "utf8"))
     .update(typeof body === "string" ? Buffer.from(body, "utf8") : body)
     .digest("hex");
+}
+
+function bodyBytes(body: Uint8Array | string): Uint8Array {
+  return typeof body === "string" ? Buffer.from(body, "utf8") : body;
+}
+
+function bodyHmac(secret: string, body: Uint8Array | string): Buffer {
+  return createHmac("sha256", Buffer.from(secret, "utf8")).update(bodyBytes(body)).digest();
+}
+
+/** What the value of a header names when the header is absent or wrong. */
+function headerLabel(header: string): string {
+  return header.replace(
+    /(^|-)([a-z])/gu,
+    (_, dash: string, letter: string) => `${dash}${letter.toUpperCase()}`,
+  );
+}
+
+/**
+ * Verify an HMAC-SHA256 of the raw body, keyed with the secret's UTF-8 bytes,
+ * in hex or base64 after an optional prefix such as `sha256=`.
+ */
+export function verifyBodyHmac(input: {
+  secret: string;
+  header: string;
+  value: string | null;
+  body: Uint8Array;
+  encoding: "hex" | "base64";
+  prefix: string;
+}): { ok: true } | { ok: false; reason: string } {
+  const name = headerLabel(input.header);
+  const value = input.value?.trim() ?? "";
+  if (!value) return { ok: false, reason: `Missing ${name} header` };
+  if (input.prefix && !value.startsWith(input.prefix)) {
+    return { ok: false, reason: `The ${name} header does not start with "${input.prefix}"` };
+  }
+  const encoded = value.slice(input.prefix.length);
+  const valid =
+    input.encoding === "hex"
+      ? /^[0-9a-fA-F]{64}$/u.test(encoded)
+      : /^[A-Za-z0-9+/_-]{43}={0,1}$/u.test(encoded);
+  const provided = valid
+    ? Buffer.from(encoded.replace(/-/gu, "+").replace(/_/gu, "/"), input.encoding)
+    : null;
+  return provided && constantTimeEqual(provided, bodyHmac(input.secret, input.body))
+    ? { ok: true }
+    : { ok: false, reason: `The ${name} header does not match the signing secret` };
+}
+
+/** The header value `verifyBodyHmac` accepts. Used by tests and test deliveries. */
+export function signBodyHmac(input: {
+  secret: string;
+  body: Uint8Array | string;
+  encoding: "hex" | "base64";
+  prefix?: string;
+}): string {
+  return `${input.prefix ?? ""}${bodyHmac(input.secret, input.body).toString(input.encoding)}`;
+}
+
+/**
+ * Verify a `t=<unix seconds>,v1=<hex>` header (Stripe, Tailscale) whose
+ * signature is the HMAC-SHA256 of `<t>.<raw body>`, keyed with the secret's
+ * UTF-8 bytes. Any `v1` entry may match (secret rotation); other schemes in
+ * the header are ignored.
+ */
+export function verifyTimestampedHmac(input: {
+  secret: string;
+  header: string;
+  value: string | null;
+  body: Uint8Array;
+  toleranceSeconds: number;
+  nowSeconds?: number;
+}): { ok: true; timestampSeconds: number } | { ok: false; reason: string } {
+  const name = headerLabel(input.header);
+  let timestamp: string | null = null;
+  const signatures: string[] = [];
+  for (const element of (input.value ?? "").split(",")) {
+    const separator = element.indexOf("=");
+    if (separator < 0) continue;
+    const key = element.slice(0, separator).trim();
+    const value = element.slice(separator + 1).trim();
+    if (key === "t" && timestamp === null) timestamp = value;
+    else if (key === "v1") signatures.push(value);
+  }
+  if (timestamp === null || signatures.length === 0) {
+    return { ok: false, reason: `Missing or malformed ${name} header` };
+  }
+  if (!/^\d{1,12}$/u.test(timestamp)) {
+    return { ok: false, reason: `The ${name} time is not a Unix time` };
+  }
+  const timestampSeconds = Number(timestamp);
+  const now = input.nowSeconds ?? Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestampSeconds) > input.toleranceSeconds) {
+    return {
+      ok: false,
+      reason: `The delivery was signed more than ${input.toleranceSeconds} seconds from now`,
+    };
+  }
+  const expected = timestampedHmac(input.secret, timestamp, input.body);
+  const matched = signatures
+    .filter((signature) => /^[0-9a-fA-F]{64}$/u.test(signature))
+    .some((signature) => constantTimeEqual(Buffer.from(signature, "hex"), expected));
+  return matched
+    ? { ok: true, timestampSeconds }
+    : { ok: false, reason: `The ${name} header does not match the signing secret` };
+}
+
+/** The header value `verifyTimestampedHmac` accepts. Used by tests and test deliveries. */
+export function signTimestampedHmac(input: {
+  secret: string;
+  body: Uint8Array | string;
+  timestampSeconds?: number;
+}): string {
+  const timestamp = String(input.timestampSeconds ?? Math.floor(Date.now() / 1000));
+  return `t=${timestamp},v1=${timestampedHmac(input.secret, timestamp, input.body).toString("hex")}`;
+}
+
+function timestampedHmac(secret: string, timestamp: string, body: Uint8Array | string): Buffer {
+  return createHmac("sha256", Buffer.from(secret, "utf8"))
+    .update(`${timestamp}.`, "utf8")
+    .update(bodyBytes(body))
+    .digest();
+}
+
+/** Verify a shared token sent as a header's value, after an optional prefix such as `Bearer `. */
+export function verifyHeaderToken(input: {
+  secret: string;
+  header: string;
+  value: string | null;
+  prefix: string;
+}): { ok: true } | { ok: false; reason: string } {
+  const name = headerLabel(input.header);
+  if (input.value === null) return { ok: false, reason: `Missing ${name} header` };
+  const provided = input.value.trim();
+  const matched =
+    provided.toLowerCase().startsWith(input.prefix.toLowerCase()) &&
+    constantTimeEqual(
+      createHmac("sha256", "token").update(provided.slice(input.prefix.length).trim()).digest(),
+      createHmac("sha256", "token").update(input.secret).digest(),
+    );
+  return matched ? { ok: true } : { ok: false, reason: `The ${name} header is not the secret` };
 }
 
 function constantTimeEqual(left: Buffer, right: Buffer): boolean {

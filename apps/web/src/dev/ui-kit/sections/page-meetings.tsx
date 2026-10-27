@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import {
   createMeetingRecorderStore,
@@ -14,12 +15,13 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 import {
   createMeetingsFixture,
+  FAILED_RECORDING_ID,
   LIVE_LINES,
   LIVE_RECORDING_ID,
 } from "@opengeni/react/testing/meetings";
 
 type View = "list" | "meeting" | "settings";
-type RecorderMode = "idle" | "recording" | "paused" | "offline" | "denied";
+type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
 
 /** The live preview as the recorder holds it: four lines heard, one still being heard. */
@@ -58,18 +60,24 @@ function fakeRecorder(
   preview: LivePreview = "off",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
+  // Just stopped: the last few seconds of audio are on their way, so it reads Transcribing.
+  const stopped = mode === "stopped";
+  const held = live || stopped;
   return {
     state: live
       ? mode === "paused"
         ? "paused"
         : "recording"
-      : mode === "denied"
-        ? "failed"
-        : "idle",
-    recordingId: live ? "preview-live" : null,
+      : stopped
+        ? "stopping"
+        : mode === "denied"
+          ? "failed"
+          : "idle",
+    // The fixture's meeting in progress, so Take notes opens the one being recorded.
+    recordingId: held ? LIVE_RECORDING_ID : null,
     title: live ? "Platform standup" : null,
     elapsedMilliseconds: live ? Date.now() - startedAt : 0,
-    tracks: live
+    tracks: held
       ? [
           {
             trackNumber: 0,
@@ -83,9 +91,9 @@ function fakeRecorder(
           },
         ]
       : [],
-    upload: live
+    upload: held
       ? {
-          recordingId: "preview-live",
+          recordingId: LIVE_RECORDING_ID,
           created: mode !== "offline",
           pendingChunks: mode === "offline" ? 7 : 1,
           pendingBytes: 120_000,
@@ -144,7 +152,20 @@ export default function PageMeetingsSection() {
   );
   // ?models=pinned previews a deployment that pins one speech-to-text model.
   const pinned = initial.get("models") === "pinned";
-  const fixture = useMemo(() => createMeetingsFixture({ state: data, pinned }), [data, pinned]);
+  // ?failure=missing_provider_key makes the failed meeting's transcript fail
+  // for a provider that isn't connected, instead of a used-up provider account.
+  const failure = initial.get("failure");
+  const fixture = useMemo(() => {
+    const base = createMeetingsFixture({ state: data, pinned });
+    if (!failure) return base;
+    const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
+      const recording = await base.client.getRecording(workspaceId, id);
+      return recording.transcript && id === FAILED_RECORDING_ID
+        ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
+        : recording;
+    };
+    return { ...base, client: { ...base.client, getRecording } };
+  }, [data, pinned, failure]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
@@ -158,16 +179,22 @@ export default function PageMeetingsSection() {
     );
     return () => window.clearInterval(timer);
   }, [mode, startedAt, store, audio, preview]);
-  // ?open=live opens the meeting someone else is recording.
+  // ?open=live opens the meeting in progress: recorded here while the recorder
+  // records, or elsewhere while it is idle. ?open=failed opens the one whose
+  // transcript failed.
   const [openId, setOpenId] = useState(
-    initial.get("open") === "live" ? LIVE_RECORDING_ID : fixture.readyId,
+    initial.get("open") === "live"
+      ? LIVE_RECORDING_ID
+      : initial.get("open") === "failed"
+        ? FAILED_RECORDING_ID
+        : fixture.readyId,
   );
 
   return (
     <KitSection sectionKey="page-meetings">
       <KitBlock
         title="Meetings"
-        description="The production Meetings pages over an in-memory recordings API. Open a meeting, name a speaker, change a turn's speaker or correct its words."
+        description="The production Meetings pages over an in-memory recordings API. Open a meeting, switch Summary, Transcript and Notepad, name a speaker, change a turn's speaker or correct its words, or ask about it."
       >
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <SegmentedControl
@@ -191,6 +218,7 @@ export default function PageMeetingsSection() {
               { value: "recording", label: "Recording" },
               { value: "paused", label: "Paused" },
               { value: "offline", label: "Offline" },
+              { value: "stopped", label: "Stopped" },
               { value: "denied", label: "Mic blocked" },
             ]}
           />
@@ -242,6 +270,7 @@ export default function PageMeetingsSection() {
                 recordings={fixture.client}
                 liveTranscriptDefault={settings.liveTranscript === true}
                 defaultLanguage={settings.language ?? null}
+                viewerName="Ingrid Solberg"
                 meetingHref={(id) => `#meeting-${id}`}
                 onOpen={(id) => {
                   setOpenId(id);
@@ -259,6 +288,11 @@ export default function PageMeetingsSection() {
                 onOpenSettings={() => setView("settings")}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
+                onOpenChat={() => toast("Opens the chat that wrote the notes")}
+                // The console starts a chat with the meeting attached and the question first.
+                onAsk={(_recordingId, question) => {
+                  toast("Starts a chat about this meeting", { description: question });
+                }}
               />
             )}
           </KitCanvas>

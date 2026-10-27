@@ -63,6 +63,7 @@ function readPair(pair: (typeof pairs)[number]) {
     "afterReads",
     `return (async () => {
       const toolFamilies = { skills: "read" };
+      const videoSkillSelected = true;
       const { ${pair.readers.join(", ")} } = ports;
       ${reads.join("\n")}
       await afterReads();

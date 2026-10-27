@@ -405,7 +405,8 @@ pub async fn enroll(
     };
     on_prompt(&pending);
 
-    poll_until_resolved(&client, req, &start).await
+    let credentials = poll_until_resolved(&client, req, &start).await?;
+    prove_new_enrollment(&req.api_base_url, identity, credentials).await
 }
 
 /// `POST /enrollments/device/start`. Isolated so the request/response field names
@@ -510,7 +511,59 @@ pub async fn exchange_token(
     };
     let resp = client.post(&url).json(&body).send().await?;
     let exchange = parse_json::<wire::ExchangeResponse>(resp, EXCHANGE_PATH).await?;
-    Ok(exchange.credentials.into_proto())
+    prove_new_enrollment(
+        &req.api_base_url,
+        identity,
+        exchange.credentials.into_proto(),
+    )
+    .await
+}
+
+/// Prove install-key possession immediately, before saving a new connection.
+/// Enrollment alone accepts a public key; this existing signed renewal protocol
+/// makes that key usable as verified abuse-detection evidence. Older APIs that
+/// have no renewal endpoint retain their existing enrollment behavior.
+async fn prove_new_enrollment(
+    api_url: &str,
+    identity: &InstallIdentity,
+    credentials: EnrollmentCredentials,
+) -> Result<EnrollmentCredentials, EnrollmentError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let bearer = &credentials.nats_credentials;
+    let proof = format!("opengeni:enrollment-renew:v1\n{now}\n{bearer}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let response = client
+        .post(join_url(api_url, "/v1/enrollments/renew"))
+        .json(&serde_json::json!({"bearer": bearer, "signedAt": now,
+            "signature": identity.sign_base64(proof.as_bytes())}))
+        .send()
+        .await?;
+    if matches!(response.status().as_u16(), 404 | 405) {
+        return Ok(credentials);
+    }
+    if !response.status().is_success() {
+        return Err(EnrollmentError::Status {
+            path: "/v1/enrollments/renew".into(),
+            status: response.status().as_u16(),
+            body: "initial machine proof unavailable".into(),
+        });
+    }
+    let renewed = response
+        .json::<wire::ExchangeResponse>()
+        .await?
+        .credentials
+        .into_proto();
+    if renewed.agent_id != credentials.agent_id || renewed.workspace_id != credentials.workspace_id
+    {
+        return Err(EnrollmentError::MissingCredentials);
+    }
+    Ok(renewed)
 }
 
 /// Joins a base URL and a path without doubling or dropping the separating slash.
@@ -741,6 +794,80 @@ mod wire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn initial_enrollment_proves_key_and_keeps_older_servers_compatible() {
+        use ed25519_dalek::{Signature, Verifier as _};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for status in [200, 401, 404] {
+            let identity = InstallIdentity::generate();
+            let key = identity.signing_key.verifying_key();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let body = loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                        assert!(headers.starts_with("POST /v1/enrollments/renew HTTP/1.1"));
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &bytes[end + 4..end + 4 + length],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                let signed_at = body["signedAt"].as_u64().unwrap();
+                assert_eq!(body["bearer"], "original");
+                let signature = base64::engine::general_purpose::STANDARD_NO_PAD
+                    .decode(body["signature"].as_str().unwrap())
+                    .unwrap();
+                key.verify(
+                    format!("opengeni:enrollment-renew:v1\n{signed_at}\noriginal").as_bytes(),
+                    &Signature::from_slice(&signature).unwrap(),
+                )
+                .unwrap();
+                let response = serde_json::json!({"credentials": {
+                    "agentId":"a","workspaceId":"w","bearer":"renewed","natsUrls":[],
+                    "relayUrl":"","relayToken":"","updatePublicKey":"",
+                    "consentedWholeMachine":true,"consentedScreenControl":false
+                }})
+                .to_string();
+                socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            });
+            let result = prove_new_enrollment(
+                &url,
+                &identity,
+                EnrollmentCredentials {
+                    agent_id: "a".into(),
+                    workspace_id: "w".into(),
+                    nats_credentials: "original".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            server.await.unwrap();
+            match status {
+                200 => assert_eq!(result.unwrap().nats_credentials, "renewed"),
+                404 => assert_eq!(result.unwrap().nats_credentials, "original"),
+                _ => assert!(result.is_err()),
+            }
+        }
+    }
 
     // A real HTTP exchange checks the native client's wire proof and persisted
     // continuation state independently of the server-side authorization tests.

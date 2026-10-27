@@ -230,7 +230,7 @@ describe("useOutlookMailIntegration", () => {
       />,
     );
     try {
-      expect(model?.mark).toMatchObject({ logoSrc: expect.stringContaining("outlook_48x1.svg") });
+      expect(model?.mark).toMatchObject({ logoSrc: expect.stringContaining("outlook-mail.svg") });
       expect(model?.chip).toEqual({ label: "Not connected", tone: "idle" });
       expect(model?.access).toBeUndefined();
       expect(model?.footer.kind).toBe("setup");

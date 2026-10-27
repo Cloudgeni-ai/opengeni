@@ -1,4 +1,5 @@
-import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
+import { SignupChallenge } from "./signup-challenge";
+import { CheckIcon, KeyRoundIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AuthApiError, requestPasswordReset, sendVerificationEmail } from "@/api";
@@ -25,6 +26,46 @@ import {
   type VerificationLinkError,
 } from "@/lib/managed-auth-url";
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import {
+  browserSupportsPasskeys,
+  passkeyAlreadyRegistered,
+  passkeyPromptDismissed,
+} from "@/lib/passkeys";
+
+/** What to tell someone whose passkey sign-in or sign-up didn't finish. */
+export function passkeyFailure(
+  mode: "signin" | "signup",
+  error: unknown,
+): { message: string; switchTo: ManagedAuthMode | null } {
+  if (passkeyPromptDismissed(error)) {
+    return {
+      message:
+        mode === "signin"
+          ? "No passkey was used. Try again, or sign in with your email and password."
+          : "No passkey was created. Try again when you're ready.",
+      switchTo: null,
+    };
+  }
+  if (
+    passkeyAlreadyRegistered(error) ||
+    (error instanceof AuthApiError && error.code === "PASSKEY_ALREADY_REGISTERED")
+  ) {
+    return {
+      message: "This passkey already belongs to an account here. Sign in with it instead.",
+      switchTo: "signin",
+    };
+  }
+  if (error instanceof AuthApiError && error.code?.startsWith("PASSKEY_")) {
+    return { message: error.message, switchTo: null };
+  }
+  return {
+    message:
+      mode === "signin"
+        ? "Couldn't sign in with your passkey. Try again."
+        : "Couldn't create your account with a passkey. Try again.",
+    switchTo: null,
+  };
+}
 
 export function ManagedAuthPanel(props: {
   initialMode?: ManagedAuthMode;
@@ -36,6 +77,7 @@ export function ManagedAuthPanel(props: {
    * Sign in stays available.
    */
   newSignupsEnabled?: boolean;
+  signupChallengeSiteKey?: string;
   /** An expired or invalid email-verification link returned the person here. */
   verificationLinkError?: VerificationLinkError | null;
   /**
@@ -48,10 +90,20 @@ export function ManagedAuthPanel(props: {
   invitation?: { organizationName: string; targetEmail: string } | null;
   onDismissInvitation?: () => void;
   socialProviders?: readonly ManagedSocialProvider[];
-  onSocialSubmit?: (provider: ManagedSocialProvider) => Promise<void>;
+  onSocialSubmit?: (
+    provider: ManagedSocialProvider,
+    signupChallengeToken?: string,
+  ) => Promise<void>;
+  /** The deployment offers passkey sign-in, and passkey-only accounts. */
+  passkeySignIn?: boolean;
+  passkeySignUp?: boolean;
+  onPasskeySubmit?: (
+    mode: "signin" | "signup",
+    input?: { name: string; signupChallengeToken?: string },
+  ) => Promise<void>;
   onSubmit: (
     mode: "signin" | "signup",
-    input: { name: string; email: string; password: string },
+    input: { name: string; email: string; password: string; signupChallengeToken?: string },
   ) => Promise<void>;
 }) {
   const allowedModes = props.allowedModes ?? (["signin", "signup"] as const);
@@ -87,8 +139,23 @@ export function ManagedAuthPanel(props: {
   const [linkResendMode, setLinkResendMode] = useState(
     () => emailVerificationRequired && Boolean(verificationLinkError),
   );
+  // Creating an account with only a name and a passkey: no email or password.
+  const [passkeySignupMode, setPasskeySignupMode] = useState(false);
   const emailOnlyMode = resetMode || linkResendMode;
   const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
+  const [passkeysSupported] = useState(browserSupportsPasskeys);
+  const passkeysOffered = Boolean(props.onPasskeySubmit) && passkeysSupported;
+  const passkeySignupView = passkeySignupMode && mode === "signup" && !signupsPausedView;
+  const offerPasskeySignIn =
+    mode === "signin" && !emailOnlyMode && passkeysOffered && props.passkeySignIn === true;
+  const offerPasskeySignUp =
+    mode === "signup" &&
+    !emailOnlyMode &&
+    !signupsPausedView &&
+    !passkeySignupView &&
+    !invitation &&
+    passkeysOffered &&
+    props.passkeySignUp === true;
   // Focus the first field only with a mouse/trackpad: on a phone, autofocus
   // opens the keyboard and scrolls the page past the heading on arrival.
   const autoFocusFirstField =
@@ -100,8 +167,13 @@ export function ManagedAuthPanel(props: {
   useEffect(() => {
     if (ownsLocationLinkError) clearVerificationLinkErrorFromLocation(window);
   }, [ownsLocationLinkError]);
+  const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
+  const [challengeReset, setChallengeReset] = useState(0);
+  const challengeRequired =
+    mode === "signup" && !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [resendBusy, setResendBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<ManagedAuthFormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -113,6 +185,7 @@ export function ManagedAuthPanel(props: {
     setMode(nextMode);
     setResetMode(false);
     setLinkResendMode(false);
+    setPasskeySignupMode(false);
     setFieldErrors({});
     setFormError(null);
     setFormActionMode(null);
@@ -143,6 +216,10 @@ export function ManagedAuthPanel(props: {
   }
 
   async function submit() {
+    if (passkeySignupView) {
+      await submitPasskey("signup");
+      return;
+    }
     const input = { name: name.trim(), email: email.trim(), password };
     const validationErrors = validateManagedAuthInput(
       emailOnlyMode ? "signin" : mode,
@@ -154,6 +231,10 @@ export function ManagedAuthPanel(props: {
     setSuccessMessage(null);
     setVerificationEmail(null);
     if (Object.keys(validationErrors).length > 0) return;
+    if (challengeRequired && !signupChallengeToken) {
+      setFormError("Complete the signup verification.");
+      return;
+    }
     setBusy(true);
     try {
       if (linkResendMode) {
@@ -170,7 +251,11 @@ export function ManagedAuthPanel(props: {
         );
         return;
       }
-      await props.onSubmit(mode, { ...input, name: input.name || input.email });
+      await props.onSubmit(mode, {
+        ...input,
+        name: input.name || input.email,
+        ...(challengeRequired ? { signupChallengeToken } : {}),
+      });
       if (mode === "signup") {
         if (emailVerificationRequired) setVerificationEmail(input.email);
         setSuccessMessage(
@@ -205,6 +290,10 @@ export function ManagedAuthPanel(props: {
       }
     } finally {
       setBusy(false);
+      if (challengeRequired) {
+        setSignupChallengeToken(undefined);
+        setChallengeReset((value) => value + 1);
+      }
     }
   }
 
@@ -237,23 +326,122 @@ export function ManagedAuthPanel(props: {
   }
 
   async function submitSocial(provider: ManagedSocialProvider) {
+    if (challengeRequired && !signupChallengeToken) {
+      setFormError("Complete the signup verification.");
+      return;
+    }
     if (!props.onSocialSubmit) return;
     setSocialBusy(provider);
     setFieldErrors({});
     setFormError(null);
     setSuccessMessage(null);
     try {
-      await props.onSocialSubmit(provider);
+      await props.onSocialSubmit(provider, challengeRequired ? signupChallengeToken : undefined);
     } catch {
       setFormError(
         `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
       );
       setFormActionMode(null);
       setSocialBusy(null);
+      if (challengeRequired) {
+        setSignupChallengeToken(undefined);
+        setChallengeReset((value) => value + 1);
+      }
     }
   }
 
-  const formInteractionBusy = busy || resendBusy || socialBusy !== null;
+  async function submitPasskey(kind: "signin" | "signup") {
+    if (!props.onPasskeySubmit) return;
+    const trimmedName = name.trim();
+    setFieldErrors({});
+    setFormError(null);
+    setFormActionMode(null);
+    setSuccessMessage(null);
+    setVerificationEmail(null);
+    if (kind === "signup") {
+      if (!trimmedName) {
+        setFieldErrors({ name: "Enter your name." });
+        return;
+      }
+      if (trimmedName.length > 80) {
+        setFieldErrors({ name: "Use 80 characters or fewer." });
+        return;
+      }
+      if (challengeRequired && !signupChallengeToken) {
+        setFormError("Complete the signup verification.");
+        return;
+      }
+    }
+    setPasskeyBusy(true);
+    try {
+      await props.onPasskeySubmit(
+        kind,
+        kind === "signup"
+          ? {
+              name: trimmedName,
+              ...(challengeRequired && signupChallengeToken ? { signupChallengeToken } : {}),
+            }
+          : undefined,
+      );
+    } catch (error) {
+      if (
+        kind === "signup" &&
+        error instanceof AuthApiError &&
+        error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE
+      ) {
+        setSignupsPausedByServer(true);
+        setPasskeySignupMode(false);
+        return;
+      }
+      const failure = passkeyFailure(kind, error);
+      setFormError(failure.message);
+      setFormActionMode(failure.switchTo);
+    } finally {
+      setPasskeyBusy(false);
+      if (kind === "signup" && challengeRequired) {
+        setSignupChallengeToken(undefined);
+        setChallengeReset((value) => value + 1);
+      }
+    }
+  }
+
+  const formInteractionBusy = busy || resendBusy || socialBusy !== null || passkeyBusy;
+  const passkeyButton =
+    offerPasskeySignIn || offerPasskeySignUp ? (
+      <Button
+        type="button"
+        variant="outline"
+        className="min-h-11 w-full justify-center"
+        disabled={formInteractionBusy}
+        onClick={() => {
+          if (offerPasskeySignIn) {
+            void submitPasskey("signin");
+            return;
+          }
+          setPasskeySignupMode(true);
+          setFieldErrors({});
+          setFormError(null);
+          setFormActionMode(null);
+          setSuccessMessage(null);
+          // The button that was pressed goes away; the name is the next step.
+          requestAnimationFrame(() => document.getElementById("managed-auth-name")?.focus());
+        }}
+      >
+        {passkeyBusy ? (
+          <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+        ) : (
+          <KeyRoundIcon className="size-4" />
+        )}
+        {offerPasskeySignIn ? "Sign in with a passkey" : "Create account with a passkey"}
+      </Button>
+    ) : null;
+  const showSocial =
+    !signupsPausedView &&
+    !emailOnlyMode &&
+    !passkeySignupView &&
+    !invitation &&
+    Boolean(props.socialProviders?.length) &&
+    Boolean(props.onSocialSubmit);
   const resendVerificationControl = verificationEmail ? (
     <div className="mt-2">
       <p className="text-xs text-fg-subtle">
@@ -307,9 +495,11 @@ export function ManagedAuthPanel(props: {
                 ? "Get a new verification link"
                 : resetMode
                   ? "Reset password"
-                  : mode === "signup"
-                    ? "Create account"
-                    : "Sign in"}
+                  : passkeySignupView
+                    ? "Create account with a passkey"
+                    : mode === "signup"
+                      ? "Create account"
+                      : "Sign in"}
             </Heading>
             <p className="text-sm text-fg-subtle">
               {linkResendMode
@@ -320,13 +510,15 @@ export function ManagedAuthPanel(props: {
                   ? "Enter your email to receive a password-reset link."
                   : signupsPausedView
                     ? "Existing accounts can still sign in."
-                    : invitation
-                      ? mode === "signup"
-                        ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                        : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                      : mode === "signup"
-                        ? "Start free. Set up agents in your product in minutes."
-                        : "Welcome back."}
+                    : passkeySignupView
+                      ? "No email or password. You'll sign in with this passkey."
+                      : invitation
+                        ? mode === "signup"
+                          ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                          : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                        : mode === "signup"
+                          ? "Start free. Set up agents in your product in minutes."
+                          : "Welcome back."}
             </p>
           </div>
         </div>
@@ -372,18 +564,26 @@ export function ManagedAuthPanel(props: {
             onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
           />
         ) : null}
-        {!signupsPausedView &&
-        !emailOnlyMode &&
-        !invitation &&
-        props.socialProviders?.length &&
-        props.onSocialSubmit ? (
+        {challengeRequired && !signupsPausedView ? (
+          <SignupChallenge
+            siteKey={props.signupChallengeSiteKey!}
+            onToken={setSignupChallengeToken}
+            resetKey={challengeReset}
+          />
+        ) : null}
+        {showSocial || passkeyButton ? (
           <>
-            <ManagedSocialAuthButtons
-              providers={props.socialProviders}
-              busyProvider={socialBusy}
-              disabled={busy || resendBusy}
-              onSelect={(provider) => void submitSocial(provider)}
-            />
+            <div className="grid gap-2">
+              {passkeyButton}
+              {showSocial ? (
+                <ManagedSocialAuthButtons
+                  providers={props.socialProviders!}
+                  busyProvider={socialBusy}
+                  disabled={busy || resendBusy || passkeyBusy}
+                  onSelect={(provider) => void submitSocial(provider)}
+                />
+              ) : null}
+            </div>
             <ManagedAuthDivider />
           </>
         ) : null}
@@ -409,10 +609,14 @@ export function ManagedAuthPanel(props: {
               >
                 {fieldErrors.name}
               </p>
+            ) : passkeySignupView ? (
+              <p className="mt-1.5 text-xs text-fg-subtle">
+                Shown in your workspaces instead of an email address.
+              </p>
             ) : null}
           </div>
         ) : null}
-        {signupsPausedView ? null : (
+        {signupsPausedView || passkeySignupView ? null : (
           <div className="mb-3">
             <Label htmlFor="managed-auth-email">Email</Label>
             <Input
@@ -439,7 +643,7 @@ export function ManagedAuthPanel(props: {
             ) : null}
           </div>
         )}
-        {!emailOnlyMode && !signupsPausedView ? (
+        {!emailOnlyMode && !signupsPausedView && !passkeySignupView ? (
           <div>
             <Label htmlFor="managed-auth-password">Password</Label>
             <Input
@@ -528,8 +732,10 @@ export function ManagedAuthPanel(props: {
         ) : null}
         {signupsPausedView ? null : (
           <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
-            {busy ? (
+            {busy || (passkeySignupView && passkeyBusy) ? (
               <Loader2Icon className="size-4 animate-spin" />
+            ) : passkeySignupView ? (
+              <KeyRoundIcon className="size-4" />
             ) : (
               <CheckIcon className="size-4" />
             )}
@@ -537,11 +743,30 @@ export function ManagedAuthPanel(props: {
               ? "Send new link"
               : resetMode
                 ? "Send reset link"
-                : mode === "signup"
-                  ? "Create account"
-                  : "Sign in"}
+                : passkeySignupView
+                  ? "Create passkey"
+                  : mode === "signup"
+                    ? "Create account"
+                    : "Sign in"}
           </Button>
         )}
+        {passkeySignupView ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="mt-2 w-full"
+            disabled={formInteractionBusy}
+            onClick={() => {
+              setPasskeySignupMode(false);
+              setFieldErrors({});
+              setFormError(null);
+              setFormActionMode(null);
+            }}
+          >
+            Use email instead
+          </Button>
+        ) : null}
         {mode === "signin" && !emailOnlyMode && allowedModes.includes("signup") ? (
           <p className="mt-3 text-center text-sm text-fg-subtle">
             New here?{" "}
@@ -557,7 +782,12 @@ export function ManagedAuthPanel(props: {
             </Button>
           </p>
         ) : null}
-        {mode === "signup" && !signupsPausedView ? (
+        {passkeySignupView ? (
+          <p className="mt-2 text-center text-xs text-fg-subtle">
+            Your browser or password manager keeps the passkey. Add a second one later under
+            Security so you can't get locked out.
+          </p>
+        ) : mode === "signup" && !signupsPausedView ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
             {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
