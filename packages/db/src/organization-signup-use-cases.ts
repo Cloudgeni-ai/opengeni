@@ -7,7 +7,7 @@ export type OrganizationSignupUseCase = (typeof ORGANIZATION_SIGNUP_USE_CASES)[n
 
 /**
  * Record one person's signup answer for one organization (migration 0595;
- * `everyday` since 1003).
+ * `everyday` since 1004).
  * Call only for the authenticated managed human (`user:` subject) after
  * authorizing their membership in `organizationId`. The first answer wins: a
  * repeated or replayed call returns the stored choice unchanged.
@@ -31,7 +31,7 @@ export async function recordOrganizationSignupUseCase(
 
 /**
  * Keep one person's current signup answer for one organization (migration
- * 1004): at organization setup, and again when they go Back and choose
+ * 1005): at organization setup, and again when they go Back and choose
  * another answer. The new-chat page follows it on every device; the first
  * answer stays in `organization_signup_use_cases` for analytics. Call only for
  * the authenticated managed human after proving their active membership in
@@ -59,7 +59,7 @@ export async function setOrganizationSignupUseCase(
 
 /**
  * The person's current signup answer for this organization, or null when the
- * server has none (an organization set up before 1004, or without an answer).
+ * server has none (an organization set up before 1005, or without an answer).
  */
 export async function readOrganizationSignupUseCase(
   db: Database,
