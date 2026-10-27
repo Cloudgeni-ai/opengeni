@@ -35,6 +35,8 @@ export interface DictationWords {
   pasteFailed: string;
   /** Why the text can't be typed into other apps on this computer. */
   pasteBlocked: Record<DesktopDictationPasteBlocker, string>;
+  /** The retry shortcut found no dictation to transcribe again. English when absent. */
+  nothingToRetry?: string;
 }
 
 export const ENGLISH_DICTATION_WORDS: DictationWords = {
@@ -60,6 +62,7 @@ export const ENGLISH_DICTATION_WORDS: DictationWords = {
     wtype: "Install wtype or ydotool so dictation can type into other apps.",
     unsupported: "This computer can't type into other apps.",
   },
+  nothingToRetry: "No recent dictation to transcribe again.",
 };
 
 /** `template` with each `{name}` replaced. */

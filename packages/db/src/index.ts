@@ -400,7 +400,6 @@ export * from "./codex-plan-entitlement";
 export * from "./subscription-core-codex";
 export * from "./subscription-core-codex-apps";
 export * from "./subscription-core-codex-compat";
-import type { CodexAccountStatus } from "./codex-account-types";
 export type {
   CodexAccountStatus,
   CodexRotationSettings,
@@ -986,7 +985,6 @@ import {
   type SecretUseApprovalDecision,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
-  CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
@@ -1479,7 +1477,7 @@ export {
   brokeredCredentialBundleProblem,
   normalizedCredentialHeaders,
 } from "./connection-token-resolver";
-import { type CodexAuthDeps, type CodexCredentialCooldownKind } from "./codex-token-resolver";
+import { type CodexAuthDeps } from "./codex-token-resolver";
 import {
   buildConnectionTokenResolver as buildConnectionTokenResolverCore,
   refreshOAuthConnectionCredential as refreshOAuthConnectionCredentialCore,
@@ -24405,19 +24403,6 @@ export class CodexSubscriptionSourceChangeBlockedError extends Error {
   }
 }
 
-/**
- * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
- * credential blob. Keyed on the composite partial index (workspace, chatgpt
- * account): re-connecting the SAME ChatGPT account updates that row in place
- * (re-asserts account_id, bumps version); connecting a NEW account inserts a new
- * row. Returns the row id + whether it was newly inserted. The route — not this
- * accessor — auto-activates a brand-new first account and ensures the
- * rotation-settings row exists.
- */
-export type UpsertCodexSubscriptionCredentialResult =
-  | { kind: "upserted"; id: string; isNew: boolean }
-  | { kind: "unresolved_redemption"; id: string; isNew: false };
-
 async function withOrganizationCodexAdministrator<T>(
   db: Database,
   input: { organizationId: string; actorSubjectId: string },
@@ -24541,11 +24526,6 @@ export type CodexAppsSettings = {
   designatedAt: Date | null;
 };
 
-export type CodexAppsCredentialAuthorization = {
-  credentialId: string;
-  ownerSubjectId: string;
-};
-
 /** A specific designated-credential unavailability observed at request time. */
 export class CodexAppsAuthorizationRevokedError extends CodexAppsCredentialUnavailable {
   constructor() {
@@ -24553,37 +24533,6 @@ export class CodexAppsAuthorizationRevokedError extends CodexAppsCredentialUnava
     this.name = "CodexAppsAuthorizationRevokedError";
   }
 }
-
-export type DesignateCodexAppsCredentialResult =
-  | ({ kind: "updated" } & CodexAppsSettings)
-  | ({ kind: "conflict" | "already_designated" } & CodexAppsSettings)
-  | { kind: "not_found" }
-  | { kind: "not_owner" }
-  | { kind: "forbidden" }
-  | { kind: "unavailable" };
-
-export type ClearCodexAppsCredentialResult = {
-  kind: "updated" | "unchanged" | "conflict" | "forbidden";
-} & CodexAppsSettings;
-
-/** Historical public authority shape; runtime token loading uses the core. */
-export type CodexAcceptedLeaseAuthority = {
-  turnId: string;
-  holderId: string;
-  generation: number;
-};
-/** Public metadata compatibility projection; never contains credential material. */
-export type CodexCredentialStatus = {
-  connected: boolean;
-  credentialId: string | null;
-  chatgptAccountId: string | null;
-  scopes: string | null;
-  planType: string | null;
-  status: string;
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastError: string | null;
-};
 
 /**
  * Single source of truth for "this workspace has an ACTIVE ChatGPT/Codex
@@ -24734,124 +24683,6 @@ export async function isCodexBilledTurn(input: {
 // Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
 // ---------------------------------------------------------------------------
 
-/**
- * A metadata-only scheduling candidate observed while the workspace's rotation
- * row is locked. `activeLeaseCount` counts unexpired holders from OTHER turns;
- * the selection cursor gives deterministic fairness after those holders drain.
- * None of these fields contains credential material.
- */
-export type CodexLeaseAccountStatus = Omit<
-  CodexAccountStatus,
-  | "allocatorVersion"
-  | "allocatorUpdatedBySubjectId"
-  | "allocatorUpdatedAt"
-  | "resetCreditAvailableCount"
-  | "resetCreditsCheckedAt"
-  | "connectedBySubjectId"
-  | "source"
-> & {
-  activeLeaseCount: number;
-  /** Absent only in pre-0383 compatibility schemas. */
-  exhaustedRevision?: number;
-  credentialVersion?: number;
-  selectionCount: number;
-  lastSelectedAt: Date | null;
-};
-
-/**
- * Opaque accepted-turn policy scope resolved while the durable turn is locked.
- *
- * This API deliberately does not know the shape of named pools. A downstream
- * allocator policy owns its private scope type and supplies a pure
- * metadata resolver. The resolved value is handed to the selector in the same
- * workspace rotation-row transaction as lease acquisition, so future pool
- * membership filtering cannot race the accepted turn's frozen policy.
- */
-export type CodexCredentialLeasePolicyScopeResolver<TPolicyScope> = (
-  turnMetadata: Readonly<Record<string, unknown>>,
-) => TPolicyScope | null;
-
-export type CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic = never> = {
-  /** Candidates from exactly one selected policy scope; never a union-ranked pool list. */
-  accounts: readonly CodexLeaseAccountStatus[];
-  /** Downstream-owned, value-free metadata diagnostics for rejected primary/fallback scopes. */
-  unavailableDiagnostics?: readonly TUnavailableDiagnostic[];
-};
-
-export type CodexCredentialLeaseCandidateFilter<
-  TPolicyScope,
-  TUnavailableDiagnostic = never,
-> = (input: {
-  accounts: readonly CodexLeaseAccountStatus[];
-  policyScope: TPolicyScope | null;
-}) =>
-  | readonly CodexLeaseAccountStatus[]
-  | CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>;
-
-/**
- * Codex session state read from the exact session row locked by credential
- * acquisition. Selection and pointer movement must use this snapshot rather
- * than an unlocked read taken before the allocator transaction.
- */
-export type CodexCredentialLeaseSessionState = {
-  pinnedCredentialId: string | null;
-  pinSource: "manual" | "policy" | null;
-  lastCredentialId: string | null;
-};
-
-export type CodexCredentialLeaseSelectionContext<
-  TPolicyScope = never,
-  TUnavailableDiagnostic = never,
-> = {
-  accounts: CodexLeaseAccountStatus[];
-  activeCredentialId: string | null;
-  rotationEnabled: boolean;
-  rotationStrategy: string;
-  /** A still-live idempotent lease for this SAME turn, if one exists. */
-  existingCredentialId: string | null;
-  /** Credentials already consumed by a definitive refusal on this accepted turn. */
-  failedCredentialIds?: readonly string[];
-  failoverExhausted?: boolean;
-  modelId?: string;
-  /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
-  policyScope: TPolicyScope | null;
-  /** Diagnostics produced while choosing one policy scope for this NEW allocation. */
-  unavailableDiagnostics: readonly TUnavailableDiagnostic[];
-};
-
-export type CodexCredentialLeaseSelection<T> = {
-  credentialId: string | null;
-  decision: T;
-  /** Optional selector veto for policy/manual homes that must not move the legacy pointer. */
-  advanceActivePointer?: boolean;
-};
-
-export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
-  decision: T;
-  accounts: CodexLeaseAccountStatus[];
-  activeCredentialId: string | null;
-  rotationEnabled: boolean;
-  rotationStrategy: string;
-  /** Session state from the row locked during this acquisition. */
-  sessionCodexState: CodexCredentialLeaseSessionState;
-  /** Number of effective-pool rows before any downstream policy filter. */
-  poolAccountCount: number;
-  /** Accepted allocator policy captured with the first durable lease. */
-  codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
-  /** True when this acquisition reused a snapshot already present on the turn. */
-  codexPolicySnapshotReused: boolean;
-  credentialId: string | null;
-  reused: boolean;
-  holderId: string | null;
-  generation: number | null;
-  leasedUntil: Date | null;
-  unavailableDiagnostics: readonly TUnavailableDiagnostic[];
-  /** Final selector decision after input policy and manual/policy pin handling. */
-  advanceActivePointer: boolean;
-  /** Frozen alternate-account budget observed before the first provider request. */
-  failoverLimit: number;
-};
-
 export class CodexCredentialLeaseAttemptFencedError extends Error {
   readonly code = "codex_credential_lease_attempt_fenced";
 
@@ -24917,60 +24748,6 @@ export type CodexCapacityWait = {
   createdAt: Date;
   updatedAt: Date;
 };
-
-export type CodexCapacityWakeTarget = {
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  workflowId: string;
-  waiterId: string;
-  generation: number;
-  wakeRevision: number;
-  workflowWakeRevision: number;
-};
-
-export type CodexCapacityMutationResult<T> = {
-  result: T;
-  wakeTargets: CodexCapacityWakeTarget[];
-};
-
-export type CodexCapacityAvailabilityDecision =
-  | {
-      kind: "available";
-      credentialId: string;
-      diagnostic?: Record<string, unknown>;
-    }
-  | {
-      kind: "unavailable";
-      earliestResetAt: Date | null;
-      resetKind: CodexCapacityResetKind;
-      diagnostic?: Record<string, unknown>;
-    };
-
-export type CodexCapacitySelectionContext<
-  TPolicyScope = never,
-  TUnavailableDiagnostic = never,
-> = CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic> & {
-  sessionId: string;
-  sessionPinnedCredentialId: string | null;
-  sessionPinSource: CodexPinSource | null;
-  sessionLastCredentialId: string | null;
-  policyHash: string | null;
-};
-
-export type ArmCodexCapacityWaitResult =
-  | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | {
-      action: "stopped";
-      sessionStatus: "failed" | "queued";
-      waiter: CodexCapacityWait;
-      events: SessionEvent[];
-    }
-  | {
-      action: "stale";
-      waiter: CodexCapacityWait | null;
-      events: SessionEvent[];
-    };
 
 export type ReconcileCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
@@ -26538,48 +26315,6 @@ async function withTemporarySubjectRls<T>(
 
 /** Shared durable scoped-subscription waiter state machine. */
 
-export type CodexCredentialLeaseQuarantine =
-  | { kind: "included_usage"; until: Date }
-  | { kind: "usage_verification"; until: Date }
-  | {
-      kind: "status";
-      status: "needs_relogin" | "error";
-      lastError: string;
-    }
-  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind }
-  | {
-      /**
-       * The re-checked ChatGPT plan does not include `modelId`. The credential
-       * stays connected and healthy for other models; only this (plan, model)
-       * pair leaves allocation until a different plan is observed.
-       */
-      kind: "plan_entitlement";
-      modelId: string;
-      /** Plan the refusal is bound to (freshly observed, or the recorded plan). */
-      planType: string | null;
-      /**
-       * False when the provider did not report a current plan during the
-       * re-check. The turn receipt then names no plan, so no later plan
-       * observation can make this account eligible again for the same turn.
-       */
-      planObserved?: boolean;
-    };
-
-export type CodexCredentialLeaseQuarantineResult =
-  | {
-      action: "recorded";
-      failoverCount: number;
-      maxFailovers: number;
-      exhausted: boolean;
-    }
-  | {
-      action: "credential_changed";
-      failoverCount: number;
-      maxFailovers: number;
-      currentCredentialVersion: number;
-    }
-  | { action: "stale"; failoverCount: number; maxFailovers: number };
-
 /** Commit organization subscription policy and its durable capacity wake atomically. */
 export async function updateModelConnectionAccess(
   db: Database,
@@ -26649,40 +26384,6 @@ async function codexAccountsForModelRestrictions(
   }
   return [];
 }
-
-export type CodexAllocatorUpdateResult =
-  | {
-      kind: "updated" | "unchanged";
-      allocatorEnabled: boolean;
-      allocatorVersion: number;
-      allocatorUpdatedBySubjectId: string | null;
-      allocatorUpdatedAt: Date | null;
-    }
-  | {
-      kind: "conflict";
-      allocatorEnabled: boolean;
-      allocatorVersion: number;
-      allocatorUpdatedBySubjectId: string | null;
-      allocatorUpdatedAt: Date | null;
-    }
-  | { kind: "not_found" };
-
-export type CodexExtraCreditsUpdateResult =
-  | {
-      kind: "updated" | "unchanged";
-      extraCreditsEnabled: boolean;
-      extraCreditsVersion: number;
-      extraCreditsUpdatedBySubjectId: string | null;
-      extraCreditsUpdatedAt: Date | null;
-    }
-  | {
-      kind: "conflict";
-      extraCreditsEnabled: boolean;
-      extraCreditsVersion: number;
-      extraCreditsUpdatedBySubjectId: string | null;
-      extraCreditsUpdatedAt: Date | null;
-    }
-  | { kind: "not_found" };
 
 export const CODEX_RESET_REDEMPTION_OUTCOMES = [
   "reset",
@@ -27518,13 +27219,6 @@ export async function readSubscriptionCoreCodexResetAuthority(
   );
 }
 
-export type CodexFinalizationUsageAuthority = CodexAcceptedLeaseAuthority & {
-  sessionId: string;
-  attemptId: string;
-  executionGeneration: number;
-  credentialVersion: number;
-};
-
 /**
  * Per-workspace model/provider availability policy. NULL fields = unrestricted.
  * Non-null allowedProviders is a strict allowlist over resolved provider
@@ -27687,36 +27381,6 @@ export async function upsertWorkspaceModelPolicy(
     },
   );
 }
-
-/** The supported rotation strategies (P3). */
-export const CODEX_ROTATION_STRATEGIES = [
-  "most_remaining",
-  "round_robin",
-  "drain_then_next",
-  // Session-sharded account affinity: each session gets a deterministic HOME
-  // account (hash(sessionId) % healthy-accounts), written as a 'policy' pin at its
-  // first codex turn and re-sharded only when that account caps. Spreads load ~1/N
-  // across the pool while keeping a session on one warm account for prompt-cache
-  // stability. Selectable exactly like the others via updateCodexRotationSettings.
-  "sharded",
-] as const;
-export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
-
-/** The two sources of a per-session codex pin (AM-2). See sessions.codex_pin_source. */
-export type CodexPinSource = "manual" | "policy";
-
-export type SessionCodexState = {
-  pinnedCredentialId: string | null;
-  lastCredentialId: string | null;
-  // The pin's SOURCE (AM-2): 'manual' (user switcher, sacred) or 'policy' (sharded
-  // home assignment, re-shardable). NULL iff pinnedCredentialId is NULL.
-  pinSource: CodexPinSource | null;
-};
-
-export type SetSessionCodexPinOptions = {
-  /** Policy writers must not overwrite a pin committed after their read. */
-  expected?: Pick<SessionCodexState, "pinnedCredentialId" | "pinSource">;
-};
 
 /** Lease-backed serving audit, written after placement in its own fenced
  * transaction. Proposals and claim-time provenance alone emit no transition.
@@ -83851,21 +83515,6 @@ export async function applySessionTurnSettlement(
   });
 }
 
-export type SettleCodexCredentialFailoverResult =
-  | { action: "recovering"; failoverCount: number; events: SessionEvent[] }
-  | { action: "stale"; failoverCount: number; events: [] }
-  | {
-      action: "limit_exceeded";
-      failoverCount: number;
-      maxFailovers: number;
-      events: SessionEvent[];
-    };
-
-export type SettleCodexCredentialLeaseLossResult =
-  | { action: "recovering"; events: SessionEvent[] }
-  | { action: "failed"; events: SessionEvent[] }
-  | { action: "stale"; events: [] };
-
 import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core/serving-policy";
 import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
 
@@ -92026,13 +91675,6 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     authorizeAcceptedUse: resolveAcceptedConnectionUse,
   };
 }
-
-export type CodexAppsRequestAuth = {
-  clientVersion: string;
-  withAuthorization: <T>(
-    use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-  ) => Promise<T>;
-};
 
 export function buildConnectionTokenResolver(
   db: Database,

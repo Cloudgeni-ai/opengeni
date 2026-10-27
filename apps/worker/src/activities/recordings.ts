@@ -973,6 +973,10 @@ export function createRecordingActivities(
                   ...(claimed.version.options.language
                     ? { language: claimed.version.options.language }
                     : {}),
+                  // The person's vocabulary, for a model that takes it.
+                  ...(claimed.version.options.keyterms?.length
+                    ? { keyterms: claimed.version.options.keyterms }
+                    : {}),
                   // A fresh request per attempt; billing stays per piece below.
                   requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),

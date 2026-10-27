@@ -130,6 +130,7 @@ export const SECTION_KEYS = [
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
+  "page-dictation",
   "page-knowledge",
   "page-org-people",
   "page-eu-only",
@@ -946,6 +947,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Record a meeting, then read its transcript and name who spoke.",
     usedOn: "Main rail",
     load: () => import("./page-meetings"),
+  },
+  {
+    key: "page-dictation",
+    group: "Pages",
+    title: "Dictation",
+    purpose: "Dictate into any app with a shortcut, and find recent dictations again.",
+    usedOn: "Desktop app: Settings → Computer use",
+    load: () => import("./page-dictation"),
   },
   {
     key: "page-knowledge",

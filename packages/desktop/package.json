@@ -29,6 +29,10 @@
       "types": "./src/main/mac-login-agent.ts",
       "default": "./src/main/mac-login-agent.ts"
     },
+    "./meeting-detection": {
+      "types": "./src/main/meeting-detection/public.ts",
+      "default": "./src/main/meeting-detection/public.ts"
+    },
     "./system-audio": {
       "types": "./src/main/system-audio.ts",
       "default": "./src/main/system-audio.ts"
@@ -44,6 +48,10 @@
     "./preload/welcome": {
       "types": "./src/preload/welcome.ts",
       "default": "./src/preload/welcome.ts"
+    },
+    "./preload/meeting-detection": {
+      "types": "./src/preload/meeting-detection.ts",
+      "default": "./src/preload/meeting-detection.ts"
     },
     "./preload/system-audio": {
       "types": "./src/preload/system-audio.ts",

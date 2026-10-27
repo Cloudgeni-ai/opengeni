@@ -36,6 +36,12 @@ afterEach(async () => {
   globalThis.localStorage?.clear();
 });
 
+/** The props React holds for a rendered element, to drive a controlled field directly. */
+function reactProps<T>(element: Element): T {
+  const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"))!;
+  return (element as unknown as Record<string, T>)[key]!;
+}
+
 const SETTINGS: DesktopDictationSettings = {
   enabled: false,
   profiles: [
@@ -65,6 +71,7 @@ function fakeApp(
   const updates: Partial<DesktopDictationSettings>[] = [];
   const permissionRequests: string[] = [];
   const history: DesktopDictationHistoryEntry[] = [];
+  const again: string[] = [];
   let settings: DesktopDictationSettings = { ...SETTINGS, ...options.settings };
   let listener: ((request: DesktopDictationRequest) => void) | null = null;
   const status = (): DesktopDictationStatus => ({
@@ -93,6 +100,10 @@ function fakeApp(
     clearHistory: async () => {
       history.splice(0);
     },
+    historyAudio: async () => null,
+    transcribeAgain: async (id) => {
+      again.push(id);
+    },
     onRequest: (next) => {
       listener = next;
       return () => {
@@ -110,6 +121,7 @@ function fakeApp(
     updates,
     permissionRequests,
     history,
+    again,
     get listening() {
       return listener !== null;
     },
@@ -130,9 +142,12 @@ const oneShotClient = { transcribeAudio: async () => ({ text: "one-shot", langua
 async function mountHost(
   app: ReturnType<typeof fakeApp>,
   server: FakeServer,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; chunks?: Uint8Array[] } = {},
 ) {
-  const { platform, recorders } = fakePlatform(server);
+  const { platform, recorders } = fakePlatform(
+    server,
+    options.chunks ? { chunks: options.chunks } : undefined,
+  );
   mounted = await renderComponent(
     <DesktopDictationHost
       client={oneShotClient}
@@ -291,6 +306,62 @@ describe("DesktopDictationHost", () => {
     expect(app.listening).toBe(false);
     expect(app.last("d1")).toMatchObject({ phase: "failed", retryable: false });
   });
+
+  test("hands the app each dictation's speech with its text, with the vocabulary it heard", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    const { recorders } = await mountHost(app, server, {
+      chunks: [new Uint8Array([1, 2]), new Uint8Array([3])],
+    });
+    await app.send({
+      kind: "start",
+      dictationId: "d1",
+      profileId: "default",
+      language: "en",
+      vocabulary: ["Kubernetes", "Ada Lovelace"],
+    });
+    await waitFor(() => app.phases("d1").includes("recording"));
+    expect(recorders[0]?.options.transcription).toEqual({
+      language: "en",
+      keyterms: ["Kubernetes", "Ada Lovelace"],
+    });
+    await app.send({ kind: "stop", dictationId: "d1" });
+    await waitFor(() => app.phases("d1").includes("done"));
+    const done = app.last("d1");
+    expect(done).toMatchObject({ phase: "done", text: "hello voice" });
+    const audio = done?.phase === "done" ? done.audio : undefined;
+    expect(audio?.mimeType).toBe("audio/webm");
+    expect([...(audio?.bytes ?? [])]).toEqual([1, 2, 3]);
+  });
+
+  test("transcribes speech the app kept as a new dictation, and reports it as one", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    await mountHost(app, server);
+    server.heard = "heard again";
+    await app.send({
+      kind: "transcribe",
+      dictationId: "d2",
+      profileId: "default",
+      language: "nb",
+      vocabulary: ["Vigeland"],
+      audio: {
+        mimeType: "audio/webm;codecs=opus",
+        bytes: new Uint8Array([26, 69, 223, 163, 1]),
+        durationMilliseconds: 2_000,
+      },
+    });
+    await waitFor(() => app.phases("d2").includes("done"));
+    expect(app.phases("d2")).toEqual(["transcribing", "done"]);
+    expect(app.last("d2")).toEqual({ dictationId: "d2", phase: "done", text: "heard again" });
+    expect(server.created[0]?.request).toMatchObject({
+      purpose: "dictation",
+      transcription: { language: "nb", keyterms: ["Vigeland"] },
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+    });
+    // Taken like any dictation: nothing is left on the server.
+    expect(server.recordings.size).toBe(0);
+  });
 });
 
 describe("DesktopDictationSettings", () => {
@@ -372,6 +443,70 @@ describe("DesktopDictationSettings", () => {
     mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
     await waitFor(() => mounted!.container.textContent?.includes("Recent dictations") ?? false);
     expect(mounted.container.textContent).toContain("Remember the milk");
+  });
+
+  test("kept speech can be played and transcribed again", async () => {
+    const app = fakeApp({ settings: { enabled: true } });
+    app.history.push({
+      id: "d1",
+      text: "Remember the milk",
+      at: new Date().toISOString(),
+      profileName: "Any language",
+      language: null,
+      audio: { mimeType: "audio/webm", durationMilliseconds: 1_000 },
+    });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Recent dictations") ?? false);
+    expect(mounted.container.querySelector("button[aria-label=Play]")).not.toBeNull();
+    const again = mounted.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Transcribe again']",
+    )!;
+    await act(async () => {
+      again.click();
+      await settle();
+    });
+    expect(app.again).toEqual(["d1"]);
+  });
+
+  test("offers the retry and cancel shortcuts and saves the vocabulary", async () => {
+    const app = fakeApp({
+      settings: { enabled: true, vocabulary: [], retryShortcut: null, cancelShortcut: null },
+      accessibility: true,
+    });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Vocabulary") ?? false);
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("Retry shortcut");
+    expect(text).toContain("Cancel shortcut");
+    const field = mounted.container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const props = reactProps<{
+      onFocus: () => void;
+      onChange: (event: unknown) => void;
+    }>(field);
+    await act(async () => {
+      props.onFocus();
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        field,
+        "Kubernetes\nAda  Lovelace, kubernetes\n",
+      );
+      props.onChange({ target: field });
+      await settle();
+    });
+    await act(async () => {
+      // The blur handler of the latest render sees the typed text.
+      reactProps<{ onBlur: () => void }>(field).onBlur();
+      await settle();
+    });
+    expect(app.updates).toContainEqual({ vocabulary: ["Kubernetes", "Ada Lovelace"] });
+  });
+
+  test("an app without the vocabulary or retry shortcut doesn't offer them", async () => {
+    const app = fakeApp({ settings: { enabled: true } });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("How the keys work") ?? false);
+    const text = mounted.container.textContent ?? "";
+    expect(text).not.toContain("Vocabulary");
+    expect(text).not.toContain("Retry shortcut");
   });
 
   test("says in the page's words why a shortcut or typing doesn't work", async () => {

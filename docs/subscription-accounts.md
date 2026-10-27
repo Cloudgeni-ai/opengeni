@@ -350,17 +350,16 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   sender's, and non-human acceptance resolves the workspace or organization
   pool instead of assuming workspace scope.
   Verification: `packages/db/test/subscription-core-claude-copy-paths-postgres.test.ts`,
-  `apps/worker/test/parent-wake-postgres.test.ts`,
-  `apps/worker/test/scheduled-task-personal-authority.test.ts`, and
-  `packages/db/test/codex-credential-leases.test.ts`.
+  `apps/worker/test/parent-wake-postgres.test.ts`
+  and `apps/worker/test/scheduled-task-personal-authority.test.ts`.
 - **SUB-ACCESS-02** Pool authority is additive to session access. Using a
   shared pool never changes who can see a session.
-  Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
+  Verification: `packages/db/test/subscription-core-accepted-turn.test.ts`.
 - **SUB-ACCESS-03** A private session arms, waits, is observed by the
   workflow, recovers and keeps pins exactly like a shared session.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
 - **SUB-ACCESS-04** A pool worker never gains visibility of another member's
-  private session. Verification: `packages/db/test/subscription-pool-private-session-access.test.ts`.
+  private session. Verification: `packages/db/test/subscription-core-accepted-turn.test.ts`.
 - **SUB-ACCESS-05** Revoking a connection or a person's access is enforced on
   the next selection and physical request authorization. Chat-turn lease renewal
   checks ownership and liveness; operation leases additionally recheck access.

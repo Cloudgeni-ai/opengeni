@@ -87,6 +87,8 @@ const SEND_EMAIL = scene(
     display: { toolName: "send_message", connector: "Gmail", providerDomain: "gmail.com" },
     context: {
       kind: "gmail",
+      // Long enough to wrap under the status at phone width.
+      accountLabel: "Gmail · alex.morgan@example.com",
       email: {
         from: "alex@example.com",
         to: "sam@example.org",

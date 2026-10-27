@@ -2,8 +2,15 @@
 // text the "Add AI agents to my product" path hands to an agent. Onboarding
 // only: keep it out of the session and startup graphs.
 
-/** The first onboarding question: embed Opengeni in a product, or use it directly. */
-export type OnboardingUseCase = "embed" | "cloud";
+/**
+ * The first onboarding question: get help with everyday things, embed
+ * Opengeni in a product, or run agents in the cloud.
+ */
+export type OnboardingUseCase = "everyday" | "embed" | "cloud";
+
+export function isOnboardingUseCase(value: unknown): value is OnboardingUseCase {
+  return value === "everyday" || value === "embed" || value === "cloud";
+}
 
 const USE_CASE_STORAGE_KEY = "opengeni.onboardingUseCase.v1";
 
@@ -11,7 +18,7 @@ const USE_CASE_STORAGE_KEY = "opengeni.onboardingUseCase.v1";
 export function storedOnboardingUseCase(): OnboardingUseCase | null {
   try {
     const value = window.sessionStorage.getItem(USE_CASE_STORAGE_KEY);
-    return value === "embed" || value === "cloud" ? value : null;
+    return isOnboardingUseCase(value) ? value : null;
   } catch {
     return null;
   }
