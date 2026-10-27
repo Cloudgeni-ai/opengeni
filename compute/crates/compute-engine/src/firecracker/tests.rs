@@ -124,6 +124,30 @@ fn only_a_refusal_or_an_exit_while_loading_counts_against_an_image() {
     assert_eq!(load_failure(died, false).kind, ErrorKind::MemoryLost);
 }
 
+/// An image saved on a host whose KVM kept no realtime clock is told apart
+/// from other refusals by Firecracker's answer, as a nested host without an
+/// invariant TSC gives it, so the restore is tried once more without moving
+/// the clock; any other refusal stands.
+#[test]
+fn a_refusal_for_a_missing_realtime_clock_is_told_apart() {
+    let refusal = |status, body: &str| ApiError::Status {
+        method: "PUT",
+        path: "/snapshot/load".into(),
+        status,
+        body: body.into(),
+    };
+    let missing = r#"{"fault_message":"Load snapshot error: Failed to restore from snapshot: Failed to build microVM from snapshot: Failed to restore microVM state: clock_realtime requested but not present in the snapshot state"}"#;
+    assert!(lacks_realtime_clock(&refusal(400, missing)));
+    assert!(!lacks_realtime_clock(&refusal(
+        400,
+        r#"{"fault_message":"Load snapshot error: unsupported snapshot version"}"#
+    )));
+    assert!(!lacks_realtime_clock(&refusal(500, missing)));
+    assert!(!lacks_realtime_clock(&ApiError::Timeout(
+        Duration::from_secs(1)
+    )));
+}
+
 /// A launch records its runtime beside the jail, so an agent that takes
 /// the VMM back later knows which runtime its snapshots belong to.
 #[test]
@@ -413,9 +437,11 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
     };
     let jail = Jail::new(&spec).unwrap();
     let bare = MemoryProfile::bare_metal();
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(body["clock_realtime"], true);
     assert_eq!(body["resume_vm"], false);
+    let clock_as_saved = load_request(&spec, &jail, &files, bare, false).unwrap();
+    assert_eq!(clock_as_saved["clock_realtime"], false);
     assert_eq!(body["snapshot_path"], "/vm.state");
     assert_eq!(body["mem_backend"]["backend_path"], "/vm.mem");
     assert_eq!(body["vsock_override"]["uds_path"], "/vsock.sock");
@@ -426,7 +452,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         mac: "06:00:ac:10:00:02".into(),
         namespace: None,
     });
-    let body = load_request(&spec, &jail, &files, bare).unwrap();
+    let body = load_request(&spec, &jail, &files, bare, true).unwrap();
     assert_eq!(
         body["network_overrides"],
         json!([{ "iface_id": "eth0", "host_dev_name": "tap0" }])
@@ -437,7 +463,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
         memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
         made_under: None,
     };
-    assert!(load_request(&spec, &jail, &outside, bare).is_err());
+    assert!(load_request(&spec, &jail, &outside, bare, true).is_err());
 }
 
 fn spec() -> VmSpec {
@@ -502,12 +528,12 @@ fn the_profile_decides_page_size_and_dirty_tracking() {
         memory: paged_source(),
         made_under: None,
     };
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested(), true).unwrap();
     assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
     assert_eq!(body["mem_backend"]["backend_path"], "/uffd.sock");
     assert_eq!(body["huge_pages"], "2M");
     assert_eq!(body["track_dirty_pages"], false);
-    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal()).unwrap();
+    let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal(), true).unwrap();
     assert_eq!(body["huge_pages"], "None");
     assert_eq!(body["track_dirty_pages"], true);
 }

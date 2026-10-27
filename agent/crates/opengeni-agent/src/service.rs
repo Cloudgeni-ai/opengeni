@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(target_os = "linux")]
-use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
 use tracing::info;
@@ -35,7 +33,6 @@ const SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION: u32 = 254;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedSystemdDefinition {
     CompatibleOwned,
-    LegacyOwned,
     CurrentOwned,
     Unowned,
 }
@@ -169,32 +166,28 @@ fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
     })
 }
 
-/// Upgrades the exact old Opengeni-owned systemd unit after a verified binary
-/// self-update. This runs before any host-work admission. It never adopts a
-/// custom unit: live manager identity, canonical fragment path, exact ExecStart,
-/// and byte-identical legacy generated content must all agree.
-///
-/// `Ok(true)` means the manager accepted a non-blocking restart and this process
-/// must return cleanly so the successor starts directly in `supervisor`.
+/// Warns when the live systemd unit cannot give this process its operation
+/// cgroup: a custom unit, or a generated unit that systemd did not place in the
+/// `supervisor` subgroup. It never rewrites the unit.
 #[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
-pub fn refresh_managed_service_definition() -> Result<bool, String> {
+pub fn inspect_managed_service_definition() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        refresh_managed_systemd_definition()
+        inspect_managed_systemd_definition()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(false)
+        Ok(())
     }
 }
 
 #[cfg(target_os = "linux")]
-fn refresh_managed_systemd_definition() -> Result<bool, String> {
+fn inspect_managed_systemd_definition() -> Result<(), String> {
     let Some((cgroup_path, cgroup_location)) = current_managed_systemd_cgroup()? else {
-        return Ok(false);
+        return Ok(());
     };
     let Some((install_scope, unit_path)) = find_live_managed_systemd_scope(&binary_path()?)? else {
-        return Ok(false);
+        return Ok(());
     };
     let spec = spec_for(install_scope)?;
     let existing = std::fs::read_to_string(&unit_path)
@@ -205,24 +198,19 @@ fn refresh_managed_systemd_definition() -> Result<bool, String> {
                 path = %unit_path.display(),
                 "the active systemd unit is custom; leaving it untouched. Run `opengeni-agent service install --restart` to adopt the generated containment topology"
             );
-            Ok(false)
         }
-        ManagedSystemdDefinition::CompatibleOwned => Ok(false),
+        ManagedSystemdDefinition::CompatibleOwned => {}
         ManagedSystemdDefinition::CurrentOwned => {
-            if cgroup_location == ManagedSystemdCgroup::Supervisor {
-                return Ok(false);
+            if cgroup_location != ManagedSystemdCgroup::Supervisor {
+                tracing::warn!(
+                    path = %unit_path.display(),
+                    cgroup = cgroup_path,
+                    "the managed unit already requests the supervisor subgroup but systemd did not place this process there; continuing without operation-cgroup capability to avoid a restart loop"
+                );
             }
-            tracing::warn!(
-                path = %unit_path.display(),
-                cgroup = cgroup_path,
-                "the managed unit already requests the supervisor subgroup but systemd did not place this process there; continuing without operation-cgroup capability to avoid a restart loop"
-            );
-            Ok(false)
-        }
-        ManagedSystemdDefinition::LegacyOwned => {
-            migrate_legacy_systemd_unit(install_scope, &unit_path, &spec, &existing)
         }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -301,135 +289,6 @@ fn find_live_managed_systemd_scope(
     }
 }
 
-#[cfg(target_os = "linux")]
-fn migrate_legacy_systemd_unit(
-    install_scope: ServiceScope,
-    unit_path: &Path,
-    spec: &ServiceSpec,
-    existing: &str,
-) -> Result<bool, String> {
-    let version = capture_systemctl(&["--version"])
-        .ok()
-        .and_then(|output| parse_systemd_version(&output));
-    remove_legacy_opengeni_control_dropins(install_scope)?;
-    atomic_replace_managed_unit(unit_path, &render_systemd_for_version(spec, version))?;
-    let scope_prefix = match install_scope {
-        ServiceScope::User => Some("--user"),
-        ServiceScope::System => None,
-    };
-    let mut reload = Vec::new();
-    if let Some(prefix) = scope_prefix {
-        reload.push(prefix);
-    }
-    reload.push("daemon-reload");
-    if let Err(error) = systemctl(&reload) {
-        rollback_managed_unit(unit_path, existing, &reload);
-        return Err(format!("reload the migrated systemd definition: {error}"));
-    }
-
-    let mut restart = Vec::new();
-    if let Some(prefix) = scope_prefix {
-        restart.push(prefix);
-    }
-    restart.extend(["restart", "--no-block", service::ids::SYSTEMD_UNIT]);
-    if let Err(error) = systemctl(&restart) {
-        rollback_managed_unit(unit_path, existing, &reload);
-        return Err(format!(
-            "queue the migrated systemd manager restart: {error}"
-        ));
-    }
-    info!(
-        path = %unit_path.display(),
-        "migrated the owned systemd unit; manager restart will activate coordinated browser shutdown"
-    );
-    Ok(true)
-}
-
-#[cfg(target_os = "linux")]
-fn rollback_managed_unit(path: &Path, prior: &str, reload_args: &[&str]) {
-    if let Err(error) = atomic_replace_managed_unit(path, prior) {
-        tracing::error!(
-            %error,
-            path = %path.display(),
-            "failed to roll back the owned unit after migration activation failed"
-        );
-        return;
-    }
-    if let Err(error) = systemctl(reload_args) {
-        tracing::error!(
-            %error,
-            path = %path.display(),
-            "restored the owned unit on disk but systemd could not reload it"
-        );
-    }
-}
-
-/// Removes only the exact systemd control drop-ins produced by the old
-/// Opengeni `set-property ... infinity` reset. Unknown names, comments plus extra
-/// directives, and ordinary operator drop-ins are preserved byte-for-byte.
-#[cfg(target_os = "linux")]
-fn remove_legacy_opengeni_control_dropins(install_scope: ServiceScope) -> Result<(), String> {
-    let suffix = PathBuf::from(format!("{}.d", service::ids::SYSTEMD_UNIT));
-    let roots = systemd_control_roots(install_scope)?;
-
-    for root in roots {
-        let directory = root.join(&suffix);
-        for name in [
-            "50-MemoryHigh.conf",
-            "50-MemoryMax.conf",
-            "50-TasksMax.conf",
-            "50-CPUQuota.conf",
-            "50-CPUQuotaPerSecUSec.conf",
-        ] {
-            let path = directory.join(name);
-            let contents = match std::fs::read_to_string(&path) {
-                Ok(contents) => contents,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(format!("read {}: {error}", path.display())),
-            };
-            if legacy_opengeni_control_dropin(name, &contents) {
-                std::fs::remove_file(&path)
-                    .map_err(|error| format!("remove {}: {error}", path.display()))?;
-                info!(path = %path.display(), "removed an obsolete Opengeni-owned aggregate-limit reset");
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn systemd_control_roots(install_scope: ServiceScope) -> Result<Vec<PathBuf>, String> {
-    let mut roots = match install_scope {
-        ServiceScope::User => vec![home()?.join(".config/systemd/user.control")],
-        ServiceScope::System => vec![PathBuf::from("/etc/systemd/system.control")],
-    };
-    match install_scope {
-        ServiceScope::User => {
-            if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-                roots.push(PathBuf::from(runtime).join("systemd/user.control"));
-            }
-        }
-        ServiceScope::System => roots.push(PathBuf::from("/run/systemd/system.control")),
-    }
-
-    Ok(roots)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn legacy_opengeni_control_dropin(name: &str, contents: &str) -> bool {
-    const SYSTEMCTL_PROVENANCE: &str =
-        "# This is a drop-in unit file extension, created via systemctl.";
-    let property = match name {
-        "50-MemoryHigh.conf" => "MemoryHigh=infinity",
-        "50-MemoryMax.conf" => "MemoryMax=infinity",
-        "50-TasksMax.conf" => "TasksMax=infinity",
-        "50-CPUQuota.conf" => "CPUQuota=",
-        "50-CPUQuotaPerSecUSec.conf" => "CPUQuotaPerSecUSec=infinity",
-        _ => return false,
-    };
-    contents == format!("{SYSTEMCTL_PROVENANCE}\n[Service]\n{property}\n")
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn managed_systemd_definition(existing: &str, spec: &ServiceSpec) -> ManagedSystemdDefinition {
     // Earlier releases generated the same units with a different product-name
@@ -444,13 +303,7 @@ fn managed_systemd_definition(existing: &str, spec: &ServiceSpec) -> ManagedSyst
                     1,
                 )
     };
-    if matches(service::render_legacy_systemd_unit_before_supervisor_subgroup(spec))
-        || matches(service::render_legacy_systemd_unit_before_browser_shutdown(
-            spec,
-        ))
-    {
-        ManagedSystemdDefinition::LegacyOwned
-    } else if matches(service::render_systemd_unit(spec)) {
+    if matches(service::render_systemd_unit(spec)) {
         ManagedSystemdDefinition::CurrentOwned
     } else if matches(service::render_systemd_unit_without_supervisor_subgroup(
         spec,
@@ -561,40 +414,6 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn atomic_replace_managed_unit(path: &Path, body: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("service unit {} has no parent", path.display()))?;
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        service::ids::SYSTEMD_UNIT,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o644);
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| format!("create {}: {error}", temporary.display()))?;
-    if let Err(error) = file
-        .write_all(body.as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!("write {}: {error}", temporary.display()));
-    }
-    drop(file);
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!("replace managed unit {}: {error}", path.display()));
-    }
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("sync service unit directory {}: {error}", parent.display()))
-}
-
 /// `service install` — write the rendered unit/plist + enable it. `--print` is a
 /// dry-run that dumps the definition and exits without touching the system.
 fn install(args: &ServiceInstallArgs) -> Result<(), String> {
@@ -652,8 +471,6 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     }
     std::fs::write(&unit_path, body).map_err(|e| format!("write {}: {e}", unit_path.display()))?;
     info!(path = %unit_path.display(), "wrote systemd unit");
-    #[cfg(target_os = "linux")]
-    remove_legacy_opengeni_control_dropins(spec.scope)?;
 
     match spec.scope {
         ServiceScope::User => {
@@ -1304,13 +1121,6 @@ mod tests {
             systemd_unit_path_for_scope(ServiceScope::System).unwrap(),
             PathBuf::from("/etc/systemd/system/opengeni-agent.service")
         );
-        assert_eq!(
-            systemd_control_roots(ServiceScope::System).unwrap(),
-            vec![
-                PathBuf::from("/etc/systemd/system.control"),
-                PathBuf::from("/run/systemd/system.control")
-            ]
-        );
     }
 
     #[test]
@@ -1656,7 +1466,6 @@ mod tests {
             scope: ServiceScope::User,
             environment_path: Some("/usr/bin:/bin".to_string()),
         };
-        let legacy = service::render_legacy_systemd_unit_before_supervisor_subgroup(&spec);
         let current = service::render_systemd_unit(&spec);
         for version in [None, Some(249), Some(SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION)] {
             // Installation and ownership-checked migration use this same selector.
@@ -1674,28 +1483,12 @@ mod tests {
                 }
             );
         }
-        let previous = service::render_legacy_systemd_unit_before_browser_shutdown(&spec);
-        assert_eq!(
-            managed_systemd_definition(&previous, &spec),
-            ManagedSystemdDefinition::LegacyOwned
-        );
-        assert_eq!(
-            managed_systemd_definition(
-                &previous.replace("TimeoutStopSec=15", "TimeoutStopSec=20"),
-                &spec
-            ),
-            ManagedSystemdDefinition::Unowned
-        );
-        assert_eq!(
-            managed_systemd_definition(&legacy, &spec),
-            ManagedSystemdDefinition::LegacyOwned
-        );
         assert_eq!(
             managed_systemd_definition(&current, &spec),
             ManagedSystemdDefinition::CurrentOwned
         );
 
-        let custom = legacy.replace("MemoryMax=infinity", "MemoryMax=8G");
+        let custom = current.replace("MemoryMax=infinity", "MemoryMax=8G");
         assert_eq!(
             managed_systemd_definition(&custom, &spec),
             ManagedSystemdDefinition::Unowned
@@ -1725,14 +1518,6 @@ mod tests {
                 service::render_systemd_unit_without_supervisor_subgroup(&spec),
                 ManagedSystemdDefinition::CompatibleOwned,
             ),
-            (
-                service::render_legacy_systemd_unit_before_supervisor_subgroup(&spec),
-                ManagedSystemdDefinition::LegacyOwned,
-            ),
-            (
-                service::render_legacy_systemd_unit_before_browser_shutdown(&spec),
-                ManagedSystemdDefinition::LegacyOwned,
-            ),
         ] {
             let previous = generated.replace(
                 "\nDescription=Opengeni self-hosted agent\n",
@@ -1752,54 +1537,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn legacy_control_dropin_cleanup_requires_exact_known_property() {
-        let generated = "# This is a drop-in unit file extension, created via systemctl.\n\
-                         [Service]\nMemoryMax=infinity\n";
-        assert!(legacy_opengeni_control_dropin(
-            "50-MemoryMax.conf",
-            generated
-        ));
-        assert!(!legacy_opengeni_control_dropin(
-            "50-MemoryMax.conf",
-            "[Service]\nMemoryMax=8G\n"
-        ));
-        assert!(!legacy_opengeni_control_dropin(
-            "50-MemoryMax.conf",
-            "[Service]\nMemoryMax=infinity\nCPUWeight=200\n"
-        ));
-        assert!(!legacy_opengeni_control_dropin("operator.conf", generated));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn atomic_owned_unit_upgrade_and_rollback_are_retry_safe_and_preserve_drop_ins() {
-        let root = tempfile::tempdir().expect("temp service root");
-        let unit = root.path().join(service::ids::SYSTEMD_UNIT);
-        let drop_in_dir = root
-            .path()
-            .join(format!("{}.d", service::ids::SYSTEMD_UNIT));
-        std::fs::create_dir(&drop_in_dir).expect("drop-in directory");
-        let drop_in = drop_in_dir.join("operator.conf");
-        std::fs::write(&drop_in, "[Service]\nMemoryMax=8G\n").expect("custom drop-in");
-        std::fs::write(&unit, "legacy").expect("legacy unit");
-
-        atomic_replace_managed_unit(&unit, "current").expect("atomic upgrade");
-        assert_eq!(std::fs::read_to_string(&unit).unwrap(), "current");
-        assert_eq!(
-            std::fs::read_to_string(&drop_in).unwrap(),
-            "[Service]\nMemoryMax=8G\n"
-        );
-
-        atomic_replace_managed_unit(&unit, "legacy").expect("rollback legacy bytes");
-        assert_eq!(std::fs::read_to_string(&unit).unwrap(), "legacy");
-        atomic_replace_managed_unit(&unit, "current").expect("retry upgrade");
-        assert_eq!(std::fs::read_to_string(&unit).unwrap(), "current");
-        assert_eq!(
-            std::fs::read_to_string(&drop_in).unwrap(),
-            "[Service]\nMemoryMax=8G\n"
-        );
     }
 }

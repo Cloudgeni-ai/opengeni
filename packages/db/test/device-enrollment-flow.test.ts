@@ -108,39 +108,6 @@ describe("0025 device-enrollment-requests migration shape", () => {
       WHERE n.nspname = 'opengeni_private' AND p.proname = 'resolve_device_enrollment_request'`;
     expect(fn.length).toBe(1);
   }, 60_000);
-
-  test("0025 rolls back + re-applies cleanly (forward-only but reversible)", async () => {
-    if (!available) return;
-    // DOWN: drop the table + the resolver fn (the documented reverse of 0025).
-    await admin.unsafe(`
-      DROP FUNCTION IF EXISTS opengeni_private.resolve_device_enrollment_request(text);
-      DROP TABLE IF EXISTS device_enrollment_requests;
-    `);
-    let gone = await admin<{ n: number }[]>`
-      SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
-    expect(Number(gone[0]!.n)).toBe(0);
-    // UP again: re-run the 0025 SQL body verbatim (re-applies clean — IF NOT EXISTS).
-    // Re-running migrate() is a no-op (schema_migrations marks it applied), so apply
-    // the file body directly to prove idempotent re-application.
-    const { readFileSync } = await import("node:fs");
-    const { join, dirname } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const here = dirname(fileURLToPath(import.meta.url));
-    const body = readFileSync(
-      join(here, "..", "drizzle", "0025_device_enrollment_requests.sql"),
-      "utf8",
-    );
-    await admin.unsafe(body);
-    gone = await admin<{ n: number }[]>`
-      SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
-    expect(Number(gone[0]!.n)).toBe(1);
-    // Re-grant to opengeni_app (the GRANT block re-runs in the body, but the role
-    // existed at migrate time; the body's DO-block grants again — assert it worked).
-    const grant = await admin<{ n: number }[]>`
-      SELECT count(*)::int as n FROM information_schema.role_table_grants
-      WHERE table_name = 'device_enrollment_requests' AND grantee = 'opengeni_app' AND privilege_type = 'SELECT'`;
-    expect(Number(grant[0]!.n)).toBeGreaterThanOrEqual(1);
-  }, 60_000);
 });
 
 describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)", () => {

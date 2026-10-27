@@ -19,6 +19,7 @@ import {
   AuthRunMutationResponse,
   BrowserAction,
   BrowserLocator,
+  browserActionDeadlineMs,
   INTERACTION_ACTION_DEADLINE_MAX_MS,
   INTERACTION_MAX_ACTIONS_PER_BATCH,
   INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND,
@@ -290,6 +291,10 @@ const BrowserScreenshotInput = z
     quality: z.number().int().min(1).max(100).optional(),
   })
   .strict();
+// Shown only on a full-page capture that could not keep every scrollbar's
+// space; static, so it never changes text already sent.
+const INEXACT_SCROLLBARS_NOTE =
+  "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.";
 const BrowserScreenshotOutput = z
   .object({
     kind: z.literal("browser_screenshot"),
@@ -306,6 +311,7 @@ const BrowserScreenshotOutput = z
     scrollY: z.number(),
     capturedAt: z.string(),
     fullPage: z.boolean(),
+    note: z.string().optional(),
   })
   .strict();
 const BrowserReadInput = z
@@ -2194,6 +2200,7 @@ export function createInteractionAttemptToolDefinitions(
             scrollY: frame.scrollY,
             capturedAt: frame.capturedAt,
             fullPage: value.fullPage ?? false,
+            ...(frame.inexactScrollbars ? { note: INEXACT_SCROLLBARS_NOTE } : {}),
           },
           [browserToolImageContent(frame.data, frame.mediaType)],
         );
@@ -2232,7 +2239,7 @@ export function createInteractionAttemptToolDefinitions(
         );
         // Omitted fences are resolved by the API from the live target in the same
         // request, so acting on the current document costs one round trip.
-        const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
+        const request = {
           operationId: context.operationId,
           targetId,
           ...(value.expectedTargetGeneration === undefined
@@ -2246,7 +2253,31 @@ export function createInteractionAttemptToolDefinitions(
             : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action,
-        });
+        };
+        let receipt: z.infer<typeof BrowserActionReceipt>;
+        try {
+          receipt = await input.transport.actInBrowser(
+            input.workspaceId,
+            browserSessionId,
+            request,
+          );
+        } catch (error) {
+          // The request reached the API, but its answer was lost on the way
+          // back. The browser records each action under its operation ID, so
+          // read what it did rather than report a network error for an action
+          // that may well have completed.
+          const recorded = isLostMutationResponse(error)
+            ? await recordedBrowserReceipt(
+                input.transport,
+                input.workspaceId,
+                browserSessionId,
+                context.operationId,
+                browserActionDeadlineMs(action),
+              )
+            : null;
+          if (!recorded) throw error;
+          receipt = recorded;
+        }
         const projected = value.view === "full" ? receipt : compactActionReceipt(receipt);
         if (!value.includeScreenshot) return projected;
         // A tab cannot be captured while a JavaScript dialog is open; the
@@ -2734,7 +2765,10 @@ export function createInteractionAttemptToolDefinitions(
       const existing = output.existing;
       if (existing) {
         if (context.caller.kind === "model") rememberComputerReading(existing);
-        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText(existing)}`;
+        // The listing above already says whether a person is using the
+        // computer.
+        const { personInputSecondsAgo: _said, ...target } = existing.target;
+        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText({ ...existing, target })}`;
       }
       const launch = output.launch;
       if (!launch) return opened;
@@ -4693,6 +4727,51 @@ async function launchOpenedComputerApp(
 
 function launchMayHaveRunNote(applicationId: string): string {
   return `The computer opened, but the launch of ${applicationId} has no known outcome: it may have started. Check computer_targets for its window before launching it again.`;
+}
+
+/** A mutation whose request was sent but whose answer never arrived (the
+ * connection broke, or the response could not be read). */
+function isLostMutationResponse(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 0 && error.outcomeUnknown === true;
+}
+
+/**
+ * The browser's own receipt for an action whose answer was lost: what it
+ * recorded once the action settled, read for as long as the action itself
+ * may run. Null when nothing was recorded under the ID, or no settled
+ * receipt could be read in that time; the lost answer then stands.
+ */
+async function recordedBrowserReceipt(
+  transport: InteractionTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  operationId: string,
+  deadlineMs: number,
+): Promise<z.infer<typeof BrowserActionReceipt> | null> {
+  const deadline = Date.now() + deadlineMs;
+  let pause = 250;
+  for (;;) {
+    try {
+      const receipt = await transport.getBrowserActionReceipt(
+        workspaceId,
+        browserSessionId,
+        operationId,
+      );
+      if (
+        receipt.state === "completed" ||
+        receipt.state === "failed" ||
+        receipt.state === "outcome_unknown"
+      )
+        return receipt;
+    } catch (error) {
+      // Nothing recorded: the action may not have reached the browser, or
+      // may still be about to. Either way its outcome stays unknown.
+      if (error instanceof OpenGeniApiError && error.status === 404) return null;
+    }
+    if (Date.now() + pause > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, pause));
+    pause = Math.min(pause * 2, 2_000);
+  }
 }
 
 /** A target's name or ID compared without case or spaces. */

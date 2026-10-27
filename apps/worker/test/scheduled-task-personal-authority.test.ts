@@ -1,10 +1,3 @@
-import { migrate } from "@opengeni/db/migrate";
-import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
-import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
-import { workspaceDeletionMigrationTail } from "../../../packages/db/test/workspace-deletion-migration-tail";
-import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
-import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
-import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -57,11 +50,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
-import {
-  acquireSharedTestDatabase,
-  acquireBlankTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
@@ -70,30 +59,6 @@ import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { MockAgentResponder, subjectFor } from "@opengeni/runtime";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
-import {
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
-  SUBSCRIPTION_RETIREMENT_MIGRATION,
-} from "@opengeni/db";
-import {
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
-} from "../../../packages/db/test/fixtures/legacy-xai";
-import {
-  createClaudeSubscriptionAccount,
-  setInitialActiveClaudeCredential,
-} from "../../../packages/db/test/fixtures/legacy-claude/accounts";
-
-// Characterizes the legacy Claude runtime, which runs only before the drained
-// Claude cutover: the database withholds that migration. Removed with the
-// legacy runtime.
-const LEGACY_CLAUDE_WORLD = {
-  // These cases characterize accepted legacy pools for both providers.
-  withheldMigrations: [
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.xai!,
-    SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS.claude!,
-    SUBSCRIPTION_RETIREMENT_MIGRATION,
-  ],
-};
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -101,10 +66,7 @@ let admin: postgres.Sql;
 let client: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase(
-    "worker-scheduled-personal-authority",
-    LEGACY_CLAUDE_WORLD,
-  );
+  shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority");
   if (!shared) {
     available = false;
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
@@ -114,7 +76,6 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
-  await restorePreRetirementGrants(shared.adminUrl);
   client = createDb(shared.appUrl);
 }, 180_000);
 
@@ -321,41 +282,13 @@ describe("scheduled task personal MCP authority", () => {
       const workspace = await workspaceFixture();
       // This task already accepted its legacy pool before migration. The
       // dispatcher copies it verbatim even though fresh selection uses v2.
-      let claudeSnapshot =
+      const claudeSnapshot =
         scope === "personal"
           ? { version: 1 as const, scope: "user" as const, authorityGeneration: 1 }
           : { version: 1 as const, scope: "organization" as const };
       // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
       // workspace default, never computed from live pools, and copied verbatim.
       const xaiSnapshot = { version: 1, scope: "workspace" } as const;
-      if (scope === "personal") {
-        await admin`update workspace_memberships set role = 'owner'
-          where workspace_id = ${workspace.workspaceId} and subject_id = ${workspace.subjectId}`;
-        const accountUuid = crypto.randomUUID();
-        const credential = await createClaudeSubscriptionAccount(client.db, {
-          ...workspace,
-          scope: "user",
-          encryptionKey: new Uint8Array(32).fill(23),
-          secret: {
-            version: 1,
-            token: "sk-ant-oat01-scheduled-personal",
-            identity: { accountUuid, deviceId: "c".repeat(64) },
-          },
-          providerAccountId: accountUuid,
-          label: null,
-          accountEmail: null,
-          planType: "claude_max",
-          expiresAt: null,
-        });
-        await setInitialActiveClaudeCredential(client.db, {
-          ...workspace,
-          authoritySnapshot: credential.authoritySnapshot,
-          credentialId: credential.account.id,
-        });
-        if (credential.authoritySnapshot.scope !== "user")
-          throw new Error("Expected personal fixture");
-        claudeSnapshot = credential.authoritySnapshot;
-      }
       const task = await createScheduledTask(client.db, {
         ...workspace,
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
@@ -1225,84 +1158,6 @@ describe("scheduled task personal MCP authority", () => {
     expect(accepted?.targetSessionExecution?.effectiveMcpServerIds).not.toContain(latentServerId);
   });
 
-  test("revoking accepted user-scoped xAI authority rejects before claim", async () => {
-    if (!available) return;
-    const workspace = await workspaceFixture();
-    await admin`insert into workspace_memberships (
-      account_id, workspace_id, subject_id, role, permissions
-    ) values (
-      ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-      'owner', '[]'::jsonb
-    ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
-    const credential = await createXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      scope: "user",
-      encryptionKey: Buffer.alloc(32, 23),
-      secret: { version: 1, accessToken: "scheduled-xai-claim" },
-      providerAccountId: `scheduled-xai-${crypto.randomUUID()}`,
-      label: "scheduled xAI claim",
-    });
-    const task = await createScheduledTask(client.db, {
-      ...workspace,
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      name: "xAI claim authority",
-      status: "active",
-      schedule: { type: "manual" },
-      temporalScheduleId: `scheduled-xai-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "must retain exact xAI authority",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "supergrok/grok-4.7",
-      },
-      xaiProviderAccountAuthoritySnapshot: credential.authoritySnapshot,
-      metadata: {},
-    });
-    const dispatched = await activities({
-      supergrokSubscriptionEnabled: true,
-    }).dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `scheduled-xai-${crypto.randomUUID()}`,
-    });
-    if (dispatched.action !== "start") throw new Error(`dispatch ${JSON.stringify(dispatched)}`);
-    await disconnectXaiSubscriptionCredential(client.db, {
-      ...workspace,
-      credentialId: credential.account.id,
-      authoritySnapshot: credential.authoritySnapshot,
-    });
-    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-      sessionId: dispatched.sessionId,
-      workflowId: dispatched.workflowId,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    expect(claimed).toEqual({ action: "unclaimed", reason: "no-work" });
-    const [evidence] = await admin<
-      Array<{ runStatus: string; runError: string | null; updateState: string; attempts: number }>
-    >`
-      select run.status as "runStatus", run.error as "runError",
-        update_value.state as "updateState",
-        (select count(*)::int from session_turn_attempts attempt
-          where attempt.session_id = run.session_id) as attempts
-      from scheduled_task_runs run
-      join session_system_updates update_value on update_value.scheduled_task_run_id = run.id
-      where run.task_id = ${task.id}
-    `;
-    expect(evidence).toEqual({
-      runStatus: "failed",
-      runError: "scheduled_xai_authority_changed",
-      updateState: "failed",
-      attempts: 0,
-    });
-  });
-
   test("revoking an accepted Slack bot rejects before a fresh attempt", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -1880,98 +1735,6 @@ describe("scheduled task personal MCP authority", () => {
       }
     }, 30_000);
   }
-
-  test("0414 rolling producer fence replay preserves identity and refuses definition drift", async () => {
-    if (!available) return;
-    const historical = await acquireBlankTestDatabase("scheduled-0414-replay");
-    if (!historical) throw new Error("Historical migration test requires PostgreSQL");
-    const historicalAdmin = postgres(historical.databaseUrl, { max: 1, onnotice: () => undefined });
-    try {
-      // 0461 deliberately extends this function for ordinary private source
-      // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
-      await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      // These later migrations require the post-0461 Knowledge/file policies.
-      // 0561 and 0582 also extend the producer fence beyond this replay boundary.
-      // So does 0717 (the generated session's Claude snapshot comparison).
-      // The maintenance probes compile against post-0461 Knowledge routines.
-      // Withhold them with that schema instead of changing published SQL.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0730_maintenance_work_probes.sql'),
-        ('0732_sandbox_maintenance_work_probes.sql')`;
-      for (const name of strictOwnerMaintenanceMigrationTail)
-        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
-      // Main's later visibility transition also depends on withheld 0501.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0738_private_sessions_share_sandboxes.sql')`;
-      // Extends the machine grant predicates from withheld 0501.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0851_personal_machine_session_tree.sql')`;
-      // Replaces the file ownership trigger from withheld 0461 and reads the
-      // file read-capability table from withheld 0499.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0854_file_visibility.sql')`;
-      // So do 0768 and 0769, which rewrite the quiescence check and visibility transition.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0768_private_visibility_ignores_leftovers.sql'),
-        ('0769_private_visibility_never_blocks.sql')`;
-      // 0873 patches the account-binding fence as rewritten by withheld 0501.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0873_mcp_binding_delegation_revocation.sql')`;
-      // The list invalidation triggers read visibility from withheld 0501;
-      // 0905 adds one more on 0888's notify function.
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0888_session_list_invalidation.sql'),
-        ('0905_schedule_timing_session_list_hints.sql')`;
-      // These learning-scope repairs rewrite routines installed by withheld
-      // 0461 (and each other). This pre-cutover producer-fence fixture must
-      // withhold the dependent tail too, not fabricate modern Knowledge SQL.
-      for (const name of knowledgeActorMigrationTail)
-        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
-      // Rewrites keys on the withheld Knowledge tables by name.
-      for (const name of workspaceDeletionMigrationTail)
-        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
-      // 0832 also extends the producer fence (generated default tool policy).
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0832_schedule_defaults_and_turn_notifications.sql')`;
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
-      // Allowance policy/attribution compiles against the same withheld
-      // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
-      for (const name of allowanceMigrationTail)
-        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
-      await migrate(historical.databaseUrl);
-      const migration = await readFile(
-        new URL(
-          "../../../packages/db/drizzle/0414_scheduled_generated_producer_materialization.sql",
-          import.meta.url,
-        ),
-        "utf8",
-      );
-      const [before] =
-        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      await historicalAdmin.begin(async (tx) => {
-        await tx.unsafe(migration);
-      });
-      const [after] =
-        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      expect(after).toEqual(before);
-      await expect(
-        historicalAdmin.begin(async (tx) => {
-          const drifted = String(before!.definition).replace(
-            "receipt.source_execution_digest = OLD.task_execution_digest",
-            "receipt.source_execution_digest <> OLD.task_execution_digest",
-          );
-          expect(drifted).not.toBe(before!.definition);
-          await tx.unsafe(drifted);
-          await tx.unsafe(migration);
-        }),
-      ).rejects.toMatchObject({ code: "55000" });
-      const [restored] =
-        await historicalAdmin`select pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-      expect(restored!.definition).toBe(before!.definition);
-    } finally {
-      await historicalAdmin.end();
-      await historical.release();
-    }
-  }, 180_000);
 
   for (const authorityCase of [
     "valid",

@@ -253,6 +253,88 @@ describe("interaction attempt tools", () => {
     expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
   });
 
+  test("browser_act reads the browser's receipt when the action's answer was lost", async () => {
+    const target = browserTarget();
+    // What the SDK raises when a POST was sent but its answer never came.
+    const lost = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      mutation: true,
+    });
+    let dispatches = 0;
+    const reads: string[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async () => {
+          dispatches += 1;
+          throw lost;
+        },
+        getBrowserActionReceipt: async (_workspaceId, _browserSessionId, operationId) => {
+          reads.push(operationId);
+          // Still running on the first read, settled on the second.
+          return reads.length === 1
+            ? {
+                ...browserReceipt(operationId, browserObservation(target)),
+                state: "dispatched" as const,
+              }
+            : browserReceipt(operationId, browserObservation(target));
+        },
+      }),
+    });
+    const operationId = randomUUID();
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/next" },
+      },
+      { operationId, caller: { kind: "model" as const, subjectId: "model:test" } },
+    );
+    expect(dispatches).toBe(1);
+    expect(reads).toEqual([operationId, operationId]);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", targetId: target.id });
+    expect(JSON.stringify(result)).not.toContain("network_error");
+  });
+
+  test("browser_act keeps a lost answer's error when the browser recorded nothing", async () => {
+    const target = browserTarget();
+    const lost = new OpenGeniApiError(0, "", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      mutation: true,
+    });
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async () => {
+          throw lost;
+        },
+        getBrowserActionReceipt: noRecordedReceipt,
+      }),
+    });
+    // An uncertain mutation keeps its own failure path, as before.
+    await expect(
+      definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          action: { type: "navigate", url: "https://example.test/next" },
+        },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      ),
+    ).rejects.toBe(lost);
+  });
+
   test("browser_act says when the actions completed but the page after them was not read", async () => {
     const target = browserTarget();
     const note = {
@@ -7348,6 +7430,7 @@ describe("interaction attempt tools", () => {
             scrollY: 0,
             capturedAt: now,
             data: image,
+            inexactScrollbars: true,
           };
         },
       }),
@@ -7368,6 +7451,7 @@ describe("interaction attempt tools", () => {
       mediaType: "image/jpeg",
       width: 120,
       height: 200,
+      note: "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
     });
     expect(result.content[1]).toEqual({
       type: "image",

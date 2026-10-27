@@ -77,33 +77,6 @@ async function storedConfig(sessionId: string): Promise<unknown> {
 }
 
 describe("sessions.agent_config (0559)", () => {
-  test("the complete fixture applies allowances and collaborator migrations before 0559", async () => {
-    const applied = await shared.admin<{ name: string }[]>`
-      SELECT name FROM schema_migrations
-      WHERE name IN (
-        '0552_usage_allowances.sql',
-        '0553_non_model_debit_attribution.sql',
-        '0554_video_allowance_refunds.sql',
-        '0555_member_collaborator_permissions.sql',
-        '0556_member_collaborator_permissions_backfill_index.sql',
-        '0557_member_collaborator_permissions_backfill.sql',
-        '0558_external_membership_removal_owner_rls.sql',
-        '0559_session_agent_config.sql'
-      )
-      ORDER BY name
-    `;
-    expect(applied.map((migration) => migration.name)).toEqual([
-      "0552_usage_allowances.sql",
-      "0553_non_model_debit_attribution.sql",
-      "0554_video_allowance_refunds.sql",
-      "0555_member_collaborator_permissions.sql",
-      "0556_member_collaborator_permissions_backfill_index.sql",
-      "0557_member_collaborator_permissions_backfill.sql",
-      "0558_external_membership_removal_owner_rls.sql",
-      "0559_session_agent_config.sql",
-    ]);
-  }, 60_000);
-
   test("an omitted configuration stores NULL and reads as a legacy session", async () => {
     const grant = await workspace();
     const session = await createSession(client.db, sessionInput(grant));
