@@ -11310,6 +11310,11 @@
       align-items: flex-start;
     }
   }
+:where(.og-root).pointer-coarse\:gap-2\.5,:where(.og-root) .pointer-coarse\:gap-2\.5 {
+    @media (pointer: coarse) {
+      gap: calc(var(--spacing) * 2.5);
+    }
+  }
 :where(.og-root).pointer-coarse\:rounded-og-md,:where(.og-root) .pointer-coarse\:rounded-og-md {
     @media (pointer: coarse) {
       border-radius: var(--og-radius-md);
@@ -11326,11 +11331,6 @@
 :where(.og-root).pointer-coarse\:bg-transparent,:where(.og-root) .pointer-coarse\:bg-transparent {
     @media (pointer: coarse) {
       background-color: transparent;
-    }
-  }
-:where(.og-root).pointer-coarse\:gap-2\.5,:where(.og-root) .pointer-coarse\:gap-2\.5 {
-    @media (pointer: coarse) {
-      gap: calc(var(--spacing) * 2.5);
     }
   }
 :where(.og-root).pointer-coarse\:p-1\.5,:where(.og-root) .pointer-coarse\:p-1\.5 {
