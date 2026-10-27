@@ -5074,7 +5074,7 @@ export const sessions = pgTable(
     initialModelContext: text("initial_model_context"),
     title: text("title"),
     titleSource: text("title_source"),
-    // Display metadata shown with the title (1004): a one-line description and
+    // Display metadata shown with the title (1008): a one-line description and
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),

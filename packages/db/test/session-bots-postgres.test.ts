@@ -17,7 +17,7 @@ import {
   type DbClient,
 } from "../src/index";
 
-// Bots (migration 1004): a chat's description and avatar, and the workspace's
+// Bots (migration 1008): a chat's description and avatar, and the workspace's
 // bot templates.
 
 let shared: SharedTestDatabase | null = null;

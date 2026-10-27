@@ -4,7 +4,7 @@ import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
 /**
- * Bot templates saved in a workspace (migration 1004). Everyone in the
+ * Bot templates saved in a workspace (migration 1008). Everyone in the
  * workspace reads them; the API decides who may change one.
  */
 

@@ -2,7 +2,7 @@ import { index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-cor
 import type { SessionAvatar } from "@opengeni/contracts";
 
 /**
- * Bot templates saved in a workspace (migration 1004): where a new bot chat
+ * Bot templates saved in a workspace (migration 1008): where a new bot chat
  * starts. The foreign key to workspaces lives in the migration.
  */
 export const botTemplates = pgTable(

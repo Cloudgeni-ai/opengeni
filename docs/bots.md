@@ -17,7 +17,7 @@ Every chat may carry, next to its title:
 
 The title is the bot's name. All three are display metadata for people. They
 never enter the model's context: the description and avatar live on the
-`sessions` row (migration `1004_session_bots.sql`) and their change event,
+`sessions` row (migration `1008_session_bots.sql`) and their change event,
 `session.profile_set`, is not projected into model history. Changing them
 therefore never changes what the agent sees or invalidates its prompt cache.
 
