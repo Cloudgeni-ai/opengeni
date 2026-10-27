@@ -185,8 +185,9 @@ describe("signed-out homepage on the real app route", () => {
     }
   }, 90_000);
 
-  test("in the macOS app the brand row clears the window controls and sharing badge", async () => {
+  test("in the macOS app the page clears the window controls and sharing badge", async () => {
     const browserBrandLeft = new Map<number, number>();
+    const scrolledLeft = new Map<string, number>();
     for (const platform of ["browser", "macos"] as const) {
       const context = await browser.newContext();
       try {
@@ -208,7 +209,7 @@ describe("signed-out homepage on the real app route", () => {
         page.on("pageerror", (error) => errors.push(error.message));
         await page.goto(baseUrl);
         await signedOutHeading(page).waitFor();
-        const header = page.locator("[data-signed-out-header]");
+        const header = page.locator("header[data-signed-out-column]");
         const brand = header.locator("> div").first();
         for (const width of [720, 900, 1100, 1128, 1280]) {
           await page.setViewportSize({ width, height: 800 });
@@ -226,7 +227,27 @@ describe("signed-out homepage on the real app route", () => {
               ),
             ).toBe("drag");
           }
+          // The header, page and footer keep one edge.
+          expect((await signedOutHeading(page).boundingBox())!.x).toBe(box.x);
         }
+        // Scrolled to the end in the smallest window, nothing on the page
+        // sits under the controls or the badge.
+        await page.setViewportSize({ width: 720, height: 520 });
+        await header.evaluate((element) => {
+          const scroller = element.closest(".overflow-y-auto")!;
+          scroller.scrollTop = scroller.scrollHeight;
+        });
+        scrolledLeft.set(
+          platform,
+          await page.evaluate(() =>
+            Math.min(
+              ...Array.from(document.querySelectorAll("[data-signed-out-column] *"))
+                .map((element) => element.getBoundingClientRect())
+                .filter((rect) => rect.width > 0 && rect.bottom > 0 && rect.top < 44)
+                .map((rect) => rect.left),
+            ),
+          ),
+        );
         expect(errors).toEqual([]);
       } finally {
         await context.close();
@@ -235,6 +256,7 @@ describe("signed-out homepage on the real app route", () => {
     // The web page itself is unchanged: 16px in a 720px window, then the
     // 1040px column's 40px inset.
     expect([...browserBrandLeft.values()]).toEqual([16, 40, 70, 84, 160]);
+    expect(Object.fromEntries(scrolledLeft)).toEqual({ browser: 16, macos: 84 });
   }, 90_000);
 
   test("broker registration stays embedded and social providers remain in the isolated popup", async () => {

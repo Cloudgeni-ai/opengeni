@@ -91,7 +91,7 @@ export function SignedOutPage({
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
         <header
-          data-signed-out-header
+          data-signed-out-column
           data-window-drag
           className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
         >
@@ -111,7 +111,10 @@ export function SignedOutPage({
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
-        <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14">
+        <div
+          data-signed-out-column
+          className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14"
+        >
           <div className="grid items-center gap-10 min-[721px]:grid-cols-[minmax(0,1fr)_minmax(0,390px)] min-[721px]:gap-16">
             <section aria-labelledby="signed-out-heading" className="min-w-0">
               <h1
@@ -139,7 +142,10 @@ export function SignedOutPage({
           </div>
         </div>
         <footer className="border-t border-border">
-          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
+          <div
+            data-signed-out-column
+            className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10"
+          >
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <Wordmark className="text-[15px] text-fg-muted" />
               {legal.length > 0 ? (

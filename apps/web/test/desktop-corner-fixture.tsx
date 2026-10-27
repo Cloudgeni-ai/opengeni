@@ -1,6 +1,8 @@
-// The settings shell as the desktop app draws it: the production SettingsShell
-// and workspace picker, with sample sections. `?platform=` picks the desktop
-// platform (or `browser`), `?theme=light` the light theme.
+// The top-left corner of desktop layouts as the app draws them. By default the
+// production SettingsShell and workspace picker, with sample sections;
+// `?view=content` a content page (ContentPage and PageHeader) beside the real
+// rail, inside a shell marked as SessionShell marks it. `?platform=` picks the
+// desktop platform (or `browser`), `?theme=light` the light theme.
 import { createRoot } from "react-dom/client";
 import { OpenGeniProvider } from "@opengeni/react";
 import {
@@ -28,14 +30,17 @@ import {
   WebhookIcon,
   type LucideIcon,
 } from "lucide-react";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import { RailBody } from "../src/components/rail/rail-shell";
 import { WorkspaceSwitcherMenu } from "../src/components/rail/workspace-switcher";
 import {
   SettingsShell,
   settingsHomeLink,
   type SettingsRailSection,
 } from "../src/components/settings/settings-sidebar";
-import { client, workspaceId } from "./desktop-rail-context";
+import { client, useRail, workspaceId } from "./desktop-rail-context";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -49,7 +54,7 @@ const item = (id: string, label: string, icon: LucideIcon) => ({
   id,
   label,
   icon,
-  link: <Link to="/test/desktop-settings.html" />,
+  link: <Link to="/test/desktop-corner.html" />,
 });
 
 const sections: SettingsRailSection[] = [
@@ -104,14 +109,55 @@ const sections: SettingsRailSection[] = [
   },
 ];
 
+function ContentPreview() {
+  const rail = useRail();
+  return (
+    <div
+      className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
+      data-rail-collapsed={rail.collapsed ? "true" : undefined}
+    >
+      <nav
+        data-collapsed={rail.collapsed}
+        style={{ width: rail.collapsed ? 56 : 288 }}
+        className="h-full shrink-0 border-r border-border"
+      >
+        <RailBody />
+      </nav>
+      <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <ContentPage width="standard" className="pt-6">
+          <PageHeader
+            title="Automations"
+            description="Scheduled and triggered work for this workspace."
+          />
+          {Array.from({ length: 30 }, (_, index) => (
+            <p key={index} className="mt-4 text-sm text-fg-muted">
+              Automation {index + 1} · Real content page components · Sample workspace data
+            </p>
+          ))}
+        </ContentPage>
+      </div>
+    </div>
+  );
+}
+
 function Preview() {
+  if (params.get("view") === "content")
+    return (
+      <OpenGeniProvider client={client} workspaceId={workspaceId}>
+        <TooltipProvider>
+          <main className="flex h-dvh bg-canvas text-fg">
+            <ContentPreview />
+          </main>
+        </TooltipProvider>
+      </OpenGeniProvider>
+    );
   return (
     <OpenGeniProvider client={client} workspaceId={workspaceId}>
       <TooltipProvider>
         <main className="flex h-dvh bg-canvas text-fg">
           <SettingsShell
             label="Settings"
-            back={{ label: "Back to sessions", link: <Link to="/test/desktop-settings.html" /> }}
+            back={{ label: "Back to sessions", link: <Link to="/test/desktop-corner.html" /> }}
             home={settingsHomeLink(workspaceId)}
             scope={
               <WorkspaceSwitcherMenu
@@ -138,6 +184,6 @@ function Preview() {
 }
 
 const root = createRootRoute({ component: Preview });
-const preview = createRoute({ getParentRoute: () => root, path: "/test/desktop-settings.html" });
+const preview = createRoute({ getParentRoute: () => root, path: "/test/desktop-corner.html" });
 const router = createRouter({ routeTree: root.addChildren([preview]) });
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);
