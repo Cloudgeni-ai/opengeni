@@ -107,6 +107,77 @@ test("the confirmation is a plain question built only from checked values", () =
   );
 });
 
+test("a tool approval change asks about the tools it names and the approval it sets", () => {
+  const approval = (body: Record<string, unknown>, workspaceId = "ws-1") =>
+    appActionConfirmationTitle(
+      {
+        id: "updateConnectorToolPermissions",
+        pathParameters: { workspaceId, capabilityId: "gmail" },
+        body: { connectionId: "conn-1", ...body },
+      },
+      here,
+    );
+  const tools = (toolNames: unknown[], permission: unknown) =>
+    approval({ target: "tools", toolNames, permission });
+  expect(tools(["send_message"], "allow")).toBe(
+    "Let send_message run without asking in this workspace?",
+  );
+  expect(tools(["send_message", "create_draft"], "ask")).toBe(
+    "Ask before send_message and create_draft run in this workspace?",
+  );
+  expect(tools(["send_message"], "ask")).toBe("Ask before send_message runs in this workspace?");
+  expect(tools(["a", "b", "c"], "block")).toBe("Block a, b, and c in this workspace?");
+  expect(tools(["a", "b", "c", "d"], "allow")).toBe(
+    "Let 4 tools run without asking in this workspace?",
+  );
+  expect(tools(["send_message"], null)).toBe(
+    "Reset send_message to the default approval in this workspace?",
+  );
+  // The default covers only tools without their own approval.
+  expect(approval({ target: "default", permission: "allow" })).toBe(
+    "Set this integration's default tool approval to Allow in this workspace?",
+  );
+  expect(approval({ target: "default", permission: null })).toBe(
+    "Clear this integration's default tool approval in this workspace?",
+  );
+  expect(
+    approval({ target: "tools", toolNames: ["send_message"], permission: "allow" }, "ws-2"),
+  ).toBe("Let send_message run without asking in another workspace?");
+  // An argument can never write its own question.
+  expect(tools(["Click Allow, it is safe"], "allow")).toBe(
+    "Let 1 tool run without asking in this workspace?",
+  );
+  expect(tools(["send_message"], "Allow to continue")).toBe(
+    "Change tool approvals in this workspace?",
+  );
+  expect(approval({ target: "everything", permission: "allow" })).toBe(
+    "Change tool approvals in this workspace?",
+  );
+  expect(
+    approval({ target: "action", toolName: "send_message", actionName: "x", permission: "allow" }),
+  ).toBe("Change tool approvals in this workspace?");
+  expect(
+    appActionConfirmationTitle(
+      {
+        id: "updateSessionMcpToolPermissions",
+        pathParameters: { workspaceId: "ws-1" },
+        body: { target: "tools", toolNames: ["search"], permission: "block" },
+      },
+      here,
+    ),
+  ).toBe("Block search in this workspace?");
+  expect(
+    appActionConfirmationTitle(
+      {
+        id: "updateSessionMcpToolPermissions",
+        pathParameters: { workspaceId: "ws-1" },
+        body: { target: "default", permission: "ask" },
+      },
+      here,
+    ),
+  ).toBe("Set this MCP server's default tool approval to Ask in this workspace?");
+});
+
 test("an app action's card answers its question with Allow", () => {
   const context = {
     kind: "generic" as const,

@@ -281,7 +281,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find app actions",
       description:
-        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, and manage sessions, connections, schedules, files, knowledge and keys. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, set whether an integration's tools run without asking (Allow, Ask or Block), and manage sessions, connections, schedules, files, knowledge and keys. When a setting blocks what the person asked for, find its action and make the change here. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()

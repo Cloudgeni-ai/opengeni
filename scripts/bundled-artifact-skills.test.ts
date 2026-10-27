@@ -121,6 +121,8 @@ describe("bundled editable-artifact skills", () => {
       expect(skill).toContain('from "@opengeni/sdk/site"');
       expect(skill).toContain("publishing it grants\n   no tool authority");
       expect(skill).toContain("normal tool approval rules");
+      expect(skill).toContain("a tool set to Ask fails there");
+      expect(skill).toContain("offer to set it to Allow in the chat");
       expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");
       expect(skill).not.toContain("declined approvals");
       expect(skill).not.toContain("one-shot approval dialog");
