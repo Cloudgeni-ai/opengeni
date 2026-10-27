@@ -189,7 +189,7 @@ export default defineConfig({
               // Inspector changes must not pull account-management forms into
               // the direct-session graph through entry-aware chunk merging.
               name: "model-connection-settings",
-              test: /(?:components[\\/](?:codex-source-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              test: /(?:components[\\/](?:codex-source-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:route|ticket-check)\.mjs$)/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -430,12 +430,13 @@ export default defineConfig({
             },
             {
               // Payment and organization-identity glyphs are lazy-only, but
-              // CreditCard also appears in new-chat and credit prompts. Keep
-              // these leaves separate from settings implementations so those
+              // CreditCard also appears in new-chat and credit prompts, and
+              // both it and ExternalLink in a chat's payment card. Keep these
+              // leaves separate from settings implementations so those
               // consumers do not load management pages. Explicit grouping also
               // prevents entry-aware merging with eager shared session glyphs.
               name: "payment-identity-glyphs",
-              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs$/,
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|external-link|fingerprint-pattern)\.mjs$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

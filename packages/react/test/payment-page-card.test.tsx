@@ -7,7 +7,7 @@ import {
   nextPaymentCheckDelay,
   PaymentPageActivityProvider,
 } from "../src/timeline/payment-page-card";
-import { paymentPageOf } from "../src/timeline/payment-page";
+import { paymentPageOf, TRUSTED_APP_ACTION_CALL_NAMES } from "../src/timeline/payment-page";
 import { activityPresentsImage } from "../src/timeline/presented-image";
 import { flush, registerDom, renderComponent, withVirtualClock } from "./render-hook";
 
@@ -125,6 +125,18 @@ describe("payment pages in the chat", () => {
     // Like a published image, it stays in view instead of folding into the work.
     expect(activityPresentsImage([checkoutCall()])).toBe(true);
     expect(activityPresentsImage([checkoutCall({ name: "evil__admin_action_call" })])).toBe(false);
+  });
+
+  test("the tool registry draws every name the payment page trusts, and no lookalike", () => {
+    const appAction = defaultToolRegistry.resolve(checkoutCall());
+    const generic = defaultToolRegistry.resolve(checkoutCall({ name: "some_other_tool" }));
+    expect(appAction).not.toBe(generic);
+    for (const name of TRUSTED_APP_ACTION_CALL_NAMES) {
+      expect(defaultToolRegistry.resolve(checkoutCall({ name }))).toBe(appAction);
+    }
+    expect(defaultToolRegistry.resolve(checkoutCall({ name: "evil__admin_action_call" }))).toBe(
+      generic,
+    );
   });
 
   test("the card reads nothing until opened, then confirms the credits once they land", async () => {

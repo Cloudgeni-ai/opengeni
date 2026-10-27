@@ -3,7 +3,7 @@ import { ToolActionReviewCard } from "../components/tool-action-review";
 import { SecretRefText } from "../components/secret-ref-chip";
 import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
-import { paymentPageOf, TRUSTED_APP_ACTION_CALL_NAMES } from "./payment-page";
+import { paymentPageOf } from "./payment-page";
 import { PaymentPageCard } from "./payment-page-card";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
@@ -2102,13 +2102,18 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     })),
   ),
   // Only the Opengeni server's own app actions: a page another server returns
-  // is never drawn as a payment button.
-  ...TRUSTED_APP_ACTION_CALL_NAMES.map((trustedName) => ({
-    match: "name" as const,
-    name: trustedName,
-    matchPrefixedLeaf: false,
-    render: AppActionCallRenderer,
-  })),
+  // is never drawn as a payment button. Spelled out here, like the knowledge
+  // tools above, because this registry is built while its chunk loads and the
+  // payment-page parser lives in a lazily shared chunk (the same names as its
+  // TRUSTED_APP_ACTION_CALL_NAMES, which a test keeps equal).
+  ...["admin_action_call", "opengeni__admin_action_call", "mcp__opengeni__admin_action_call"].map(
+    (trustedName) => ({
+      match: "name" as const,
+      name: trustedName,
+      matchPrefixedLeaf: false,
+      render: AppActionCallRenderer,
+    }),
+  ),
   // Provider-native items carry `raw.type` on the wire — this is their source of
   // truth and is consulted first by the registry.
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },
