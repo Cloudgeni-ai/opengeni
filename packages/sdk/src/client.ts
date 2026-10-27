@@ -1230,6 +1230,8 @@ export type TranscribeAudioInput = {
   audio: Blob | File | Uint8Array;
   mimeType: string;
   durationSeconds?: number | undefined;
+  /** ISO 639-1 or 639-3 code of what is spoken ("nb", "en"); omitted means detect. */
+  language?: string | undefined;
   signal?: AbortSignal | undefined;
 };
 
@@ -1396,6 +1398,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
+    if (input.language) form.append("language", input.language);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
@@ -11288,7 +11291,7 @@ export class OpenGeniClient {
    */
   async getBillingCheckout(
     checkoutSessionId: string,
-    options: { accountId?: string } = {},
+    options: { accountId?: string; signal?: AbortSignal } = {},
   ): Promise<BillingCheckoutStatus> {
     return await this.requestJson(
       "GET",
@@ -11297,6 +11300,7 @@ export class OpenGeniClient {
       {
         ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 

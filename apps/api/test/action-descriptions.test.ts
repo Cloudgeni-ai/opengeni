@@ -24,6 +24,22 @@ describe("action descriptions", () => {
     expect(missing).toEqual([]);
   });
 
+  test("buying credits and reading the balance are found in the words people use", () => {
+    const found = (query: string) =>
+      searchActions({ query, limit: 20, offset: 0 }).actions.map((action) => action.id);
+    for (const query of ["buy credits", "add credits", "credits", "add money"]) {
+      expect([query, found(query)]).toEqual([
+        query,
+        expect.arrayContaining(["createBillingCheckout"]),
+      ]);
+    }
+    expect(found("balance")).toContain("getBilling");
+    expect(found("payment")).toContain("getBillingCheckout");
+    // Giving a workspace allowance credits is told apart from buying them.
+    const grant = ACTION_CATALOG.find((entry) => entry.id === "grantWorkspaceCredits")!;
+    expect(actionDescription(grant)).toContain("to buy credits use createBillingCheckout");
+  });
+
   test("descriptions name the provider and the scope", () => {
     expect(
       actionDescription({

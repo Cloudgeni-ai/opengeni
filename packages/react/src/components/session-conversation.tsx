@@ -39,7 +39,10 @@ import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
-import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
+import type {
+  ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
+} from "./composer-transcription-control";
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { AuthNeededRow } from "./auth-needed-row";
@@ -75,6 +78,7 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ClientPaymentPageActivity } from "../timeline/payment-page-activity";
 import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
@@ -165,8 +169,10 @@ export type SessionConversationProps = ClientOverride &
     /**
      * Composer microphone (dictation into the draft). Defaults to true; it
      * appears only when the client config reports voice input available.
+     * Pass options instead of `true` to set the language dictations are
+     * heard in, or a check (such as a consent prompt) before each one starts.
      */
-    voiceInput?: boolean | undefined;
+    voiceInput?: boolean | ComposerVoiceInputOptions | undefined;
     /**
      * Live speech-to-speech voice in the composer. Opt-in: a call spends the
      * workspace's credits and asks for the microphone, so it is off unless this
@@ -512,6 +518,7 @@ function ConversationView({
     context.client,
     context.workspaceId,
     voiceInputRequested && !importedArchive ? config.voiceInput : null,
+    typeof voiceInputRequested === "object" ? voiceInputRequested : undefined,
   );
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
@@ -652,7 +659,7 @@ function ConversationView({
         />
       </Suspense>
     ) : null;
-  return (
+  const view = (
     <SingleSendWording enabled={composer.singleSend === true}>
       <div
         className={cn(
@@ -891,6 +898,9 @@ function ConversationView({
       </div>
     </SingleSendWording>
   );
+  // A payment page opened in this chat confirms its credits here, in the app
+  // and in an embed (through its session proxy) alike.
+  return <ClientPaymentPageActivity client={context.client}>{view}</ClientPaymentPageActivity>;
 }
 
 /** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */
@@ -1090,6 +1100,7 @@ export function useComposerTranscription(
   client: unknown,
   workspaceId: string,
   capability: ClientVoiceInputConfig | null,
+  options?: ComposerVoiceInputOptions,
 ): ComposerTranscriptionControlProps | null {
   const [workspaceEnabled, setWorkspaceEnabled] = useState<{
     key: string;
@@ -1121,6 +1132,8 @@ export function useComposerTranscription(
       live = false;
     };
   }, [reader, workspaceId, supported]);
+  const language = options?.language;
+  const beforeStart = options?.beforeStart;
   return useMemo(
     () =>
       supported
@@ -1131,9 +1144,11 @@ export function useComposerTranscription(
             capability,
             workspaceEnabled:
               workspaceEnabled?.key === workspaceId ? workspaceEnabled.enabled : false,
+            ...(language !== undefined ? { language } : {}),
+            ...(beforeStart ? { beforeStart } : {}),
           }
         : null,
-    [supported, reader, workspaceId, capability, workspaceEnabled],
+    [supported, reader, workspaceId, capability, workspaceEnabled, language, beforeStart],
   );
 }
 

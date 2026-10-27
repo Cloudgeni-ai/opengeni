@@ -1,5 +1,9 @@
-// Expo config plugin: system voice calls with the host's agent.
+// Expo config plugin: system voice calls with the host's agent (`call`), and
+// background meeting recording (`recording: true`). Each is set up only when
+// asked for, so a meetings-only app gets no VoIP mode or Siri intents; the
+// plugin without options still sets up calls, as it always has.
 //
+// Calls:
 // - Info.plist: the background modes CallKit needs (`audio`, `voip`), the
 //   INStartCallIntent activity for Phone recents, the microphone purpose, and
 //   optional Siri app-name synonyms (for example the agent's own name).
@@ -18,7 +22,7 @@ const {
   IOSConfig,
 } = require("expo/config-plugins");
 
-const { SWIFT_FILE, intentsSource, resolveOptions } = require("./call-intents.cjs");
+const { SWIFT_FILE, intentsSource, pluginFeatures, resolveOptions } = require("./call-intents.cjs");
 const { withRecording } = require("./with-recording.cjs");
 const {
   CONTROL_TARGET,
@@ -86,6 +90,9 @@ function withCallIntentsSource(config, options) {
 }
 
 function withNativeCall(config, props) {
+  const features = pluginFeatures(props);
+  if (features.recording) config = withRecording(config);
+  if (!features.call) return config;
   const options = resolveOptions(props);
   config = withCallInfoPlist(config, options);
   if (options.appIntents) config = withCallIntentsSource(config, options);
@@ -98,7 +105,6 @@ function withNativeCall(config, props) {
     }
     config = withCallControl(config, options, control);
   }
-  if (props?.recording) config = withRecording(config);
   return config;
 }
 

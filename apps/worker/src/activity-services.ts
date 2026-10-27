@@ -12,7 +12,7 @@ import {
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
-  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -56,10 +56,7 @@ export function createSharedActivityServices(
             ...databasePoolOptions(settings),
             // Runtime login only: the files rotate this URL's password in place.
             ...databasePasswordFileOptions(settings),
-            onCredentialEvent: logDatabaseCredentialEvent(
-              "worker-activities",
-              (message, attributes) => observability.warn(message, attributes),
-            ),
+            onCredentialEvent: observeDatabaseCredentialEvents("worker-activities", observability),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;

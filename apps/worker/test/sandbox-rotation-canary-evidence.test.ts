@@ -59,7 +59,7 @@ describe("Sandbox rotation supervision admission", () => {
   });
   for (const [name, command] of [
     ["missing command", null],
-    ["legacy command", { kind: "modal-control-v1", supervision }],
+    ["unknown command kind", { kind: "unknown-kind", supervision }],
     ["PTY", { kind: "modal-router-v1", pty: true, supervision }],
     ["missing descriptor", { kind: "modal-router-v1" }],
     [
