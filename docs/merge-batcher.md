@@ -1011,6 +1011,15 @@ Exactly-once arbitrary REST effects are not promised: external marker deletion,
 manual reruns, or operator recovery based on incomplete evidence remain provider/
 operator limitations. Git landing itself remains atomic and restart-reconcilable.
 
+Each maintenance tick processes one due effect (a due rerun first, then one
+other effect), then drains further due comments, oldest first, up to eight
+comments in the tick. Batch landings stage one comment per member, so a single
+comment per tick falls behind. Every drained comment reloads state, rechecks the
+lease and uses the same durable claim, final lease read and marker
+reconciliation. The drain stops at once when the lease moves to another owner,
+the claim changes, or GitHub throttles or rejects a submission; the remaining
+comments keep their order for the next tick.
+
 ## Shadow evidence and operations
 
 ### Bounded observation and measured stages
