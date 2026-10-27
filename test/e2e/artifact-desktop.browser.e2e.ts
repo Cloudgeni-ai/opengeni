@@ -83,12 +83,14 @@ test("expanded Sites start below the desktop window bar", async () => {
         expect(await header.evaluate((el) => el.getBoundingClientRect().height)).toBe(48);
         await expectWindowTop(page, platform);
         if (desktopBar) {
-          // The dialog stays clickable over the bar; its header still moves the window.
+          // The modal Site dialog starts below the bar, so it doesn't claim the bar: its
+          // full-window backdrop would otherwise stop the bar moving the window. Its header
+          // still moves the window.
           const region = (selector: string) =>
             page
               .locator(selector)
               .evaluate((el) => getComputedStyle(el).getPropertyValue("-webkit-app-region"));
-          expect(await region("dialog")).toBe("no-drag");
+          expect(await region("dialog")).not.toBe("no-drag");
           expect(await region("[data-artifact-fullscreen] > [data-window-drag]")).toBe("drag");
         }
         expect(

@@ -95,8 +95,10 @@ html[data-desktop="macos"]::before {
 }
 
 /* In a short window a tall dialog or a menu can reach over the bar; it stays
-   clickable there instead of moving the window. */
-html:is([data-desktop="macos"], [data-desktop="windows"]) :is(dialog, [role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper]) {
+   clickable there instead of moving the window. A modal <dialog> is left out:
+   it starts below the bar, and Chromium would extend its no-drag to the
+   full-window backdrop, so the bar would stop moving the window. */
+html:is([data-desktop="macos"], [data-desktop="windows"]) :is(dialog:not(:modal), [role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper]) {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
