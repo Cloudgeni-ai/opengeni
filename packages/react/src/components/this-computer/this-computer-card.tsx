@@ -86,6 +86,9 @@ export function ThisComputerCard({
   const catalogText = useOpenGeniText();
   const labels = given ?? defaultThisComputerLabels(catalogText);
   const card = labels.card;
+  // A ready computer may not be the one the person means: on the web, the
+  // host's own connect path stays one click away after the card completes.
+  const [connectingAnother, setConnectingAnother] = useState(false);
   const status = computer?.status ?? null;
   const use = computer ? computerUseState(computer) : ({ kind: "hidden" } as const);
   const own = (machines ?? []).filter(
@@ -211,6 +214,56 @@ export function ThisComputerCard({
   }
 
   const complete = readyName !== null;
+  const hostConnects = Boolean(onConnect || downloads?.length || openAppUrl || downloadUrl);
+  const offerAnother = complete && !computer && hostConnects;
+  const anotherLabel = catalogText("thisComputer.card.connectAnother");
+  // Install-and-open guidance, for a first computer or another one.
+  const downloadsFoot =
+    downloads?.length || openAppUrl ? (
+      <div className="og-tc-card-foot og-tc-card-downloads">
+        {downloads?.map((download) => (
+          <a key={download.url} href={download.url}>
+            {download.label}
+          </a>
+        ))}
+        {openAppUrl ? <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a> : null}
+      </div>
+    ) : null;
+  let another: ReactNode = null;
+  if (offerAnother && onConnect) {
+    another = (
+      <div className="og-tc-card-foot og-tc-card-another">
+        <HostConnectAction onConnect={onConnect} label={anotherLabel} secondary />
+      </div>
+    );
+  } else if (offerAnother && !connectingAnother) {
+    another = (
+      <div className="og-tc-card-foot og-tc-card-another">
+        <button type="button" data-secondary="" onClick={() => setConnectingAnother(true)}>
+          {anotherLabel}
+        </button>
+      </div>
+    );
+  } else if (offerAnother) {
+    another = (
+      <>
+        <div className="og-tc-card-foot og-tc-card-another">
+          <p>
+            {downloadsFoot
+              ? catalogText("thisComputer.card.anotherInstallThenOpen")
+              : card.getApp(productName)}
+          </p>
+          {!downloadsFoot && downloadUrl ? (
+            <a href={downloadUrl} target="_blank" rel="noreferrer" data-secondary="">
+              {card.getAppAction(productName)}
+              <ArrowUpRightIcon aria-hidden />
+            </a>
+          ) : null}
+        </div>
+        {downloadsFoot}
+      </>
+    );
+  }
   return (
     <section className="og-session-capability og-tc-card" aria-label={card.name}>
       <div className="og-session-capability-shell" data-state={complete ? "complete" : undefined}>
@@ -231,18 +284,8 @@ export function ThisComputerCard({
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>
-        {!computer && !complete && (downloads?.length || openAppUrl) ? (
-          <div className="og-tc-card-foot og-tc-card-downloads">
-            {downloads?.map((download) => (
-              <a key={download.url} href={download.url}>
-                {download.label}
-              </a>
-            ))}
-            {openAppUrl ? (
-              <a href={openAppUrl}>{catalogText("thisComputer.card.openApp")}</a>
-            ) : null}
-          </div>
-        ) : null}
+        {!computer && !complete ? downloadsFoot : null}
+        {another}
         {!complete ? <p className="og-tc-card-note">{card.note}</p> : null}
       </div>
     </section>
@@ -252,9 +295,12 @@ export function ThisComputerCard({
 function HostConnectAction({
   onConnect,
   label,
+  secondary = false,
 }: {
   onConnect: () => Promise<void>;
   label: string;
+  /** A quieter button, beside a computer that is already ready. */
+  secondary?: boolean;
 }) {
   const t = useOpenGeniText();
   const busyRef = useRef(false);
@@ -265,6 +311,7 @@ function HostConnectAction({
       <button
         type="button"
         disabled={busy}
+        data-secondary={secondary ? "" : undefined}
         onClick={() => {
           if (busyRef.current) return;
           busyRef.current = true;

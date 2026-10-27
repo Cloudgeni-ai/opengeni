@@ -1,6 +1,8 @@
 // "Use this computer" reference: every state of the setup, offer, settings
 // panel and conversation card against a simulated desktop host.
-//   ?theme=light|dark  ?view=board|setup  ?state=<preset>  ?grant=auto|manual
+//   ?theme=light|dark  ?view=board|setup|web  ?state=<preset>  ?grant=auto|manual
+//   view=web: the conversation card outside the desktop app, as an embedding
+//   host shows it, including a ready computer next to the host's connect path.
 import type { MachineView } from "@opengeni/sdk";
 import {
   ThisComputerCard,
@@ -280,6 +282,41 @@ createRoot(document.getElementById("root")!).render(
     data-og-theme={theme}
     style={{ minHeight: "100dvh", background: "var(--og-color-bg)", color: "var(--og-color-fg)" }}
   >
-    {view === "setup" ? <SetupOnly /> : <Board />}
+    {view === "setup" ? <SetupOnly /> : view === "web" ? <WebCards /> : <Board />}
   </div>,
 );
+
+/** The web card in one column, for narrow and wide screenshots. */
+function WebCards() {
+  const rationale = "Connect the Windows laptop at home so I can tidy its Downloads folder.";
+  return (
+    <div style={{ padding: 16, display: "grid", gap: 24, maxWidth: 720, margin: "0 auto" }}>
+      <Tile title="web: computer ready, host links">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[machine("online")]}
+          rationale={rationale}
+          downloads={[{ label: "Download Acme for Windows", url: "https://example.com/acme.exe" }]}
+          openAppUrl="acme://connect"
+        />
+      </Tile>
+      <Tile title="web: computer ready, host callback">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[machine("online")]}
+          rationale={rationale}
+          onConnect={async () => {}}
+        />
+      </Tile>
+      <Tile title="web: no computer, host links">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[]}
+          rationale={rationale}
+          downloads={[{ label: "Download Acme for Windows", url: "https://example.com/acme.exe" }]}
+          openAppUrl="acme://connect"
+        />
+      </Tile>
+    </div>
+  );
+}

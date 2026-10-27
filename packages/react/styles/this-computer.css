@@ -910,6 +910,15 @@
   border-color: var(--og-color-border);
   color: var(--og-color-fg);
 }
+/* "Connect another computer" beside a ready one: an outlined peer action. */
+.og-tc-card-foot > :is(button, a)[data-secondary] {
+  background: var(--og-color-surface-1);
+  border-color: var(--og-color-border);
+  color: var(--og-color-fg);
+}
+.og-tc-card-another {
+  justify-content: flex-start;
+}
 .og-tc-card .og-tc-error {
   width: auto;
   margin: 0 19px 12px;

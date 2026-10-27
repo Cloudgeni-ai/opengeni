@@ -1638,7 +1638,13 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
-  on a question is moved and keeps the question;
+  on a question is moved and keeps the question. No machine is promoted: every
+  reachable machine gets the same quiet button (only a machine that just
+  connected from the card's own dialog gets the primary one), because the card
+  can't know which computer the person means;
+- ends that list with an **Another computer** row whose **Connect** opens the
+  connect flow below, so connecting a computer that isn't listed yet is a peer
+  of using a listed one rather than a trailing link;
 - inside the desktop app, **Use this computer** calls the existing desktop host
   connection directly, with personal ownership and screen-control consent. There
   is no second setup confirmation; required operating-system permission prompts
@@ -1670,12 +1676,14 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   that was offline, comes online the same dialog shows its name, **Connected**
   and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
   chat** (the same attach path as the list). Closing the dialog stops the watch;
-- once a machine with a screen is reachable (the chat's own machine first),
-  offers the
+- once this chat runs on a reachable machine with a screen, shows that
+  machine's screen control and offers the
   [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
-  stops after ten minutes or when the inventory is not readable.
+  stops after ten minutes or when the inventory is not readable. Before the
+  chat runs on a machine these rows stay hidden, so steps about a machine the
+  person may not mean don't compete with choosing or connecting the right one.
 
 Reading the list needs `enrollments:read`; connecting follows the scope rule
 above (every teammate connects an Only me machine; This workspace needs

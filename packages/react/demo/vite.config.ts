@@ -17,6 +17,7 @@ const demoInputs = {
   machines: resolve(__dirname, "machines.html"),
   memberMachines: resolve(__dirname, "member-machines.html"),
   chromeSetupCard: resolve(__dirname, "chrome-setup-card.html"),
+  machineCard: resolve(__dirname, "machine-card.html"),
   workbench: resolve(__dirname, "workbench.html"),
   workbenchDock: resolve(__dirname, "workbench-dock.html"),
   workbenchEmbed: resolve(__dirname, "workbench-embed.html"),

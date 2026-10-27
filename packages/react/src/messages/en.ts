@@ -4596,6 +4596,12 @@ export const englishMessages = {
   "thisComputer.card.note":
     "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app.",
   "thisComputer.card.openApp": "Open app and connect",
+  "thisComputer.card.connectAnother": "Connect another computer",
+  "thisComputer.card.anotherInstallThenOpen":
+    "On the computer you want to connect, open this chat, install the app, then return here to open it and connect.",
+  "thisComputer.card.connectOnThatComputer":
+    "A computer connects from the computer itself. Open this chat on the computer you want to use, then choose Connect.",
+  "thisComputer.card.shareConversation": "Share link to this chat",
   "thisComputer.card.installThenOpen":
     "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
   "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",

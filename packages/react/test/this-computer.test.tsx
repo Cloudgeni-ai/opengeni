@@ -140,6 +140,49 @@ test("the conversation card offers the desktop app where it can't host the agent
   expect(html).toContain('href="https://example.com/desktop"');
 });
 
+test("a ready computer leaves connecting another one a click away on the web", () => {
+  const ready = [
+    {
+      sandboxId: "pc",
+      enrollmentId: "enr-pc",
+      name: "Studio desktop",
+      scope: "user",
+      state: "online",
+    },
+  ] as never;
+  const links = renderToStaticMarkup(
+    <ThisComputerCard
+      productName="Acme"
+      machines={ready}
+      downloads={[{ label: "Download Acme", url: "https://example.com/app" }]}
+      openAppUrl="acme://connect"
+    />,
+  );
+  expect(links).toContain("Agents can use Studio desktop");
+  expect(links).toContain("Connect another computer");
+  // The install steps wait behind that button instead of crowding a done card.
+  expect(links).not.toContain("Download Acme");
+
+  const callback = renderToStaticMarkup(
+    <ThisComputerCard productName="Acme" machines={ready} onConnect={async () => {}} />,
+  );
+  expect(callback).toContain("Connect another computer");
+
+  // Without a host connect path there is nothing to offer.
+  const bare = renderToStaticMarkup(<ThisComputerCard productName="Acme" machines={ready} />);
+  expect(bare).not.toContain("Connect another computer");
+
+  // Inside the desktop app, the card is about this computer only.
+  const inApp = renderToStaticMarkup(
+    <ThisComputerCard
+      productName="Acme"
+      computer={computer(status({ state: "connected" }))}
+      onConnect={async () => {}}
+    />,
+  );
+  expect(inApp).not.toContain("Connect another computer");
+});
+
 test("host errors lose Electron's IPC prefix", () => {
   expect(
     hostErrorText(new Error("Error invoking remote method 'computer:connect': Error: Offline")),
