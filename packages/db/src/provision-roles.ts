@@ -2719,7 +2719,7 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
     END IF;
     IF to_regclass('opengeni_private.organization_signup_current_use_cases') IS NOT NULL THEN
-      -- The person's current signup answer (0990): ordinary row access under
+      -- The person's current signup answer (1000): ordinary row access under
       -- FORCE RLS to the tenant, never DELETE or schema authority.
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_current_use_cases FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_signup_current_use_cases FROM PUBLIC;
