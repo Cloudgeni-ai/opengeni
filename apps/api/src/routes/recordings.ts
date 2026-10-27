@@ -481,7 +481,9 @@ export function registerRecordingRoutes(
       // the language it is spoken in, or none to detect it.
       const { language, ...other } = body.transcription ?? {};
       if (Object.keys(other).length > 0) {
-        throw invalid("A dictation uses the workspace's voice input model; only its language can be set");
+        throw invalid(
+          "A dictation uses the workspace's voice input model; only its language can be set",
+        );
       }
       const result = await guard(() =>
         createRecording(db, {

@@ -486,7 +486,20 @@ describe("transcript text", () => {
       ["nb", "nn", "nob", "nor", "no", "en", "eng", "en-US", "sv_SE", "zzzz", "", undefined].map(
         (tag) => openAiLanguage(tag),
       ),
-    ).toEqual(["no", "no", "no", "no", "no", "en", "en", "en", "sv", undefined, undefined, undefined]);
+    ).toEqual([
+      "no",
+      "no",
+      "no",
+      "no",
+      "no",
+      "en",
+      "en",
+      "en",
+      "sv",
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   test("a result's text is the model's own, else its words joined", () => {
