@@ -775,6 +775,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
       } finally {
         await admin.end().catch(() => undefined);
       }
+      await detachDeadScratchRolesOnce();
       await ensureAppRole();
       await ensureTemplateBuilt();
       await maybeStartReaper();
@@ -863,6 +864,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // cluster-global role on EVERY acquisition, not only the fresh-start branch;
     // otherwise the running container looks healthy while every FORCE-RLS clone
     // fails with `role opengeni_app does not exist`.
+    await detachDeadScratchRolesOnce();
     await ensureAppRole();
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
@@ -1583,6 +1585,10 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   anywhere else, or owning objects, is kept with a note. Template builds also
 //   strip grants to scratch roles that some migrations copy to every
 //   privileged role, so templates never carry them (scrubScratchRoleGrants).
+//   Each process's first acquisition also removes the memberships of
+//   unconnected scratch roles whose owner provably died
+//   (detachDeadScratchRoles), so a leftover member of opengeni_app cannot
+//   block role provisioning while it waits for the reaper.
 // Every failure is reported in the result and never thrown.
 // ---------------------------------------------------------------------------
 
@@ -1812,6 +1818,88 @@ export async function scrubScratchRoleGrants(
  * drop it, with its memberships, if the test dies before dropping it. Best
  * effort: without the record the reaper falls back to its idle-window rule.
  */
+/**
+ * Remove every role membership (both directions) of scratch test roles whose
+ * owner provably died and that have no connection. A run killed mid-test can
+ * leave its scratch role a member of `opengeni_app`, which makes every other
+ * run's role provisioning refuse to normalize `opengeni_app` until the role
+ * is gone. This is quick (catalog only) and runs on acquisition; the
+ * background reaper drops the role and its grants later. Roles without an
+ * owner record, or with an owner this process cannot verify, are left alone.
+ * Best effort: never throws. Returns the roles it detached.
+ */
+export async function detachDeadScratchRoles(
+  sql: postgres.Sql,
+  options: { rolePrefix?: string; here?: ProcessIdentity; probe?: ReapOptions["probe"] } = {},
+): Promise<string[]> {
+  const detached: string[] = [];
+  try {
+    const roles = await sql<{ rolname: string; comment: string | null; connections: number }[]>`
+      SELECT r.rolname, shobj_description(r.oid, 'pg_authid') AS comment,
+             (SELECT count(*)::int FROM pg_stat_activity a WHERE a.usesysid = r.oid) AS connections
+        FROM pg_roles r
+       WHERE r.rolname ~ ${scratchRolePattern(options.rolePrefix)}
+         AND EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid OR m.roleid = r.oid)`;
+    const here = options.here ?? currentProcessIdentity();
+    for (const role of roles) {
+      if (!isScratchTestRoleName(role.rolname, options.rolePrefix) || role.connections > 0)
+        continue;
+      const owner = parseDatabaseOwnerComment(role.comment);
+      if (!owner || ownerStatus(owner, here, options.probe) !== "dead") continue;
+      try {
+        const memberships = await sql<{ granted: string; member: string; grantor: string }[]>`
+          SELECT g.rolname AS granted, r.rolname AS member, gr.rolname AS grantor
+            FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid
+            JOIN pg_roles r ON r.oid = m.member
+            JOIN pg_roles gr ON gr.oid = m.grantor
+           WHERE g.rolname = ${role.rolname} OR r.rolname = ${role.rolname}`;
+        for (const { granted, member, grantor } of memberships) {
+          const revoke = `REVOKE ${quoteIdent(granted)} FROM ${quoteIdent(member)}`;
+          // GRANTED BY another role needs PostgreSQL 16; older servers only
+          // know grants by the current user.
+          await sql
+            .unsafe(`${revoke} GRANTED BY ${quoteIdent(grantor)}`)
+            .catch(() => sql.unsafe(revoke));
+        }
+        detached.push(role.rolname);
+      } catch (error) {
+        void reaperNote(`could not detach ${role.rolname}: ${String(error)}`);
+      }
+    }
+  } catch (error) {
+    void reaperNote(`could not check scratch roles: ${String(error)}`);
+  }
+  if (detached.length > 0) {
+    void reaperNote(`detached dead scratch role(s) from their memberships: ${detached.join(" ")}`);
+  }
+  return detached;
+}
+
+let scratchRolesDetached = false;
+
+/** detachDeadScratchRoles once per process on this harness's cluster. */
+async function detachDeadScratchRolesOnce(): Promise<void> {
+  if (scratchRolesDetached || process.env.OPENGENI_TEST_PG_REAP?.trim() === "0") return;
+  scratchRolesDetached = true;
+  const scope = process.env.OPENGENI_TEST_PG_REAP_SCOPE?.trim();
+  const scoped = scope && /^og_[a-z0-9_]+$/u.test(scope) ? scope : undefined;
+  let sql: postgres.Sql | null = null;
+  try {
+    sql = postgres(ADMIN_URL, {
+      max: 1,
+      connect_timeout: 10,
+      onnotice: () => undefined,
+      connection: { lock_timeout: 2000, statement_timeout: 30_000, application_name: "og-reaper" },
+    });
+    await detachDeadScratchRoles(sql, scoped ? { rolePrefix: `${scoped}bypass_` } : {});
+  } catch (error) {
+    void reaperNote(`could not check scratch roles: ${String(error)}`);
+  } finally {
+    await sql?.end({ timeout: 5 }).catch(() => undefined);
+  }
+}
+
 export async function recordTestRoleOwner(sql: postgres.Sql, roleName: string): Promise<void> {
   await sql
     .unsafe(`COMMENT ON ROLE ${quoteIdent(roleName)} IS ${quoteLiteral(databaseOwnerComment())}`)

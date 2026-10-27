@@ -790,12 +790,17 @@ purpose. Scratch login roles a test creates on the shared cluster must be named
 `opengeni_bypass_<32 hex>` or `migration_<4 digits>_<32 hex>` and recorded with
 `recordTestRoleOwner`; the reaper revokes their grants and drops them (and
 their memberships) the same way once their test is gone, and template builds
-strip grants to them that migrations copy to every privileged role.
+strip grants to them that migrations copy to every privileged role. Each test
+process also removes, when it first acquires the cluster, the memberships of
+scratch roles whose owner provably died, so a leftover cannot block other
+runs' `opengeni_app` provisioning until the reaper gets to it.
 Template names depend only on the contents of the migrations and the
 files the migration runner and role provisioning load, so worktrees with the
 same inputs share one. Notes
 go to `reaper.log` beside the harness lock state; `OPENGENI_TEST_PG_REAP=0`
-turns it off (it is off under `CI`). See the header of
+turns it off (it is off under `CI`). `bun test --no-orphans` (as in
+`test:unit`) kills the detached pass when its test process exits, so a short
+run may cut a pass short; the next one finishes the work. See the header of
 `packages/testing/src/shared-pg.ts`.
 
 Bun services launched by the test harness ignore implicit checkout `.env` files.

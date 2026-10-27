@@ -24,6 +24,7 @@ import {
   currentProcessIdentity,
   type DatabaseOwner,
   databaseOwnerComment,
+  detachDeadScratchRoles,
   isPerTestDatabaseName,
   isScratchTestRoleName,
   isTemplateDatabaseName,
@@ -655,6 +656,75 @@ describe("reaping a real cluster", () => {
           SELECT count(*)::int AS n FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid
            WHERE d.datname = ${outside} AND s.deptype = 'a'`;
         expect(outsideGrant?.n).toBe(1);
+      } finally {
+        await holder.end();
+      }
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "detaches a dead owner's scratch role from opengeni_app-style memberships at once and leaves the rest",
+    async () => {
+      if (!admin) return;
+      const { sub } = subScope("d");
+      const rolePrefix = `${sub}bypass_`;
+      const hex32 = () => crypto.randomUUID().replace(/-/g, "");
+      const group = `${sub}app`;
+      const member = `${sub}member`;
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(group)} NOLOGIN`);
+      await admin.unsafe(`CREATE ROLE ${quoteIdent(member)} NOLOGIN`);
+      const createRole = async (comment?: string, login = "") => {
+        const name = `${rolePrefix}${hex32()}`;
+        await admin!.unsafe(`CREATE ROLE ${quoteIdent(name)} ${login || "NOLOGIN"}`);
+        if (comment !== undefined) {
+          await admin!.unsafe(`COMMENT ON ROLE ${quoteIdent(name)} IS ${quoteLiteral(comment)}`);
+        }
+        // Like sandbox-lease: `grant opengeni_app to <bypass role>`.
+        await admin!.unsafe(`GRANT ${quoteIdent(group)} TO ${quoteIdent(name)}`);
+        return name;
+      };
+      const memberships = async (name: string) => {
+        const [row] = await admin!<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member
+           WHERE g.rolname = ${name} OR r.rolname = ${name}`;
+        return row?.n ?? 0;
+      };
+      const dead = await createRole(databaseOwnerComment(deadOwner));
+      await admin.unsafe(`GRANT ${quoteIdent(dead)} TO ${quoteIdent(member)}`);
+      const live = await createRole(databaseOwnerComment(liveOwner));
+      const foreign = await createRole(databaseOwnerComment(currentDatabaseOwner()));
+      const unowned = await createRole();
+      const password = hex32();
+      const connected = await createRole(
+        databaseOwnerComment(deadOwner),
+        `LOGIN PASSWORD ${quoteLiteral(password)}`,
+      );
+      const url = new URL(adminUrl);
+      url.username = connected;
+      url.password = password;
+      const holder = postgres(url.toString(), { max: 1 });
+      try {
+        await holder`SELECT 1`;
+        expect(await detachDeadScratchRoles(admin, { rolePrefix, here })).toEqual([dead]);
+        expect(await memberships(dead)).toBe(0);
+        // The role itself stays for the reaper, which also revokes its grants.
+        const [kept] = await admin`SELECT 1 FROM pg_roles WHERE rolname = ${dead}`;
+        expect(kept).toBeDefined();
+        for (const name of [live, foreign, unowned, connected]) {
+          expect(await memberships(name)).toBe(1);
+        }
+        // Errors are swallowed: an unreachable server just detaches nothing.
+        const unreachable = postgres("postgres://postgres:x@127.0.0.1:1/postgres", {
+          max: 1,
+          connect_timeout: 2,
+        });
+        try {
+          expect(await detachDeadScratchRoles(unreachable, { rolePrefix, here })).toEqual([]);
+        } finally {
+          await unreachable.end().catch(() => undefined);
+        }
       } finally {
         await holder.end();
       }
