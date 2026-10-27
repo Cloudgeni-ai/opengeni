@@ -34,7 +34,9 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
   SessionAutomationWaitSummary,
+  SessionAvatar,
 } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -1844,6 +1846,10 @@ export type Session = {
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
+  /** Display-only one-line description of what this chat is for. Never sent to the model. */
+  description?: string | null | undefined;
+  /** Display-only avatar. Never sent to the model. */
+  avatar?: SessionAvatar | null | undefined;
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
@@ -2030,6 +2036,8 @@ export type SessionListEntry = Pick<
   | "automationWait"
   | "title"
   | "titleSource"
+  | "description"
+  | "avatar"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -2668,6 +2676,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.profile_set",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
@@ -3859,6 +3868,18 @@ export type CreateSessionRequest = {
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
   /**
+   * The new chat's name, description and avatar, as if a person set them (a
+   * bot started from a template, for example). Display metadata only; never
+   * sent to the model.
+   */
+  profile?:
+    | {
+        title?: string | undefined;
+        description?: string | undefined;
+        avatar?: SessionAvatar | undefined;
+      }
+    | undefined;
+  /**
    * `realtime` creates an idle session shell so realtime voice can be the
    * first interaction. `standard` is the explicit default; `createSession`
    * sends it with a usage limit so servers that predate limits reject the
@@ -4109,6 +4130,7 @@ export type FirstPartyMcpToolName =
   | "session_steer"
   | "session_human_input_respond"
   | "set_other_session_title"
+  | "bot_template_save"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"
@@ -7139,7 +7161,10 @@ export type UpdateSessionGoalRequest =
     };
 
 export type UpdateSessionRequest = {
-  title: string;
+  title?: string | undefined;
+  /** Empty string clears the description. */
+  description?: string | null | undefined;
+  avatar?: SessionAvatar | null | undefined;
 };
 
 // --- Operator context controls (/clear, /compact) ----------------------------

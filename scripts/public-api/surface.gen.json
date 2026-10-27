@@ -2255,6 +2255,67 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/bot-templates",
+      "sdk": [
+        "OpenGeniClient.listBotTemplates"
+      ],
+      "request": [],
+      "response": [
+        "ListBotTemplatesResponse",
+        "WorkspaceBotTemplate"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/bot-templates",
+      "sdk": [
+        "OpenGeniClient.createBotTemplate"
+      ],
+      "request": [
+        "CreateBotTemplateRequest"
+      ],
+      "response": [
+        "BotTemplateResponse",
+        "WorkspaceBotTemplate"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+      "sdk": [
+        "OpenGeniClient.deleteBotTemplate"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+      "sdk": [
+        "OpenGeniClient.getBotTemplate"
+      ],
+      "request": [],
+      "response": [
+        "BotTemplateResponse",
+        "WorkspaceBotTemplate"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+      "sdk": [
+        "OpenGeniClient.updateBotTemplate"
+      ],
+      "request": [
+        "UpdateBotTemplateRequest"
+      ],
+      "response": [
+        "BotTemplateResponse",
+        "WorkspaceBotTemplate"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/browser-identities",
       "sdk": [
         "OpenGeniClient.listBrowserIdentities"
@@ -10316,6 +10377,7 @@
       "session.notification.posted",
       "session.notification.withdrawn",
       "session.personal_resources.attached",
+      "session.profile_set",
       "session.queue.changed",
       "session.queue.history",
       "session.queue.prompt.cancelled",
@@ -11875,6 +11937,15 @@
         "$.effectiveAt": "string!",
         "$.planKey": "string!",
         "$.subscriptionId": "string!"
+      }
+    },
+    "BotTemplateResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.template": "ref(WorkspaceBotTemplate)!"
       }
     },
     "BrowserAction": {
@@ -14986,6 +15057,19 @@
         "$.url": "string!"
       }
     },
+    "CreateBotTemplateRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
+        "$.description": "string?",
+        "$.name": "string!",
+        "$.setupInstructions": "string!",
+        "$.sourceSessionId": "string? null"
+      }
+    },
     "CreateBrowserIdentityRequest": {
       "io": [
         "input"
@@ -15628,6 +15712,10 @@
         "$.modelContext": "string?",
         "$.personalResourceAttachment": "ref(PersonalResourceAttachmentIntent)?",
         "$.policyRole": "string?",
+        "$.profile": "object?",
+        "$.profile.avatar": "ref(SessionAvatar)?",
+        "$.profile.description": "string?",
+        "$.profile.title": "string?",
         "$.reasoningEffort": "ref(ReasoningEffort)?",
         "$.requestedSessionId": "string?",
         "$.resources": "array?",
@@ -15675,6 +15763,7 @@
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -15690,6 +15779,7 @@
         "$.createdBy": "ref(TurnInitiator)!",
         "$.createdByContext": "object!",
         "$.createdByContext{}": "unknown",
+        "$.description": "string! null",
         "$.dispatchWait": "object? null",
         "$.dispatchWait.attempts": "integer!",
         "$.dispatchWait.lastError": "string! null",
@@ -17120,7 +17210,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_notes_save\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
+        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"bot_template_save\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_notes_save\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
       }
     },
     "ForkSessionRequest": {
@@ -20294,6 +20384,16 @@
         "$": "object",
         "$.templates": "array!",
         "$.templates[]": "ref(WorkspaceAutomationTemplate)"
+      }
+    },
+    "ListBotTemplatesResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.templates": "array!",
+        "$.templates[]": "ref(WorkspaceBotTemplate)"
       }
     },
     "ListConnectionsResponse": {
@@ -25877,6 +25977,7 @@
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -25892,6 +25993,7 @@
         "$.createdBy": "ref(TurnInitiator)!",
         "$.createdByContext": "object!",
         "$.createdByContext{}": "unknown",
+        "$.description": "string! null",
         "$.dispatchWait": "object? null",
         "$.dispatchWait.attempts": "integer!",
         "$.dispatchWait.lastError": "string! null",
@@ -26041,6 +26143,38 @@
         "$.events[].source.kind": "ref(EventSourceKind)!",
         "$.events[].source.name": "string!",
         "$.nextRunAt": "string! null"
+      }
+    },
+    "SessionAvatar": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=emoji\",\"kind=icon\",\"kind=image\",\"kind=letters\"]",
+        "$|kind=emoji": "object",
+        "$|kind=emoji.emoji": "string!",
+        "$|kind=emoji.hue": "integer!",
+        "$|kind=emoji.kind": "const!=[\"\\\"emoji\\\"\"]",
+        "$|kind=icon": "object",
+        "$|kind=icon.hue": "integer!",
+        "$|kind=icon.icon": "ref(SessionAvatarIcon)!",
+        "$|kind=icon.kind": "const!=[\"\\\"icon\\\"\"]",
+        "$|kind=letters": "object",
+        "$|kind=letters.hue": "integer!",
+        "$|kind=letters.kind": "const!=[\"\\\"letters\\\"\"]",
+        "$|kind=letters.letters": "string!",
+        "$|kind=image": "object",
+        "$|kind=image.artifactId": "string!",
+        "$|kind=image.kind": "const!=[\"\\\"image\\\"\"]"
+      }
+    },
+    "SessionAvatarIcon": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"book-open\\\"\",\"\\\"bot\\\"\",\"\\\"briefcase\\\"\",\"\\\"bug\\\"\",\"\\\"calendar-clock\\\"\",\"\\\"chart-line\\\"\",\"\\\"code\\\"\",\"\\\"database\\\"\",\"\\\"file-text\\\"\",\"\\\"flask-conical\\\"\",\"\\\"git-pull-request\\\"\",\"\\\"globe\\\"\",\"\\\"headset\\\"\",\"\\\"mail\\\"\",\"\\\"megaphone\\\"\",\"\\\"pen-tool\\\"\",\"\\\"receipt\\\"\",\"\\\"rocket\\\"\",\"\\\"search\\\"\",\"\\\"shield-check\\\"\",\"\\\"sparkles\\\"\",\"\\\"telescope\\\"\",\"\\\"users\\\"\",\"\\\"wrench\\\"\"]"
       }
     },
     "SessionBackgroundCommand": {
@@ -26287,7 +26421,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.profile_set\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -26511,10 +26645,12 @@
         "$.archivedAt": "string! null",
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
+        "$.avatar": "ref(SessionAvatar)! null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.channelId": "string! null",
         "$.createdAt": "string!",
         "$.createdBy": "ref(TurnInitiator)!",
+        "$.description": "string! null",
         "$.displayTitle": "string!",
         "$.effectiveControl": "ref(EffectiveSessionControl)!",
         "$.hasSchedules": "boolean?",
@@ -29686,6 +29822,18 @@
         "$.status": "ref(AutomationTriggerStatus)?"
       }
     },
+    "UpdateBotTemplateRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(SessionAvatar)? null",
+        "$.description": "string?",
+        "$.name": "string?",
+        "$.setupInstructions": "string?"
+      }
+    },
     "UpdateBrowserIdentityRequest": {
       "io": [
         "input"
@@ -30380,7 +30528,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.title": "string!"
+        "$.avatar": "ref(SessionAvatar)? null",
+        "$.description": "string? null",
+        "$.title": "string?"
       }
     },
     "UpdateSessionRetentionRequest": {
@@ -31772,6 +31922,25 @@
         "$.schedule": "ref(AutomationTemplateSchedule)! null",
         "$.triggers": "array!",
         "$.triggers[]": "ref(AutomationTemplateTrigger)",
+        "$.updatedAt": "string!",
+        "$.viewerAccess": "enum!=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
+        "$.workspaceId": "string!"
+      }
+    },
+    "WorkspaceBotTemplate": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.avatar": "ref(SessionAvatar)! null",
+        "$.createdAt": "string!",
+        "$.createdBySubjectId": "string! null",
+        "$.description": "string!",
+        "$.id": "string!",
+        "$.name": "string!",
+        "$.setupInstructions": "string!",
+        "$.sourceSessionId": "string! null",
         "$.updatedAt": "string!",
         "$.viewerAccess": "enum!=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
         "$.workspaceId": "string!"
@@ -33174,6 +33343,8 @@
       "BillingSubscriptionChange": "type",
       "BillingSummary": "type",
       "BillingUsageResponse": "type",
+      "BotTemplateFile": "type",
+      "BotTemplateResponse": "type",
       "BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES": "value",
       "BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX": "value",
       "BROWSER_CONTROL_WEBSOCKET_PROTOCOL": "value",
@@ -33429,6 +33600,7 @@
       "CreateAutomationTemplateRequest": "type",
       "CreateBillingPortalRequest": "type",
       "CreateBillingPortalResponse": "type",
+      "CreateBotTemplateRequest": "type",
       "CreateBrowserIdentityRequest": "type",
       "CreateBrowserSessionRequest": "type",
       "CreateCapabilityCatalogItemRequest": "type",
@@ -33867,6 +34039,7 @@
       "ListApiIntegrationsResponse": "type",
       "ListApiKeysResponse": "type",
       "ListAutomationTemplatesResponse": "type",
+      "ListBotTemplatesResponse": "type",
       "listCompanyBrainContextReceipts": "value",
       "listCompanyBrainKnowledgeProposals": "value",
       "ListConnectionsResponse": "type",
@@ -34390,6 +34563,8 @@
       "SessionAdmissionBlock": "type",
       "SessionApprovalRequest": "type",
       "SessionAutomationWaitSummary": "type",
+      "SessionAvatar": "type",
+      "SessionAvatarIcon": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
@@ -34733,6 +34908,7 @@
       "UninstallSkillRequest": "type",
       "UninstallSkillResult": "type",
       "UpdateAutomationTemplateRequest": "type",
+      "UpdateBotTemplateRequest": "type",
       "UpdateBrowserIdentityRequest": "type",
       "UpdateChannelRequest": "type",
       "UpdateCompanyProfileAgentPolicyRequest": "type",
@@ -34886,6 +35062,7 @@
       "WorkspaceAutomationTemplate": "type",
       "WorkspaceBackgroundCommand": "type",
       "WorkspaceBackgroundCommandListResponse": "type",
+      "WorkspaceBotTemplate": "type",
       "WorkspaceCaptureDegradedReason": "type",
       "WorkspaceCaptureFile": "type",
       "WorkspaceCaptureManifest": "type",
@@ -39871,6 +40048,7 @@
       "createAutomationTemplate",
       "createBillingCheckout",
       "createBillingPortalSession",
+      "createBotTemplate",
       "createBrowserIdentity",
       "createBrowserSession",
       "createCapability",
@@ -39921,6 +40099,7 @@
       "defineSiteSqlQuery",
       "deleteApiKey",
       "deleteAutomationTemplate",
+      "deleteBotTemplate",
       "deleteChannel",
       "deleteConnection",
       "deleteDocument",
@@ -40005,6 +40184,7 @@
       "getBillingEntitlements",
       "getBillingSubscriptionPlans",
       "getBillingUsage",
+      "getBotTemplate",
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
@@ -40160,6 +40340,7 @@
       "listAuthRuns",
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
+      "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
       "listBrowserIdentities",
@@ -40463,6 +40644,7 @@
       "unregisterNativePushDevice",
       "updateArtifactPin",
       "updateAutomationTemplate",
+      "updateBotTemplate",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -40617,6 +40799,7 @@
       "createAutomationTemplate",
       "createBillingCheckout",
       "createBillingPortalSession",
+      "createBotTemplate",
       "createBrowserIdentity",
       "createBrowserSession",
       "createCapability",
@@ -40664,6 +40847,7 @@
       "defineSiteSqlQuery",
       "deleteApiKey",
       "deleteAutomationTemplate",
+      "deleteBotTemplate",
       "deleteChannel",
       "deleteConnection",
       "deleteDocument",
@@ -40747,6 +40931,7 @@
       "getBillingEntitlements",
       "getBillingSubscriptionPlans",
       "getBillingUsage",
+      "getBotTemplate",
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
@@ -40898,6 +41083,7 @@
       "listAuthRuns",
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
+      "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
       "listBrowserIdentities",
@@ -41198,6 +41384,7 @@
       "unregisterNativePushDevice",
       "updateArtifactPin",
       "updateAutomationTemplate",
+      "updateBotTemplate",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -41363,6 +41550,7 @@
       "createAutomationTemplate",
       "createBillingCheckout",
       "createBillingPortalSession",
+      "createBotTemplate",
       "createBrowserIdentity",
       "createBrowserSession",
       "createCapability",
@@ -41413,6 +41601,7 @@
       "defineSiteSqlQuery",
       "deleteApiKey",
       "deleteAutomationTemplate",
+      "deleteBotTemplate",
       "deleteChannel",
       "deleteConnection",
       "deleteDocument",
@@ -41497,6 +41686,7 @@
       "getBillingEntitlements",
       "getBillingSubscriptionPlans",
       "getBillingUsage",
+      "getBotTemplate",
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
@@ -41660,6 +41850,7 @@
       "listAuthRuns",
       "listAutomationTemplates",
       "listAvailableOpenGeniSlackBots",
+      "listBotTemplates",
       "listBrowserDiagnostics",
       "listBrowserDownloads",
       "listBrowserIdentities",
@@ -41974,6 +42165,7 @@
       "unregisterNativePushDevice",
       "updateArtifactPin",
       "updateAutomationTemplate",
+      "updateBotTemplate",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -42830,6 +43022,9 @@
       "createBillingPortalSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -42978,6 +43173,9 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiKey\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteAutomationTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteBotTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteChannel": [
@@ -43231,6 +43429,9 @@
       ],
       "getBillingUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingUsageResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBrowserActionReceipt": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserActionReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43722,6 +43923,9 @@
       ],
       "listAvailableOpenGeniSlackBots": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AvailableOpenGeniSlackBots\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBotTemplates": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBrowserDiagnostics": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticsOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticBatch\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44667,6 +44871,9 @@
       "updateAutomationTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAutomationTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceAutomationTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45353,6 +45560,9 @@
       "createBillingPortalSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45501,6 +45711,9 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiKey\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteAutomationTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteBotTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteChannel": [
@@ -45754,6 +45967,9 @@
       ],
       "getBillingUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingUsageResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBrowserActionReceipt": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserActionReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -46221,6 +46437,9 @@
       ],
       "listAvailableOpenGeniSlackBots": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AvailableOpenGeniSlackBots\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBotTemplates": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBrowserDiagnostics": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticsOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticBatch\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47133,6 +47352,9 @@
       "updateAutomationTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAutomationTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceAutomationTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47688,6 +47910,9 @@
       "createBillingPortalSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47824,6 +48049,9 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiKey\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteAutomationTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteBotTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteChannel": [
@@ -48071,6 +48299,9 @@
       ],
       "getBillingUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingUsageResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBrowserActionReceipt": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserActionReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48511,6 +48742,9 @@
       ],
       "listAvailableOpenGeniSlackBots": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AvailableOpenGeniSlackBots\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBotTemplates": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBrowserDiagnostics": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticsOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticBatch\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49392,6 +49626,9 @@
       ],
       "updateAutomationTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAutomationTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceAutomationTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50153,6 +50390,9 @@
       "createBillingPortalSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -50292,6 +50532,9 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiKey\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteAutomationTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteBotTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteChannel": [
@@ -50542,6 +50785,9 @@
       ],
       "getBillingUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingUsageResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBrowserActionReceipt": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserActionReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50997,6 +51243,9 @@
       ],
       "listAvailableOpenGeniSlackBots": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AvailableOpenGeniSlackBots\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBotTemplates": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBrowserDiagnostics": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticsOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticBatch\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -51899,6 +52148,9 @@
       ],
       "updateAutomationTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAutomationTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceAutomationTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52442,6 +52694,9 @@
       "createBillingPortalSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBillingPortalResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -52581,6 +52836,9 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ApiKey\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteAutomationTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteBotTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "deleteChannel": [
@@ -52831,6 +53089,9 @@
       ],
       "getBillingUsage": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"accountId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BillingUsageResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getBrowserActionReceipt": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserActionReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -53286,6 +53547,9 @@
       ],
       "listAvailableOpenGeniSlackBots": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AvailableOpenGeniSlackBots\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listBotTemplates": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listBrowserDiagnostics": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticsOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDiagnosticBatch\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -54188,6 +54452,9 @@
       ],
       "updateAutomationTemplate": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateAutomationTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceAutomationTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateBotTemplate": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBotTemplateRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceBotTemplate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

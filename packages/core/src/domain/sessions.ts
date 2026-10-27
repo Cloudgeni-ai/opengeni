@@ -18,6 +18,7 @@ import {
   SessionRetryConflictError,
 } from "@opengeni/db";
 import type {
+  SessionAvatar,
   SessionRetryRequest,
   SessionRetryResponse,
   SessionTurnSurface,
@@ -200,6 +201,7 @@ import {
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
+  updateSessionProfileWithEvent,
   setSessionKeepLive,
   type SetSessionKeepLiveResult,
   withWorkspaceSubjectSessionActivityRls,
@@ -4932,6 +4934,90 @@ export async function updateSessionTitle(
     updated: result.updated,
     title: result.title,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
+  };
+}
+
+/**
+ * Rename a chat and change its description or avatar: the shared path for the
+ * PATCH route and the agent's title tools. Only what is named changes.
+ *
+ * A rename through this path is a deliberate name, whoever makes it: the
+ * agent's title is cleaned like any model-written title, then stored as a
+ * chosen name, so automatic titling never replaces it. Only automatic titling
+ * (which writes through `updateSessionTitle` directly) is kept off a chosen
+ * name. An image avatar must already have been checked by the caller.
+ */
+export async function updateSessionProfile(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  change: {
+    title?: string | undefined;
+    description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
+  },
+  source: "user" | "agent",
+): Promise<{
+  titleUpdated: boolean;
+  profileUpdated: boolean;
+  title: string | null;
+  description: string | null;
+  avatar: SessionAvatar | null;
+  relatedSessionAccess: "target" | "root";
+}> {
+  let title: string | null = null;
+  let titleUpdated = false;
+  let relatedSessionAccess: "target" | "root" = "root";
+  if (change.title !== undefined) {
+    const name = source === "agent" ? normalizeAutomaticSessionTitle(change.title) : change.title;
+    if (name !== null) {
+      const result = await updateSessionTitle(deps, grant, sessionId, name, "user");
+      title = result.title;
+      titleUpdated = result.updated;
+      relatedSessionAccess = result.relatedSessionAccess;
+    }
+  }
+  if (change.description === undefined && change.avatar === undefined) {
+    const current = await getSession(deps.db, grant.workspaceId, sessionId);
+    return {
+      titleUpdated,
+      profileUpdated: false,
+      title: title ?? current?.title ?? null,
+      description: current?.description ?? null,
+      avatar: current?.avatar ?? null,
+      relatedSessionAccess,
+    };
+  }
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.title.write",
+    surface: "core",
+  });
+  relatedSessionAccess = authorization?.relatedSessionAccess ?? relatedSessionAccess;
+  const result = await updateSessionProfileWithEvent(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    ...(change.description !== undefined ? { description: change.description } : {}),
+    ...(change.avatar !== undefined ? { avatar: change.avatar } : {}),
+    source,
+  });
+  if (result.events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, result.events);
+  }
+  if (title === null) {
+    title = (await getSession(deps.db, grant.workspaceId, sessionId))?.title ?? null;
+  }
+  return {
+    titleUpdated,
+    profileUpdated: result.updated,
+    title,
+    description: result.description,
+    avatar: result.avatar,
+    relatedSessionAccess,
   };
 }
 

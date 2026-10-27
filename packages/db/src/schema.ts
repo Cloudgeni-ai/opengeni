@@ -47,7 +47,7 @@ import {
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
-import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
+import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -77,6 +77,7 @@ import {
 } from "./lossless-columns";
 
 export * from "./automation-templates-schema";
+export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -5073,6 +5074,10 @@ export const sessions = pgTable(
     initialModelContext: text("initial_model_context"),
     title: text("title"),
     titleSource: text("title_source"),
+    // Display metadata shown with the title (1004): a one-line description and
+    // an avatar. Never part of the model's context; copied by forks.
+    description: text("description"),
+    avatar: jsonb("avatar").$type<SessionAvatar>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a

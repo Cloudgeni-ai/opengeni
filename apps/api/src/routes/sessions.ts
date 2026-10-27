@@ -50,6 +50,7 @@ import {
   TranscriptionBillingRefusedError,
 } from "@opengeni/core";
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
+import { requireUsableSessionAvatar } from "./session-avatar";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import {
@@ -391,7 +392,7 @@ import {
   updateSessionToolPolicy,
   updateSessionAgent,
   updateSessionSkills,
-  updateSessionTitle,
+  updateSessionProfile,
   setSessionRetention,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
@@ -859,6 +860,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           if (context) (payload as Record<string, unknown>).modelContext = context;
         }
       }
+      // Checked before anything is created: an avatar the chat could not show
+      // refuses the request instead of leaving a half-made chat.
+      const profile = CreateSessionRequest.parse(payload).profile;
+      if (profile?.avatar) {
+        await requireUsableSessionAvatar(deps, grant, profile.avatar, {
+          sharedWithWorkspace: (payload as { visibility?: unknown }).visibility !== "private",
+        });
+      }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
@@ -876,6 +885,37 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         keepLive: true,
       });
       if (kept.status === "updated") session = { ...session, retention: kept.retention };
+    }
+    // The requested name, description and avatar, written as the person's own
+    // (a user title stays pinned over automatic titling). Creation committed;
+    // a failure here leaves an ordinary chat that can still be renamed.
+    const profile = (payload as { profile?: CreateSessionRequest["profile"] }).profile;
+    if (profile && (profile.title || profile.description || profile.avatar)) {
+      try {
+        const updated = await updateSessionProfile(
+          deps,
+          grant,
+          session.id,
+          {
+            title: profile.title,
+            description: profile.description ?? undefined,
+            avatar: profile.avatar,
+          },
+          "user",
+        );
+        session = {
+          ...session,
+          title: updated.title,
+          titleSource: profile.title ? "user" : session.titleSource,
+          description: updated.description,
+          avatar: updated.avatar,
+        };
+      } catch (error) {
+        deps.observability?.warn("session create profile write failed", {
+          sessionId: session.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
     // Creation committed. Independent response reads may overlap on a pool;
     // keep policy failures outside the create-rejection boundary.
@@ -2669,16 +2709,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return variableSetsRemovedResponse(c, 410);
   });
 
-  // Manual rename. A user-set title is permanent: the db write is
-  // unconditional (source='user'), so it always pins the session over later
-  // agent writes. Returns the refreshed session, mirroring GET detail.
+  // Manual rename and description/avatar edit. A user-set title is permanent:
+  // the db write is unconditional (source='user'), so it always pins the
+  // session over later automatic agent titles. Returns the refreshed session,
+  // mirroring GET detail.
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = await parseRequestJson(c, UpdateSessionRequest);
-    const titleUpdate = await updateSessionTitle(deps, grant, sessionId, payload.title, "user");
+    await requireUsableSessionAvatar(deps, grant, payload.avatar, {
+      sessionId,
+    });
+    const titleUpdate = await updateSessionProfile(
+      deps,
+      grant,
+      sessionId,
+      {
+        title: payload.title,
+        description: payload.description,
+        avatar: payload.avatar,
+      },
+      "user",
+    );
     // A session-returning member route must preserve the caller's private pin
     // projection. Returning the generic mapSession() default here would reset a
     // pinned React consumer to false/version 0 after a harmless rename.
