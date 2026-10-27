@@ -96,6 +96,28 @@ The agent saves a template of itself with `bot_template_save` (capability
 the setup instructions from what the chat has established and leaves out
 one-off tasks, history, personal details and secrets.
 
+### The agent suggesting a bot
+
+When a person keeps asking a chat for the same kind of work, or says they will
+want it again, the agent may call `bot_suggest` once in that chat (capability
+`subagents`, needs `sessions:read`). It offers one of two things:
+
+- `create`: make this chat a bot. The agent chooses the name, a one-line
+  description and an avatar, and drafts setup instructions for a template.
+- `reuse`: a bot chat (`sessionId`) or bot template (`templateId`) that already
+  does this work. A `create` whose name a bot or template already has is
+  declined with the existing ones listed, so the agent can suggest reusing one.
+
+The tool changes nothing. It records the newest suggestion on the chat
+(`sessions.bot_suggestion`, migration `1014_session_bot_suggestion.sql`, display
+state that never reaches the model, returned as `Session.botSuggestion`) and the
+chat shows it as a card. **Make it a bot** sets the chat's name, description
+and avatar as the person and keeps it live; **Save as template…** opens the
+template dialog filled in from the draft; a `reuse` card opens the bot chat or
+starts a bot from the template; **Not now** hides it in that browser. A chat
+that is already a bot is not offered one. One sentence of prompt guidance,
+shown only while the tool can be available, tells the agent when to call it.
+
 ### Sharing a template as a file
 
 A template exports as a small JSON file and imports into any workspace as a new

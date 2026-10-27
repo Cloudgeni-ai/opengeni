@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "name": "local-unit",
+  "executable": "bun",
+  "exitCode": 1,
+  "forwardedSignal": null,
+  "timedOut": false,
+  "timeoutSeconds": 900,
+  "spawnErrorCode": null,
+  "observedExitCode": 1,
+  "processGroupObservedAfterLeaderExit": false,
+  "processGroupNaturalSettleMs": 1000,
+  "processGroupSettledNaturally": null,
+  "processGroupLeakDetected": false,
+  "processGroupSettled": true,
+  "startedAt": "2026-10-27T21:06:19.132Z",
+  "completedAt": "2026-10-27T21:14:02.609Z",
+  "wallSeconds": 463.477446333,
+  "process": {
+    "userSeconds": null,
+    "systemSeconds": null,
+    "maxRssBytes": null,
+    "fileSystemInputs": null,
+    "fileSystemOutputs": null
+  },
+  "cgroup": {
+    "memoryBeforeBytes": null,
+    "memoryAfterBytes": null,
+    "memoryPeakSampledBytes": null,
+    "memoryPeakDeltaFromStartBytes": null,
+    "cpuUsageDeltaNanoseconds": null,
+    "readBytesDelta": null,
+    "writeBytesDelta": null
+  },
+  "runner": {
+    "os": "darwin",
+    "arch": "arm64",
+    "bunVersion": "1.4.4",
+    "githubRunnerOs": null,
+    "githubRunnerArch": null
+  }
+}
