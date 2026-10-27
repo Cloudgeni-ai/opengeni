@@ -24149,6 +24149,9 @@
         "$.metadata{}": "unknown",
         "$.ownerSubjectId": "string!",
         "$.purpose": "ref(RecordingPurpose)!",
+        "$.sourceWorkspace": "object? null",
+        "$.sourceWorkspace.id": "string!",
+        "$.sourceWorkspace.name": "string!",
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
@@ -24523,6 +24526,7 @@
         "$": "object",
         "$.available": "boolean!",
         "$.capabilities": "ref(RecordingTranscriptionCapabilities)!",
+        "$.chargedInCredits": "boolean?",
         "$.funding": "ref(RecordingTranscriptionFunding)!",
         "$.model": "string!",
         "$.name": "string!",
@@ -38396,6 +38400,7 @@
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
       "meetingTitle": "value",
+      "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
@@ -38404,7 +38409,10 @@
       "speakerIsNamed": "value",
       "tidyLiveText": "value",
       "tidyPartialText": "value",
+      "transcribingText": "value",
       "transcriptErrorText": "value",
+      "transcriptFixModel": "value",
+      "transcriptNeedsCredits": "value",
       "TranscriptTurn": "type",
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
@@ -38861,6 +38869,7 @@
     },
     "@opengeni/react/testing/meetings": {
       "createMeetingsFixture": "value",
+      "ELSEWHERE_RECORDING_ID": "value",
       "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
@@ -42446,6 +42455,7 @@
       "finish",
       "rename",
       "resume",
+      "retry",
       "status",
       "subscribe"
     ],
@@ -55395,6 +55405,9 @@
       ],
       "resume": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"only\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"params\":[{\"name\":\"recording\",\"optional\":false,\"type\":\"Identifier\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StoredRecording\",\"optional\":false,\"type\":\"Identifier\"}}}],\"returnType\":{\"type\":\"TSBooleanKeyword\"},\"type\":\"TSFunctionType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSStringKeyword\"},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "retry": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
       ],
       "status": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingUploadStatus\",\"optional\":false,\"type\":\"Identifier\"}}]}}"

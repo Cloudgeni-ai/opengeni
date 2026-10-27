@@ -35,6 +35,7 @@ import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
 import {
   createRecordingActivities,
+  recordingTranscriptBudgetMilliseconds,
   type RecordingActivityOptions,
 } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -197,6 +198,7 @@ function activities(
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
   aligner: RecordingWordAligner | null = null,
+  now?: () => number,
   startMeetingSummary?: RecordingActivityOptions["startMeetingSummary"],
 ) {
   const warnings: string[] = [];
@@ -217,10 +219,20 @@ function activities(
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
       aligner: () => aligner,
+      ...(now ? { now } : {}),
       ...(startMeetingSummary ? { startMeetingSummary } : {}),
     }),
   };
 }
+
+test("a transcript's time budget grows with the audio, up to twelve hours", () => {
+  const minutes = (value: number) => value * 60_000;
+  expect(recordingTranscriptBudgetMilliseconds(0)).toBe(minutes(30));
+  // The 51-minute meeting that sat in Transcribing for hours.
+  expect(recordingTranscriptBudgetMilliseconds(minutes(51))).toBe(minutes(30 + 153));
+  expect(recordingTranscriptBudgetMilliseconds(minutes(600))).toBe(minutes(720));
+  expect(recordingTranscriptBudgetMilliseconds(-5)).toBe(minutes(30));
+});
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
   test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
@@ -242,10 +254,18 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ],
     }));
     const started: unknown[] = [];
-    const ok = activities(storage, provider, "key", null, null, async (_services, input) => {
-      started.push(input);
-      return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
-    });
+    const ok = activities(
+      storage,
+      provider,
+      "key",
+      null,
+      null,
+      undefined,
+      async (_services, input) => {
+        started.push(input);
+        return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
+      },
+    );
     expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
       outcome: "complete",
     });
@@ -271,7 +291,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       versionId: again,
       transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
     });
-    const failing = activities(storage, provider, "key", null, null, async () => {
+    const failing = activities(storage, provider, "key", null, null, undefined, async () => {
       throw new Error("no account free");
     });
     expect(
@@ -283,6 +303,162 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ).toEqual({ outcome: "complete" });
     expect(failing.warnings).toContain("meeting summary not started");
   });
+
+  test("past its time budget a transcript fails as timed_out, with no audio sent", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let called = false;
+    const provider = fakeProvider(async () => {
+      called = true;
+      throw new Error("never asked");
+    });
+    // A retry that starts a day after the meeting was asked to be transcribed.
+    const later = () => Date.now() + 24 * 60 * 60_000;
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        later,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(called).toBe(false);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  });
+
+  test("a provider still working when the budget runs out fails the version as timed_out", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let called = false;
+    let aborted = false;
+    // It never answers and ignores the abort, like a stuck alignment step.
+    const provider = fakeProvider(async (request) => {
+      called = true;
+      request.signal?.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return await new Promise<never>(() => undefined);
+    });
+    // A few seconds of the budget are left: enough to prepare the audio.
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const nearlyOut = () => Date.now() + budget - 8_000;
+    const started = Date.now();
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        nearlyOut,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    // On a busy machine the budget can run out before the audio is ready;
+    // when the provider was asked, it was told to stop.
+    if (called) expect(aborted).toBe(true);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
+
+  test("a transcript that answers after its budget ran out is neither charged nor saved", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en", diarizer: "ours" },
+    });
+    const charged = { settled: 0 };
+    // A deployment-funded model charged in credits answers at once; telling
+    // the speakers apart ignores the abort and finishes after the budget.
+    const late = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Late.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const slow: RecordingDiarizer = {
+      id: "slow",
+      diarize: async (_audio, options) => {
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) resolve();
+          else options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return {
+          turns: [{ startMilliseconds: 0, endMilliseconds: 2_000, speaker: "S0" }],
+          voices: [],
+          voiceModel: "test-voices",
+        };
+      },
+    };
+    const funded: RecordingTranscriptionProvider = {
+      ...late,
+      funding: "deployment",
+      models: late.models.map((model) => ({
+        ...model,
+        creditPricing: { microsPerMinute: 10_000 },
+      })),
+    };
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const nearlyOut = () => Date.now() + budget - 6_000;
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath, usageLimitsMode: "managed" }),
+        observability: { warn: () => undefined, info: () => undefined, error: () => undefined },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([funded]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => slow,
+      aligner: () => null,
+      now: nearlyOut,
+      billing: () => ({
+        admit: async () => undefined,
+        settle: async () => {
+          charged.settled += 1;
+          return { creditCostMicros: 1_000 };
+        },
+      }),
+    });
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "failed",
+      errorCode: "timed_out",
+    });
+    // Give the abandoned work time to reach where it would charge and save.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(charged.settled).toBe(0);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
 
   test("prepares each track, keeps the microphone as one speaker and diarizes the rest", async () => {
     if (!client) return;
