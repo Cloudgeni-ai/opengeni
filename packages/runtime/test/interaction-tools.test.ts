@@ -7194,6 +7194,7 @@ describe("interaction attempt tools", () => {
             scrollY: 0,
             capturedAt: now,
             data: image,
+            inexactScrollbars: true,
           };
         },
       }),
@@ -7214,6 +7215,7 @@ describe("interaction attempt tools", () => {
       mediaType: "image/jpeg",
       width: 120,
       height: 200,
+      note: "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.",
     });
     expect(result.content[1]).toEqual({
       type: "image",

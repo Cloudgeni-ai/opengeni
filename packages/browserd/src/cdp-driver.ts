@@ -237,6 +237,99 @@ const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 const COMMITTED_LOADER_HISTORY = 16;
 /** Captures of a tab that keeps committing new documents before giving up. */
 const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
+/** Bound for each step that keeps scrollbar gutters during a full-page capture. */
+const SCROLLBAR_STYLE_TIMEOUT_MS = 2_000;
+/** What a full-page capture changed to keep its scrollbar gutters, and how to undo it. */
+type ScrollbarLayout = {
+  viewportWidth: number | null;
+  inexact: boolean;
+  restore: () => Promise<void>;
+};
+/** Most scrollers whose gutter a full-page capture keeps by selector. */
+const MAX_PINNED_SCROLLERS = 256;
+/**
+ * Finds the classic (space-taking) scrollbars a full-page capture would hide.
+ * Vertical ones in the document tree are `pinned`: a selector keeps their
+ * gutter. Those whose gutter the page keeps stable itself need no rule; `own`
+ * holds the rule that re-evaluates their scrollbars afterwards. The rest (horizontal ones, those inside shadow trees, any past the
+ * limit) cannot be kept, which makes the capture inexact; `refresh` names the
+ * elements, or shadow hosts, whose style must change afterwards to bring
+ * them back. Overlay scrollbars take no space and are never found.
+ */
+const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
+  const root = document.documentElement;
+  if (!root) return null;
+  const limit = ${MAX_PINNED_SCROLLERS};
+  const pinned = [];
+  // A gutter the page keeps stable itself already holds its space, so it
+  // gets no rule. Its scrollbar, if it shows one, is brought back afterwards
+  // by flipping overflow-y between scroll and auto, which lays out an
+  // overflowing scroller the same way and keeps any custom scrollbar style.
+  const own = [];
+  const pin = (selector, element, style) => {
+    if (!String(style.scrollbarGutter).startsWith("stable")) return pinned.push(selector);
+    const scroll = style.overflowY === "scroll";
+    if (!scroll && element.scrollHeight <= element.clientHeight) return;
+    own.push(selector + "{overflow-y:" + (scroll ? "auto" : "scroll") + "!important}");
+  };
+  const refresh = new Set();
+  let overflow = false;
+  if (innerWidth - root.clientWidth >= 1) pin(":root", root, getComputedStyle(root));
+  if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
+  // Changing a rule restyles every element its last compound could match, so
+  // that compound names the element's tag, id and first class as well.
+  const path = (element) => {
+    const parts = [];
+    for (let node = element; node && node !== root; node = node.parentElement) {
+      let index = 1;
+      for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index += 1;
+      let part = ":nth-child(" + index + ")";
+      if (node === element) {
+        const name = CSS.escape(element.localName);
+        const id = element.id ? "#" + CSS.escape(element.id) : "";
+        const first = element.classList[0];
+        part = name + id + (first ? "." + CSS.escape(first) : "") + part;
+      }
+      parts.unshift(part);
+    }
+    return ":root>" + parts.join(">");
+  };
+  const visit = (scope, host) => {
+    for (const element of scope.querySelectorAll("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot, host ?? element);
+      if (element === root || !(element instanceof HTMLElement)) continue;
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      // Inline boxes report no client size; a scroller always has one.
+      if (width === 0 && height === 0) continue;
+      const wide = element.offsetWidth - width;
+      const tall = element.offsetHeight - height;
+      // Equal borders and no overflow: skip the costly style read. (A
+      // "stable both-edges" scroller's gutters look like equal borders.)
+      if (
+        Math.abs(wide - 2 * element.clientLeft) < 1 &&
+        Math.abs(tall - 2 * element.clientTop) < 1 &&
+        element.scrollHeight <= height &&
+        element.scrollWidth <= width
+      ) continue;
+      const style = getComputedStyle(element);
+      const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
+      const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
+      if (!vertical && !horizontal) continue;
+      const kept = vertical && !host && pinned.length + own.length < limit;
+      if (kept) pin(path(element), element, style);
+      if (horizontal || !kept) {
+        if (refresh.size < limit) refresh.add(path(host ?? element));
+        else overflow = true;
+      }
+    }
+  };
+  visit(document, null);
+  return { viewportWidth: innerWidth, pinned, own, refresh: overflow ? [":root"] : [...refresh] };
+})()`;
+/** Lays the page out, which re-evaluates the scrollbars of restyled scrollers. */
+const LAYOUT_READ_EXPRESSION =
+  "document.documentElement ? document.documentElement.getBoundingClientRect().width : null";
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -1910,138 +2003,316 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               deadline,
               async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
             );
-            const metrics = await this.screenshotRead(
-              "Page.getLayoutMetrics",
-              deadline,
-              async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-            );
-            const capture: Record<string, unknown> = {
-              format: normalized.format,
-              fromSurface: true,
-              captureBeyondViewport: normalized.fullPage,
-              ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-            };
-            let cssWidth = metrics.viewport.width;
-            let cssHeight = metrics.viewport.height;
-            let scrollX = metrics.viewport.x;
-            let scrollY = metrics.viewport.y;
-            if (normalized.fullPage) {
-              cssWidth = metrics.content.width;
-              cssHeight = metrics.content.height;
-              scrollX = 0;
-              scrollY = 0;
-              assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-              capture.clip = {
-                x: 0,
-                y: 0,
-                width: cssWidth,
-                height: cssHeight,
-                scale: 1,
-              };
-            }
-            const captureOnce = async () => {
-              const response = await this.screenshotRead(
-                "Page.captureScreenshot",
+            let layout: ScrollbarLayout | null = null;
+            try {
+              const metrics = await this.screenshotRead(
+                "Page.getLayoutMetrics",
                 deadline,
-                async (timeoutMs) => {
-                  const stallBound =
-                    this.engine === "chrome" && !normalized.fullPage
-                      ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
-                      : timeoutMs;
-                  try {
-                    return await this.sendTarget<{ data?: unknown }>(
-                      state,
-                      "Page.captureScreenshot",
-                      capture,
-                      { timeoutMs: stallBound },
-                    );
-                  } catch (error) {
-                    if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
-                      throw new InteractionControllerError(
-                        "timeout",
-                        CONNECTED_CHROME_CAPTURE_STALLED,
-                        true,
-                      );
-                    }
-                    throw error;
-                  }
-                },
+                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
               );
-              // An image above the media bound fails like a reply too large
-              // for the connection: the agent can ask for a smaller capture.
-              const encodedBound = Math.ceil((BROWSER_MEDIA_MAX_BYTES * 4) / 3) + 4;
-              if (typeof response.data === "string" && response.data.length > encodedBound)
-                throw new CdpResponseRefusedError(
-                  "Page.captureScreenshot",
-                  "too_large",
-                  response.data.length,
-                  encodedBound,
+              const capture: Record<string, unknown> = {
+                format: normalized.format,
+                fromSurface: true,
+                captureBeyondViewport: normalized.fullPage,
+                ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+              };
+              let cssWidth = metrics.viewport.width;
+              let cssHeight = metrics.viewport.height;
+              let scrollX = metrics.viewport.x;
+              let scrollY = metrics.viewport.y;
+              let pixelRatio = metrics.pixelRatio;
+              if (normalized.fullPage) {
+                // A page too large to capture fails before any style changes.
+                // Keeping the gutters changes no layout, so these metrics hold.
+                assertImageDimensions(
+                  Math.ceil(Math.max(metrics.content.width, metrics.viewport.width)),
+                  Math.ceil(metrics.content.height),
                 );
-              const data = decodeBoundedBase64Image(response.data);
-              return { data, dimensions: imageDimensions(data, normalized.format) };
-            };
-            let { data, dimensions } = await captureOnce();
-            // Chromium applies a new device-metrics override asynchronously, so a
-            // capture right after a viewport change can still return the previous
-            // surface. A viewport capture of an emulated device has an exact size;
-            // wait briefly for the compositor instead of publishing the stale frame.
-            const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-            if (expected) {
-              const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-              const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-              const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-              let pause = 16;
-              while (
-                (Math.abs(dimensions.width - expectedWidth) > 1 ||
-                  Math.abs(dimensions.height - expectedHeight) > 1) &&
-                Date.now() + pause < settleDeadline
-              ) {
-                await delay(pause);
-                pause = Math.min(pause * 2, 200);
-                const refreshed = await this.screenshotRead(
-                  "Page.getLayoutMetrics",
-                  deadline,
-                  async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-                );
-                cssWidth = refreshed.viewport.width;
-                cssHeight = refreshed.viewport.height;
-                scrollX = refreshed.viewport.x;
-                scrollY = refreshed.viewport.y;
-                ({ data, dimensions } = await captureOnce());
+                layout = await this.keepScrollbarLayout(state, deadline);
+                // The capture keeps the page's own layout width, scrollbar
+                // gutter included, so the image is as wide as the tab's viewport.
+                cssWidth = Math.max(metrics.content.width, layout?.viewportWidth ?? 0);
+                cssHeight = metrics.content.height;
+                scrollX = 0;
+                scrollY = 0;
+                pixelRatio = null;
+                assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+                capture.clip = {
+                  x: 0,
+                  y: 0,
+                  width: cssWidth,
+                  height: cssHeight,
+                  scale: 1,
+                };
               }
-            }
-            // The image is labeled with the document it shows. A commit while it
-            // was captured leaves the label unproven, so capture the new page.
-            const shown = state.documentGeneration;
-            await this.screenshotRead(
-              "Page.getFrameTree",
-              deadline,
-              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-            );
-            if (state.documentGeneration !== shown) {
-              if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
-              throw new InteractionControllerError(
-                "resource_unavailable",
-                "browser page kept changing to new documents while its screenshot was captured",
-                true,
+              const captureOnce = async () => {
+                const response = await this.screenshotRead(
+                  "Page.captureScreenshot",
+                  deadline,
+                  async (timeoutMs) => {
+                    const stallBound =
+                      this.engine === "chrome" && !normalized.fullPage
+                        ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
+                        : timeoutMs;
+                    try {
+                      return await this.sendTarget<{ data?: unknown }>(
+                        state,
+                        "Page.captureScreenshot",
+                        capture,
+                        { timeoutMs: stallBound },
+                      );
+                    } catch (error) {
+                      if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
+                        throw new InteractionControllerError(
+                          "timeout",
+                          CONNECTED_CHROME_CAPTURE_STALLED,
+                          true,
+                        );
+                      }
+                      throw error;
+                    }
+                  },
+                );
+                // An image above the media bound fails like a reply too large
+                // for the connection: the agent can ask for a smaller capture.
+                const encodedBound = Math.ceil((BROWSER_MEDIA_MAX_BYTES * 4) / 3) + 4;
+                if (typeof response.data === "string" && response.data.length > encodedBound)
+                  throw new CdpResponseRefusedError(
+                    "Page.captureScreenshot",
+                    "too_large",
+                    response.data.length,
+                    encodedBound,
+                  );
+                const data = decodeBoundedBase64Image(response.data);
+                return { data, dimensions: imageDimensions(data, normalized.format) };
+              };
+              let { data, dimensions } = await captureOnce();
+              // Chromium applies a new device-metrics override asynchronously, so a
+              // capture right after a viewport change can still return the previous
+              // surface. A viewport capture of an emulated device has an exact size;
+              // wait briefly for the compositor instead of publishing the stale frame.
+              const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+              if (expected) {
+                const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+                const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+                const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+                let pause = 16;
+                while (
+                  (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                    Math.abs(dimensions.height - expectedHeight) > 1) &&
+                  Date.now() + pause < settleDeadline
+                ) {
+                  await delay(pause);
+                  pause = Math.min(pause * 2, 200);
+                  const refreshed = await this.screenshotRead(
+                    "Page.getLayoutMetrics",
+                    deadline,
+                    async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                  );
+                  cssWidth = refreshed.viewport.width;
+                  cssHeight = refreshed.viewport.height;
+                  scrollX = refreshed.viewport.x;
+                  scrollY = refreshed.viewport.y;
+                  pixelRatio = refreshed.pixelRatio;
+                  ({ data, dimensions } = await captureOnce());
+                }
+              }
+              await layout?.restore();
+              // The image is labeled with the document it shows. A commit while it
+              // was captured leaves the label unproven, so capture the new page.
+              const shown = state.documentGeneration;
+              await this.screenshotRead(
+                "Page.getFrameTree",
+                deadline,
+                async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
               );
+              if (state.documentGeneration !== shown) {
+                if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
+                throw new InteractionControllerError(
+                  "resource_unavailable",
+                  "browser page kept changing to new documents while its screenshot was captured",
+                  true,
+                );
+              }
+              const frame = this.imageFrame({
+                state,
+                sequence: 0,
+                format: normalized.format,
+                data,
+                width: dimensions.width,
+                height: dimensions.height,
+                // A classic scrollbar is in the image but not in the CSS
+                // viewport size, so without a known emulated scale the axis
+                // with less scrollbar gives the closer ratio.
+                deviceScaleFactor: finiteScale(
+                  pixelRatio ??
+                    Math.min(dimensions.width / cssWidth, dimensions.height / cssHeight),
+                ),
+                scrollX,
+                scrollY,
+              });
+              return layout?.inexact ? { ...frame, inexactScrollbars: true as const } : frame;
+            } finally {
+              await layout?.restore();
             }
-            return this.imageFrame({
-              state,
-              sequence: 0,
-              format: normalized.format,
-              data,
-              width: dimensions.width,
-              height: dimensions.height,
-              deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-              scrollX,
-              scrollY,
-            });
           }
           throw new Error("unreachable screenshot attempt");
         }),
       { read: true },
     );
+  }
+
+  /**
+   * Chromium hides every scrollbar for a capture beyond the viewport
+   * (Page.captureScreenshot captureBeyondViewport), so the page lays out
+   * without them while it is captured: content widens by the scrollbar width
+   * and right-aligned elements move. Restoring the setting afterwards does
+   * not lay the page out again, so the change also outlasted the capture.
+   * A temporary inspector stylesheet, which page scripts cannot see, keeps
+   * the gutter of each vertical scrollbar reserved during the capture.
+   * Changing that sheet afterwards re-evaluates the scrollbars.
+   */
+  private async keepScrollbarLayout(
+    state: TargetState,
+    deadline: number,
+  ): Promise<ScrollbarLayout> {
+    const unchanged = { viewportWidth: null, inexact: false, restore: async () => {} };
+    let found: unknown;
+    try {
+      found = await this.screenshotRead(
+        "Runtime.evaluate",
+        deadline,
+        async (timeoutMs) =>
+          await this.evaluateIsolated(state, SCROLLBAR_LAYOUT_EXPRESSION, timeoutMs),
+      );
+    } catch (error) {
+      if (error instanceof InteractionControllerError) throw error;
+      return unchanged;
+    }
+    if (
+      !isRecord(found) ||
+      typeof found.viewportWidth !== "number" ||
+      !Number.isFinite(found.viewportWidth) ||
+      found.viewportWidth <= 0 ||
+      !isSelectorList(found.pinned) ||
+      !isSelectorList(found.own) ||
+      !isSelectorList(found.refresh)
+    ) {
+      return unchanged;
+    }
+    const viewportWidth = found.viewportWidth;
+    const pinned = found.pinned;
+    const own = found.own;
+    const refresh = found.refresh;
+    const inexact = refresh.length > 0;
+    if (pinned.length + own.length === 0 && !inexact) {
+      return { viewportWidth, inexact, restore: async () => {} };
+    }
+    // Every step stays within the capture's own deadline.
+    const stepTimeout = () =>
+      Math.max(1, Math.min(SCROLLBAR_STYLE_TIMEOUT_MS, deadline - Date.now()));
+    let styleSheetId: string | null = null;
+    try {
+      await this.sendTarget(state, "CSS.enable", {}, { timeoutMs: stepTimeout() });
+      const created = await this.sendTarget<{ styleSheetId?: unknown }>(
+        state,
+        "CSS.createStyleSheet",
+        { frameId: state.frame.id },
+        { timeoutMs: stepTimeout() },
+      );
+      if (typeof created.styleSheetId !== "string") throw new Error("no inspector stylesheet");
+      styleSheetId = created.styleSheetId;
+      if (pinned.length > 0) {
+        await this.sendTarget(
+          state,
+          "CSS.setStyleSheetText",
+          { styleSheetId, text: `${pinned.join(",")}{scrollbar-gutter:stable!important}` },
+          { timeoutMs: stepTimeout() },
+        );
+      }
+    } catch {
+      // Keeping the layout only improves the capture; it never blocks it.
+      // Without a sheet, the restore below still re-evaluates scrollbars when
+      // it can.
+    }
+    let restored = false;
+    const restore = async () => {
+      if (restored) return;
+      restored = true;
+      // A JavaScript dialog can cut the capture short; the work it abandons
+      // may no longer reach the page. The restore only takes back this
+      // capture's own temporary style, so it runs outside that scope: its
+      // commands wait for the dialog to be answered and then apply.
+      await dialogWork.exit(async () => {
+        const sheet = styleSheetId;
+        try {
+          if (sheet === null) return;
+          const setText = async (text: string) =>
+            await this.sendTarget(
+              state,
+              "CSS.setStyleSheetText",
+              { styleSheetId: sheet, text },
+              { timeoutMs: stepTimeout() },
+            );
+          try {
+            // A style change on a scroller re-evaluates its scrollbars. The
+            // removed gutter rule does that for every pinned element. Gutters
+            // the page keeps stable itself get the overflow-y flip found above.
+            // Scrollbars the sheet could not pin (horizontal ones, those inside
+            // shadow trees) get scrollbar-color, which is inherited into shadow
+            // trees and changes no layout of a standard scrollbar. Either change
+            // needs a layout pass before the sheet is cleared, or the two would
+            // cancel out, so a layout read forces one.
+            if ((inexact || own.length > 0) && deadline > Date.now()) {
+              await setText(
+                (inexact ? `${refresh.join(",")}{scrollbar-color:GrayText Canvas!important}` : "") +
+                  own.join(""),
+              );
+              await this.evaluateIsolated(state, LAYOUT_READ_EXPRESSION, stepTimeout());
+            }
+          } finally {
+            // Always clear the sheet, whatever the step above did: nothing of
+            // the capture may stay on the page. A busy page that misses this
+            // bound still runs the queued clear once it answers. The clear needs
+            // no style pass: the page's next frame or layout read applies it,
+            // before anything can see layout.
+            await setText("");
+          }
+        } catch {
+          // The page may have moved to another document; its sheet went with it.
+        } finally {
+          await this.sendTarget(state, "CSS.disable", {}, { timeoutMs: stepTimeout() }).catch(
+            () => undefined,
+          );
+        }
+      });
+    };
+    return { viewportWidth, inexact, restore };
+  }
+
+  /** Evaluates a read-only expression where page scripts cannot see or replace it. */
+  private async evaluateIsolated(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    const world = await this.sendTarget<{ executionContextId?: unknown }>(
+      state,
+      "Page.createIsolatedWorld",
+      { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+      { timeoutMs },
+    );
+    if (!Number.isSafeInteger(world.executionContextId)) {
+      throw new Error("CDP did not create an isolated read world");
+    }
+    const result = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+      state,
+      "Runtime.evaluate",
+      { expression, contextId: world.executionContextId, returnByValue: true },
+      { timeoutMs },
+    );
+    if (result.exceptionDetails) throw new Error("browser evaluation failed");
+    return isRecord(result.result) ? result.result.value : undefined;
   }
 
   /**
@@ -5361,6 +5632,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<{
     viewport: { x: number; y: number; width: number; height: number };
     content: { width: number; height: number };
+    pixelRatio: number | null;
   }> {
     const response = await this.sendTarget<{
       cssVisualViewport?: unknown;
@@ -5368,7 +5640,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }>(state, "Page.getLayoutMetrics", {}, timeoutMs ? { timeoutMs } : undefined);
     const viewport = dimensionsRecord(response.cssVisualViewport, true);
     const content = dimensionsRecord(response.cssContentSize, false);
-    return { viewport, content };
+    const zoom = isRecord(response.cssVisualViewport)
+      ? numberField(response.cssVisualViewport, "zoom")
+      : null;
+    const pixelRatio =
+      state.emulatedViewport && zoom !== null && zoom > 0
+        ? state.emulatedViewport.deviceScaleFactor * zoom
+        : null;
+    return { viewport, content, pixelRatio };
   }
 
   private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
@@ -11913,6 +12192,10 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
+}
+
+function isSelectorList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((selector) => typeof selector === "string");
 }
 
 /**
