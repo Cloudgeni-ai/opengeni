@@ -468,6 +468,53 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("macOS listings and observations say when a person used the computer within a minute", async () => {
+    let seconds: number | null = 12.7;
+    let read = (): number | null => seconds;
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      personInput: () => read(),
+    });
+    try {
+      const listed = await backend.targets();
+      expect(listed.map((target) => target.personInputSecondsAgo)).toEqual([12]);
+      expect((await backend.observe(listed[0]!.id)).target.personInputSecondsAgo).toBe(12);
+      // Through the driver, as the contract carries it.
+      const driver = new ComputerDriver({
+        computerSessionId: "2d3cfcc6-0b8c-4a69-9c62-6f84b8c5c9a1",
+        controllerGeneration: "generation",
+        client: backend,
+      });
+      expect((await driver.listTargets())[0]).toMatchObject({ personInputSecondsAgo: 12 });
+      expect((await driver.observe(listed[0]!.id)).target.personInputSecondsAgo).toBe(12);
+      // Input a minute or more ago, a reading that says nothing and one that
+      // fails are not mentioned, and the stored target never keeps a reading.
+      for (const reading of [60, null]) {
+        seconds = reading;
+        expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+        expect((await backend.observe(listed[0]!.id)).target).not.toHaveProperty(
+          "personInputSecondsAgo",
+        );
+      }
+      read = () => {
+        throw new Error("unreadable");
+      };
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("other platforms never read person input", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux", { personInput: () => 1 });
+    try {
+      expect((await backend.targets())[0]).not.toHaveProperty("personInputSecondsAgo");
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("the frontmost ordinary window is the focused target", async () => {
     class StackFixture extends LinuxPermissionsFixture {
       windows: Array<Record<string, unknown>> = [];
@@ -1257,7 +1304,7 @@ describe("CUA desktop boundary", () => {
       try {
         const target = (await backend.targets())[0]!;
         await expect(backend.capture(target.id)).rejects.toMatchObject({
-          code: "driver_failed",
+          code: "unavailable",
           dispatched: false,
         });
         expect(
@@ -3262,13 +3309,34 @@ describe("CUA desktop boundary", () => {
       // Back on screen, it is read again.
       fixture.onScreen = true;
       expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
-      // The same failure for a window on screen stays a driver failure.
+      // The same failure for a window still listed on screen is a read that
+      // did not succeed this time, with what to do next, never a driver
+      // failure (which callers see as an internal error): for the elements
+      // and for the pixels alike.
       const original = fixture.callTool.bind(fixture);
       fixture.callTool = async (name, argumentsJson) =>
         name === "get_window_state"
           ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
           : original(name, argumentsJson);
-      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "driver_failed" });
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)])
+        await expect(read()).rejects.toMatchObject({
+          code: "unavailable",
+          retryable: false,
+          dispatched: false,
+          message: `${target.id} is still open, but reading it failed this time (CUA get_window_state did not return a valid result: No content); observe it again in a moment, since an app that is busy or redrawing the window can fail one read`,
+        });
+      // A window that closed meanwhile is gone, not unreadable.
+      fixture.callTool = async (name, argumentsJson) => {
+        if (name === "get_window_state")
+          return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+        const response = await original(name, argumentsJson);
+        if (name === "list_windows") response.structuredJson = JSON.stringify({ windows: [] });
+        return response;
+      };
+      await expect(backend.observe(target.id)).rejects.toMatchObject({
+        code: "target_not_found",
+        dispatched: false,
+      });
     } finally {
       await backend.close();
     }

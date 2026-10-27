@@ -2722,7 +2722,10 @@ export function createInteractionAttemptToolDefinitions(
       const existing = output.existing;
       if (existing) {
         if (context.caller.kind === "model") rememberComputerReading(existing);
-        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText(existing)}`;
+        // The listing above already says whether a person is using the
+        // computer.
+        const { personInputSecondsAgo: _said, ...target } = existing.target;
+        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText({ ...existing, target })}`;
       }
       const launch = output.launch;
       if (!launch) return opened;

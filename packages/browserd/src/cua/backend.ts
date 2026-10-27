@@ -1,4 +1,5 @@
 import { CuaNativeTools } from "./native-tools";
+import { type PersonInputReader, recentPersonInput } from "./macos-person-input";
 import { COMPUTER_LOCATOR_WAIT_MS, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -200,6 +201,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
     private readonly frontWindow: WindowFronting | null,
+    private readonly personInput: PersonInputReader | null,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -237,6 +239,10 @@ export class CuaComputerBackend implements ComputerBackend {
       /** Windows: bring a window to the foreground before CUA sends it
        * pointer or keyboard input (see windows-foreground.ts). */
       frontWindow?: WindowFronting | null;
+      /** macOS: how long ago a person used the keyboard, mouse or trackpad
+       * (see macos-person-input.ts). Listings and observations say so when
+       * it was within the last minute. */
+      personInput?: PersonInputReader | null;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -251,6 +257,7 @@ export class CuaComputerBackend implements ComputerBackend {
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
         platform === "macos" ? (options.macWindows ?? null) : null,
         platform === "windows" ? (options.frontWindow ?? null) : null,
+        platform === "macos" ? (options.personInput ?? null) : null,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -322,15 +329,33 @@ export class CuaComputerBackend implements ComputerBackend {
   targets(): Promise<ComputerBackendTarget[]> {
     return this.run(async () => {
       await this.assertOnScreen(true);
-      return await this.discover();
+      const targets = await this.discover();
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? targets
+        : targets.map((target) => ({ ...target, personInputSecondsAgo }));
     });
   }
   observe(targetId: string): Promise<ComputerBackendObservation> {
-    return this.run(() =>
-      this.whileOnScreen(false, () =>
+    return this.run(async () => {
+      const observation = await this.whileOnScreen(false, () =>
         this.readOnScreen(targetId, () => this.observeTarget(targetId)),
-      ),
-    );
+      );
+      const personInputSecondsAgo = this.recentPersonInput();
+      return personInputSecondsAgo === undefined
+        ? observation
+        : { ...observation, target: { ...observation.target, personInputSecondsAgo } };
+    });
+  }
+
+  /** Whole seconds since a person used the keyboard, mouse or trackpad, when
+   * that was within the last minute. A reading that fails says nothing. */
+  private recentPersonInput(): number | undefined {
+    try {
+      return recentPersonInput(this.personInput?.() ?? null);
+    } catch {
+      return undefined;
+    }
   }
   capture(
     targetId: string,
@@ -428,8 +453,8 @@ export class CuaComputerBackend implements ComputerBackend {
       let report = "";
       // A click, key press or press of an element CUA could only send, with
       // nothing confirming the app acted on it. An app in the background can
-      // take a press through accessibility and do nothing (a button that
-      // opens a menu only while its app is active).
+      // take a press through accessibility and do nothing (a toolbar button
+      // that opens its flyout only while its app is active).
       const rawInput =
         command.action.type === "keyboard" ||
         (command.action.type === "pointer" &&
@@ -1094,7 +1119,10 @@ export class CuaComputerBackend implements ComputerBackend {
    * or a hidden app's window is first brought back on screen, behind the
    * person's front window and without activating its app. Any other window
    * listed off screen is refused at once, and a failed read of a window that
-   * left the screen since says so instead of reporting a driver failure. */
+   * left the screen since says so instead of reporting a driver failure. A
+   * failed read of a window still listed on screen is reported as a read that
+   * did not succeed this time, with what to do next, since only a read was
+   * asked and nothing changed. */
   private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
     const offScreen = () =>
       new ComputerBackendError(
@@ -1128,8 +1156,16 @@ export class CuaComputerBackend implements ComputerBackend {
           false,
           false,
         );
-      if (target.onScreen) throw error;
-      throw offScreen();
+      if (!target.onScreen) throw offScreen();
+      if (error.code !== "driver_failed") throw error;
+      throw new ComputerBackendError(
+        "unavailable",
+        `${targetId} is still open, but reading it failed this time (${error.message}); observe it again in a moment, since an app that is busy or redrawing the window can fail one read`,
+        // Not retryable: a retried read would not differ, and a frame stream
+        // must not replace the helper for one window's failed read.
+        false,
+        false,
+      );
     }
   }
 

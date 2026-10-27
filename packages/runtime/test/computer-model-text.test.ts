@@ -394,6 +394,34 @@ describe("computer session and action text", () => {
     expect(computerTargetsText([target])).not.toContain("off screen");
   });
 
+  test("says once when a person used the computer within the last minute", () => {
+    const line =
+      "A person used this computer's keyboard, mouse or trackpad 12 s ago and may be using it now.";
+    expect(Buffer.byteLength(line)).toBe(91);
+    const marked = { ...target, personInputSecondsAgo: 12 };
+    expect(computerTargetsText([marked, { ...marked, id: "window:2" }])).toBe(
+      [
+        "2 targets:",
+        'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
+        'window window:2 "Calculator" pid 7 at 0,0 size 300x400',
+        line,
+      ].join("\n"),
+    );
+    const read = observation({ kind: "snapshot", roots: [], nodeCount: 0 });
+    const text = computerObservationText({
+      ...read,
+      target: { ...read.target, personInputSecondsAgo: 12 },
+    });
+    expect(text.split("\n").slice(0, 3)).toEqual([
+      'window window:1 "Sign in - Chromium" pid 42 at 9,9 size 1052x842 focused',
+      "Observation o_1, target generation g_1, frame f_1",
+      line,
+    ]);
+    // Without the mark, as for input a minute or more ago, nothing is said.
+    expect(computerTargetsText([target])).not.toContain("A person");
+    expect(computerObservationText(read)).not.toContain("A person");
+  });
+
   test("reports the action state, its error and the observation after it", () => {
     const text = computerActionText({
       operationId: "op-1",
@@ -505,8 +533,8 @@ describe("computerObservationDiff", () => {
       observation: unchanged,
     };
     const line =
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again, or look for the same command in the app's menu bar.";
-    expect(Buffer.byteLength(line)).toBe(185);
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
+    expect(Buffer.byteLength(line)).toBe(133);
     expect(
       computerActionText({ ...receipt, unconfirmedInput: true as const })
         .split("\n")

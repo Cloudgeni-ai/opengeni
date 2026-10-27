@@ -14472,6 +14472,7 @@
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
         "$.offScreen": "const?=[\"true\"]",
+        "$.personInputSecondsAgo": "integer?",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"

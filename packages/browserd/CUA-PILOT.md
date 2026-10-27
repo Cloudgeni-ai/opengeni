@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`6c821745e9c1207d9f3673732988a082b760a9d9`: upstream `cua-driver-rs-v0.37.0`
+`296f8e87c3d718e35908ff2e58bc04f0336a3d8c`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -71,16 +71,13 @@ When `set_value` refuses after opening a menu it could not tell for the
 select's, Escape follows `AXCancel` only while WindowServer still shows a menu
 window opened since, so it cannot land in the app's window; when a menu could
 not be seen to close, the refusal says it may still be open.
-On macOS an accessibility press the app answers with an error is done when
-the window it was sent to then leaves the screen within a second (a dialog's
-Allow or OK button that closes the dialog before the app answers), and the
-result says so. A `run_steps` press that was sent again after a first try,
-and refused because its window is gone, reports the first press as done
-instead of failing the batch. `get_desktop_state` says how long ago the
-keyboard, mouse or trackpad was last used (`person_input_idle_seconds`),
-from the per-event-type HID timers: input agents send to apps in the
-background resets `HIDIdleTime` but not these, so the reading tells whether a
-person is at the computer.
+On macOS an accessibility press the app answers with "cannot complete"
+(`kAXErrorCannotComplete`) is done when the window it was sent to then leaves
+the screen within a second (a dialog's Allow or OK button that closes the
+dialog before the app answers), and the result says so. No other error
+counts: an element already gone, or a request that never reached the app,
+says the press was not taken, so a window closing then closed for another
+reason.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -267,17 +264,29 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   Close Window) are reported as a likely no-op.
 - On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
   click, double-click, key press or element invoke the driver reports as
-  unverifiable, with no element changed and no window opened after it, is
-  reported as possibly not taken effect, with the app's menu bar as the next
-  place to look. An app in the background can take an accessibility press and
-  do nothing: some toolbar buttons that open a menu do so only while their app
-  is active, while the same command in the menu bar works in the background.
+  unverifiable, with no element changed after it, is reported as possibly not
+  taken effect. An app in the background can take an accessibility press and
+  do nothing: some toolbar buttons that open a flyout do so only while their
+  app is active, and show no sign of a menu to tell them by (a plain button
+  with only a press), while the same command in the app's menu bar works in
+  the background.
   The native Linux helper (the default for Linux host desktops) does not report
   unconfirmed input, so its results never carry that line.
 - A macOS window named by its id is a target even when the listing of every
   app leaves it out because its app raised it above the levels of working
   windows (a sign-in or other dialog): CUA reads any window by its id, and the
   adapter looks it up in its app's own listing.
+- A failed read of a window that is still listed on screen (CUA answering a
+  tree read or a capture with text only, or with a capture that does not
+  match) is refused as `unavailable` with what to do next, instead of a driver
+  failure that callers see as an internal error; a window that closed
+  meanwhile is `target_not_found`.
+- On macOS, listings and observations say when a person used the keyboard,
+  mouse or trackpad within the last minute (`personInputSecondsAgo` on each
+  target), from CoreGraphics' per-event-type HID timers: input agents send to
+  apps in the background resets `HIDIdleTime` and the any-event timer, but not
+  these. Input sent in the foreground does count. Reading them takes no
+  screenshot and no permission.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
@@ -302,7 +311,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/6c821745e9c1207d9f3673732988a082b760a9d9/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/296f8e87c3d718e35908ff2e58bc04f0336a3d8c/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

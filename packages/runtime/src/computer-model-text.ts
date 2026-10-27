@@ -33,6 +33,7 @@ export type ComputerTextTarget = {
   bounds: { x: number; y: number; width: number; height: number } | null;
   focused: boolean;
   offScreen?: true | undefined;
+  personInputSecondsAgo?: number | undefined;
 };
 
 export type ComputerTextObservation = {
@@ -419,6 +420,8 @@ export function computerObservationText(observation: ComputerTextObservation): s
   ];
   if (observation.frameId) fence.push(`frame ${observation.frameId}`);
   lines.push(fence.join(", "));
+  const person = personInputLine([observation.target]);
+  if (person) lines.push(person);
   if (observation.capturedFrame) {
     const { width, height, region, regionFrame } = observation.capturedFrame;
     const measuredOn = regionFrame
@@ -595,7 +598,20 @@ export function computerTargetsText(targets: readonly ComputerTextTarget[]): str
   if (targets.length === 0) return "No apps, windows or screens are available.";
   const lines = [`${plural(targets.length, "target")}:`, ...targets.map(computerTargetLine)];
   if (targets.some((target) => target.offScreen)) lines.push(OFF_SCREEN_NOTE);
+  const person = personInputLine(targets);
+  if (person) lines.push(person);
   return lines.join("\n");
+}
+
+/** A person used the computer within the last minute: an agent's input could
+ * meet theirs. Said once, however many targets carry it. */
+function personInputLine(targets: readonly ComputerTextTarget[]): string | null {
+  const seconds = targets.find(
+    (target) => target.personInputSecondsAgo !== undefined,
+  )?.personInputSecondsAgo;
+  return seconds === undefined
+    ? null
+    : `A person used this computer's keyboard, mouse or trackpad ${seconds} s ago and may be using it now.`;
 }
 
 /** Fixed text, so a listing renders identically for the same targets. */
@@ -674,7 +690,7 @@ export function computerActionText(
     semantic.removedRefs.length === 0
   )
     lines.push(
-      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again, or look for the same command in the app's menu bar.",
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.",
     );
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
