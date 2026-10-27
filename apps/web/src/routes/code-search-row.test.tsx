@@ -58,7 +58,9 @@ function checked(container: HTMLElement) {
   )?.textContent;
 }
 
-test("offered here but EU-only: Not supported in EU, Off, and nothing can be chosen", async () => {
+test("EU-only without an EU decision model: Not supported in EU, Off, and nothing can be chosen", async () => {
+  // The server's answer: code search off from the EU-narrowed settings, with the region reason.
+  context.clientConfig.codeSearch = { available: false, workspaceDefault: "off" };
   context.clientConfig.inferenceFeatures = RESTRICTED;
   const { container, root } = await render();
   expect(container.textContent).toContain("Fast code search");
@@ -72,7 +74,6 @@ test("offered here but EU-only: Not supported in EU, Off, and nothing can be cho
 
 test("not offered by the deployment: no row, and never Not supported in EU", async () => {
   context.clientConfig.codeSearch = { available: false, workspaceDefault: "off" };
-  context.clientConfig.inferenceFeatures = RESTRICTED;
   const { container, root } = await render();
   expect(container.textContent).toBe("");
   await act(async () => root.unmount());

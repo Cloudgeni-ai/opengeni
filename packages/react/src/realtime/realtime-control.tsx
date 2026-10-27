@@ -555,9 +555,15 @@ export function RealtimeVoiceControl(props: {
   // rather than a disabled one that explains a setup step to someone who
   // never asked for voice. It appears once a voice model is available, and
   // never hides a conversation or a failure that is still on screen, nor a
-  // catalog that failed to load.
+  // catalog that failed to load. EU-only with every voice model switched off
+  // for its region: shown, switched off, saying "Not supported in EU".
+  const allRegionRestricted =
+    modelsKnown &&
+    models.length > 0 &&
+    models.every((model) => isRegionRestricted(model.unavailableCode ?? null));
   if (
     !models.some((model) => model.available) &&
+    !allRegionRestricted &&
     (props.loadState ?? "ready") !== "failed" &&
     props.snapshot.status === "idle" &&
     !modeOwned

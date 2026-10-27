@@ -1763,7 +1763,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.textContent).not.toContain("Voice model unavailable");
   });
 
-  test("a voice model EU-only switched off says Not supported in EU once", async () => {
+  test("EU-only voice models switched off: shown, off, saying Not supported in EU once", async () => {
     const restricted = {
       id: "gpt-realtime-3",
       label: "GPT Realtime",
@@ -1782,33 +1782,84 @@ describe("ordinary session Codex realtime control", () => {
       available: true,
       recommended: false,
     } as const;
-    await act(async () => {
-      root.render(
-        <RealtimeVoiceControl
-          snapshot={idle}
-          canStart={false}
-          admissionBlocker="Not supported in EU"
-          modelAvailable={false}
-          selectedModel={restricted as never}
-          models={[restricted as never, allowed as never]}
-          audioRef={createRef<HTMLAudioElement>()}
-          onStart={async () => undefined}
-          onStop={async () => undefined}
-          onRetry={async () => undefined}
-          onRetryAudibleOutput={async () => undefined}
-          onSetInputMuted={() => undefined}
-          onSetOutputMuted={() => undefined}
-        />,
-      );
-    });
+    const alsoRestricted = { ...restricted, id: "gpt-realtime-mini", label: "Mini" } as const;
+    // Every voice model restricted, and the saved one restricted beside an EU one.
+    for (const models of [
+      [restricted, alsoRestricted],
+      [restricted, allowed],
+    ]) {
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            key={models.map((model) => model.id).join()}
+            snapshot={idle}
+            canStart={false}
+            admissionBlocker="Not supported in EU"
+            modelAvailable={false}
+            selectedModel={restricted as never}
+            models={models as never}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
 
-    const start = container.querySelector<HTMLButtonElement>(
-      '[data-testid="realtime-primary-action"]',
-    );
-    expect(start?.disabled).toBe(true);
-    expect(start?.getAttribute("aria-label")).toBe("Not supported in EU");
-    const status = container.querySelector('[role="status"]')?.textContent ?? "";
-    expect(status).toBe("Not supported in EU");
+      const start = container.querySelector<HTMLButtonElement>(
+        '[data-testid="realtime-primary-action"]',
+      );
+      expect(start?.disabled).toBe(true);
+      expect(start?.getAttribute("aria-label")).toBe("Not supported in EU");
+      const status = container.querySelector('[role="status"]')?.textContent ?? "";
+      expect(status).toBe("Not supported in EU");
+    }
+  });
+
+  test("no voice model configured and none restricted: still no control", async () => {
+    const unconnected = {
+      id: "gpt-realtime-3",
+      label: "GPT Realtime",
+      provider: "openai",
+      description: "",
+      available: false,
+      unavailableReason: "Connect a workspace AI Gateway key",
+      recommended: false,
+    } as const;
+    const restricted = {
+      ...unconnected,
+      id: "gpt-realtime-mini",
+      unavailableReason: "Not supported in EU",
+      unavailableCode: "region_restricted",
+    } as const;
+    // One restricted beside one that only needs connecting: not every model is off for the EU.
+    for (const models of [[unconnected], [unconnected, restricted]]) {
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            key={models.length}
+            snapshot={idle}
+            canStart={false}
+            admissionBlocker="Connect a workspace AI Gateway key"
+            modelAvailable={false}
+            selectedModel={unconnected as never}
+            models={models as never}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+      expect(container.querySelector('[data-testid="realtime-primary-action"]')).toBeNull();
+      expect(container.textContent).not.toContain("Not supported in EU");
+    }
   });
 
   test("shows no voice control, and never Connect Codex, until the catalog arrives", async () => {

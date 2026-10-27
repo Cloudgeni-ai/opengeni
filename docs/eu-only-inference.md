@@ -297,8 +297,10 @@ session's effective tools omit them.
   through one helper, `inferenceFeatureRestriction` / `regionRestrictedText` in
   `@opengeni/react`.
   A feature with no route at all (`unavailableReason: null`) keeps its usual
-  unavailable state (hidden or off) and never says EU. With no voice model
-  allowed, live voice isn't shown.
+  unavailable state (hidden or off) and never says EU. When every voice model
+  is `region_restricted`, live voice stays visible, switched off; with no voice
+  model configured it is hidden as before. Fast code search shows when the
+  deployment offers it or when `code_search` is `region_restricted`.
 - The app reads these lists for the open workspace
   (`GET /v1/config/client?workspaceId=`), again when the workspace changes,
   when the window regains focus and after the setting changes.

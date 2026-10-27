@@ -182,8 +182,8 @@ const EU_ONLY_CONFIG = {
     { id: "meeting_transcription", available: false, unavailableReason: "region_restricted" },
     { id: "code_search", available: false, unavailableReason: "region_restricted" },
   ],
-  // Offered by the deployment; EU-only switches it off here.
-  codeSearch: { available: true, workspaceDefault: "off" },
+  // As the server answers EU-only without an EU decision model.
+  codeSearch: { available: false, workspaceDefault: "off" },
   voiceInput: {
     available: false,
     providers: [],
@@ -432,20 +432,21 @@ const EU_ONLY_VOICE_MODEL: RealtimeModelOption = {
   recommended: true,
 };
 
-/** A voice model the server allows here (fixture: its route has an EU record). */
-const EU_ALLOWED_VOICE_MODEL: RealtimeModelOption = {
+/** Another voice model with no EU route here. */
+const EU_ONLY_VOICE_MODEL_MINI: RealtimeModelOption = {
   id: "opengeni-gateway/openai/gpt-realtime-mini",
   label: "GPT Realtime Mini",
   provider: "OpenGeni",
   description: "Faster, lighter live voice",
-  available: true,
-  unavailableReason: null,
+  available: false,
+  unavailableReason: "Not supported in EU",
+  unavailableCode: "region_restricted",
   recommended: false,
 };
 
 /**
- * The live voice button and its model list when the saved model has no EU
- * route. With no voice model allowed at all, live voice isn't shown.
+ * The live voice button and its model list when no voice model has an EU
+ * route: shown, switched off.
  */
 function EuOnlyRealtime() {
   const noop = async () => {};
@@ -471,7 +472,7 @@ function EuOnlyRealtime() {
           admissionBlocker="Not supported in EU"
           modelAvailable={false}
           selectedModel={EU_ONLY_VOICE_MODEL}
-          models={[EU_ONLY_VOICE_MODEL, EU_ALLOWED_VOICE_MODEL]}
+          models={[EU_ONLY_VOICE_MODEL, EU_ONLY_VOICE_MODEL_MINI]}
           audioRef={createRef<HTMLAudioElement>()}
           onStart={noop}
           onStop={noop}
@@ -486,7 +487,7 @@ function EuOnlyRealtime() {
         className="w-[320px] rounded-lg border border-border bg-popover p-1 shadow-md"
       >
         <RealtimeModelPickerMenu
-          models={[EU_ONLY_VOICE_MODEL, EU_ALLOWED_VOICE_MODEL]}
+          models={[EU_ONLY_VOICE_MODEL, EU_ONLY_VOICE_MODEL_MINI]}
           selectedModel={EU_ONLY_VOICE_MODEL}
           provider="OpenGeni"
           direction={1}

@@ -692,8 +692,9 @@ export function CodeSearchPreferenceRow({
 }) {
   const context = useAppContext();
   const capability = context.clientConfig.codeSearch;
-  // Offered by the deployment, but EU-only and without an EU decision model:
-  // shown, switched off. Not offered at all: not shown.
+  // EU-only without an EU decision model: the server reports code search
+  // unavailable and `region_restricted`; shown, switched off. No route at all
+  // (no reason): not shown.
   const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "code_search");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const explicit = workspace?.settings?.codeSearchEnabled;
@@ -705,7 +706,7 @@ export function CodeSearchPreferenceRow({
         ? "off"
         : "default";
   const [saving, setSaving] = useState(false);
-  if (capability?.available !== true) return null;
+  if (capability?.available !== true && regionRestricted === null) return null;
   const defaultPhrase =
     capability?.workspaceDefault === "on"
       ? "Default turns it on"
