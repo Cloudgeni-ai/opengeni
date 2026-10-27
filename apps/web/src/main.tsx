@@ -61,7 +61,8 @@ if (reportClientSignals) {
     }),
   );
   // The desktop app's own window without the shell's bridge; see lib/desktop.tsx.
-  reportMissingDesktopBridge();
+  // The router has not resolved yet, so this names the route it is loading.
+  reportMissingDesktopBridge(appDestinationRoutePattern);
 }
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
 // Content-free count of analytics banner answers; see lib/analytics-consent.ts.

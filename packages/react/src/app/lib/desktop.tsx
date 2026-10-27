@@ -72,11 +72,17 @@ export const desktopPlatform: DesktopPlatform | null =
 /**
  * Count once when the page is the desktop app's own window by its user agent
  * but the shell's bridge is missing, so we learn how often and where that
- * happens. Call after the client signal reporter is installed.
+ * happens. Call after the client signal reporter is installed; while the page
+ * loads, pass the pattern of the route the router is loading, since the
+ * route it shows is not resolved yet.
  */
-export function reportMissingDesktopBridge(): void {
+export function reportMissingDesktopBridge(routePattern?: () => string): void {
   if (desktopBridge || !desktopPlatform) return;
-  reportDesktopBridgeMissing(desktopPlatform, desktopAppVersionFromUserAgent(navigator.userAgent));
+  reportDesktopBridgeMissing(
+    desktopPlatform,
+    desktopAppVersionFromUserAgent(navigator.userAgent),
+    routePattern,
+  );
 }
 
 /**

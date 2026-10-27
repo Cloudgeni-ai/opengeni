@@ -119,7 +119,15 @@ export type ClientSignalReporter = {
   requestFailure(action: ClientRequestAction, reason: ClientRequestFailureReason): boolean;
   stream(stream: ClientStream, event: ClientStreamEvent): boolean;
   webVital(metric: ClientWebVitalMetric, page: ClientPage, value: number): boolean;
-  desktopBridgeMissing(platform: ClientDesktopPlatform, appVersion: string | null): boolean;
+  /**
+   * `routePattern` overrides the reporter's own, for a report sent while the
+   * page loads, before the router has resolved its matches.
+   */
+  desktopBridgeMissing(
+    platform: ClientDesktopPlatform,
+    appVersion: string | null,
+    routePattern?: () => string,
+  ): boolean;
 };
 
 export type ClientSignalReporterOptions = {
@@ -169,9 +177,9 @@ export function createClientSignalReporter(
     lastReportedAt.set(key, at);
     return true;
   };
-  const route = () => {
+  const route = (routePattern = options.routePattern) => {
     try {
-      return clientRoutePattern(options.routePattern());
+      return clientRoutePattern(routePattern());
     } catch {
       return "unknown";
     }
@@ -202,7 +210,7 @@ export function createClientSignalReporter(
       });
       return true;
     },
-    desktopBridgeMissing(platform, appVersion) {
+    desktopBridgeMissing(platform, appVersion, routePattern) {
       if (reportedDesktopBridgeMissing) return false;
       reportedDesktopBridgeMissing = true;
       send({
@@ -212,7 +220,7 @@ export function createClientSignalReporter(
           appVersion && CLIENT_DESKTOP_APP_VERSION_PATTERN.test(appVersion)
             ? appVersion
             : "unknown",
-        route: route(),
+        route: route(routePattern),
         revision,
       });
       return true;
@@ -264,6 +272,7 @@ export function reportClientWebVital(
 export function reportDesktopBridgeMissing(
   platform: ClientDesktopPlatform,
   appVersion: string | null,
+  routePattern?: () => string,
 ): void {
-  defaultReporter?.desktopBridgeMissing(platform, appVersion);
+  defaultReporter?.desktopBridgeMissing(platform, appVersion, routePattern);
 }

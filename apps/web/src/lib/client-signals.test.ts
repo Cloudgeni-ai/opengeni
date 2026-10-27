@@ -143,6 +143,18 @@ describe("signal reporter", () => {
       expect(other.map((report) => report.appVersion)).toEqual(["unknown"]);
     }
   });
+
+  test("a desktop bridge report sent while the page loads names the route being loaded", () => {
+    const sent: Array<{ route: string }> = [];
+    const reporter = createClientSignalReporter({
+      send: (body) => sent.push(JSON.parse(body)),
+      revision: "abc123",
+      // Before the router resolves, the shown route has no pattern yet.
+      routePattern: () => "",
+    });
+    reporter.desktopBridgeMissing("macos", "0.1.32", () => "/workspaces/$workspaceId/sessions");
+    expect(sent.map((report) => report.route)).toEqual(["/workspaces/$workspaceId/sessions"]);
+  });
 });
 
 describe("beacon delivery while offline", () => {
