@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createObservability } from "@opengeni/observability";
 import {
   DATABASE_AUTHENTICATION_MAX_ATTEMPTS,
+  DATABASE_CREDENTIAL_METRICS,
+  databaseCredentialEventAttributes,
   databaseLoginAttemptOf,
   databasePasswordFileOptions,
   databasePasswordFileOptionsFromEnvironment,
@@ -11,6 +14,7 @@ import {
   databaseUrlUser,
   isDatabaseAuthenticationFailure,
   logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   RotatingDatabasePassword,
   rotatingDatabasePasswordFor,
   tagDatabaseLoginAttempt,
@@ -644,7 +648,10 @@ async function switchUnderConcurrentLogins(
   operations: number,
 ) {
   const inFlight = gate();
-  for (const pool of all) pool.hold = inFlight.promise;
+  for (const pool of all) {
+    pool.held = 0;
+    pool.hold = inFlight.promise;
+  }
   const outcomes = Promise.allSettled(
     all.map((pool) =>
       Promise.allSettled(Array.from({ length: operations }, () => pool.operation())),
@@ -777,6 +784,80 @@ describe("concurrent logins at the moment of a switch", () => {
     }
   });
 
+  test("rollback by reversing the files: the reload selects the server's password, then one switch when the server reverts", async () => {
+    // Forward rotation: files previous=old, current=new; the server moves to
+    // new while every connection is logging in with old.
+    const role = { password: OLD_PASSWORD };
+    const all = await pools(role, SIZES);
+    expect(await switchUnderConcurrentLogins(all, role, NEW_PASSWORD, 20)).toEqual(
+      SIZES.map(() => 0),
+    );
+    // The mirrored rollback reverses the files (previous=new, current=old;
+    // previous first, so no read ever sees only the old password while the
+    // server still has the new one) and waits for every pool to see them.
+    await writeFile(previous, `${NEW_PASSWORD}\n`);
+    await writeFile(current, `${OLD_PASSWORD}\n`);
+    for (const pool of all) {
+      await pool.source.password();
+      // The reload restarts at the first candidate, which is now new: the
+      // password the server still has, so nothing is refused yet.
+      expect(pool.source.candidateIndex).toBe(0);
+      expect(pool.source.candidateCount).toBe(2);
+    }
+    const marks = all.map((pool) => pool.events.length);
+    const quiet = await Promise.all(all.map((pool) => pool.operation()));
+    expect(quiet.every((result) => result === "ok")).toBe(true);
+    all.forEach((pool, index) => expect(pool.count("candidate_refused", marks[index]!)).toBe(0));
+    // Then the server is restored to old with every connection logging in.
+    const failed = await switchUnderConcurrentLogins(all, role, OLD_PASSWORD, 40);
+    expect(failed).toEqual(SIZES.map(() => 0));
+    all.forEach((pool, index) => {
+      const since = marks[index]!;
+      expect(pool.count("candidate_refused", since)).toBe(pool.max);
+      expect(pool.staleRefusals(since)).toBe(pool.max - 1);
+      expect(pool.count("candidate_switched", since)).toBe(1);
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      expect(pool.source.candidateIndex).toBe(1);
+    });
+  });
+
+  test("forward rotation, file reversal and server rollback under continuous load fail no operation", async () => {
+    const role = { password: OLD_PASSWORD };
+    const all = await pools(role, SIZES);
+    const running = { value: true };
+    let completed = 0;
+    const failures: unknown[] = [];
+    const lanes = all.flatMap((pool) =>
+      Array.from({ length: pool.max * 3 }, async () => {
+        while (running.value) {
+          await pool.operation().then(
+            () => (completed += 1),
+            (error: unknown) => failures.push(error),
+          );
+        }
+      }),
+    );
+    await Bun.sleep(50);
+    role.password = NEW_PASSWORD;
+    await Bun.sleep(150);
+    await writeFile(previous, `${NEW_PASSWORD}\n`);
+    await writeFile(current, `${OLD_PASSWORD}\n`);
+    await Bun.sleep(150);
+    role.password = OLD_PASSWORD;
+    await Bun.sleep(150);
+    running.value = false;
+    await Promise.all(lanes);
+    expect(failures).toEqual([]);
+    expect(completed).toBeGreaterThan(100);
+    for (const pool of all) {
+      expect(pool.count("candidates_exhausted")).toBe(0);
+      // One switch forward; the reversal itself reselects new without a
+      // switch; one switch when the server returns to old.
+      expect(pool.count("candidate_switched")).toBe(2);
+      expect(pool.source.candidateIndex).toBe(1);
+    }
+  });
+
   test("a single configured password still fails fast for every concurrent operation", async () => {
     await writeFile(current, NEW_PASSWORD);
     const role = { password: OLD_PASSWORD };
@@ -825,18 +906,38 @@ describe("no secret in events, logs or errors", () => {
       expectNoSecret(lines.map((line) => line.map((part) => JSON.stringify(part)).join(" ")));
       expectNoSecret(String(outcome));
       expectNoSecret((outcome as Error).stack ?? "");
-      // Single refusals are not logged; switches, exhaustion and reloads are.
-      // The retry is refused on the selected password each time, so the pool
-      // moves on twice before every candidate was refused.
+      // Every event is logged. The retry is refused on the selected password
+      // each time, so the pool moves on twice before every candidate was
+      // refused.
       expect(lines.map((line) => line[0])).toEqual([
         "[database] reloaded database credential candidates",
+        "[database] database credential candidate refused",
         "[database] switched database credential candidate",
+        "[database] database credential candidate refused",
         "[database] switched database credential candidate",
+        "[database] database credential candidate refused",
         "[database] switched database credential candidate",
         "[database] every database credential candidate was rejected",
         "[database] reloaded database credential candidates",
       ]);
-      expect(lines[1]?.[1]).toEqual({ pool: "test-pool", fromIndex: 0, toIndex: 1, candidates: 2 });
+      expect(lines[0]?.[1]).toEqual({ databasePool: "test-pool", credentialCandidates: 2 });
+      expect(lines[1]?.[1]).toEqual({
+        databasePool: "test-pool",
+        credentialIndex: 0,
+        credentialCandidates: 2,
+        credentialStale: false,
+      });
+      expect(lines[2]?.[1]).toEqual({
+        databasePool: "test-pool",
+        credentialFromIndex: 0,
+        credentialToIndex: 1,
+        credentialCandidates: 2,
+      });
+      expect(lines[7]?.[1]).toEqual({
+        databasePool: "test-pool",
+        credentialIndex: 1,
+        credentialCandidates: 2,
+      });
       // The object itself does not expose a password through serialization.
       expectNoSecret(source);
       expectNoSecret(String(source));
@@ -846,12 +947,204 @@ describe("no secret in events, logs or errors", () => {
   });
 
   test("the LISTEN connection is tagged in log lines", () => {
-    const lines: Array<[string, Record<string, string | number>]> = [];
+    const lines: Array<[string, Record<string, string | number | boolean>]> = [];
     logDatabaseCredentialEvent("api", (message, attributes) => lines.push([message, attributes]))(
       { type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 },
       "notifications",
     );
-    expect(lines[0]?.[1].pool).toBe("api-notifications");
+    expect(lines[0]?.[1].databasePool).toBe("api-notifications");
+  });
+
+  test("an unreadable file is logged by file and errno code only", () => {
+    expect(
+      databaseCredentialEventAttributes("worker", {
+        type: "password_file_unreadable",
+        file: "previous",
+        code: "EACCES",
+      }),
+    ).toEqual({
+      databasePool: "worker",
+      credentialFile: "previous",
+      credentialFileErrorCode: "EACCES",
+    });
+  });
+});
+
+describe("credential event metrics and structured logs", () => {
+  function recordingObserver() {
+    const counters: Array<{ name: string; labels: Record<string, string> | undefined }> = [];
+    const warnings: Array<[string, Record<string, string | number | boolean>]> = [];
+    return {
+      counters,
+      warnings,
+      observer: {
+        warn: (message: string, attributes: Record<string, string | number | boolean>) =>
+          void warnings.push([message, attributes]),
+        incrementCounter: (input: { name: string; labels?: Record<string, string> }) =>
+          void counters.push({ name: input.name, labels: input.labels }),
+      },
+    };
+  }
+
+  test("refusals (stale or fresh), switches, exhaustions and reloads are counted by pool and index", () => {
+    const { counters, warnings, observer } = recordingObserver();
+    const listen = observeDatabaseCredentialEvents("worker", observer);
+    listen({ type: "candidates_reloaded", candidates: 2 }, "pool");
+    listen({ type: "candidate_refused", index: 0, candidates: 2, stale: false }, "pool");
+    listen({ type: "candidate_switched", fromIndex: 0, toIndex: 1, candidates: 2 }, "pool");
+    listen({ type: "candidate_refused", index: 0, candidates: 2, stale: true }, "pool");
+    listen({ type: "candidates_exhausted", index: 1, candidates: 2 }, "notifications");
+    listen({ type: "password_file_unreadable", file: "current", code: "EACCES" }, "pool");
+    expect(counters).toEqual([
+      {
+        name: "opengeni_database_credential_reloads_total",
+        labels: { pool: "worker", candidates: "2" },
+      },
+      {
+        name: "opengeni_database_credential_refusals_total",
+        labels: { pool: "worker", index: "0", refusal: "fresh" },
+      },
+      {
+        name: "opengeni_database_credential_switches_total",
+        labels: { pool: "worker", from_index: "0", to_index: "1" },
+      },
+      {
+        name: "opengeni_database_credential_refusals_total",
+        labels: { pool: "worker", index: "0", refusal: "stale" },
+      },
+      {
+        name: "opengeni_database_credential_exhaustions_total",
+        labels: { pool: "worker-notifications", index: "1" },
+      },
+    ]);
+    expect(DATABASE_CREDENTIAL_METRICS.refusals.name).toBe(
+      "opengeni_database_credential_refusals_total",
+    );
+    // Every event is also logged, with the pool and its facts.
+    expect(warnings.map(([message]) => message)).toEqual([
+      "reloaded database credential candidates",
+      "database credential candidate refused",
+      "switched database credential candidate",
+      "database credential candidate refused",
+      "every database credential candidate was rejected",
+      "database password file unreadable; treating it as missing",
+    ]);
+    expect(warnings[3]?.[1]).toEqual({
+      databasePool: "worker",
+      credentialIndex: 0,
+      credentialCandidates: 2,
+      credentialStale: true,
+    });
+    expect(warnings[4]?.[1].databasePool).toBe("worker-notifications");
+  });
+
+  test("a failing observer never reaches the pool", async () => {
+    await writeFile(previous, OLD_PASSWORD);
+    await writeFile(current, NEW_PASSWORD);
+    const source = new RotatingDatabasePassword({
+      files: { currentPasswordFile: current, previousPasswordFile: previous },
+      fallbackPassword: URL_PASSWORD,
+      onEvent: observeDatabaseCredentialEvents("worker", {
+        warn: () => {
+          throw new Error("log sink down");
+        },
+        incrementCounter: () => {
+          throw new Error("registry conflict");
+        },
+      }),
+    });
+    expect(await source.password()).toBe(OLD_PASSWORD);
+    expect(source.reportAuthenticationFailure(source.position())).toBe("switched");
+    expect(await source.password()).toBe(NEW_PASSWORD);
+  });
+
+  test("a real Observability publishes the pool and index on log lines and as Prometheus counters", async () => {
+    const lines: string[] = [];
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    console.log = (line: string) => void lines.push(String(line));
+    console.warn = (line: string) => void lines.push(String(line));
+    try {
+      const observability = createObservability(
+        {
+          observabilityStructuredLogs: true,
+          observabilityMetricsEnabled: true,
+          serviceName: "opengeni-worker",
+          environment: "test",
+        } as never,
+        { component: "worker" },
+      );
+      await writeFile(previous, `${OLD_PASSWORD}\n`);
+      await writeFile(current, `${NEW_PASSWORD}\n`);
+      const source = new RotatingDatabasePassword({
+        files: { currentPasswordFile: current, previousPasswordFile: previous },
+        fallbackPassword: URL_PASSWORD,
+        onEvent: observeDatabaseCredentialEvents("worker-control", observability),
+      });
+      await source.password();
+      // Three logins in flight with the old password when the server moves to
+      // the new one: one fresh refusal (the switch), two stale ones.
+      const logins = [{}, {}, {}];
+      for (const login of logins) await source.password(login);
+      for (const login of logins) {
+        source.reportAuthenticationFailure(source.refusedPosition(refusedBy(login))!);
+      }
+      const metrics = await observability.prometheusMetrics();
+      // The registry appends its default labels (service, component, ...).
+      const sample = (name: string, labels: string) =>
+        metrics
+          .split("\n")
+          .find((line) => line.startsWith(`${name}{${labels},`))
+          ?.split(" ")
+          .at(-1);
+      expect(
+        sample(
+          "opengeni_database_credential_refusals_total",
+          'index="0",pool="worker-control",refusal="fresh"',
+        ),
+      ).toBe("1");
+      expect(
+        sample(
+          "opengeni_database_credential_refusals_total",
+          'index="0",pool="worker-control",refusal="stale"',
+        ),
+      ).toBe("2");
+      expect(
+        sample(
+          "opengeni_database_credential_switches_total",
+          'from_index="0",pool="worker-control",to_index="1"',
+        ),
+      ).toBe("1");
+      expect(
+        sample(
+          "opengeni_database_credential_reloads_total",
+          'candidates="2",pool="worker-control"',
+        ),
+      ).toBe("1");
+      expectNoSecret(metrics);
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+    }
+    expectNoSecret(lines);
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const switched = records.find(
+      (record) => record.message === "switched database credential candidate",
+    );
+    expect(switched).toMatchObject({
+      level: "warn",
+      databasePool: "worker-control",
+      credentialFromIndex: 0,
+      credentialToIndex: 1,
+      credentialCandidates: 2,
+    });
+    const stale = records.filter(
+      (record) =>
+        record.message === "database credential candidate refused" &&
+        record.credentialStale === true,
+    );
+    expect(stale).toHaveLength(2);
+    expect(stale[0]).toMatchObject({ databasePool: "worker-control", credentialIndex: 0 });
   });
 });
 

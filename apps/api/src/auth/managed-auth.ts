@@ -18,6 +18,7 @@ import {
   databasePasswordFileOptions,
   ensureManagedAccessForUser,
   logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   rotatingDatabasePasswordFor,
   tagDatabaseLoginAttempt,
   withDatabaseAuthenticationRetry,
@@ -216,13 +217,9 @@ export function createManagedAuthDatabasePool(
   databaseUrl: string,
   observability?: ManagedAuthPoolObservability,
   passwordFiles?: DatabasePasswordFiles,
-  onCredentialEvent: DatabaseCredentialEventListener = logDatabaseCredentialEvent(
-    "managed-auth",
-    (message, attributes) => {
-      if (observability) observability.warn(message, attributes);
-      else console.warn(`[database] ${message}`, attributes);
-    },
-  ),
+  onCredentialEvent: DatabaseCredentialEventListener = observability
+    ? observeDatabaseCredentialEvents("managed-auth", observability)
+    : logDatabaseCredentialEvent("managed-auth"),
 ): Pool {
   const credential = rotatingDatabasePasswordFor(databaseUrl, passwordFiles, onCredentialEvent);
   const pool = new Pool(

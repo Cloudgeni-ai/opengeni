@@ -43,6 +43,10 @@ import { createManagedAuthDatabasePool } from "../src/auth/managed-auth";
 //      switches back and forward at once (no time-based grace), and logins
 //      still in flight with a replaced password never move a pool or use up
 //      an operation's attempts;
+//   2c. the mirrored rollback by file reversal: the Secret gets previous = new
+//      and current = old, so each pool reloads onto the new password (the one
+//      the server has) without a refusal; then ALTER ROLE back to the old
+//      password, and each pool switches exactly once;
 //   3. previous is cleared.
 // No operation may fail and no request may return 500.
 //
@@ -495,10 +499,47 @@ describe("runtime database password rotation", () => {
       expect(tally.count("candidates_exhausted")).toEqual({});
       expect(failures).toEqual([]);
 
-      // 3. Previous is cleared: the only candidate is the new password, which
+      // 2c. Mirrored rollback: reverse the files first. The reload starts over
+      //     at the first candidate, now the new password the server still
+      //     has, so nothing is refused or switched.
+      const beforeReversal = tally.events.length;
+      const since = (mark: number, type: DatabaseCredentialEvent["type"]) => {
+        const counts: Record<string, number> = {};
+        for (const { pool, event } of tally.events.slice(mark)) {
+          if (event.type === type) counts[pool] = (counts[pool] ?? 0) + 1;
+        }
+        return counts;
+      };
+      await volume.update({
+        "previous-password": `${rotated}\n`,
+        password: `${originalPassword}\n`,
+      });
+      await Bun.sleep(2_500);
+      await restartListener(current);
+      expect(since(beforeReversal, "candidate_refused")).toEqual({});
+      expect(since(beforeReversal, "candidate_switched")).toEqual({});
+      expect(failures).toEqual([]);
+      //     Then the server goes back to the old password: one switch per pool.
+      const beforeRestore = tally.events.length;
+      await admin.unsafe(`alter role opengeni_app password '${originalPassword}'`);
+      await Bun.sleep(5_000);
+      await restartListener(current);
+      const restoreSwitches = since(beforeRestore, "candidate_switched");
+      console.info(
+        "[rotation-test] after the file-reversal rollback",
+        JSON.stringify({
+          switches: restoreSwitches,
+          refusals: since(beforeRestore, "candidate_refused"),
+        }),
+      );
+      for (const pool of pools) expect(restoreSwitches[`g1:${pool}`]).toBe(1);
+      expect(tally.count("candidates_exhausted")).toEqual({});
+      expect(failures).toEqual([]);
+
+      // 3. Previous is cleared: the only candidate is the old password, which
       //    every pool already uses, so nothing is refused or switched.
       const before = tally.events.length;
-      await volume.update({ password: `${rotated}\n` });
+      await volume.update({ password: `${originalPassword}\n` });
       await Bun.sleep(2_500);
       await restartListener(current);
       const afterClear = tally.events.slice(before).map(({ event }) => event.type);

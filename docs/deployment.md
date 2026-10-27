@@ -1256,8 +1256,24 @@ without moving the pool again (stale refusals). A refusal of the newly selected
 password moves the pool on at once, back to the first candidate after the last
 (for example when a rollback restored the old password); there is no
 time-based grace. Only a change in the files' contents starts the order over.
-Logs and metrics never carry a password; the pools log only content-free
-events such as `switched database credential candidate` with candidate indexes.
+Logs and metrics never carry a password. Each pool logs one content-free
+warning per event (`reloaded database credential candidates`, `database
+credential candidate refused`, `switched database credential candidate`,
+`every database credential candidate was rejected`, `database password file
+unreadable; treating it as missing`) with the fields `databasePool` (`api`,
+`managed-auth`, `worker`, `worker-readiness`, `worker-activities`, with a
+`-notifications` suffix for the API's LISTEN connection), `credentialIndex`,
+`credentialFromIndex`, `credentialToIndex`, `credentialCandidates`,
+`credentialStale` (refusals), and `credentialFile` and
+`credentialFileErrorCode` (unreadable files). Index 0 is the first candidate.
+The same events are counted, labelled by `pool`, in
+`opengeni_database_credential_refusals_total` (`index`, and `refusal` =
+`stale` or `fresh`), `opengeni_database_credential_switches_total`
+(`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total`
+(`index`) and `opengeni_database_credential_reloads_total` (`candidates`). A
+rotation should show exactly one switch per pool and no exhaustion; stale
+refusals are expected, at most one per connection that was logging in when the
+password changed.
 
 A query or transaction start refused with `28P01` is retried on the newly
 selected candidate, but only at the connection layer, only while another
@@ -1299,7 +1315,8 @@ To rotate, in this order:
    printing the files: for example `kubectl exec <pod> -- test -s
    /var/run/opengeni/database/previous-password` on each pod (when the image
    has `test`), or a `reloaded database credential candidates` log line with
-   `candidates: 2` from each pod.
+   `credentialCandidates: 2` (or a `candidates="2"` reload counter) from each
+   pod.
 2. In one step, with no release in between: run `ALTER ROLE opengeni_app
    PASSWORD ...` with the new password, set `OPENGENI_APP_DATABASE_PASSWORD`
    (role provisioning resets the role to it on every release), and set the
@@ -1309,6 +1326,12 @@ To rotate, in this order:
    Running pods keep using the files, and each pool meets one `28P01` on its
    next new connection and switches to the new password.
 3. Clear `OPENGENI_DATABASE_PREVIOUS_PASSWORD`.
+
+To roll back after step 2, mirror it: write the files reversed (previous = the
+new password, current = the old one), confirm every pod sees them, then
+restore the role's old password. A change in the files starts the order over
+at the first candidate, which is then the password the server still has, so
+nothing is refused until the role changes back, and each pool switches once.
 
 Change the role only after the files show both passwords. If the role changes
 first, new connections fail until the files catch up. Outside Kubernetes,

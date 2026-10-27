@@ -114,6 +114,50 @@ describe("managed-auth pool credentials", () => {
     }
   });
 
+  test("with an observability, refusals and the switch are counted and logged under managed-auth", async () => {
+    if (!shared) return;
+    const counters: Array<{ name: string; labels?: Record<string, string> }> = [];
+    const warnings: Array<[string, Record<string, unknown>]> = [];
+    const pool = createManagedAuthDatabasePool(
+      refusedUrl,
+      {
+        warn: (message, attributes) => void warnings.push([message, attributes ?? {}]),
+        incrementCounter: ({ name, labels }) =>
+          void counters.push({ name, labels: labels as Record<string, string> }),
+      },
+      await passwordFiles({ previous: REFUSED_PASSWORD, current: validPassword }),
+    );
+    try {
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: 12 }, () => pool.query("select 1")),
+      );
+      expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
+      const named = (name: string) => counters.filter((counter) => counter.name === name);
+      expect(named("opengeni_database_credential_switches_total")).toEqual([
+        {
+          name: "opengeni_database_credential_switches_total",
+          labels: { pool: "managed-auth", from_index: "0", to_index: "1" },
+        },
+      ]);
+      const refusals = named("opengeni_database_credential_refusals_total");
+      expect(refusals.length).toBeGreaterThan(0);
+      expect(refusals.filter((counter) => counter.labels?.refusal === "fresh")).toHaveLength(1);
+      expect(named("opengeni_database_credential_exhaustions_total")).toEqual([]);
+      expect(
+        warnings.find(([message]) => message === "switched database credential candidate")?.[1],
+      ).toEqual({
+        databasePool: "managed-auth",
+        credentialFromIndex: 0,
+        credentialToIndex: 1,
+        credentialCandidates: 2,
+      });
+      expect(JSON.stringify([counters, warnings])).not.toContain(validPassword);
+      expect(JSON.stringify([counters, warnings])).not.toContain(REFUSED_PASSWORD);
+    } finally {
+      await pool.end();
+    }
+  });
+
   test("mirrored rollback with every client logging in: the pool switches back at once, no operation fails", async () => {
     if (!shared) return;
     const events: DatabaseCredentialEvent[] = [];

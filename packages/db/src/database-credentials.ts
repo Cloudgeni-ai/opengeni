@@ -45,7 +45,7 @@ export type DatabaseCredentialEvent =
        * A login that used candidate `index` was refused with 28P01. `stale`:
        * the pool had already selected another password since that login read
        * its own, so the refusal neither moves the pool nor uses up an
-       * operation's attempts. For counters and tests; not logged (a switch is).
+       * operation's attempts.
        */
       type: "candidate_refused";
       index: number;
@@ -197,25 +197,160 @@ export function databaseCredentialEventMessage(event: DatabaseCredentialEvent): 
 }
 
 /**
- * One content-free log line per event except single refusals (a switch is
- * logged instead): the message and the event's index and count facts, tagged
- * with the pool's name. Defaults to `console.warn`, for processes without
- * structured logging (CLIs, scripts).
+ * The log attributes of a credential event: the pool's name and the event's
+ * index, count and stale facts, never a password. These names (and their
+ * value grammars) are reviewed for the public telemetry boundary in
+ * `@opengeni/observability`, which drops any other key from external logs.
+ */
+export function databaseCredentialEventAttributes(
+  pool: string,
+  event: DatabaseCredentialEvent,
+  connection?: "pool" | "notifications",
+): Record<string, string | number | boolean> {
+  const databasePool = connection === "notifications" ? `${pool}-notifications` : pool;
+  switch (event.type) {
+    case "candidates_reloaded":
+      return { databasePool, credentialCandidates: event.candidates };
+    case "candidate_refused":
+      return {
+        databasePool,
+        credentialIndex: event.index,
+        credentialCandidates: event.candidates,
+        credentialStale: event.stale,
+      };
+    case "candidate_switched":
+      return {
+        databasePool,
+        credentialFromIndex: event.fromIndex,
+        credentialToIndex: event.toIndex,
+        credentialCandidates: event.candidates,
+      };
+    case "candidates_exhausted":
+      return {
+        databasePool,
+        credentialIndex: event.index,
+        credentialCandidates: event.candidates,
+      };
+    case "password_file_unreadable":
+      return { databasePool, credentialFile: event.file, credentialFileErrorCode: event.code };
+  }
+}
+
+/**
+ * One content-free log line per event: the message and
+ * {@link databaseCredentialEventAttributes}. Refusals are logged too (their
+ * number is bounded by the logins in flight when the password changes).
+ * Defaults to `console.warn`, for processes without structured logging (CLIs,
+ * scripts).
  */
 export function logDatabaseCredentialEvent(
   pool: string,
-  log: (message: string, attributes: Record<string, string | number>) => void = (
+  log: (message: string, attributes: Record<string, string | number | boolean>) => void = (
     message,
     attributes,
   ) => console.warn(`[database] ${message}`, attributes),
 ): DatabaseCredentialEventListener {
   return (event, connection) => {
-    if (event.type === "candidate_refused") return;
-    const { type: _type, ...facts } = event;
-    log(databaseCredentialEventMessage(event), {
-      pool: connection === "notifications" ? `${pool}-notifications` : pool,
-      ...facts,
-    });
+    log(
+      databaseCredentialEventMessage(event),
+      databaseCredentialEventAttributes(pool, event, connection),
+    );
+  };
+}
+
+/**
+ * Prometheus counters of credential events, labelled by pool (`pool`, with a
+ * `-notifications` suffix for a LISTEN connection) and candidate index, never
+ * by a password. Indexes are positions in the candidate list: 0 is the current
+ * file (or the URL password), 1 the previous file.
+ */
+export const DATABASE_CREDENTIAL_METRICS = {
+  /** Labels: pool, index (the refused login's candidate), refusal ("stale" | "fresh"). */
+  refusals: {
+    name: "opengeni_database_credential_refusals_total",
+    help: "Database logins refused with 28P01, by pool, the login's candidate index and whether the pool had already moved past it (stale).",
+  },
+  /** Labels: pool, from_index, to_index. */
+  switches: {
+    name: "opengeni_database_credential_switches_total",
+    help: "Database pools that moved to the next password candidate after a fresh 28P01, by pool.",
+  },
+  /** Labels: pool, index (the selected candidate when the operation gave up). */
+  exhaustions: {
+    name: "opengeni_database_credential_exhaustions_total",
+    help: "Database operations whose 28P01 surfaced after every password candidate was refused, by pool.",
+  },
+  /** Labels: pool, candidates (how many passwords the reloaded files offer). */
+  reloads: {
+    name: "opengeni_database_credential_reloads_total",
+    help: "Database password file changes a pool picked up, by pool and candidate count.",
+  },
+} as const;
+
+/** The part of an `Observability` that {@link observeDatabaseCredentialEvents} uses. */
+export type DatabaseCredentialObserver = {
+  warn(message: string, attributes: Record<string, string | number | boolean>): void;
+  incrementCounter(input: { name: string; help?: string; labels?: Record<string, string> }): void;
+};
+
+function databaseCredentialEventCounter(
+  pool: string,
+  event: DatabaseCredentialEvent,
+): { name: string; help: string; labels: Record<string, string> } | null {
+  switch (event.type) {
+    case "candidate_refused":
+      return {
+        ...DATABASE_CREDENTIAL_METRICS.refusals,
+        labels: { pool, index: String(event.index), refusal: event.stale ? "stale" : "fresh" },
+      };
+    case "candidate_switched":
+      return {
+        ...DATABASE_CREDENTIAL_METRICS.switches,
+        labels: { pool, from_index: String(event.fromIndex), to_index: String(event.toIndex) },
+      };
+    case "candidates_exhausted":
+      return {
+        ...DATABASE_CREDENTIAL_METRICS.exhaustions,
+        labels: { pool, index: String(event.index) },
+      };
+    case "candidates_reloaded":
+      return {
+        ...DATABASE_CREDENTIAL_METRICS.reloads,
+        labels: { pool, candidates: String(event.candidates) },
+      };
+    case "password_file_unreadable":
+      return null;
+  }
+}
+
+/**
+ * Logs every credential event through `observability.warn` (see
+ * {@link logDatabaseCredentialEvent}) and counts refusals, switches,
+ * exhaustions and reloads ({@link DATABASE_CREDENTIAL_METRICS}). An observer
+ * failure never reaches the pool.
+ */
+export function observeDatabaseCredentialEvents(
+  pool: string,
+  observability: DatabaseCredentialObserver,
+): DatabaseCredentialEventListener {
+  const log = logDatabaseCredentialEvent(pool, (message, attributes) =>
+    observability.warn(message, attributes),
+  );
+  return (event, connection) => {
+    try {
+      const counter = databaseCredentialEventCounter(
+        connection === "notifications" ? `${pool}-notifications` : pool,
+        event,
+      );
+      if (counter) observability.incrementCounter(counter);
+    } catch {
+      // Metrics are best effort.
+    }
+    try {
+      log(event, connection);
+    } catch {
+      // Logging is best effort.
+    }
   };
 }
 
