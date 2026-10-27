@@ -87,7 +87,8 @@ e2e(
       expect(await evaluate("keys")).toEqual(["Escape"]);
 
       // Function and navigation keys reach the page with their standard
-      // names, including the common short spellings.
+      // names, including the common short spellings. A modifier goes down as
+      // its own key first, as a person presses it.
       await evaluate(
         'globalThis.codes=[];document.addEventListener("keydown",e=>codes.push([e.key,e.code,e.keyCode,e.ctrlKey]))',
       );
@@ -105,6 +106,7 @@ e2e(
         ["PageUp", "PageUp", 33, false],
         ["PageDown", "PageDown", 34, false],
         ["Insert", "Insert", 45, false],
+        ["Control", "ControlLeft", 17, true],
         ["F5", "F5", 116, true],
       ]);
       await evaluate("globalThis.keys=['Escape']");
@@ -208,6 +210,119 @@ e2e(
         )
       ).result.value;
       expect(value).toBe("BIJJL4Q4J");
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "typed keys reach a canvas that reads physical keys, and inserted text is not lost on it",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-canvas-keys-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    // Like a remote-desktop viewer that forwards scancodes: the canvas reads
+    // only which physical key went down and whether a Shift key is held, and
+    // the remote side turns that into a character on a US layout.
+    const script = `
+      const plain = "1234567890-=[]\\\\;',./\`";
+      const shifted = '!@#$%^&*()_+{}|:"<>?~';
+      const codes = ["Digit1","Digit2","Digit3","Digit4","Digit5","Digit6","Digit7","Digit8","Digit9","Digit0","Minus","Equal","BracketLeft","BracketRight","Backslash","Semicolon","Quote","Comma","Period","Slash","Backquote"];
+      const screen = document.querySelector("canvas");
+      globalThis.remote = ""; globalThis.downs = [];
+      let shift = false;
+      screen.addEventListener("keyup", (e) => { if (e.code.startsWith("Shift")) shift = false; e.preventDefault(); });
+      screen.addEventListener("keydown", (e) => {
+        e.preventDefault();
+        downs.push(e.code);
+        if (e.code.startsWith("Shift")) { shift = true; return; }
+        if (e.code.startsWith("Key")) { const letter = e.code.slice(3); remote += shift ? letter : letter.toLowerCase(); return; }
+        if (e.code === "Space") { remote += " "; return; }
+        const index = codes.indexOf(e.code);
+        if (index >= 0) remote += (shift ? shifted : plain)[index];
+      });
+      screen.focus();`;
+    const fixture = `data:text/html,${encodeURIComponent(
+      `<!doctype html><title>Remote screen</title><canvas tabindex="0" width="320" height="200" aria-label="Remote screen"></canvas><input aria-label="Note"><script>${script}</script>`,
+    )}`;
+    try {
+      const initial = await driver.start(fixture);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const evaluate = async (expression: string) =>
+        (
+          await cdp!.send<{ result: { value: unknown } }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            { sessionId: attached.sessionId },
+          )
+        ).result.value;
+      const run = (action: BrowserActionCommand["action"]) =>
+        controller.run({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: initial.target.id,
+          expectedTargetGeneration: initial.target.targetGeneration,
+          expectedDocumentGeneration: initial.target.documentGeneration!,
+          expectedFrameId: initial.frameId!,
+          actor: { kind: "human", subjectId: "canvas-keys-fixture" },
+          observationMode: "none",
+          action,
+        });
+      expect(await evaluate("document.activeElement?.tagName")).toBe("CANVAS");
+
+      // Uppercase letters and shifted symbols need Shift held on their key.
+      const text = `Hello World 1! aB@#$%^&*()_+{}|:"<>?~ -=[]\\;',./\``;
+      const typed = await run({ type: "type", text, mode: "keys" });
+      expect(typed.state).toBe("completed");
+      expect(await evaluate("remote")).toBe(text);
+
+      // A key combination presses its modifier first.
+      await evaluate("downs.length = 0");
+      expect((await run({ type: "press", key: "Ctrl+A" })).state).toBe("completed");
+      expect(await evaluate("downs")).toEqual(["ControlLeft", "KeyA"]);
+
+      // Inserted text has nowhere to go on a canvas: refuse it rather than
+      // report text that never arrived.
+      await evaluate('remote = ""; downs.length = 0');
+      const inserted = await run({ type: "type", text: "lost" });
+      expect(inserted.state).toBe("failed");
+      expect(inserted.error?.code).toBe("invalid_action");
+      expect(inserted.error?.message).toContain("mode:'keys'");
+      expect(await evaluate("downs.length")).toBe(0);
+
+      // A text field still takes inserted text.
+      const field = await run({
+        type: "type",
+        locator: { kind: "label", text: "Note" },
+        text: "Inserted Text!",
+      });
+      expect(field.state).toBe("completed");
+      expect(await evaluate('document.querySelector("input").value')).toBe("Inserted Text!");
     } finally {
       await cdp?.close();
       await driver.close();

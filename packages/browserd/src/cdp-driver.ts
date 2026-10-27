@@ -5852,6 +5852,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
           );
         }
+        if (
+          action.text &&
+          action.mode !== "keys" &&
+          this.engine !== "lightpanda" &&
+          (await this.evaluate(state, TEXT_INSERT_TARGET_EXPRESSION)) === false
+        ) {
+          // Chromium drops inserted text without any event when the focused
+          // element is not a text field (a canvas, a button, the page
+          // itself), so the action would report text that never arrived.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            TYPE_INSERT_NO_TEXT_FIELD_MESSAGE,
+          );
+        }
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
@@ -8149,6 +8163,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async pressKey(state: TargetState, key: ParsedKey): Promise<void> {
+    // Each modifier goes down as its own key first and comes up last, as a
+    // person presses it: pages that track physical keys (remote-desktop
+    // viewers sending scancodes) only see a modifier that was pressed.
+    const modifiers = MODIFIER_KEYS.filter((modifier) => (key.modifiers & modifier.bit) !== 0);
+    let held = 0;
+    for (const modifier of modifiers) {
+      held |= modifier.bit;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: modifier.key,
+        code: modifier.code,
+        modifiers: held,
+        windowsVirtualKeyCode: modifier.keyCode,
+        location: 1,
+      });
+    }
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyDown",
       key: key.key,
@@ -8167,6 +8197,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       modifiers: key.modifiers,
       windowsVirtualKeyCode: key.keyCode,
     });
+    for (const modifier of [...modifiers].reverse()) {
+      held &= ~modifier.bit;
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: modifier.key,
+        code: modifier.code,
+        modifiers: held,
+        windowsVirtualKeyCode: modifier.keyCode,
+        location: 1,
+      });
+    }
   }
 
   private async dragNodes(
@@ -9929,7 +9970,49 @@ type ParsedKey = {
   text: string;
 };
 
-/** A literal character as one key press (typed with `type.mode: "keys"`). */
+// The keys of a US keyboard that give printable ASCII characters other than
+// letters and digits, as [unshifted, shifted, code, Windows virtual key code].
+const US_SYMBOL_KEYS: readonly (readonly [string, string, string, number])[] = [
+  ["1", "!", "Digit1", 49],
+  ["2", "@", "Digit2", 50],
+  ["3", "#", "Digit3", 51],
+  ["4", "$", "Digit4", 52],
+  ["5", "%", "Digit5", 53],
+  ["6", "^", "Digit6", 54],
+  ["7", "&", "Digit7", 55],
+  ["8", "*", "Digit8", 56],
+  ["9", "(", "Digit9", 57],
+  ["0", ")", "Digit0", 48],
+  ["`", "~", "Backquote", 192],
+  ["-", "_", "Minus", 189],
+  ["=", "+", "Equal", 187],
+  ["[", "{", "BracketLeft", 219],
+  ["]", "}", "BracketRight", 221],
+  ["\\", "|", "Backslash", 220],
+  [";", ":", "Semicolon", 186],
+  ["'", '"', "Quote", 222],
+  [",", "<", "Comma", 188],
+  [".", ">", "Period", 190],
+  ["/", "?", "Slash", 191],
+];
+
+const US_SYMBOL_KEY_BY_CHARACTER = new Map<
+  string,
+  { code: string; keyCode: number; shift: boolean }
+>(
+  US_SYMBOL_KEYS.flatMap(([plain, shifted, code, keyCode]) => [
+    [plain, { code, keyCode, shift: false }],
+    [shifted, { code, keyCode, shift: true }],
+  ]),
+);
+
+const SHIFT_MODIFIER = 8;
+
+/** A literal character as one key press (typed with `type.mode: "keys"`): the
+ * key a person presses for it on a US keyboard, with Shift held when that key
+ * needs it, so that pages reading physical keys and Shift (remote-desktop
+ * viewers) get the same character as pages reading the key's text. Other
+ * characters are sent as text with no physical key. */
 function characterKey(character: string): ParsedKey {
   if (character === "\n" || character === "\r") {
     return { key: "Enter", code: "Enter", keyCode: 13, modifiers: 0, text: "\r" };
@@ -9950,12 +10033,30 @@ function characterKey(character: string): ParsedKey {
       key: character,
       code: `Key${upper}`,
       keyCode: upper.charCodeAt(0),
-      modifiers: 0,
+      modifiers: character === upper ? SHIFT_MODIFIER : 0,
+      text: character,
+    };
+  }
+  const symbol = US_SYMBOL_KEY_BY_CHARACTER.get(character);
+  if (symbol) {
+    return {
+      key: character,
+      code: symbol.code,
+      keyCode: symbol.keyCode,
+      modifiers: symbol.shift ? SHIFT_MODIFIER : 0,
       text: character,
     };
   }
   return { key: character, code: "", keyCode: 0, modifiers: 0, text: character };
 }
+
+// The modifier keys behind the CDP modifier bits, in the order they go down.
+const MODIFIER_KEYS: readonly { bit: number; key: string; code: string; keyCode: number }[] = [
+  { bit: 2, key: "Control", code: "ControlLeft", keyCode: 17 },
+  { bit: 1, key: "Alt", code: "AltLeft", keyCode: 18 },
+  { bit: 4, key: "Meta", code: "MetaLeft", keyCode: 91 },
+  { bit: SHIFT_MODIFIER, key: "Shift", code: "ShiftLeft", keyCode: 16 },
+];
 
 /** Replace `{{secret:…}}` references with the controller-private values right
  * before dispatch. The returned command no longer carries the side map, so
@@ -11377,6 +11478,29 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
   }
   return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
 }`;
+
+const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
+  "no text field is focused, so inserted text would not arrive and nothing was typed; focus a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
+
+/** Whether inserted text can reach the focused element: true for a text
+ * field or editable content, false for an element that takes no text (the
+ * page itself, a canvas, a button), null when focus is inside a frame, a
+ * plugin or a closed shadow root that this document cannot see. */
+const TEXT_INSERT_TARGET_EXPRESSION = `(() => { try {
+  let element = document.activeElement;
+  while (element && element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+  if (document.designMode === "on") return true;
+  if (!(element instanceof Element)) return false;
+  if (element.isContentEditable) return true;
+  if (element === document.body || element === document.documentElement) return false;
+  const tag = element.localName;
+  if (tag === "textarea") return true;
+  if (tag === "input") return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(element.type);
+  if (["iframe", "frame", "object", "embed"].includes(tag) || tag.includes("-")) return null;
+  // An element focused in its own right takes no text. A shadow host focused
+  // for a field inside its closed shadow root is not focusable itself.
+  return element.tabIndex >= 0 || element.hasAttribute("tabindex") ? false : null;
+} catch { return null; } })()`;
 
 const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
   const element = document.activeElement;
