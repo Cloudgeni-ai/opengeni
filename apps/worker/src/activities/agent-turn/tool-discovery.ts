@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { recordUsageEvent, type Database } from "@opengeni/db";
+import { recordUsageEvent, type Database, type UsageEventProcessingResidency } from "@opengeni/db";
 import type { DecisionUsage, DecisionModel } from "@opengeni/decisions";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 import { configuredDecisionModel } from "./decision-model";
@@ -48,6 +48,8 @@ export async function recordToolDecisionUsage(input: {
   modelId: string;
   usage: DecisionUsage;
   requestId: string;
+  /** Where the decision model processed the call (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency | null;
 }): Promise<void> {
   const entries = [
     ["input_tokens", input.usage.inputTokens, "tokens"],
@@ -73,6 +75,7 @@ export async function recordToolDecisionUsage(input: {
       quantity,
       unit,
       idempotencyKey: `usage:tool_discovery:${category}:${input.turnAttemptId}:${identity}`,
+      ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
     });
   }
 }

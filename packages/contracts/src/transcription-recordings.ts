@@ -18,6 +18,8 @@ export const TranscriptionRecordingErrorCode = /* @__PURE__ */ defineSchema(() =
     "insufficient_credits",
     "allowance_exhausted",
     "monthly_model_cost_limit",
+    /** The workspace is EU-only and no speech-to-text route here is EU. */
+    "region_restricted",
   ]),
 );
 export type TranscriptionRecordingErrorCode = z.infer<typeof TranscriptionRecordingErrorCode>;

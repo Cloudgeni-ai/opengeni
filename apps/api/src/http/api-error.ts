@@ -16,6 +16,7 @@ import {
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
 } from "@opengeni/core";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -56,6 +57,22 @@ export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError
         details: result.data,
       })
     : null;
+}
+
+/**
+ * EU-only inference refused a model-backed feature with no EU route: 422 with
+ * `details.code: "region_restricted"`, the same code every availability field
+ * reports for it.
+ */
+export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof InferenceRegionRestrictedError)) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: error.code },
+  });
 }
 
 /** Preserve typed admission details through the common public error envelope. */

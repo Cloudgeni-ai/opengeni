@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { TranscriptionServiceError } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
@@ -7,6 +7,15 @@ import {
   orderedProviders,
   remainingTranscriptionProviderRequestMilliseconds,
 } from "@opengeni/core/transcription-service";
+
+// These tests use fake databases; the workspace's EU-only setting is off.
+let euOnlySpy: ReturnType<typeof spyOn<typeof dbModule, "isWorkspaceEuOnly">> | undefined;
+beforeEach(() => {
+  euOnlySpy = spyOn(dbModule, "isWorkspaceEuOnly").mockResolvedValue(false);
+});
+afterEach(() => {
+  euOnlySpy?.mockRestore();
+});
 
 const audio = new Uint8Array([1, 2, 3]);
 

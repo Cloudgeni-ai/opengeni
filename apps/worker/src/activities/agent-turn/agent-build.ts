@@ -90,6 +90,13 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
 import {
+  decisionModelProcessingResidency,
+  gateImageGenerationOption,
+  gateVideoGenerationOption,
+  imageGenerationRoute,
+  videoGenerationRoute,
+} from "./side-feature-gates";
+import {
   attemptQuestionVaultValidator,
   createAttemptSecretResolver,
   secretsCapabilityEnabled,
@@ -296,7 +303,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         return Uint8Array.from(Buffer.from(read.content, "base64"));
       },
     });
-  const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
+  const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
@@ -505,6 +512,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
+  const imageGenerationOption = gateImageGenerationOption(
+    runSettings,
+    imageGenerationRoute({
+      nativeHosted: Boolean(nativeImageProviderBinding),
+      providerKind: resolvedModel?.provider.kind,
+    }),
+    unrestrictedImageGenerationOption,
+  );
   const videoGenerationEnabled =
     videoGenerationPolicy.defaultModelId !== null &&
     videoGenerationPolicy.enabledModelIds.length > 0;
@@ -553,7 +568,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       }
     }
   }
-  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
+  const unrestrictedVideoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
     if (
       !objectStorage ||
       eventing.modelRunSettings.sandboxBackend === "none" ||
@@ -631,6 +646,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
+  const videoGenerationOption = gateVideoGenerationOption(
+    runSettings,
+    videoGenerationRoute(videoGenerationPolicy.fundingSource),
+    unrestrictedVideoGenerationOption,
+  );
   const serviceTier = serviceTierForLatencyMode(
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
@@ -894,6 +914,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               modelId,
               usage,
               requestId,
+              processingResidency: decisionModelProcessingResidency(runSettings),
             }),
         }),
         ...(eventing.toolPreparationReady

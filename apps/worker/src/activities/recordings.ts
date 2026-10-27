@@ -603,6 +603,16 @@ export function createRecordingActivities(
         if (!found.spec.capabilities.wordTimestamps && !aligner) {
           throw new PermanentRecordingFailure("model_unavailable");
         }
+        // EU-only: a provider without an EU route never receives the audio,
+        // and the job never moves to another provider.
+        if (
+          !(await deployment.regionAllowed(job.version.providerId, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }))
+        ) {
+          throw new PermanentRecordingFailure("region_restricted");
+        }
         const resolved = await deployment.credentials(job.version.providerId, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,

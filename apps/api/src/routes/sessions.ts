@@ -324,6 +324,7 @@ import {
   SelfhostedSession,
   usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -512,6 +513,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
     if (error instanceof TranscriptionBillingRefusedError) {
       return transcriptionBillingRefusal(c, error);
+    }
+    if (error instanceof InferenceRegionRestrictedError) {
+      return c.json(
+        {
+          error: {
+            status: 422,
+            code: error.code,
+            message: error.message,
+            retryable: false,
+          },
+        },
+        422,
+      );
     }
     if (error instanceof RealtimeVoiceUnavailableError) {
       return c.json(
@@ -1906,7 +1920,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               connectionId: claim.connection.id,
               operationId,
               connectionEpoch: claim.connection.connectionEpoch,
-              failureCode: "billing_refused",
+              failureCode:
+                error instanceof InferenceRegionRestrictedError ? error.code : "billing_refused",
             }),
           ),
         ).catch(() => undefined);
@@ -2154,10 +2169,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               failureCode:
                 error instanceof RealtimeWebsocketBrokerError
                   ? error.code
-                  : error instanceof TranscriptionBillingRefusedError ||
-                      error instanceof RealtimeVoiceUnavailableError
-                    ? "billing_refused"
-                    : `${provider?.id ?? "websocket"}_error`,
+                  : error instanceof InferenceRegionRestrictedError
+                    ? error.code
+                    : error instanceof TranscriptionBillingRefusedError ||
+                        error instanceof RealtimeVoiceUnavailableError
+                      ? "billing_refused"
+                      : `${provider?.id ?? "websocket"}_error`,
             }),
           ),
         ).catch(() => undefined);

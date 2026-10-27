@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   signDelegatedAccessToken,
   TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS,
@@ -17,6 +17,15 @@ import * as dbModule from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+
+// These tests use fake databases; the workspace's EU-only setting is off.
+let euOnlySpy: ReturnType<typeof spyOn<typeof dbModule, "isWorkspaceEuOnly">> | undefined;
+beforeEach(() => {
+  euOnlySpy = spyOn(dbModule, "isWorkspaceEuOnly").mockResolvedValue(false);
+});
+afterEach(() => {
+  euOnlySpy?.mockRestore();
+});
 
 const SECRET = "test-delegation-secret";
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";

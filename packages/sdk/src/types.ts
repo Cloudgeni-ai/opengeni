@@ -4376,6 +4376,7 @@ export type ModelAvailabilityV1 = {
     | "policy_blocked"
     | "unsupported"
     | "credits_disabled"
+    | "region_restricted"
     | null;
   checkedAt: string | null;
 };
@@ -5630,7 +5631,8 @@ export type TranscriptionRecordingErrorCode =
   | "unknown"
   | "insufficient_credits"
   | "allowance_exhausted"
-  | "monthly_model_cost_limit";
+  | "monthly_model_cost_limit"
+  | "region_restricted";
 
 export type TranscriptionRecordingState =
   | "uploading"

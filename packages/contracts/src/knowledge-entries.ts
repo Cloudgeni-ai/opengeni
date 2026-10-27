@@ -387,6 +387,8 @@ export const KnowledgeEntryListResponse = /* @__PURE__ */ defineSchema(() =>
         "quota",
         "provider_unavailable",
         "query_limit",
+        // The workspace is EU-only and the embedding route is not EU.
+        "region_restricted",
       ])
       .optional(),
   }),

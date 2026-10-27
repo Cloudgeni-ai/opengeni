@@ -13442,10 +13442,12 @@
         "$.firstPartyMcpTools.allowed[]": "ref(FirstPartyMcpToolName)",
         "$.firstPartyMcpTools.default": "array!",
         "$.firstPartyMcpTools.default[]": "ref(FirstPartyMcpToolName)",
+        "$.inferenceFeatures": "array?",
+        "$.inferenceFeatures[]": "ref(InferenceFeatureAvailability)",
         "$.legacyModelFallback": "object?",
         "$.legacyModelFallback.availability": "object!",
         "$.legacyModelFallback.availability.checkedAt": "string! null",
-        "$.legacyModelFallback.availability.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.legacyModelFallback.availability.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"region_restricted\\\"\",\"\\\"unsupported\\\"\"]",
         "$.legacyModelFallback.availability.selectable": "const!=[\"false\"]",
         "$.legacyModelFallback.availability.status": "const!=[\"\\\"unavailable\\\"\"]",
         "$.legacyModelFallback.id": "string!",
@@ -18572,6 +18574,25 @@
         "$.metric": "string!"
       }
     },
+    "InferenceFeatureAvailability": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.id": "ref(InferenceFeatureId)!",
+        "$.unavailableReason": "enum! null=[\"\\\"region_restricted\\\"\"]"
+      }
+    },
+    "InferenceFeatureId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"code_search\\\"\",\"\\\"image_generation\\\"\",\"\\\"knowledge_embeddings\\\"\",\"\\\"meeting_transcription\\\"\",\"\\\"realtime_voice\\\"\",\"\\\"video_generation\\\"\",\"\\\"voice_input\\\"\",\"\\\"web_search\\\"\"]"
+      }
+    },
     "InlineOpenApiDocumentSource": {
       "io": [
         "input"
@@ -19868,7 +19889,7 @@
         "$": "object",
         "$.entries": "array!",
         "$.entries[]": "ref(KnowledgeEntrySummary)",
-        "$.fallbackReason": "enum?=[\"\\\"awaiting_funding\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"provider_unavailable\\\"\",\"\\\"query_limit\\\"\",\"\\\"quota\\\"\"]",
+        "$.fallbackReason": "enum?=[\"\\\"awaiting_funding\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"provider_unavailable\\\"\",\"\\\"query_limit\\\"\",\"\\\"quota\\\"\",\"\\\"region_restricted\\\"\"]",
         "$.nextCursor": "string! null",
         "$.searchMode": "enum?=[\"\\\"hybrid\\\"\",\"\\\"keyword\\\"\",\"\\\"vector\\\"\"]"
       }
@@ -21458,7 +21479,7 @@
       "shape": {
         "$": "object",
         "$.checkedAt": "string! null",
-        "$.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"credits_disabled\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"region_restricted\\\"\",\"\\\"unsupported\\\"\"]",
         "$.selectable": "boolean!",
         "$.status": "enum!=[\"\\\"available\\\"\",\"\\\"degraded\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
@@ -24391,6 +24412,7 @@
         "$.name": "string!",
         "$.providerId": "string!",
         "$.providerName": "string!",
+        "$.unavailableReason": "enum? null=[\"\\\"region_restricted\\\"\"]",
         "$.usdPerHour": "number! null"
       }
     },
@@ -31299,7 +31321,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"allowance_exhausted\\\"\",\"\\\"cancelled\\\"\",\"\\\"insufficient_credits\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"monthly_model_cost_limit\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
+        "$": "enum=[\"\\\"allowance_exhausted\\\"\",\"\\\"cancelled\\\"\",\"\\\"insufficient_credits\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"monthly_model_cost_limit\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"region_restricted\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "VoiceInputProviderId": {

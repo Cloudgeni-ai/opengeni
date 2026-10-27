@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import {
+  isEuResidency,
   resolveWorkspaceSessionDefaults,
   type OrganizationModelDefaults,
   type WorkspaceSessionDefaults,
@@ -10,6 +11,7 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveWorkspaceModelSelection,
   selectDefaultSessionModel,
+  settingsWithInferenceResidency,
   type WorkspaceModelSelection,
 } from "@opengeni/core";
 import { getOrganizationModelDefaults, getWorkspace, type Database } from "@opengeni/db";
@@ -78,8 +80,12 @@ export function siteOutsideModelChoice(input: {
       .model;
   // Always the concrete model: a session created without one would take the
   // workspace's ordinary default, which may be a subscription.
-  // The fallback is paid with credits, as the publish dialog says.
-  const credited = input.selections.filter((selection) => selection.model.cost === "credits");
+  // The fallback is paid with credits, as the publish dialog says. In an
+  // EU-only workspace both the model and its fallback must have an EU
+  // residency record; there is no fallback outside the EU.
+  const credited = regionEligibleSelections(input.settings, input.selections).filter(
+    (selection) => selection.model.cost === "credits",
+  );
   if (
     admissibleWorkspaceModel(credited, chosen) &&
     !isSubscriptionBilledModel(input.selections, chosen)
@@ -94,6 +100,16 @@ export function siteOutsideModelChoice(input: {
     !isSubscriptionBilledModel(input.selections, fallback)
     ? { kind: "fallback", model: fallback }
     : { kind: "unavailable" };
+}
+
+/** Under EU-only inference, only selections whose route is EU by its residency record. */
+function regionEligibleSelections(
+  settings: Pick<Settings, "requiredModelGeography">,
+  selections: readonly WorkspaceModelSelection[],
+): readonly WorkspaceModelSelection[] {
+  return settings.requiredModelGeography === "eu"
+    ? selections.filter((selection) => isEuResidency(selection.model.residency))
+    : selections;
 }
 
 /** Actual catalog billing, not just provider-name heuristics, fences every admission. */
@@ -117,7 +133,11 @@ export async function siteCreditModelSelections(
     ...scope,
     subjectId: `site:${siteId}`,
   });
-  return resolveWorkspaceModelSelection(input).filter(
+  const residency = await settingsWithInferenceResidency(deps.db, {
+    ...scope,
+    settings: input.settings,
+  });
+  return regionEligibleSelections(residency, resolveWorkspaceModelSelection(input)).filter(
     (selection) =>
       selection.model.cost === "credits" &&
       admissibleWorkspaceModel([selection], selection.model.id),
@@ -141,7 +161,10 @@ export async function resolveSiteOutsideModel(
     getOrganizationModelDefaults(deps.db, scope.accountId),
   ]);
   return siteOutsideModelChoice({
-    settings: selectionInput.settings,
+    settings: await settingsWithInferenceResidency(deps.db, {
+      ...scope,
+      settings: selectionInput.settings,
+    }),
     selections: resolveWorkspaceModelSelection(selectionInput),
     agentModel: input.agentModel,
     workspaceDefaults: resolveWorkspaceSessionDefaults(workspace?.settings ?? {}),

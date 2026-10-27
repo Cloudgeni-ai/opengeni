@@ -1,7 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { euModelRoutes, type Settings } from "@opengeni/config";
-import { modelEndpointDeployment } from "@opengeni/contracts";
+import {
+  euModelRoutes,
+  sideFeatureRouteFeatures,
+  sideFeatureRouteIsEu,
+  type SideFeatureResidencySettings,
+  type SideFeatureRouteId,
+  type Settings,
+} from "@opengeni/config";
+import { modelEndpointDeployment, type InferenceFeatureId } from "@opengeni/contracts";
 
 import { replayableJsonBodySource } from "./replayable-json-body";
 
@@ -18,12 +25,87 @@ import { replayableJsonBodySource } from "./replayable-json-body";
 
 export class InferenceRegionRestrictedError extends Error {
   readonly code = "region_restricted";
-  constructor(readonly modelName: string) {
+  constructor(
+    readonly modelName: string,
+    message?: string,
+  ) {
     super(
-      `Model "${modelName}" is not supported in EU. This workspace only uses models that process data in the EU; pick an EU model.`,
+      message ??
+        `Model "${modelName}" is not supported in EU. This workspace only uses models that process data in the EU; pick an EU model.`,
     );
     this.name = "InferenceRegionRestrictedError";
   }
+}
+
+const INFERENCE_FEATURE_LABELS: Record<InferenceFeatureId, string> = {
+  web_search: "Web search",
+  image_generation: "Image generation",
+  video_generation: "Video generation",
+  realtime_voice: "Live voice",
+  voice_input: "Voice input",
+  meeting_transcription: "Transcription",
+  knowledge_embeddings: "Semantic Knowledge search",
+  code_search: "Code search",
+};
+
+/** The refusal for a side feature that has no EU route. */
+export function sideFeatureRegionRestrictedError(
+  feature: InferenceFeatureId,
+): InferenceRegionRestrictedError {
+  return new InferenceRegionRestrictedError(
+    feature,
+    `${INFERENCE_FEATURE_LABELS[feature]} is not supported in EU.`,
+  );
+}
+
+/**
+ * Whether a side-feature call must run on an EU route: the settings carry the
+ * EU requirement, or the run's context is EU or not yet resolved.
+ */
+export function sideFeatureRequiresEu(settings: SideFeatureResidencySettings): boolean {
+  if (settings.requiredModelGeography === "eu") return true;
+  // Every enclosing context counts: unresolved anywhere, or EU anywhere.
+  const context = currentInferenceResidency();
+  return context !== undefined && (!context.resolved || context.requirement !== null);
+}
+
+/**
+ * Refuse a side-feature call on a route that may not run here, before any
+ * byte is sent. Under EU only a route whose residency record is EU passes;
+ * nothing falls back to another route.
+ */
+export function assertSideFeatureRoute(
+  settings: SideFeatureResidencySettings,
+  route: SideFeatureRouteId,
+  feature: InferenceFeatureId = sideFeatureRouteFeatures(route)[0]!,
+): void {
+  if (sideFeatureRequiresEu(settings) && !sideFeatureRouteIsEu(settings, route)) {
+    throw sideFeatureRegionRestrictedError(feature);
+  }
+}
+
+/**
+ * A transport for a side-feature provider adapter that checks the route
+ * before every request, so nothing is sent on a route that may not run here
+ * even when the adapter was built earlier.
+ */
+export function sideFeatureRouteFetch(
+  settings: SideFeatureResidencySettings,
+  route: SideFeatureRouteId,
+  inner: typeof fetch = globalThis.fetch,
+): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    assertSideFeatureRoute(settings, route);
+    return await inner(input, init);
+  }) as typeof fetch;
+}
+
+/** Whether a side-feature call may use this route now (the non-throwing form). */
+export function sideFeatureRouteRunnable(
+  settings: SideFeatureResidencySettings,
+  route: SideFeatureRouteId,
+): boolean {
+  return !sideFeatureRequiresEu(settings) || sideFeatureRouteIsEu(settings, route);
 }
 
 /**
@@ -150,19 +232,62 @@ export function currentInferenceResidency(): InferenceResidencyContext | undefin
   return effective;
 }
 
-function modelOf(value: unknown): string | null {
-  return value !== null &&
-    typeof value === "object" &&
-    typeof (value as { model?: unknown }).model === "string"
-    ? (value as { model: string }).model
-    : null;
+/** What the guard reads from a model request body. */
+type RequestBodyFacts = {
+  model: string | null;
+  /**
+   * Provider-hosted tools the request asks the provider to run (search,
+   * image generation, code execution): their side-feature route, or null for
+   * a hosted tool with no residency record. Function tools run here and are
+   * not listed.
+   */
+  hostedTools: { type: string; route: SideFeatureRouteId | null }[];
+};
+
+/** The side-feature route of a provider-hosted tool type, by the provider's wire type. */
+function hostedToolRoute(type: string): SideFeatureRouteId | null | undefined {
+  // OpenAI and Azure `web_search`/`web_search_preview*`, Anthropic
+  // `web_search_*`/`web_fetch_*`, SuperGrok `x_search`.
+  if (type.startsWith("web_search") || type.startsWith("web_fetch") || type === "x_search") {
+    return "web_search.hosted";
+  }
+  if (type === "image_generation") return "image_generation.openai_hosted";
+  // Hosted execution and retrieval run on the provider's own services.
+  if (
+    type === "code_interpreter" ||
+    type.startsWith("code_execution") ||
+    type === "file_search" ||
+    type === "mcp"
+  ) {
+    return null;
+  }
+  // Function and client-executed tools run here.
+  return undefined;
 }
 
-function modelFromJsonText(text: string): string | null {
+function bodyFacts(value: unknown): RequestBodyFacts {
+  if (value === null || typeof value !== "object") return { model: null, hostedTools: [] };
+  const body = value as { model?: unknown; tools?: unknown };
+  const hostedTools: RequestBodyFacts["hostedTools"] = [];
+  for (const tool of Array.isArray(body.tools) ? (body.tools as unknown[]) : []) {
+    const type =
+      tool !== null && typeof tool === "object" ? (tool as { type?: unknown }).type : undefined;
+    if (typeof type !== "string") continue;
+    const route = hostedToolRoute(type);
+    if (route !== undefined) hostedTools.push({ type, route });
+  }
+  // Chat Completions search models and SuperGrok live search are hosted search too.
+  if ("web_search_options" in body || "search_parameters" in body) {
+    hostedTools.push({ type: "web_search_options", route: "web_search.hosted" });
+  }
+  return { model: typeof body.model === "string" ? body.model : null, hostedTools };
+}
+
+function factsFromJsonText(text: string): RequestBodyFacts {
   try {
-    return modelOf(JSON.parse(text) as unknown);
+    return bodyFacts(JSON.parse(text) as unknown);
   } catch {
-    return null;
+    return { model: null, hostedTools: [] };
   }
 }
 
@@ -171,29 +296,29 @@ function modelFromJsonText(text: string): string | null {
  * request) is read from the object it encodes, without consuming or buffering
  * it; any other stream is read from a tee without consuming what is sent.
  */
-async function requestBodyModel(
+async function requestBodyFacts(
   input: Parameters<typeof fetch>[0],
   init: RequestInit | undefined,
-): Promise<{ model: string | null; init: RequestInit | undefined }> {
+): Promise<RequestBodyFacts & { init: RequestInit | undefined }> {
   const body = init?.body;
-  if (typeof body === "string") return { model: modelFromJsonText(body), init };
+  if (typeof body === "string") return { ...factsFromJsonText(body), init };
   const replayable = replayableJsonBodySource(body);
-  if (replayable) return { model: modelOf(replayable.source), init };
+  if (replayable) return { ...bodyFacts(replayable.source), init };
   if (body instanceof Uint8Array) {
-    return { model: modelFromJsonText(new TextDecoder().decode(body)), init };
+    return { ...factsFromJsonText(new TextDecoder().decode(body)), init };
   }
   if (body instanceof ArrayBuffer) {
-    return { model: modelFromJsonText(new TextDecoder().decode(new Uint8Array(body))), init };
+    return { ...factsFromJsonText(new TextDecoder().decode(new Uint8Array(body))), init };
   }
   if (body instanceof ReadableStream) {
     const [sent, inspected] = body.tee();
     const text = await new Response(inspected).text();
-    return { model: modelFromJsonText(text), init: { ...init, body: sent } };
+    return { ...factsFromJsonText(text), init: { ...init, body: sent } };
   }
   if (body == null && input instanceof Request) {
-    return { model: modelFromJsonText(await input.clone().text()), init };
+    return { ...factsFromJsonText(await input.clone().text()), init };
   }
-  return { model: null, init };
+  return { model: null, hostedTools: [], init };
 }
 
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
@@ -242,7 +367,7 @@ export async function assertInferenceResidencyForRequest(
 ): Promise<RequestInit | undefined> {
   const context = contextRequirement();
   if (!context && !bound) return init;
-  const read = await requestBodyModel(input, init);
+  const read = await requestBodyFacts(input, init);
   if (context === "refuse") throw new InferenceRegionRestrictedError(read.model ?? providerId);
   const deployment = modelEndpointDeployment(requestUrl(input));
   for (const requirement of [bound, context]) {
@@ -253,6 +378,20 @@ export async function assertInferenceResidencyForRequest(
       (deployment !== null && !allowsRoute(requirement, providerId, deployment))
     ) {
       throw new InferenceRegionRestrictedError(read.model ?? (deployment || providerId));
+    }
+  }
+  // Under EU, a provider-hosted tool runs on the provider's own services (for
+  // Azure web search, Grounding with Bing outside the geo boundary), not on
+  // the model route: it needs its own EU record. Hosted-tool routes are
+  // code-owned, so no deployment declaration applies.
+  for (const tool of read.hostedTools) {
+    if (!tool.route || !sideFeatureRouteIsEu({}, tool.route)) {
+      throw tool.route
+        ? sideFeatureRegionRestrictedError(sideFeatureRouteFeatures(tool.route)[0]!)
+        : new InferenceRegionRestrictedError(
+            tool.type,
+            `Hosted tool "${tool.type}" is not supported in EU.`,
+          );
     }
   }
   return read.init;

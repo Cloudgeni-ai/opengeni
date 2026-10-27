@@ -153,6 +153,7 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
   const reconcile = spyOn(db, "reconcileUnsettledVoiceInputCharges").mockResolvedValue(
     undefined as never,
   );
+  const euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
   try {
     const settings = testSettings({
       billingMode: "stripe",
@@ -190,5 +191,6 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
   } finally {
     policy.mockRestore();
     reconcile.mockRestore();
+    euOnly.mockRestore();
   }
 });

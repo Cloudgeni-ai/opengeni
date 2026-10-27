@@ -113,6 +113,44 @@ describe("EU-only inference enforcement", () => {
     expect(sent).toHaveLength(1);
   });
 
+  test("under EU a hosted provider tool in the body is refused, even on an EU model route", async () => {
+    const { sent, inner } = recordingFetch();
+    const guarded = instrumentedModelFetch(
+      "azure-eu",
+      inner,
+      false,
+      inferenceResidencyRequirement(eu()),
+    );
+    const withTools = (tools: unknown[], extra: Record<string, unknown> = {}): RequestInit => ({
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-eu", input: "hi", tools, ...extra }),
+    });
+    // Function tools run here: allowed.
+    await guarded(URL_RESPONSES, withTools([{ type: "function", name: "lookup" }]));
+    // Hosted search (Grounding with Bing on Azure) and hosted image generation are not EU.
+    for (const tools of [
+      [{ type: "web_search" }],
+      [{ type: "web_search_preview" }],
+      [{ type: "web_search_20250305", name: "web_search" }],
+      [{ type: "image_generation" }],
+      // Hosted tools without any residency record are refused too.
+      [{ type: "code_interpreter" }],
+      [{ type: "mcp", server_url: "https://mcp.example.com" }],
+    ]) {
+      await expect(guarded(URL_RESPONSES, withTools(tools))).rejects.toThrow(
+        InferenceRegionRestrictedError,
+      );
+    }
+    await expect(guarded(URL_RESPONSES, withTools([], { web_search_options: {} }))).rejects.toThrow(
+      "Web search is not supported in EU.",
+    );
+    expect(sent).toHaveLength(1);
+    // Outside EU hosted tools pass as before.
+    const open = instrumentedModelFetch("azure-eu", inner, false, null);
+    await open(URL_RESPONSES, withTools([{ type: "web_search" }]));
+    expect(sent).toHaveLength(2);
+  });
+
   test("a non-model request with a body is refused under EU; reads pass", async () => {
     const { sent, inner } = recordingFetch();
     const guarded = instrumentedModelFetch(

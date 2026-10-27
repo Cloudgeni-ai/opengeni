@@ -42,7 +42,7 @@ export {
   type SingleModelCallTarget,
 } from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
-import { inferenceResidencyRequirement } from "./inference-residency";
+import { inferenceResidencyRequirement, sideFeatureRouteRunnable } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
@@ -703,10 +703,15 @@ export {
 } from "./model-provider";
 export {
   InferenceRegionRestrictedError,
+  assertSideFeatureRoute,
   currentInferenceResidency,
   findInferenceRegionRestrictedError,
   inferenceResidencyRequirement,
   resolveInferenceResidency,
+  sideFeatureRegionRestrictedError,
+  sideFeatureRequiresEu,
+  sideFeatureRouteFetch,
+  sideFeatureRouteRunnable,
   withInferenceResidency,
 } from "./inference-residency";
 export {
@@ -3181,12 +3186,20 @@ export function buildOpenGeniAgent(
   // resolved provider's api/window/web-search instead.
   const toolFamilies = resolveAgentToolFamilies(options.agentConfig, {
     hasSkills: (skillCatalog?.length ?? 0) > 0,
-    webSearch: options.hostedWebSearch ?? settings.webSearchEnabled,
+    // EU-only: hosted tools run on the provider's own backend, so they are
+    // attached only when their route's residency record allows it.
+    webSearch:
+      (options.hostedWebSearch ?? settings.webSearchEnabled) &&
+      sideFeatureRouteRunnable(settings, "web_search.hosted"),
     humanInput: options.humanInputEnabled !== false,
   });
   const hostedWebSearch = toolFamilies.webSearch;
   const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
-    image: options.imageGeneration?.kind ?? null,
+    image:
+      options.imageGeneration?.kind === "native_hosted" &&
+      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
+        ? null
+        : (options.imageGeneration?.kind ?? null),
     video: Boolean(options.videoGeneration),
   });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;

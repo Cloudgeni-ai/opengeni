@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Permission, signDelegatedAccessToken } from "@opengeni/contracts";
 import type { TranscriptionService } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { createTranscriptionService } from "@opengeni/core/transcription-service";
+
+// These tests use fake databases; the workspace's EU-only setting is off.
+let euOnlySpy: ReturnType<typeof spyOn<typeof dbModule, "isWorkspaceEuOnly">> | undefined;
+beforeEach(() => {
+  euOnlySpy = spyOn(dbModule, "isWorkspaceEuOnly").mockResolvedValue(false);
+});
+afterEach(() => {
+  euOnlySpy?.mockRestore();
+});
 
 const SECRET = "transcription-route-secret";
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";
@@ -127,7 +136,10 @@ describe("transcription routes", () => {
     });
   });
   test("returns the transcript even when settlement fails, billing only server facts", async () => {
-    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({
+      settings: {},
+      accountId: "account",
+    } as never);
     const settled: unknown[] = [];
     const logged: string[] = [];
     const transcription = createTranscriptionService({

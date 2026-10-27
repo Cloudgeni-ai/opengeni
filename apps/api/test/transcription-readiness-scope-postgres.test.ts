@@ -132,8 +132,9 @@ test("account hint removes only workspace hydration, not fresh provider queries"
     const newIds = await f.ids(f.context);
     const scopedQueries = statements;
     expect(newIds).toEqual(oldIds);
-    // Codex, Grok and the workspace-key provider each hydrate the workspace once.
-    expect(fallbackQueries.length - scopedQueries.length).toBe(18);
+    // Codex, Grok and the workspace-key provider each hydrate the workspace
+    // once, and so does the EU-only check (one read shared by every provider).
+    expect(fallbackQueries.length - scopedQueries.length).toBe(24);
     expect(scopedQueries.some((q) => q.includes('"workspace_inference_controls"'))).toBe(false);
     for (const queries of [fallbackQueries, scopedQueries]) {
       expect(

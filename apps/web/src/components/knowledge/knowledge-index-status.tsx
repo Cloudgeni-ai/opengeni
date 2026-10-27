@@ -99,6 +99,7 @@ export function KnowledgeSearchFallback({
     quota: "Semantic search quota reached. Showing keyword results.",
     provider_unavailable: "Semantic search provider unavailable. Showing keyword results.",
     query_limit: "Query exceeds the semantic search limit. Showing keyword results.",
+    region_restricted: "Semantic search is not supported in EU. Showing keyword results.",
   }[reason];
   return (
     <p role="status" className="text-sm text-fg-muted">

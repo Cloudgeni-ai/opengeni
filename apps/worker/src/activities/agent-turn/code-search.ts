@@ -26,6 +26,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
 import { configuredDecisionModel, type WorkerDecisionSettings } from "./decision-model";
+import { sideFeatureRouteRunnable } from "@opengeni/runtime";
 
 /**
  * One breaker per worker process. Repeated decision-provider outages (including an exhausted
@@ -288,6 +289,8 @@ export function codeSearchToolDefinitions(input: {
   const config = decisionModelConfiguration(input.settings, true);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
   if (!input.enabled || !config || input.backend === "none") return [];
+  // EU-only inference: no code_search without an EU decision model.
+  if (!sideFeatureRouteRunnable(input.settings, `decision_model.${config.provider}`)) return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }

@@ -1,4 +1,6 @@
 import { voiceInputCreditBillingActive, type Settings } from "@opengeni/config";
+import { speechToTextProcessingResidency } from "./deployment";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
 import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
 import { createVoiceInputBilling } from "../domain/voice-input-billing";
@@ -265,12 +267,26 @@ export function createTranscriptionService(input: {
           : null
         : await firstAvailable(ordered(request), request);
       if (!provider) {
+        // EU-only: say so when the region is why nothing can serve the
+        // workspace (fallback never leaves the EU; `available` excludes
+        // every provider without an EU route).
+        const candidates = exact ? [exact] : ordered(request);
+        const regionAllowed = await Promise.all(
+          candidates.map((candidate) =>
+            deployment.regionAllowed(candidate.id, scopeContext).catch(() => false),
+          ),
+        );
+        if (candidates.length > 0 && regionAllowed.every((allowed) => !allowed)) {
+          throw sideFeatureRegionRestrictedError("voice_input");
+        }
         throw new TranscriptionServiceError({
           fallbackSafe: true,
           code: "unavailable",
           message: "Transcription is unavailable.",
         });
       }
+      // Checked again right before the audio is sent.
+      await deployment.assertRegion(provider.id, scopeContext, "voice_input");
       const fallBack = async (error: unknown) => {
         if (
           error instanceof TranscriptionServiceError &&
@@ -418,6 +434,10 @@ export function createTranscriptionService(input: {
             pricing,
             usage: result.usage ?? null,
             billing: billingContext,
+            processingResidency: speechToTextProcessingResidency(
+              input.settings,
+              deployment.route(provider.id),
+            ),
           });
         }
       };

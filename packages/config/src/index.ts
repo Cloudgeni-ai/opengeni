@@ -20,6 +20,12 @@ export {
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+export * from "./side-feature-residency";
+import {
+  parseSideFeatureResidencyJson,
+  sideFeatureRouteAllowed,
+  type SideFeatureResidencySettings,
+} from "./side-feature-residency";
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
@@ -1165,6 +1171,11 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Where operator-run side-feature routes (self-hosted search, the
+  // deployment's Azure voice, speech and embedding resources, an
+  // OpenAI-compatible decision model) process data: route id to residency
+  // declaration. Other side-feature routes use code-owned rules.
+  sideFeatureResidencyJson: z.string().optional(),
   // Per-run only, never read from the environment: set by the execution
   // overlay when the workspace is EU-only. Every model route the run resolves
   // must then have an EU residency record. See docs/eu-only-inference.md.
@@ -2535,12 +2546,43 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 export type DecisionModelSettings = Pick<
   Settings,
   "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
->;
-/** Explicit deployment credentials only. Compatibility is code-search-only. */
+> &
+  SideFeatureResidencySettings;
+/**
+ * Explicit deployment credentials only. Compatibility is code-search-only.
+ * Under EU-only inference a decision model whose route is not EU is not
+ * configured at all, so code search and model tool routing are off.
+ */
 export function decisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
+):
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | undefined {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config && sideFeatureRouteAllowed(settings, `decision_model.${config.provider}`)
+    ? config
+    : undefined;
+}
+
+/**
+ * The side-feature route the configured decision model sends over, whether
+ * or not it may run under the settings' residency requirement.
+ */
+export function decisionModelRoute(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch = false,
+): `decision_model.${"jev" | "openai" | "openrouter"}` | null {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config ? `decision_model.${config.provider}` : null;
+}
+
+function unrestrictedDecisionModelConfiguration(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch: boolean,
 ):
   | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
   | undefined {
@@ -5727,6 +5769,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
+    sideFeatureResidencyJson: optional("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
@@ -12100,6 +12143,9 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,
       );
     }
+  }
+  if (settings.sideFeatureResidencyJson?.trim()) {
+    parseSideFeatureResidencyJson(settings.sideFeatureResidencyJson);
   }
   if (
     settings.productAccessMode === "configured" &&

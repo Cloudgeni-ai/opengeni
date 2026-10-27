@@ -118,7 +118,9 @@ test("Knowledge preparation retains the current collection map with bounded cata
     durationsMs.push(performance.now() - start);
   }
   console.info("knowledge-preparation-work", JSON.stringify({ transactions, durationsMs }));
-  // Authorization, two searches, two catalog pages and one current-view batch.
-  // The scalar catalog path needed 25 transactions for these same 20 entries.
-  expect(transactions).toEqual([6, 6, 6]);
+  // Authorization, two searches (each reading the workspace's EU-only setting
+  // before its query may reach the embedder), two catalog pages and one
+  // current-view batch. The scalar catalog path needed 25 transactions for
+  // these same 20 entries.
+  expect(transactions).toEqual([8, 8, 8]);
 }, 180_000);

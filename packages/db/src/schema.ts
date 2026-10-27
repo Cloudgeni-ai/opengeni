@@ -13179,6 +13179,14 @@ export const usageEvents = pgTable(
       withTimezone: true,
     }),
     billingProviderEventId: text("billing_provider_event_id"),
+    // Where a model-backed side feature processed this call (geography,
+    // deployment type, regions of its route's residency record; never
+    // evidence). Null before 0990 and for events that are not such calls.
+    processingResidency: jsonb("processing_residency").$type<{
+      geography: string;
+      deploymentType: string;
+      regions: string[];
+    }>(),
   },
   (table) => ({
     idempotency: uniqueIndex("usage_events_idempotency_idx").on(table.idempotencyKey),

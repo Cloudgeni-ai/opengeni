@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withXaiSubscriptionCatalogProvider } from "@opengeni/config";
 import * as config from "@opengeni/config";
 import {
@@ -20,6 +20,15 @@ import {
 } from "../src/domain/session-tool-policy";
 
 const settings = testSettings({ openaiModel: "gpt-6-astra", lazyToolSearchEnabled: true });
+
+// The workspace's EU-only setting: off unless a test says otherwise.
+let euOnly: ReturnType<typeof spyOn<typeof db, "isWorkspaceEuOnly">>;
+beforeEach(() => {
+  euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
+});
+afterEach(() => {
+  euOnly.mockRestore();
+});
 
 function session(capabilities: AgentCapabilities = "all", overrides: Partial<Session> = {}) {
   const agent = resolveAgentConfig({
@@ -530,6 +539,32 @@ describe("server effectiveTools environment projection", () => {
     );
     expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
+  test("EU-only: media tools without an EU route are never projected", () => {
+    const row = session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" });
+    const attached = context({
+      objectStorageAvailable: true,
+      mediaAttachments: new Map([[row.id, { image: "provider_adapter", video: true }]]),
+    });
+    const eu = { ...attached, settings: { ...attached.settings, requiredModelGeography: "eu" } };
+    const names = projected(row, eu as SessionEffectiveToolsContext).effectiveTools!.tools.map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain("generate_image");
+    expect(names).not.toContain("generate_video");
+    expect(names).not.toContain("x_search");
+  });
+
+  test("EU-only: the context reads the workspace setting and narrows its settings", async () => {
+    euOnly.mockResolvedValue(true);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBe("eu");
+    });
+    euOnly.mockResolvedValue(false);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBeUndefined();
+    });
+  });
+
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
     const result = projected(session("none", { bundledSkillIds: ["builtin:documents"] }));
     expect(result.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");

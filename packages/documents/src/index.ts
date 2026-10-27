@@ -118,6 +118,11 @@ export type DocumentEmbedder = {
    * request that can only fail. Absent means available.
    */
   readonly available?: boolean;
+  /**
+   * True when embeddings are computed in this process and no text is sent
+   * anywhere, so EU-only inference needs no route for them.
+   */
+  readonly local?: boolean;
   embedMany: (texts: string[]) => Promise<number[][]>;
   embedQuery: (text: string) => Promise<number[]>;
 };
@@ -455,6 +460,7 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
 }
 
 export class DeterministicEmbeddingProvider implements DocumentEmbedder {
+  readonly local = true;
   constructor(
     readonly dimensions = DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
     readonly model = `deterministic-local-${dimensions}`,

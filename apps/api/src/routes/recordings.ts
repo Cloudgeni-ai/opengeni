@@ -25,6 +25,7 @@ import {
   type RecordingTranscriptionOptions,
   type RecordingTranscriptionRequest,
   type WorkspaceRecordingSettings,
+  REGION_RESTRICTED,
 } from "@opengeni/contracts";
 import {
   estimateRecordingTranscriptionCostMicros,
@@ -328,6 +329,12 @@ export function registerRecordingRoutes(
       recording.purpose === "dictation"
         ? await dictationChoice(actor)
         : await transcriptionChoice(actor, requested);
+    // EU-only: refused before the version exists, so no audio is ever sent.
+    await deployment.assertRegion(
+      choice.providerId,
+      actor,
+      recording.purpose === "dictation" ? "voice_input" : "meeting_transcription",
+    );
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
     if (
@@ -1001,6 +1008,18 @@ export function registerRecordingRoutes(
         ),
       ),
     );
+    const regionAllowed = new Map(
+      await Promise.all(
+        offered.map(
+          async (provider) =>
+            [
+              provider.id,
+              // A failed EU-only read fails the request; it never becomes a wrong label.
+              await deployment.regionAllowed(provider.id, actor),
+            ] as const,
+        ),
+      ),
+    );
     // The models a meeting can use: each places every word in time, or the
     // deployment does it for them. Live models stream the live transcript;
     // a pinned deployment offers its own provider's and the one its operator
@@ -1024,6 +1043,9 @@ export function registerRecordingRoutes(
             model: spec.model,
             name: spec.name,
             available: availability.get(provider.id) ?? false,
+            ...(regionAllowed.get(provider.id) === false
+              ? { unavailableReason: REGION_RESTRICTED }
+              : {}),
             funding: provider.funding,
             capabilities: { ...spec.capabilities, batch: meeting, live },
             // A price only where this workspace pays it: its own key, or credits
@@ -1073,6 +1095,7 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
+    await deployment.assertRegion(provider.id, actor, "meeting_transcription");
     await admitRecordingUsage(actor);
     const resolved = await deployment.credentials(provider.id, actor);
     const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };

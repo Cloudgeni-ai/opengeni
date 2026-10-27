@@ -21,6 +21,7 @@ import {
   VOICE_CREDIT_USAGE,
   type CreditDebitAttribution,
   type Database,
+  type UsageEventProcessingResidency,
 } from "@opengeni/db";
 import {
   TranscriptionBillingRefusedError,
@@ -216,6 +217,7 @@ export function createVoiceInputBilling(deps: {
         basis,
         providerCostMicros: cost.providerCostMicros,
         creditCostMicros: cost.creditCostMicros,
+        ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
       });
     },
   };
@@ -238,6 +240,7 @@ export async function settleVoiceInputUsage(
     providerId: string;
     model: string;
     billing: TranscriptionBillingContext;
+    processingResidency?: UsageEventProcessingResidency;
     usage: VoiceInputUsage;
     basis: VoiceInputBillingBasis;
     providerCostMicros: number;
@@ -261,6 +264,7 @@ export async function settleVoiceInputUsage(
     // The API is the writer; the payer is the trusted attribution snapshot.
     initiator: { kind: "service", subjectId: "api:voice-input" },
     initiatorContext: { creditDebitAttribution: attribution },
+    ...(input.processingResidency ? { processingResidency: input.processingResidency } : {}),
   });
   const amount = Number(receipt.quantity);
   if (amount > 0) {

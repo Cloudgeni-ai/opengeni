@@ -1,5 +1,5 @@
 import { KnowledgeEntryListRequest, type KnowledgeEntryListResponse } from "@opengeni/contracts";
-import type { Settings } from "@opengeni/config";
+import { sideFeatureProcessingResidency, type Settings } from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
@@ -16,6 +16,8 @@ import {
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
 import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
+import { sideFeatureAllowedForWorkspace } from "../side-feature-availability";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable
@@ -101,6 +103,27 @@ export async function searchKnowledgeEntries(
       fallbackReason,
     };
   };
+  // Whether the query would leave this process. An embedder that cannot be
+  // resolved sends nothing; the provider path below falls back as before.
+  const sendsQuery = (() => {
+    try {
+      return !embedder().local;
+    } catch {
+      return false;
+    }
+  })();
+  // EU-only: the query is never sent to an embedding route without an EU
+  // residency record; keyword search answers instead (vector mode refuses).
+  if (
+    sendsQuery &&
+    !(await sideFeatureAllowedForWorkspace(db, settings, context, "knowledge.embeddings"))
+  ) {
+    return keywordFallback(
+      db,
+      sideFeatureRegionRestrictedError("knowledge_embeddings"),
+      "region_restricted",
+    );
+  }
   const bytes = Buffer.byteLength(request.query, "utf8");
   const paidSettings = settings && paidDocumentEmbedding(settings) ? settings : undefined;
   // A workspace that turned Opengeni credits off is never debited; it keeps
@@ -128,6 +151,10 @@ export async function searchKnowledgeEntries(
 
   const retrieveThenSettle = async (queryDb: Database) => {
     let embedding: { model: string; values: number[] };
+    // Where the query was embedded; nothing is sent anywhere by a local embedder.
+    const processingResidency = sendsQuery
+      ? sideFeatureProcessingResidency(settings ?? {}, "knowledge.embeddings")
+      : undefined;
     try {
       const provider = embedder();
       const values = await provider.embedQuery(request.query!);
@@ -157,6 +184,7 @@ export async function searchKnowledgeEntries(
         sourceResourceType: "knowledge_query",
         sourceResourceId: usageId,
         idempotencyKey: `knowledge.query_bytes:${usageId}`,
+        ...(processingResidency ? { processingResidency } : {}),
       });
       if (paidSettings && cost > 0)
         await recordUsageEvent(queryDb, {
@@ -168,6 +196,7 @@ export async function searchKnowledgeEntries(
           sourceResourceType: "knowledge_query",
           sourceResourceId: usageId,
           idempotencyKey: `knowledge.query_cost:${usageId}`,
+          ...(processingResidency ? { processingResidency } : {}),
           // Durable receipt inserted before the debit in this same transaction.
           // The service is the writer, not an inferred causal human.
           initiator: { kind: "service", subjectId: "worker:knowledge-query" },

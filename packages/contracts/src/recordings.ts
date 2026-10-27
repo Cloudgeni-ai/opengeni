@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
+import { FeatureUnavailableReason } from "./inference-residency";
 
 /**
  * Recordings: captured conversations (meetings, interviews, site walks) with
@@ -847,6 +848,12 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     name: z.string(),
     /** The provider can serve this workspace now (its key, sign-in or account is set up). */
     available: z.boolean(),
+    /**
+     * Why `available` is false when the reason is not setup: `region_restricted`
+     * when the workspace is EU-only and this provider has no EU route (show
+     * "Not supported in EU").
+     */
+    unavailableReason: FeatureUnavailableReason.nullable().optional(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /**

@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import * as euDb from "@opengeni/db";
 import { spawnSync } from "node:child_process";
 import { testSettings } from "@opengeni/testing/settings";
 import {
@@ -22,6 +23,18 @@ import {
 import { createFfmpegAudioNormalizer } from "@opengeni/core/transcription-service";
 import { createTranscriptionService } from "@opengeni/core/transcription-service";
 import { parseTranscriptionResponseBody } from "@opengeni/core/transcription-service";
+
+// These tests use fake databases; the workspace's EU-only setting is off.
+let euOnlySpy: ReturnType<typeof spyOn<typeof euDb, "isWorkspaceEuOnly">> | undefined;
+beforeEach(() => {
+  euOnlySpy = spyOn(euDb, "isWorkspaceEuOnly").mockResolvedValue(false);
+});
+let workspaceSpy: ReturnType<typeof spyOn<typeof euDb, "getWorkspace">> | undefined;
+afterEach(() => {
+  euOnlySpy?.mockRestore();
+  workspaceSpy?.mockRestore();
+  workspaceSpy = undefined;
+});
 
 const pricing = { microsPerMinute: 6000, marginBps: 500 };
 const request = {
@@ -354,6 +367,8 @@ test("unpriced or malformed deployment pricing withholds only that provider and 
 });
 
 test("readiness is scoped to the workspace's available subscription", async () => {
+  // The EU-only check places the workspace in its account.
+  workspaceSpy = spyOn(euDb, "getWorkspace").mockResolvedValue({ accountId: "a" } as never);
   const service = createTranscriptionService({
     settings: testSettings({
       voiceInputProviderOrder: "codex-subscription",
@@ -368,6 +383,8 @@ test("readiness is scoped to the workspace's available subscription", async () =
 });
 
 test("readiness honours preference and fallback; a throwing probe never fails the caller", async () => {
+  // The EU-only check places the workspace in its account.
+  workspaceSpy = spyOn(euDb, "getWorkspace").mockResolvedValue({ accountId: "a" } as never);
   const service = createTranscriptionService({
     settings: {
       ...settings,

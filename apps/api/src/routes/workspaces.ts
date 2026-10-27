@@ -3,6 +3,8 @@ import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websoc
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
+  realtimeVoiceRegionAllowed,
+  settingsWithInferenceResidency,
   realtimeVoiceOfferProblem,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
@@ -67,6 +69,7 @@ import {
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -162,7 +165,7 @@ import {
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
-import { projectWorkspaceModelCatalog } from "../model-catalog";
+import { projectWorkspaceModelCatalog, withRegionAvailability } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
@@ -808,15 +811,23 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationDefaults,
       ...(creditBalance ? { creditBalance } : {}),
     });
-    const catalog = projectWorkspaceModelCatalog(selections, {
-      defaultSelection,
-      creditsSelection: creditsDefaultSessionModel({
-        settings: workspaceCatalogSettings,
-        selections,
-        workspaceSettings,
-        organizationDefaults,
-      }),
+    const { requiredModelGeography } = await settingsWithInferenceResidency(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      settings: workspaceCatalogSettings,
     });
+    const catalog = projectWorkspaceModelCatalog(
+      withRegionAvailability(selections, requiredModelGeography),
+      {
+        defaultSelection,
+        creditsSelection: creditsDefaultSessionModel({
+          settings: workspaceCatalogSettings,
+          selections,
+          workspaceSettings,
+          organizationDefaults,
+        }),
+      },
+    );
     for (const model of catalog.models) {
       model.compactionPolicy = workspaceModelCompactionPolicy(
         workspaceCatalogSettings,
@@ -1261,6 +1272,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsConnected,
       workspaceSettings,
       organizationDefaults,
+      residencySettings,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1272,6 +1284,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
+      settingsWithInferenceResidency(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        settings: deps.settings,
+      }),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1318,7 +1335,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ])
         : (["none", false] as const);
     const hasCredits = creditStanding === "spendable";
-    const models = [
+    const offeredModels = [
       ...managedCandidates.map((model, index) => ({
         ...model,
         provider: "OpenGeni" as const,
@@ -1373,6 +1390,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         recommended: false,
       })),
     ];
+    // EU-only: a model whose route has no EU residency record is listed as
+    // region_restricted, and nothing else is offered in its place.
+    const models = offeredModels.map((model) =>
+      realtimeVoiceRegionAllowed(residencySettings, model.id)
+        ? model
+        : {
+            ...model,
+            available: false,
+            unavailableReason: REGION_RESTRICTED_MESSAGE,
+            unavailableCode: REGION_RESTRICTED,
+            recommended: false,
+          },
+    );
     // Each model lists the voice settings its provider offers, with the
     // workspace's saved values for it and the organization's default, and
     // which model each of them chose to start voice conversations with.

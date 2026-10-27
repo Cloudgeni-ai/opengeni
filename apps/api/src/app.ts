@@ -43,6 +43,7 @@ import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
   normalizeOrganizationAccessPolicy,
+  REGION_RESTRICTED_MESSAGE,
 } from "@opengeni/contracts";
 import {
   httpRejectionFactsFromEnvelope,
@@ -146,6 +147,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  regionRestrictedHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
   databaseContentionHttpError,
@@ -194,6 +196,9 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
+  inferenceFeatureAvailability,
+  inferenceFeatureRegionAllowed,
+  settingsWithInferenceResidency,
   selectDefaultSessionModel,
   isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
@@ -410,7 +415,7 @@ import {
   scrubManagedAuthProviderResponse,
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
-import { projectClientModel } from "./model-catalog";
+import { projectClientModel, withRegionAvailability } from "./model-catalog";
 import {
   createSpeechToTextDeployment,
   createTranscriptionService,
@@ -1499,6 +1504,8 @@ export function createAppComposition(deps: AppDependencies): {
       creditsAvailable: false,
     });
     let modelSelectionForbidden = false;
+    // EU-only inference for the caller's workspace (none without one).
+    let requiredModelGeography: "eu" | undefined;
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
@@ -1553,6 +1560,13 @@ export function createAppComposition(deps: AppDependencies): {
             modelSelectionForbidden = true;
             selections = [];
           }
+          requiredModelGeography = (
+            await settingsWithInferenceResidency(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              settings: catalogSettings,
+            })
+          ).requiredModelGeography;
           const workspace = await getWorkspace(deps.db, workspaceId);
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,
@@ -1588,6 +1602,7 @@ export function createAppComposition(deps: AppDependencies): {
         modelSelectionForbidden = true;
       }
     }
+    const residencySettings = { ...deps.settings, requiredModelGeography };
     const models = selections.filter(isWorkspaceModelAdmissible);
     const defaultModel = defaultSelection.model;
     const fallbackDefinition = selections.find(
@@ -1623,10 +1638,12 @@ export function createAppComposition(deps: AppDependencies): {
         allowedModels: models.length > 0 ? models.map(({ model }) => model.id) : [defaultModel],
         ...(legacyModelFallback ? { legacyModelFallback } : {}),
         // Availability remains an observation hint, not the admission predicate.
-        models: models.map(({ model, availability }) => ({
-          ...projectClientModel(model),
-          availability,
-        })),
+        models: withRegionAvailability(models, requiredModelGeography).map(
+          ({ model, availability }) => ({
+            ...projectClientModel(model),
+            availability,
+          }),
+        ),
         defaultReasoningEffort: defaultSelection.reasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         defaultSandboxBackend: deps.settings.sandboxBackend,
@@ -1635,7 +1652,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
-        codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        codeSearch: codeSearchDeploymentPolicy(residencySettings),
         // Archiving needs object storage; without it the worker never archives.
         ...(deps.settings.sessionArchiveEnabled && objectStorage
           ? {
@@ -1645,7 +1662,10 @@ export function createAppComposition(deps: AppDependencies): {
               },
             }
           : {}),
-        agentConfig: clientAgentConfig(deps.settings),
+        agentConfig: clientAgentConfig(residencySettings),
+        // Region availability of every model-backed side feature for the
+        // caller's workspace: `region_restricted` shows "Not supported in EU".
+        inferenceFeatures: inferenceFeatureAvailability(residencySettings),
         // Producer capability for per-task usage limits. Clients only offer a
         // new limit when enabled; existing limits stay visible and removable.
         sessionUsageLimits: {
@@ -2488,6 +2508,7 @@ export function createAppComposition(deps: AppDependencies): {
               details: { code: rawError.code },
             })
           : (sessionUsageLimitHttpError(rawError) ??
+            regionRestrictedHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
@@ -4259,12 +4280,19 @@ function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
 /** Client-safe agent-configuration projection. */
 function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
+  // EU-only: capabilities whose every model-backed route is switched off.
+  const regionRestricted: Partial<Record<(typeof AGENT_CAPABILITY_IDS)[number], boolean>> = {
+    webSearch: !inferenceFeatureRegionAllowed(settings, "web_search"),
+    media:
+      !inferenceFeatureRegionAllowed(settings, "image_generation") &&
+      !inferenceFeatureRegionAllowed(settings, "video_generation"),
+  };
   return {
     // Deprecated: agent configuration is always on. Kept for client compatibility.
     enabled: true,
     defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
-      const reason = policy.unavailable[id];
+      const reason = regionRestricted[id] ? REGION_RESTRICTED_MESSAGE : policy.unavailable[id];
       return reason === undefined ? { id, available: true } : { id, available: false, reason };
     }),
   };

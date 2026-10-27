@@ -1,6 +1,6 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
-import type { CreditDebitAttribution } from "@opengeni/db";
+import type { CreditDebitAttribution, UsageEventProcessingResidency } from "@opengeni/db";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -137,6 +137,8 @@ export type TranscriptionBilling = {
     pricing: VoiceInputPricing;
     usage: VoiceInputUsage | null;
     billing: TranscriptionBillingContext;
+    /** Where the provider processed the audio (its route's residency claim). */
+    processingResidency?: UsageEventProcessingResidency;
   }): Promise<{ creditCostMicros: number }>;
 };
 

@@ -53,6 +53,8 @@ import { ApiHttpError } from "../http/api-error";
 import { wavDurationSeconds } from "@opengeni/core/transcription-service";
 import { TranscriptionSegmenterError } from "@opengeni/core/transcription-service";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { voiceInputRegionRestricted } from "../transcription/region";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 
 const CHUNK_SHA256_HEADER = "x-opengeni-chunk-sha256";
 const CHUNK_START_HEADER = "x-opengeni-chunk-start-milliseconds";
@@ -98,6 +100,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
   app.post("/v1/workspaces/:workspaceId/transcription-recordings", async (c) => {
     try {
       const authority = await requireRecordingAuthority(c, deps, true);
+      if (await voiceInputRegionRestricted(deps, authority)) {
+        return c.json({ code: "region_restricted" }, 422);
+      }
       if (!(await resumableAvailable(deps, authority.workspaceId))) {
         return c.json({ code: "unavailable" }, 503);
       }
@@ -369,6 +374,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
       let fallbackAllowed = false;
       try {
         authority = await requireRecordingAuthority(c, deps, true);
+        if (await voiceInputRegionRestricted(deps, authority)) {
+          return c.json({ code: "region_restricted" }, 422);
+        }
         const service = deps.transcription;
         if (
           !deps.objectStorage ||
@@ -716,6 +724,10 @@ function processingFailure(error: unknown): {
         error.code === "unavailable" ||
         error.code === "provider",
     };
+  }
+  if (error instanceof InferenceRegionRestrictedError) {
+    // EU-only refused the provider before any audio was sent.
+    return { code: "region_restricted", retryable: false };
   }
   if (error instanceof DOMException && error.name === "AbortError") {
     return { code: "cancelled", retryable: true };

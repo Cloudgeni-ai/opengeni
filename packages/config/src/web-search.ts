@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  sideFeatureRouteAllowed,
+  type SideFeatureResidencySettings,
+} from "./side-feature-residency";
 
 /**
  * Provider-agnostic web search: the deployment-funded `web_search` and
@@ -300,7 +304,7 @@ export type WebSearchSettings = {
   billingMode?: string | undefined;
   usageLimitsMode?: string | undefined;
   creditMarginBpsOverride?: number | undefined;
-};
+} & SideFeatureResidencySettings;
 
 export type WebSearchProviderResolution =
   | { status: "off" }
@@ -503,12 +507,28 @@ export function resolveWebSearchProvider(settings: WebSearchSettings): WebSearch
   }
 }
 
-/** The configured provider, or null when off or invalid. */
+/**
+ * The configured provider, or null when off or invalid. Under EU-only
+ * inference only providers whose residency record is EU remain, in their
+ * configured order, so failover never leaves the EU; with no EU search
+ * provider the provider tools are off.
+ */
 export function webSearchProviderConfig(
   settings: WebSearchSettings,
 ): WebSearchProviderConfig | null {
   const resolution = resolveWebSearchProvider(settings);
-  return resolution.status === "configured" ? resolution.config : null;
+  if (resolution.status !== "configured") return null;
+  if (settings.requiredModelGeography !== "eu") return resolution.config;
+  const allowed = (endpoint: WebSearchProviderEndpoint) =>
+    sideFeatureRouteAllowed(settings, `web_search.${endpoint.provider}`);
+  const search = resolution.config.search.filter(allowed);
+  if (search.length === 0) return null;
+  return { ...resolution.config, search, fetch: resolution.config.fetch.filter(allowed) };
+}
+
+/** Hosted provider search runs on the provider's search backend: never EU. */
+export function hostedWebSearchAllowed(settings: SideFeatureResidencySettings): boolean {
+  return sideFeatureRouteAllowed(settings, "web_search.hosted");
 }
 
 /**
@@ -532,6 +552,11 @@ export function webSearchToolPlan(
     creditsDisabled?: boolean;
   },
 ): { hostedWebSearch: boolean; providerTools: WebSearchProviderToolName[] } {
+  if (!hostedWebSearchAllowed(settings)) {
+    // EU-only: hosted search (including SuperGrok's transport search) is
+    // never offered; only EU provider tools may be.
+    turn = { ...turn, hostedWebSearch: false, transportHostedSearch: false };
+  }
   const config = webSearchProviderConfig(settings);
   if (!config || turn.transportHostedSearch) {
     return { hostedWebSearch: turn.hostedWebSearch, providerTools: [] };

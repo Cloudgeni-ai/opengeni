@@ -9,6 +9,7 @@ import {
   withRlsContext,
   type CreditDebitAttribution,
   type Database,
+  type UsageEventProcessingResidency,
 } from "@opengeni/db";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 
@@ -38,6 +39,8 @@ export type WebSearchCallCost = {
   creditMicros: number;
   marginBps: number;
   basis: "provider_reported" | "configured_price" | "list_price";
+  /** Where the provider processed the call (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency;
 };
 
 export class WebSearchBillingRefusedError extends Error {
@@ -112,6 +115,7 @@ export function createWebSearchBilling(deps: { db: Database; settings: Settings 
         turnAttemptId: scope.attemptId,
         sourceResourceType: WEB_SEARCH_SOURCE_TYPE,
         sourceResourceId: `${scope.attemptId}:${cost.operationId}`,
+        ...(cost.processingResidency ? { processingResidency: cost.processingResidency } : {}),
       };
       // Request counts are recorded for every deployment, billed or not, so
       // operators see provider volume.

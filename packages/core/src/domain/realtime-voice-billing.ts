@@ -7,8 +7,14 @@ import {
   realtimeVoiceMinuteCreditMicros,
   realtimeVoiceStartedMinutes,
   voiceInputCreditBillingActive,
+  CODEX_REALTIME_MODEL_ID,
+  ELEVENLABS_REALTIME_MODELS,
+  SUPERGROK_REALTIME_MODEL_ID,
+  sideFeatureProcessingResidency,
+  sideFeatureRouteAllowed,
   type RealtimeVoicePricing,
   type Settings,
+  type SideFeatureRouteId,
 } from "@opengeni/config";
 import type { SessionRealtimeModel } from "@opengeni/contracts";
 import {
@@ -17,6 +23,7 @@ import {
   creditDebitAttributionMetadata,
   existingUsageEventIdempotencyKeys,
   getSpendableCreditBalance,
+  isWorkspaceEuOnly,
   loadSessionRealtimeBillingFacts,
   recordUsageEvent,
   sumUsageQuantity,
@@ -25,6 +32,7 @@ import {
   type CreditDebitAttribution,
   type Database,
 } from "@opengeni/db";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import { TranscriptionBillingRefusedError } from "../transcription";
 import { workspaceCreditsDisabled } from "./workspace-credits";
 
@@ -100,6 +108,37 @@ export function deploymentRealtimeVoice(
     };
   }
   return null;
+}
+
+/**
+ * The side-feature route a live-voice model runs on, or null for a model this
+ * deployment does not know (never EU).
+ */
+export function realtimeVoiceRoute(
+  model: SessionRealtimeModel | string,
+): SideFeatureRouteId | null {
+  if (model === AZURE_LIVE_REALTIME_MODEL_ID) return "realtime_voice.azure_live";
+  if (model === CODEX_REALTIME_MODEL_ID) return "realtime_voice.codex_subscription";
+  if (model === SUPERGROK_REALTIME_MODEL_ID) return "realtime_voice.supergrok_subscription";
+  for (const gateway of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
+    if (gateway.managedModelId === model || gateway.workspaceModelId === model) {
+      return "realtime_voice.ai_gateway";
+    }
+  }
+  for (const elevenLabs of Object.values(ELEVENLABS_REALTIME_MODELS)) {
+    if (elevenLabs.modelId === model) return "realtime_voice.elevenlabs";
+  }
+  return null;
+}
+
+/** Whether a live-voice model may run under these (residency-narrowed) settings. */
+export function realtimeVoiceRegionAllowed(
+  settings: Pick<Settings, "sideFeatureResidencyJson" | "requiredModelGeography">,
+  model: SessionRealtimeModel | string,
+): boolean {
+  if (settings.requiredModelGeography !== "eu") return true;
+  const route = realtimeVoiceRoute(model);
+  return route !== null && sideFeatureRouteAllowed(settings, route);
 }
 
 export type RealtimeVoiceUnavailableCode =
@@ -205,7 +244,12 @@ export type RealtimeVoiceSettlement = {
  * heartbeats, owner-proven end). Each (connection, minute) is one idempotent
  * usage receipt plus one post-use debit.
  */
-export function createRealtimeVoiceBilling(deps: { db: Database; settings: Settings }) {
+export function createRealtimeVoiceBilling(deps: {
+  db: Database;
+  settings: Settings;
+  /** The workspace's EU-only setting (tests inject it). */
+  isEuOnly?: typeof isWorkspaceEuOnly;
+}) {
   const billingActive = () => voiceInputCreditBillingActive(deps.settings);
 
   async function refusal(input: {
@@ -275,6 +319,20 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       attribution: CreditDebitAttribution;
       now?: Date;
     }): Promise<void> {
+      // EU-only first, for every live-voice model (workspace-funded too),
+      // before any connection to a provider is made.
+      const euOnly =
+        deps.settings.requiredModelGeography === "eu" ||
+        (await (deps.isEuOnly ?? isWorkspaceEuOnly)(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        }));
+      if (
+        euOnly &&
+        !realtimeVoiceRegionAllowed({ ...deps.settings, requiredModelGeography: "eu" }, input.model)
+      ) {
+        throw sideFeatureRegionRestrictedError("realtime_voice");
+      }
       const voice = deploymentRealtimeVoice(deps.settings, input.model);
       if (!voice) return;
       const problem = realtimeVoiceOfferProblem(deps.settings, voice);
@@ -359,6 +417,8 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
         workspaceId: facts.workspaceId,
         keys: minutes.map((minute) => minute.key),
       });
+      // Where the voice call ran, recorded on each minute's receipt.
+      const processingRoute = realtimeVoiceRoute(facts.model);
       let debitedMicros = 0;
       for (const minute of minutes) {
         if (recorded.has(minute.key)) continue;
@@ -380,6 +440,14 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
               occurredAt: minute.startsAt,
               initiator: { kind: "service", subjectId: "api:voice-realtime" },
               initiatorContext: { creditDebitAttribution: attribution },
+              ...(processingRoute
+                ? {
+                    processingResidency: sideFeatureProcessingResidency(
+                      deps.settings,
+                      processingRoute,
+                    ),
+                  }
+                : {}),
             });
             const amount = Number(receipt.quantity);
             if (amount <= 0) return 0;

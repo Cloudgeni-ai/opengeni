@@ -5888,6 +5888,13 @@ export async function deleteGitHubInstallationBinding(
   );
 }
 
+/** The residency claim a side-feature usage event records (never evidence). */
+export type UsageEventProcessingResidency = {
+  geography: string;
+  deploymentType: string;
+  regions: readonly string[];
+};
+
 export async function recordUsageEvent(
   db: Database,
   input: {
@@ -5907,6 +5914,11 @@ export async function recordUsageEvent(
     origin?: SessionTurnSource | null;
     idempotencyKey: string;
     occurredAt?: Date;
+    /**
+     * Where a model-backed side feature processed the call: its route's
+     * residency claim (never evidence). See docs/eu-only-inference.md.
+     */
+    processingResidency?: UsageEventProcessingResidency | null;
   },
 ): Promise<UsageEvent> {
   if (input.turnId && !input.sessionId) {
@@ -5950,6 +5962,15 @@ export async function recordUsageEvent(
           origin: input.origin ?? null,
           idempotencyKey: input.idempotencyKey,
           occurredAt: input.occurredAt ?? new Date(),
+          ...(input.processingResidency
+            ? {
+                processingResidency: {
+                  geography: input.processingResidency.geography,
+                  deploymentType: input.processingResidency.deploymentType,
+                  regions: [...input.processingResidency.regions],
+                },
+              }
+            : {}),
         })
         .onConflictDoUpdate({
           target: schema.usageEvents.idempotencyKey,
