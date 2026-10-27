@@ -47,6 +47,7 @@ function usage(exitCode = 1): void {
     "  --save-image saves the result's single image at that path and never overwrites",
     "  if the call completes but its image cannot be saved, the result is still printed",
     "  with imageSaveError and the exit code is 4; do not repeat that call",
+    "  an error result (isError) prints as the answer, saves no file and exits 0",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -352,11 +353,14 @@ async function main(): Promise<void> {
     if (saveTo !== undefined) preflightImagePath(saveTo);
     const operationId = randomUUID();
     const result = await client.call(entry.identity, argumentsValue, { operationId });
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    const saveImage = result.isError === true ? undefined : saveTo;
     let printed: AttemptToolResult;
     try {
       printed = await materializeCallImages(result, {
         full,
-        ...(saveTo === undefined ? {} : { saveTo }),
+        ...(saveImage === undefined ? {} : { saveTo: saveImage }),
       });
     } catch (error) {
       process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));

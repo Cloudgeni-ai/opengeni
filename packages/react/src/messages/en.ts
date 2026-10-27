@@ -3756,6 +3756,7 @@ export const englishMessages = {
   "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
+  "realtime.realtimeControl.checkingVoice": "Checking voice",
   "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
   "realtime.realtimeControl.chooseVoiceModelAndOptions": "Choose voice model and options",
   "realtime.realtimeControl.clientAck": "client ack",
@@ -3769,6 +3770,7 @@ export const englishMessages = {
   "realtime.realtimeControl.dismissFailuretext": "Dismiss: {failureText}",
   "realtime.realtimeControl.endingVoice": "Ending voice…",
   "realtime.realtimeControl.endVoiceConversation": "End voice conversation",
+  "realtime.realtimeControl.findingTheVoiceModelsYou": "Finding the voice models you can use.",
   "realtime.realtimeControl.ignoredProviderEvents": "ignored provider events",
   "realtime.realtimeControl.interruptNaturallyWheneverYouWant":
     "Interrupt naturally whenever you want.",
@@ -3777,6 +3779,8 @@ export const englishMessages = {
   "realtime.realtimeControl.labelDetail": "{label}. {detail}",
   "realtime.realtimeControl.lastIgnoredEvent": "last ignored event",
   "realtime.realtimeControl.listening": "Listening",
+  "realtime.realtimeControl.microphoneCantBeUsedHere":
+    "Your microphone can't be used here. Type your message instead.",
   "realtime.realtimeControl.microphoneMuted": "microphone muted",
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
@@ -3818,6 +3822,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
+  "realtime.realtimeControl.voiceCouldNotLoad": "Voice couldn't load. Try again later.",
   "realtime.realtimeControl.voiceLanguage": "Language",
   "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
   "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",

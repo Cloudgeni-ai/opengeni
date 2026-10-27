@@ -897,8 +897,10 @@ async function chromeStderrDrainWrapper(
   const mkfifo =
     (await firstExecutableInPath(["mkfifo"])) ??
     (await firstExecutable(["/usr/bin/mkfifo", "/bin/mkfifo"]));
+  // Some distributions provide GNU tail separately from a generic implementation
+  // whose byte cap is incorrect for pipes/FIFOs (for example uutils 0.8.0).
   const tail =
-    (await firstExecutableInPath(["tail"])) ??
+    (await firstExecutableInPath(["gnutail", "tail"])) ??
     (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
   if (!mkfifo || !tail) throw new Error("managed Chrome requires mkfifo and tail");
   const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
