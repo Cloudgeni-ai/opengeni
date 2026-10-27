@@ -16,8 +16,9 @@
 //! could order it below or above the notices before it. The host's
 //! `activity` question is answered with the count Opengeni's agent
 //! registers (see [`crate::agent`]), and its `sync` request with
-//! [`SYNCED`] once the guest's disks hold what it wrote; any other line is
-//! not answered.
+//! [`SYNCED`] once the guest's disks hold what it wrote and the root file
+//! system has given back the space its files freed; any other line is not
+//! answered.
 
 use crate::cmdline::valid_sandbox;
 
@@ -106,7 +107,8 @@ pub fn answer(seeded: bool) -> &'static [u8] {
 pub const STALE: &[u8] = b"stale\n";
 
 /// The guest's answer to `sync`, which the host sends before it saves the
-/// guest's disks: everything written to them is on them.
+/// guest's disks: everything written to them is on them, and the free
+/// space the guest trimmed is no longer held for it.
 pub const SYNCED: &[u8] = b"synced\n";
 
 /// The latest order applied; notices below it are stale.

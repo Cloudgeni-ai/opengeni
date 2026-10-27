@@ -735,7 +735,55 @@ describe("conversation connection card", () => {
     }
   });
 
+  const allowConnecting = () => {
+    context.accessContext.workspaceGrants = [
+      {
+        workspaceId: "workspace",
+        permissions: [
+          "connections:read",
+          "connections:write",
+          "capabilities:manage",
+          "sessions:control",
+        ],
+      },
+    ];
+  };
+  const readOnlyGrant = () => {
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read"] },
+    ];
+  };
+
+  test("a member who may not connect accounts sees why instead of a Connect button", async () => {
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read", "sessions:control"] },
+    ];
+    const cached = { ...catalogItem, authKind: "oauth2" as const };
+    const definitionNotice = {
+      ...item,
+      capability: { ...item.capability!, id: "api:integration:mail", name: "Mail" },
+    } as AuthNeededItem;
+    for (const notice of [item, definitionNotice]) {
+      const h = await render(false, cached, cached, false, "workspace", notice);
+      try {
+        const name = notice.capability!.name;
+        expect(h.container.textContent).toContain(
+          `${name} can't be connected from here. Ask whoever manages this app to allow it.`,
+        );
+        expect(
+          [...h.container.querySelectorAll("button")].some((node) =>
+            node.textContent?.includes(`Connect ${name}`),
+          ),
+        ).toBe(false);
+      } finally {
+        await h.close();
+      }
+    }
+    readOnlyGrant();
+  });
+
   test("OAuth CTA retains the live provider name after renamed setup is opened and cancelled", async () => {
+    allowConnecting();
     const cached = { ...catalogItem, authKind: "oauth2" as const };
     const h = await render(false, { ...cached, name: "Current Example" }, cached);
     try {
@@ -758,6 +806,7 @@ describe("conversation connection card", () => {
       expect(updateConnection).not.toHaveBeenCalled();
       expect(enableCapability).not.toHaveBeenCalled();
     } finally {
+      readOnlyGrant();
       await h.close();
     }
   });

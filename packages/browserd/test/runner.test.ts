@@ -348,6 +348,40 @@ describe("managed browser profile cryptography", () => {
     },
   );
 
+  test.skipIf(process.platform !== "linux")(
+    "reports the display its launch actually gives the browser",
+    async () => {
+      // The reported display and the launch arguments come from one decision:
+      // a headed browser without a window is offscreen (new headless), never
+      // reported as a window.
+      for (const [options, display] of [
+        [{ headed: true }, "window"],
+        [{ headed: true, offscreen: true }, "offscreen"],
+        [{ headed: false }, null],
+      ] as const) {
+        const root = await mkdtemp("/tmp/og-runner-display-");
+        const browserPath = join(root, "fixture-browser");
+        await writeFile(browserPath, fixtureBrowserScript(), { mode: 0o700 });
+        const runner = await ManagedBrowserRunner.create({
+          profileDirectory: join(root, "profile"),
+          ...options,
+          browserExecutablePath: browserPath,
+          systemdScope: false,
+          networkIsolation: false,
+        });
+        try {
+          expect(runner.display).toBe(display);
+          await runner.run(["get", "cdp-url"]);
+          const { argv } = await fixtureBrowserLaunch(root);
+          expect(argv.includes("--headless=new")).toBe(display !== "window");
+        } finally {
+          await stopFixtureBrowser(root);
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "a browser that never opens its DevTools endpoint times out and is stopped",
     async () => {

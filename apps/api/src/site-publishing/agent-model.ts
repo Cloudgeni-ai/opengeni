@@ -1,11 +1,13 @@
 import type { Settings } from "@opengeni/config";
 import {
   resolveWorkspaceSessionDefaults,
+  type LimitDecision,
   type OrganizationModelDefaults,
   type WorkspaceSessionDefaults,
 } from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,
+  checkLimit,
   loadWorkspaceModelSelectionInput,
   resolveWorkspaceCatalogSettings,
   resolveWorkspaceModelSelection,
@@ -147,4 +149,111 @@ export async function resolveSiteOutsideModel(
     workspaceDefaults: resolveWorkspaceSessionDefaults(workspace?.settings ?? {}),
     organizationDefaults: organization.sessionDefaults ?? null,
   });
+}
+
+/**
+ * Why the workspace can't pay for an outsider's turn: no credits for the
+ * model, or the workspace's usage allowance is used up.
+ */
+export type SiteAgentUnfundedReason = "no_credits" | "allowance_exhausted";
+
+/**
+ * The reason a core admission decision means the workspace can't pay, or
+ * null when it was allowed or refused for anything else (a static cap, for
+ * example, which a turn reports itself).
+ */
+export function siteUnfundedReason(decision: LimitDecision): SiteAgentUnfundedReason | null {
+  if (decision.allowed) return null;
+  if (decision.code === "insufficient_credits") return "no_credits";
+  if (decision.code === "allowance_exhausted") return "allowance_exhausted";
+  return null;
+}
+
+/**
+ * Whether the workspace can pay for a turn by someone outside it on this
+ * credit-billed model right now: core's own admission check for a new agent
+ * run, with no person's allowance behind it, as an outside visitor's turn
+ * has none. A Site whose assistant would only answer "no credits" reports
+ * the assistant as unavailable instead of offering it.
+ */
+export async function siteOutsideModelFunding(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  model: string,
+): Promise<LimitDecision> {
+  return checkLimit(deps, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    initiatingHumanSubjectId: null,
+    action: "agent_run:create",
+    quantity: 1,
+    model,
+  });
+}
+
+/** How long `site.config` reuses a workspace's funding answer for a model. */
+export const SITE_OUTSIDE_FUNDING_MEMO_MS = 30_000;
+const SITE_OUTSIDE_FUNDING_MEMO_MAX = 2_000;
+const outsideFundingMemo = new Map<
+  string,
+  { answer: Promise<SiteAgentUnfundedReason | null>; expiresAt: number }
+>();
+
+/**
+ * Reuse one funding answer per key for SITE_OUTSIDE_FUNDING_MEMO_MS from
+ * `now`. Concurrent callers share the check in flight; a failed check is
+ * forgotten as soon as it fails, so the next caller runs it again. Bounded:
+ * expired answers are swept first, then the oldest live one is dropped.
+ */
+export function rememberSiteOutsideFunding(
+  key: string,
+  now: number,
+  check: () => Promise<SiteAgentUnfundedReason | null>,
+): Promise<SiteAgentUnfundedReason | null> {
+  const memo = outsideFundingMemo.get(key);
+  if (memo && memo.expiresAt > now) return memo.answer;
+  outsideFundingMemo.delete(key);
+  if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX) {
+    for (const [stale, entry] of outsideFundingMemo)
+      if (entry.expiresAt <= now) outsideFundingMemo.delete(stale);
+    // Still full of live answers: drop the oldest (Map keeps insertion order).
+    const oldest = outsideFundingMemo.keys().next();
+    if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX && !oldest.done)
+      outsideFundingMemo.delete(oldest.value);
+  }
+  const answer = check();
+  const entry = { answer, expiresAt: now + SITE_OUTSIDE_FUNDING_MEMO_MS };
+  outsideFundingMemo.set(key, entry);
+  answer.catch(() => {
+    if (outsideFundingMemo.get(key) === entry) outsideFundingMemo.delete(key);
+  });
+  return answer;
+}
+
+/**
+ * Why the workspace can't pay for an outsider's turn on this model, or null
+ * when it can (or was refused for something else), for `site.config`: a
+ * public read made on every visitor page load. The answer is reused per
+ * account, workspace and model for SITE_OUTSIDE_FUNDING_MEMO_MS, so a burst
+ * of visitors runs core's admission check once; adding credits shows within
+ * that window. A failed check is not remembered and is rethrown. Turns
+ * still run core's own admission, so a stale answer only changes whether
+ * the assistant is offered, never whether a turn is paid for.
+ */
+export function siteOutsideModelUnfundedReason(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  model: string,
+  now: number = Date.now(),
+): Promise<SiteAgentUnfundedReason | null> {
+  return rememberSiteOutsideFunding(
+    `${scope.accountId}\u0000${scope.workspaceId}\u0000${model}`,
+    now,
+    async () => siteUnfundedReason(await siteOutsideModelFunding(deps, scope, model)),
+  );
+}
+
+/** Forget remembered funding answers, for tests. */
+export function clearSiteOutsideFundingMemo(): void {
+  outsideFundingMemo.clear();
 }

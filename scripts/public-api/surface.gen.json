@@ -12611,6 +12611,7 @@
         "$.controller": "ref(InteractionControllerBinding)! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
+        "$.display": "enum?=[\"\\\"offscreen\\\"\",\"\\\"window\\\"\"]",
         "$.driverId": "string!",
         "$.engine": "enum!=[\"\\\"chrome\\\"\",\"\\\"chromium\\\"\",\"\\\"external\\\"\",\"\\\"firefox\\\"\",\"\\\"lightpanda\\\"\",\"\\\"webkit\\\"\"]",
         "$.engineVersion": "string! null",
@@ -13514,9 +13515,24 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
+      }
+    },
+    "ClientModelResidencyV1": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deploymentType": "ref(ModelDeploymentType)!",
+        "$.eu": "boolean!",
+        "$.evidenceSource": "ref(ModelResidencyEvidenceSource)!",
+        "$.geography": "ref(ModelProcessingGeography)!",
+        "$.regions": "array!",
+        "$.regions[]": "string"
       }
     },
     "ClientResumableVoiceInputConfig": {
@@ -14061,7 +14077,8 @@
         "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.unconfirmedInput": "const?=[\"true\"]"
       }
     },
     "ComputerActionRequest": {
@@ -21700,6 +21717,14 @@
         "$|kind=organization_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]"
       }
     },
+    "ModelDeploymentType": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"azure_data_zone\\\"\",\"\\\"azure_global\\\"\",\"\\\"azure_regional\\\"\",\"\\\"bedrock_geo_profile\\\"\",\"\\\"bedrock_global_profile\\\"\",\"\\\"bedrock_regional\\\"\",\"\\\"gateway\\\"\",\"\\\"provider_default\\\"\",\"\\\"self_hosted\\\"\",\"\\\"subscription\\\"\",\"\\\"unknown\\\"\"]"
+      }
+    },
     "ModelPricingScheduleV1": {
       "io": [
         "output"
@@ -21724,6 +21749,22 @@
         "$.inputMicrosPerMillionTokens": "integer!",
         "$.marginBps": "integer?",
         "$.outputMicrosPerMillionTokens": "integer!"
+      }
+    },
+    "ModelProcessingGeography": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"eu\\\"\",\"\\\"global\\\"\",\"\\\"other\\\"\",\"\\\"unknown\\\"\",\"\\\"us\\\"\"]"
+      }
+    },
+    "ModelResidencyEvidenceSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admin_declaration\\\"\",\"\\\"built_in_rule\\\"\",\"\\\"none\\\"\",\"\\\"operator_declaration\\\"\",\"\\\"provider_api\\\"\",\"\\\"provider_documentation\\\"\"]"
       }
     },
     "MoveDocumentRequest": {
@@ -32469,6 +32510,7 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
         "$.source": "enum?=[\"\\\"codex\\\"\",\"\\\"opengeni\\\"\",\"\\\"openrouter\\\"\",\"\\\"supergrok\\\"\",\"\\\"workspace_gateway\\\"\"]"
@@ -32928,6 +32970,7 @@
         "$.members[]": "ref(MemberAllowanceUsage)",
         "$.nextCursor": "string! null",
         "$.period": "ref(UsageAllowanceWindow)!",
+        "$.unit": "const?=[\"\\\"usd_micros\\\"\"]",
         "$.workspace": "ref(WorkspaceAllowanceUsage)!"
       }
     },
@@ -37685,6 +37728,7 @@
       "McpCapabilityConnectInput": "type",
       "providerLabel": "value",
       "reconnectCandidate": "value",
+      "showsMcpServerLabel": "value",
       "useChatConnectionsAllowed": "value",
       "useConnect": "value",
       "useConnectSetupFlow": "value",
@@ -38026,10 +38070,12 @@
       "CodexRealtimeControl": "value",
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
+      "MicrophoneAccess": "type",
       "NewSessionRealtimeControl": "value",
       "prestartSessionRealtime": "value",
       "realtimeAppLanguage": "value",
       "realtimeConversationLanguage": "value",
+      "RealtimeLoadState": "type",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",

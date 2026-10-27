@@ -73,7 +73,10 @@ async function call(
     headers: {
       "content-type": "application/json",
       [SITE_GATEWAY_TIMESTAMP_HEADER]: String(timestamp),
-      [SITE_GATEWAY_SIGNATURE_HEADER]: options.tamper ? `${signature.slice(0, -2)}AA` : signature,
+      // Always change the tail, even for a signature that already ends in "AA".
+      [SITE_GATEWAY_SIGNATURE_HEADER]: options.tamper
+        ? `${signature.slice(0, -2)}${signature.endsWith("AA") ? "BB" : "AA"}`
+        : signature,
       ...options.headers,
       "MF-Original-URL": url,
     },

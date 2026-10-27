@@ -188,6 +188,54 @@ test("stopping sign-in restores retry without waiting for an unresponsive backen
   }
 });
 
+test("a blocked sign-in window shows the card's own line, not the browser helper's", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-blocked",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  let begun = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async () => {
+        begun += 1;
+        throw new Error("must not begin without a window");
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => null) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-blocked"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    expect(continueButton).toBeDefined();
+    await actRun(() => continueButton!.click());
+    await flush();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Your browser blocked the sign-in window.");
+    expect(text).not.toContain("Allow popups to connect your account");
+    expect(text).not.toContain("Connect popup");
+    expect(begun).toBe(0);
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 test("custom MCP setup retains discovery failures and can retry into sign-in", async () => {
   let inspections = 0;
   const custom = { ...item, enabled: false, authKind: null, connectionRef: null };
@@ -391,12 +439,17 @@ test("a failed authorization retries with a fresh attempt", async () => {
     connectionRef: null,
   } as CapabilityCatalogItem;
   const begins: string[] = [];
+  const popupFinishes: unknown[] = [];
   let recoveries = 0;
   const client = {
     listCapabilities: async () => ({ items: [disconnected] }),
     connectTransport: () => ({
-      begin: async (_workspace: string, input: { idempotencyKey: string }) => {
+      begin: async (
+        _workspace: string,
+        input: { idempotencyKey: string; finishInPopup?: true },
+      ) => {
         begins.push(input.idempotencyKey);
+        popupFinishes.push(input.finishInPopup);
         return {
           id: `attempt-${begins.length}`,
           workspaceId: "workspace",
@@ -480,6 +533,8 @@ test("a failed authorization retries with a fresh attempt", async () => {
     await click("Try signing in again");
     expect(begins).toHaveLength(2);
     expect(begins[1]).not.toBe(begins[0]);
+    // Sign-in runs in the card's popup, which ends on a closing page.
+    expect(popupFinishes).toEqual([true, true]);
   } finally {
     await view.unmount();
     window.open = previousOpen;
@@ -1144,4 +1199,38 @@ test("a server's sign-in inspection message stays out of the card", async () => 
   } finally {
     await view.unmount();
   }
+});
+
+test("a reviewed catalog service reads as the service; a hand-added server keeps its MCP label", async () => {
+  const render = async (source: CapabilityCatalogItem["source"]) => {
+    const shown = { ...item, source, enabled: false, connectionRef: null } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listConnections: async () => [],
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+      />,
+    );
+    await flush();
+    const header = document.querySelector(".og-session-capability-header");
+    const result = {
+      badge: header?.querySelector(".og-session-capability-type")?.textContent ?? null,
+      provider: header?.textContent?.includes("service.example") ?? false,
+    };
+    await view.unmount();
+    return result;
+  };
+  expect(await render("library")).toEqual({ badge: null, provider: true });
+  expect(await render("manual")).toEqual({ badge: "MCP server", provider: true });
 });

@@ -16,6 +16,10 @@
 {{- if include "opengeni.computeControl.trusted" .root -}}
 {{- $_ := set $reserved "NODE_EXTRA_CA_CERTS" true -}}
 {{- end -}}
+{{- if include "opengeni.databasePasswordFiles.enabled" .root -}}
+{{- $_ := set $reserved "OPENGENI_DATABASE_PASSWORD_FILE" true -}}
+{{- $_ := set $reserved "OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE" true -}}
+{{- end -}}
 {{- $seen := dict -}}
 {{- range .entries -}}
 {{- if not (kindIs "map" .) -}}

@@ -43,7 +43,10 @@ mod window_presence;
 
 mod console_state;
 
-pub use console_state::{console_state, MacConsoleFacts, MacConsoleState};
+pub use console_state::{
+    console_session, console_state, MacConsoleFacts, MacConsoleSession, MacConsoleState,
+    MacConsoleUser,
+};
 pub use window_presence::{MacWindowPresence, MacWindowQuery};
 
 /// Runs one synchronous native operation with a thread-local Cocoa pool.
