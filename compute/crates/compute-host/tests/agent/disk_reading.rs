@@ -273,6 +273,19 @@ fn assert_booked_again(written: u64, raced: u64) {
     );
 }
 
+/// Asserts that `read`, a reading taken once the disk holds its
+/// [`WRITTEN`] bytes again, leaves as much for more wakes as `written`
+/// did, the blocks that map the disk aside. Those are the disk's too, and
+/// a filesystem lays them out anew with each write: a fragmented ext4
+/// splits the same bytes into more or fewer extents, mapped by more or
+/// fewer blocks. The disk's bound allows [`WRITTEN`]/256 for them.
+fn assert_taken_again(written: u64, read: u64) {
+    assert!(
+        read.abs_diff(written) <= WRITTEN / 256,
+        "the disk's space was not booked as before: {written} then {read}"
+    );
+}
+
 /// Space a guest frees while the agent reads the disk, as its trim before
 /// a pause may, stays booked for that guest: its disk is read after the
 /// reading, which shows the space free, so the space is not left for
@@ -291,11 +304,17 @@ async fn space_a_guest_frees_while_the_disk_is_read_stays_booked_for_it() {
     assert_booked_again(written, raced);
 
     // Readings of the disk alone keep it booked, until a disk reading
-    // shows it taken again.
+    // shows it taken again. Its map may hold a block less meanwhile, as
+    // its filesystem merges the extents of what it writes back, and that
+    // block is booked too.
     sleep(Duration::from_millis(1100)).await;
     let status = lab.status().await.disk.unwrap();
-    assert_eq!(status.free, raced, "it stays booked until a reading");
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert!(
+        status.free.abs_diff(raced) <= WRITTEN / 256,
+        "it stays booked until a reading: {raced} then {}",
+        status.free
+    );
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
     lab.assert_clean();
 }
 
@@ -323,7 +342,7 @@ async fn space_a_guest_frees_and_takes_again_as_the_disk_is_read_stays_booked_fo
     };
     let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
     assert_booked_again(written, raced);
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
     lab.assert_clean();
 }
 
@@ -347,7 +366,7 @@ async fn space_a_guest_takes_again_with_no_write_call_stays_booked_for_it() {
     };
     let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
     assert_booked_again(written, raced);
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
     lab.assert_clean();
 }
 
@@ -388,7 +407,7 @@ async fn space_a_guest_trims_as_it_pauses_stays_booked_for_it() {
     lab.wake(sandbox).await;
     lab.wait_level(sandbox, LevelName::Running).await;
     sleep(Duration::from_millis(1100)).await;
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
     lab.assert_clean();
 }
 
@@ -411,7 +430,7 @@ async fn a_disk_not_read_whole_books_all_it_may_take() {
     std::fs::rename(disk.with_extension("away"), &disk).unwrap();
     write_again(&disk);
     assert_booked_again(written, raced);
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
 
     // Read whole, but by a VM whose writes do not return in time: what it
     // wrote after the disk reading cannot be counted.
@@ -419,7 +438,7 @@ async fn a_disk_not_read_whole_books_all_it_may_take() {
     let raced = read_free(&gauge, &lab, None).await;
     lab.world.unsettled.store(false, Ordering::SeqCst);
     assert_booked_again(written, raced);
-    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    assert_taken_again(written, read_free(&gauge, &lab, None).await);
     lab.assert_clean();
 }
 
