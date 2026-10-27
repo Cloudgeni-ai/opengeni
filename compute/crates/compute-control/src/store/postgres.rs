@@ -996,7 +996,7 @@ impl Store for PostgresStore {
         name: &str,
         image: ImageId,
         at_ms: u64,
-    ) -> Result<Option<ImageId>> {
+    ) -> Result<ImageId> {
         self.record_built_now(source, name, image, at_ms).await
     }
 

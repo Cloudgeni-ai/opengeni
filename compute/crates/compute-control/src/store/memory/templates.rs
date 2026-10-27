@@ -26,13 +26,6 @@ impl Inner {
             || self.built.values().any(|built| *built == image)
     }
 
-    /// Whether a collector claimed captured image `image`.
-    pub(super) fn claimed(&self, image: ImageId) -> bool {
-        self.captured
-            .get(&image)
-            .is_some_and(|captured| captured.claim.is_some())
-    }
-
     /// Whether `row` is created from a team's template that is gone.
     pub(super) fn template_gone(&self, row: &SandboxRow) -> bool {
         row.spec

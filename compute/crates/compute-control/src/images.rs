@@ -94,12 +94,10 @@ pub async fn follow<S: Store>(service: Arc<Service<S>>, sources: BTreeMap<String
                 // Built for another name, or before: this name uses it now,
                 // so it is this name's to fall back on later too.
                 match store.record_built(&source, &name, image, now_ms()).await {
-                    // Recorded, so never claimed to be forgotten.
-                    Ok(Some(kept)) => {
+                    Ok(kept) => {
                         images.set(&name, kept);
                         continue;
                     }
-                    Ok(None) => images.set(&name, image),
                     Err(error) => {
                         // Used meanwhile; recorded at the next ask.
                         images.set(&name, image);

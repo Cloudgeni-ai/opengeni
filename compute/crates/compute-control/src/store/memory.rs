@@ -697,17 +697,14 @@ impl Store for MemoryStore {
         name: &str,
         image: ImageId,
         _at_ms: u64,
-    ) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+    ) -> impl Future<Output = Result<ImageId>> + Send {
         let mut inner = self.lock();
-        if !inner.built.contains_key(source) && inner.claimed(image) {
-            return ready(Ok(None));
-        }
         let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
         inner
             .image_uses
             .retain(|(named, used)| named != name || used != source);
         inner.image_uses.push((name.to_owned(), source.to_owned()));
-        ready(Ok(Some(recorded)))
+        ready(Ok(recorded))
     }
 
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {

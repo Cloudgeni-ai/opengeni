@@ -451,17 +451,21 @@ pub trait Store: Send + Sync + 'static {
     /// now uses `source`. Answers the image recorded for `source`, which
     /// creates of `name` use: builds are not byte for byte the same, so the
     /// first recorded wins. Every name that uses a source is recorded, so
-    /// two names sharing one each keep it as their latest. `None`, and
-    /// nothing recorded, when `image` would be recorded but is a captured
-    /// image a collector has claimed (see [`Store::collect_image`]): it is
-    /// being forgotten, and no use of it is recorded from then on.
+    /// two names sharing one each keep it as their latest.
+    ///
+    /// A build is a captured image's bytes only once it is recorded: each
+    /// build is a new file system with a random UUID (compute-image's
+    /// `ext4::make`), so no disk can be captured with its bytes before a
+    /// sandbox starts from it, which it does only once recorded. A
+    /// recorded build is a use, which keeps a captured image of the same
+    /// bytes (see [`Store::collect_image`]).
     fn record_built(
         &self,
         source: &str,
         name: &str,
         image: ImageId,
         at_ms: u64,
-    ) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+    ) -> impl Future<Output = Result<ImageId>> + Send;
 
     /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;

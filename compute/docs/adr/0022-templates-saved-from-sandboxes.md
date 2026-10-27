@@ -55,15 +55,17 @@ without ever forgetting one a template or a create still needs.
   (ADR 17) then frees its chunks.
   - Every use recorded of an image and every claim on it take turns by
     locks, and a claim looks at the uses only once it holds its lock: a
-    template's insert and a claim lock the image's record, a built
-    image's record locks it after inserting itself, and a sandbox created
-    from a template locks the template, which a claim cannot precede
-    (the template is a use). A use recorded first keeps the image; one
-    after finds it claimed and is refused: the capture stores it again
-    once forgotten, a build that happened to be the same bytes is not
-    used (builds are not byte for byte the same and a captured disk was
-    booted, so this is an accident), and a create whose template was
-    deleted meanwhile fails as naming no template.
+    template's insert and a claim lock the image's record, and a sandbox
+    created from a template locks the template, which a claim cannot
+    precede (the template is a use). A use recorded first keeps the
+    image; one after finds it claimed and is refused: the capture stores
+    it again once forgotten, and a create whose template was deleted
+    meanwhile fails as naming no template.
+  - A built image needs no such turn. A build is a new file system with a
+    random UUID, so no disk can be captured with its bytes before a
+    sandbox starts from it, which it does only once the build is
+    recorded; recorded, it is a use that keeps a captured image of the
+    same bytes.
   - A claim names its collector. Another collector takes it over only
     once it lapses (10 minutes), as when its collector stopped. A
     collector reads the pointer, then checks it still holds its claim,

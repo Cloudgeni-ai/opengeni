@@ -1,13 +1,14 @@
 //! Templates and captured images in Postgres (see [`crate::store::Store`]).
 //!
-//! Every use recorded of a captured image (a template, an image built,
-//! and through its template a sandbox) and a collector's claim on it take
-//! turns by locks: a template's insert and a claim lock the image's
-//! record, a built image's record locks it after inserting itself, and a
+//! Every use recorded of a captured image (a template, and through its
+//! template a sandbox) and a collector's claim on it take turns by locks:
+//! a template's insert and a claim lock the image's record, and a
 //! sandbox's insert locks its template. A claim looks at what uses the
 //! image only once it holds the lock, so a use committed before is seen,
 //! and one after finds the image claimed (or, for a sandbox, its template
-//! gone) and is refused.
+//! gone) and is refused. A build is a captured image's bytes only once
+//! recorded (see [`crate::store::Store::record_built`]), so a claim sees
+//! it as a use too.
 
 use std::str::FromStr as _;
 

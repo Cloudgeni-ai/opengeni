@@ -691,13 +691,13 @@ async fn images<S: Store>(store: S) {
     let first = image_id();
     assert_eq!(
         store.record_built(&old, &name, first, 1).await.unwrap(),
-        Some(first)
+        first
     );
     // Another host's build of the same OCI image is not the image recorded.
     let again = image_id();
     assert_eq!(
         store.record_built(&old, &name, again, 2).await.unwrap(),
-        Some(first)
+        first
     );
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
@@ -707,7 +707,7 @@ async fn images<S: Store>(store: S) {
     let next = image_id();
     assert_eq!(
         store.record_built(&new, &name, next, 3).await.unwrap(),
-        Some(next)
+        next
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
@@ -721,7 +721,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &alias, image_id(), 4)
             .await
             .unwrap(),
-        Some(first)
+        first
     );
     assert_eq!(store.latest_built(&alias).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
@@ -732,7 +732,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &name, image_id(), 5)
             .await
             .unwrap(),
-        Some(first)
+        first
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
 }
@@ -808,10 +808,7 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
     // Meanwhile the name moves to a new source and rolls back to the old
     // one: the rollback is recorded by the transaction holding the row.
     let next = image_id();
-    assert_eq!(
-        store.record_built(new, name, next, 3).await.unwrap(),
-        Some(next)
-    );
+    assert_eq!(store.record_built(new, name, next, 3).await.unwrap(), next);
     holder
         .execute(
             &format!(
@@ -824,7 +821,7 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
         .await
         .unwrap();
     holder.commit().await.unwrap();
-    assert_eq!(delayed.await.unwrap().unwrap(), Some(first));
+    assert_eq!(delayed.await.unwrap().unwrap(), first);
     assert_eq!(store.latest_built(name).await.unwrap(), Some(first));
 
     drop(store);
@@ -1638,16 +1635,7 @@ async fn uses_after_a_claim<S: Store>(store: &S) {
     let claimed = collector(at + 10, 0);
     assert!(store.collect_image(image, at + 1, &claimed).await.unwrap());
 
-    // A build that happens to be the claimed image's bytes is not
-    // recorded, nor is a template of it.
-    let source = format!("registry.example/sandbox@sha256:{:064x}", random());
-    let name = format!("image-{:016x}", random());
-    assert_eq!(
-        store.record_built(&source, &name, image, 1).await.unwrap(),
-        None
-    );
-    assert_eq!(store.image_built(&source).await.unwrap(), None);
-    assert_eq!(store.latest_built(&name).await.unwrap(), None);
+    // A template of the claimed image is not recorded.
     assert_eq!(
         store
             .insert_template(&template(&team, image, None, 3))
@@ -1656,26 +1644,6 @@ async fn uses_after_a_claim<S: Store>(store: &S) {
         Inserted::Collecting
     );
     assert!(store.collecting(image, &claimed.id).await.unwrap());
-
-    // A source recorded before keeps its image, whatever a build of it
-    // is now.
-    let other = format!("registry.example/sandbox@sha256:{:064x}", random());
-    let kept = image_id();
-    assert_eq!(
-        store.record_built(&other, &name, kept, 2).await.unwrap(),
-        Some(kept)
-    );
-    assert_eq!(
-        store.record_built(&other, &name, image, 3).await.unwrap(),
-        Some(kept)
-    );
-
-    store.collected(image, &claimed.id).await.unwrap();
-    assert_eq!(
-        store.record_built(&source, &name, image, 4).await.unwrap(),
-        Some(image),
-        "forgotten, it is recorded as any other build"
-    );
 }
 
 /// Captured images are collected only once nothing has used them for a
@@ -1693,90 +1661,6 @@ async fn collection<S: Store>(store: S) {
 #[tokio::test]
 async fn captured_images_are_collected_only_once_nothing_has_used_them_for_a_while() {
     each(collection, collection).await;
-}
-
-/// A build of a captured image's bytes, recorded while a collector holds
-/// the image unclaimed (its check for uses made, its claim not yet), waits
-/// for the claim and is not recorded: a claim never forgets an image a
-/// build names.
-#[tokio::test]
-async fn a_build_racing_a_claim_waits_for_it() {
-    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
-        return;
-    };
-    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .unwrap();
-    tokio::spawn(connection);
-    let (watch, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .unwrap();
-    tokio::spawn(connection);
-    let schema = format!("compute_claim_{:x}", random());
-    client
-        .batch_execute(&format!("create schema {schema}"))
-        .await
-        .unwrap();
-    let scoped = format!("{url} options='-c search_path={schema}' application_name={schema}");
-    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
-    let team = format!("team-{:x}", random());
-    let at = now_ms();
-    let image = unused_image(&store, &team, at).await;
-
-    // The collector holds the image's row, having found nothing using it.
-    let holder = client.transaction().await.unwrap();
-    holder
-        .execute(
-            &format!("select 1 from {schema}.compute_captured_images where image = $1 for update"),
-            &[&image.to_string()],
-        )
-        .await
-        .unwrap();
-    let source = format!("registry.example/sandbox@sha256:{:064x}", random());
-    let delayed = {
-        let store = store.clone();
-        let source = source.clone();
-        tokio::spawn(async move { store.record_built(&source, "sandbox", image, 1).await })
-    };
-    let waiting = "select count(*) from pg_stat_activity where application_name = $1 \
-                   and wait_event_type = 'Lock' and query like '%compute_captured_images%'";
-    let mut waited = 0;
-    while watch
-        .query_one(waiting, &[&schema])
-        .await
-        .unwrap()
-        .get::<_, i64>(0)
-        == 0
-    {
-        assert!(
-            waited < 500 && !delayed.is_finished(),
-            "the build never waited on the collector"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        waited += 1;
-    }
-
-    // Then it claims the image, as it would.
-    holder
-        .execute(
-            &format!(
-                "update {schema}.compute_captured_images \
-                 set collector = 'collector', claimed_ms = $2 where image = $1"
-            ),
-            &[&image.to_string(), &i64::try_from(at).unwrap()],
-        )
-        .await
-        .unwrap();
-    holder.commit().await.unwrap();
-    assert_eq!(delayed.await.unwrap().unwrap(), None);
-    assert_eq!(store.image_built(&source).await.unwrap(), None);
-    assert!(store.collecting(image, "collector").await.unwrap());
-
-    drop(store);
-    client
-        .batch_execute(&format!("drop schema {schema} cascade"))
-        .await
-        .unwrap();
 }
 
 async fn sandboxes_from_templates<S: Store>(store: S) {
