@@ -11542,7 +11542,7 @@ const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
 }`;
 
 const TYPE_INSERT_NO_TEXT_FIELD_MESSAGE =
-  "no text field is focused, so inserted text would not arrive and nothing was typed; focus a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
+  "the target is not a text field, so inserted text would not arrive and nothing was typed; type into a text field, or use mode:'keys' for a canvas or remote desktop that reads key presses";
 
 const TYPE_KEYS_TEXT_ONLY_MESSAGE =
   "keys were sent, but these characters have no key on a US keyboard and went as text only, which a canvas or remote desktop that reads key presses may not receive; check the screen: ";
