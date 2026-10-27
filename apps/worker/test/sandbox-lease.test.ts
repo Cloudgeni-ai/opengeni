@@ -24,12 +24,13 @@
 // a real box, drains its lease, and asserts the reaper's real terminate path
 // stops it — terminating the box in `finally` regardless.
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// pgvector/pgvector:pg16 (the migration baseline does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser → FORCE RLS applies; the global
 // sweep rides the SECURITY-DEFINER fn). Container torn down in afterAll.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { dropScratchBypassRole, reapStaleBypassRoles } from "./scratch-bypass-role";
 import {
   captureRetainedRouterOutput,
   createProviderCommandRetainer,
@@ -539,6 +540,8 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
+  // Earlier runs killed before their cleanup can leave a bypass role behind.
+  await reapStaleBypassRoles(admin, shared.adminUrl);
 }, 180_000);
 
 afterAll(async () => {
@@ -4447,38 +4450,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBe("terminated");
   }, 180_000);
 
-  test("deadline-command inventory function replays without widening public authority", async () => {
-    if (!available) throw new Error("Real PostgreSQL required for containment migration");
-    const definition = async () => {
-      const [row] = await admin`select pg_get_functiondef(
-        'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure
-      ) as definition`;
-      return String(row!.definition);
-    };
-    const before = await definition();
-    expect(before).toContain("process.reconcile_attempts >= 5");
-    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
-    expect(before).toContain(
-      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
-    );
-    expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
-    const migration = await Bun.file(
-      new URL(
-        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
-        import.meta.url,
-      ),
-    ).text();
-    await admin.begin(async (tx) => {
-      await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
-    });
-    expect(await definition()).toBe(before);
-    const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0
-        and acl.privilege_type = 'EXECUTE'), false) as public_execute
-      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-      where p.oid = 'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure`;
-    expect(permission!.public_execute).toBe(false);
-  }, 60_000);
-
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -5337,7 +5308,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expect(await readReconciliationState()).toEqual(beforeBypass);
     } finally {
       await bypassClient?.close();
-      await admin.unsafe(`drop role if exists ${quotedBypassRole}`);
+      // Memberships first, then grants that migrations elsewhere copied to it.
+      // A short deadline keeps this inside the test's own limit; anything
+      // left is for the stale-role cleanup or the shared reaper.
+      const leftovers = await dropScratchBypassRole(admin, shared!.adminUrl, bypassRole, {
+        deadline: Date.now() + 20_000,
+      });
+      if (leftovers.length > 0) console.warn(leftovers.join("; "));
     }
 
     const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {

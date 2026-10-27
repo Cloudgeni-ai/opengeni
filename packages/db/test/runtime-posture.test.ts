@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+
 import {
   evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
@@ -23,7 +23,6 @@ import {
   SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
   SUBSCRIPTION_M3_OWNER_ONLY_PRIVATE_ROUTINES,
   SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES,
-  SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
@@ -876,24 +875,6 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
-  });
-
-  test("requires the receipt of every provider whose cutover is in the binary's ledger", () => {
-    const posture = safePosture();
-    posture.subscriptionProviderCutoverReceipts = [];
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the codex subscription-core cutover receipt (0689_subscription_core_codex_cutover.sql); apply the pending migrations first",
-    );
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
-    );
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
-    );
-    // Each listed cutover migration is in this binary's ledger.
-    for (const migration of Object.values(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
-      expect(existsSync(new URL(`../drizzle/${migration}`, import.meta.url))).toBe(true);
-    }
   });
 
   test("a provider's legacy tables are read-only once its receipt exists", () => {
@@ -1803,6 +1784,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1008 bot templates: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1930,7 +1917,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 0952 secret approval rules and use approvals: full-DML, FORCE-RLS.
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
-        1; // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1; // 1008 bot templates: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1944,6 +1932,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
       expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
+      expect(FORCE_RLS_TABLES).toContain("bot_templates");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("bot_templates");
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");

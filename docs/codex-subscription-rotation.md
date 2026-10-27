@@ -2,11 +2,9 @@
 
 Since maintenance migration `0689_subscription_core_codex_cutover.sql`, Codex
 (ChatGPT subscription) accounts run on the shared subscription core. The legacy
-selector, leases, refresh and failover path is removed in M3 PR 4. Missing or
-disabled cutover rows fail closed; neither permits a legacy-table fallback.
-Its historical text remains in git history, and historical database regression
-setup lives only in test fixtures. The reset-redemption ledger remains a live
-core fence. `bun run check:no-legacy-subscription-runtime` enforces this boundary.
+selector, leases, refresh and failover path is removed in M3 PR 4, and the
+per-organization cutover switch is no longer read. Its historical text remains in git history. The reset-redemption ledger remains
+a live core fence.
 
 | Topic | Now |
 | --- | --- |
@@ -87,7 +85,7 @@ reading below the limit replaces the stored windows and wakes the waiters; it
 ends a refusal's stored deadline only when it also confirms the account may
 serve (not `allowed: false`, no spent feature limit).
 For a stalled waiter check `next_check_at`, `wake_revision`,
-`observed_wake_revision`, and the organization's cutover row; see the
+and `observed_wake_revision`; see the
 [wait design](design/subscription-core-2026-10-07.md#pr-2a-codex-chat-waits-wakes-re-placement-and-health-dormant).
 
 ## Historical maintenance cutovers

@@ -121,7 +121,7 @@ test("inventory tests run whenever their area changes, beyond the cap and broad 
     },
     dirs,
   );
-  expect(migration.unitTests).toEqual(["scripts/release-schema-contract.test.ts"]);
+  expect(migration.unitTests).toEqual(["scripts/check-migration-immutability.test.ts"]);
   // Inventory tests need not be in the impact plan's list, only exist; docs
   // plans never run units.
   const web = selectPrFastPlan(

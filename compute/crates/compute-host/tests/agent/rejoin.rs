@@ -277,6 +277,7 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
         .local_addr()
         .unwrap();
     let fleet = FleetConfig {
+        guest: None,
         control: format!("https://localhost:{port}"),
         info: HostInfo {
             name: "host-a.example".into(),
@@ -559,6 +560,7 @@ async fn a_host_registers_naming_the_boot_its_cloud_took() {
         .local_addr()
         .unwrap();
     let fleet = FleetConfig {
+        guest: None,
         control: format!("https://localhost:{port}"),
         info: HostInfo {
             name: "host-a.example".into(),

@@ -3,9 +3,8 @@
  * the shared core (design 5.3, Claude track C2a), on real PostgreSQL as the
  * non-owner application role.
  *
- * The production registry and migrated database admit Claude. A separate
- * historical fixture proves the pre-receipt legacy route. Only the adapter's
- * token transport is replaced; usage is scripted and real network is denied.
+ * The production registry and migrated database admit Claude. Only the
+ * adapter's token transport is replaced; usage is scripted and real network is denied.
  *
  * Run this file in its own process: the registration replaces module
  * bindings for the whole process.
@@ -23,8 +22,6 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
 
 setDefaultTimeout(180_000);
-
-const productionProviderIds = productionRegistry.subscriptionCoreProviderIds();
 
 /** The OAuth token endpoint; only the credential refresh tests script it. */
 let tokenEndpoint: typeof fetch = (async () => {
@@ -49,13 +46,11 @@ const {
   readSubscriptionCoreClaudeCatalogReadiness,
   readSubscriptionCoreClaudeOrganizationUsageRow,
   readSubscriptionCoreClaudeWorkspaceUsageTarget,
-  readSubscriptionCoreProviderRouteForWorkspace,
   refreshSubscriptionCoreClaudeOrganizationUsage,
   refreshSubscriptionCoreClaudeWorkspaceUsage,
   resetSubscriptionCoreClaudeUsageThrottle,
   subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization,
 } = await import("../src");
-const { upsertOrganizationClaudeSubscription } = await import("./fixtures/legacy-claude/accounts");
 const {
   rawRows,
   setSubjectRlsContext,
@@ -155,13 +150,6 @@ async function organization(): Promise<Org> {
     opus: opus.upstreamModelId,
     sonnet: sonnet.upstreamModelId,
   };
-}
-
-async function setCutover(org: Org, enabled: boolean): Promise<void> {
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${org.accountId}::uuid, 'claude', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 /** Later cases also run alone under mutation probes, after the legacy checks. */
@@ -464,99 +452,9 @@ describe("the application role", () => {
   });
 });
 
-describe("before the Claude cutover receipt (legacy route)", () => {
-  let current: { shared: SharedTestDatabase; client: DbClient };
-  beforeAll(async () => {
-    current = { shared, client };
-    const legacy = await acquireSharedTestDatabase("claude-reads-before-cutover", {
-      withheldMigrations: [
-        "0748_subscription_core_claude_cutover.sql",
-        "0751_subscription_core_legacy_retirement.sql",
-      ],
-    });
-    if (!legacy) throw new Error("Real PostgreSQL is required");
-    shared = legacy;
-    client = createDb(shared.appUrl, { max: 6 });
-  }, 180_000);
-  afterAll(async () => {
-    if (client !== current.client) await client.close();
-    if (shared !== current.shared) await shared.release();
-    ({ shared, client } = current);
-  }, 60_000);
-
-  test("the production binding does not bypass the missing cutover receipt", () => {
-    expect(productionProviderIds).toContain("claude");
-  });
-
-  test("without the cutover receipt admission fails closed even with a valid legacy pool", async () => {
-    const org = await organization();
-    await setCutover(org, true);
-    expect(
-      await readSubscriptionCoreProviderRouteForWorkspace(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        provider: "claude",
-      }),
-    ).toBe("legacy");
-    // A core connection is not read on the legacy route.
-    await sharedConnection(org, "legacy-core-row");
-    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    const secret = {
-      version: 1 as const,
-      token: "sk-ant-oat01-legacy-admission",
-      identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-    };
-    // Seed historical data only with the fixture administrator: current app
-    // roles deliberately no longer execute retired Claude writer routines.
-    // Every admission assertion below still runs as the restricted app role.
-    const seed = createDb(shared.adminUrl, { max: 1 });
-    try {
-      await upsertOrganizationClaudeSubscription(seed.db, {
-        organizationId: org.accountId,
-        actorSubjectId: org.ownerSubjectId,
-        encryptionKey: key,
-        secret,
-        providerAccountId: secret.identity.accountUuid,
-        label: null,
-        accountEmail: null,
-        expiresAt: null,
-      });
-    } finally {
-      await seed.close();
-    }
-    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    expect(
-      await admit(org, org.opus, { authoritySnapshot: { version: 1, scope: "workspace" } }),
-    ).toBeNull();
-    expect(await admit(org, org.opus, organizationSnapshot, { subject: false })).toBeNull();
-  });
-});
-
 describe("on the Claude core route", () => {
-  test("the production migration admits the binding and its receipt", async () => {
-    await ensureTestClaudeRegistration();
-    const org = await organization();
-    await setCutover(org, true);
-    expect(
-      await readSubscriptionCoreProviderRouteForWorkspace(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        provider: "claude",
-      }),
-    ).toBe("core");
-    await setCutover(org, false);
-    expect(
-      await readSubscriptionCoreProviderRouteForWorkspace(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        provider: "claude",
-      }),
-    ).toBe("maintenance");
-  });
-
   test("usage targets: the workspace pool, aliases and the owner's own personal connection", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const organizationPool = await sharedConnection(org, "org-pool");
     const workspacePool = await sharedConnection(org, "ws-pool", { pool: "workspace" });
     const personal = await personalConnection(org, "personal");
@@ -619,7 +517,6 @@ describe("on the Claude core route", () => {
   test("a live refresh records the reading with the catalog's models, and throttles", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const connectionId = await sharedConnection(org, "refresh", { pool: "workspace" });
     const scope = {
       accountId: org.accountId,
@@ -681,7 +578,6 @@ describe("on the Claude core route", () => {
   test("failed reads are throttled; setup tokens and 401s never store a status", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const scope = {
       accountId: org.accountId,
       workspaceId: org.workspaceId,
@@ -734,7 +630,6 @@ describe("on the Claude core route", () => {
   test("the throttle prefers a newer stored reading and is keyed by workspace and version", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const other = await secondWorkspace(org);
     // Organization scope reaches both workspaces.
     const connectionId = await sharedConnection(org, "keyed");
@@ -793,7 +688,6 @@ describe("on the Claude core route", () => {
   test("past 30 seconds on the injected clock the provider is read again", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const scope = {
       accountId: org.accountId,
       workspaceId: org.workspaceId,
@@ -844,7 +738,6 @@ describe("on the Claude core route", () => {
   test("a reading the core did not record is reported unavailable", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const connectionId = await sharedConnection(org, "fenced", { pool: "workspace" });
     const scope = {
       accountId: org.accountId,
@@ -879,7 +772,6 @@ describe("on the Claude core route", () => {
 
   test("readiness splits the core projection by the legacy prefixes", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const read = (workspaceId = org.workspaceId, subjectId: string | null = org.ownerSubjectId) =>
       readSubscriptionCoreClaudeCatalogReadiness(client.db, {
         accountId: org.accountId,
@@ -925,7 +817,6 @@ describe("on the Claude core route", () => {
 
   test("organization admission: the effective source and a live organization-pool connection", async () => {
     const org = await organization();
-    await setCutover(org, true);
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
     // A personal connection never admits an organization model.
     await personalConnection(org, "admission-personal");
@@ -977,14 +868,10 @@ describe("on the Claude core route", () => {
     await shared.admin`update subscription_connections set status = 'active'
       where id = ${connectionId}::uuid`;
     expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
-    // Maintenance admits nothing.
-    await setCutover(org, false);
-    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
   });
 
   test("carried accepted authority decides through the accepted-authority reader", async () => {
     const org = await organization();
-    await setCutover(org, true);
     await sharedConnection(org, "carried");
     const initial = (sessionId: string): CompatCarrier => ({
       kind: "session_initial",
@@ -1173,7 +1060,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
   test("the organization route: an administrator reads organization-pool connections live", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const connectionId = await sharedConnection(org, "admin-live");
     const workspaceManaged = await sharedConnection(org, "admin-managed", { pool: "workspace" });
     const row = await organizationRow(org, connectionId);
@@ -1181,10 +1067,9 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     // Refused without a provider call: a member who is not an administrator,
     // another organization's administrator (for this organization, or with
     // this organization's connection on their own), a connection a
-    // workspace manages, and a cutover in maintenance.
+    // workspace manages.
     const plain = await member(org);
     const otherOrg = await organization();
-    await setCutover(otherOrg, true);
     for (const input of [
       { organizationId: org.accountId, subjectId: plain.subjectId, row },
       { organizationId: org.accountId, subjectId: otherOrg.ownerSubjectId, row },
@@ -1198,16 +1083,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
       expect((await organizationRefresh(input, upstream.fetchImpl)).refreshStatus).toBe(
         "unavailable",
       );
-    await setCutover(org, false);
-    expect(
-      (
-        await organizationRefresh(
-          { organizationId: org.accountId, subjectId: org.ownerSubjectId, row },
-          upstream.fetchImpl,
-        )
-      ).refreshStatus,
-    ).toBe("unavailable");
-    await setCutover(org, true);
     expect(upstream.calls).toHaveLength(0);
     expect(await storedQuota(connectionId)).toBeNull();
     expect(await storedQuota(workspaceManaged)).toBeNull();
@@ -1251,7 +1126,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
 
   test("the organization route: an expired credential rotates under the administrator; a 401 asks for reconnect", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const connectionId = await sharedConnection(org, "admin-rotate");
     const generation = await expireCredential(connectionId, "admin-rotate");
     const upstream = liveUsage();
@@ -1290,7 +1164,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
 
   test("the owner refreshes their own personal connection, only in their own Personal workspace", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const personal = await personalConnection(org, "own-live");
     const own = (await readSubscriptionCoreClaudeWorkspaceUsageTarget(client.db, {
       accountId: org.accountId,
@@ -1336,11 +1209,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     );
     await shared.admin`update organization_user_resource_authorities
       set generation = 1 where resource_id = ${personal}::uuid`;
-    await setCutover(org, false);
-    expect((await refresh(org.personalWorkspaceId, org.ownerSubjectId)).usage.refreshStatus).toBe(
-      "unavailable",
-    );
-    await setCutover(org, true);
     expect(upstream.calls).toHaveLength(0);
     expect(await storedQuota(personal)).toBeNull();
 
@@ -1378,7 +1246,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
 
   test("the owner's personal refresh rotates an expired credential through the owner-only routine; a 401 asks for reconnect", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const personal = await personalConnection(org, "own-rotate");
     const generation = await expireCredential(personal, "own-rotate");
     const scope = {
@@ -1440,7 +1307,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     // This case must also work in isolation for the refusal mutation probe.
     await ensureTestClaudeRegistration();
     const org = await organization();
-    await setCutover(org, true);
     const oauthId = await sharedConnection(org, "refused-oauth");
     const setupId = await sharedConnection(org, "refused-setup", { kind: "setup" });
     const personal = await personalConnection(org, "refused-own");
@@ -1501,16 +1367,7 @@ describe("live refresh outside a workspace pool (C2c)", () => {
       );
     };
 
-    // Maintenance: the organization route refuses (stored usage, no check
-    // time; the setup token keeps `scope_required`), then reads live again
-    // once the cutover is enabled.
     clock += 31_000;
-    await setCutover(org, false);
-    refusedAs(await organizationUsage(oauthId), organizationRead);
-    const setup = await organizationUsage(setupId);
-    expect(setup.usage.refreshStatus).toBe("scope_required");
-    expect(setup.usage.refreshCheckedAt).toBeNull();
-    await setCutover(org, true);
     expect(upstream.calls).toHaveLength(2);
     expect(await storedQuota(oauthId)).toEqual(stored.organization);
     expect(await storedQuota(setupId)).toBeNull();
@@ -1568,7 +1425,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     await ensureTestClaudeRegistration();
     const org = await organization();
-    await setCutover(org, true);
     const connectionId = await sharedConnection(org, "remember-failure-org");
     const personal = await personalConnection(org, "remember-failure-own");
     let clock = Date.now();
@@ -1629,7 +1485,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
   test("a stored needs_relogin answers reconnect on both new paths, with no provider call and no quota", async () => {
     resetSubscriptionCoreClaudeUsageThrottle();
     const org = await organization();
-    await setCutover(org, true);
     const organizationId = await sharedConnection(org, "relogin-org");
     const personal = await personalConnection(org, "relogin-own");
     await shared.admin`update subscription_connections
@@ -1675,7 +1530,6 @@ describe("live refresh outside a workspace pool (C2c)", () => {
 
   test("the owner-only routines refuse every other context", async () => {
     const org = await organization();
-    await setCutover(org, true);
     const personal = await personalConnection(org, "routines");
     const other = await member(org);
     const call = async (

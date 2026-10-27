@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+
 import {
   RequestHumanInputToolInput,
   type CompanyProfileAgentReviewRequiredReceipt,
@@ -327,78 +327,6 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("company-profile agent administration", () => {
-  test("declares an explicit organization authority independent of governed learning", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0324_human_confirmed_company_profile_agent_admin.sql", import.meta.url),
-      "utf8",
-    );
-    expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
-    // The agent path carries exactly the manual route's authority: the organization owner
-    // (`account:admin`), never a widened owner/admin set.
-    expect(migration.match(/membership\.role = 'owner'/g)).toHaveLength(2);
-    expect(migration).not.toContain("membership.role IN ('owner', 'admin')");
-    // Receipts that reference sessions carry the restrictive session visibility policy.
-    expect(
-      migration.match(
-        /CREATE POLICY session_visibility_isolation\n {2}ON company_profile_agent_\w+_receipts AS RESTRICTIVE/g,
-      ),
-    ).toHaveLength(2);
-    // Lock order: no lock stronger than managed_accounts FOR KEY SHARE precedes the canonical
-    // workspace/session prefix; the nested activation reaches the organization row after it.
-    const proposeBody = migration.slice(
-      migration.indexOf("CREATE FUNCTION propose_company_profile_for_attempt("),
-      migration.indexOf("CREATE FUNCTION confirm_company_profile_for_attempt("),
-    );
-    const confirmBody = migration.slice(
-      migration.indexOf("CREATE FUNCTION confirm_company_profile_for_attempt("),
-      migration.indexOf("REVOKE ALL ON FUNCTION propose_company_profile_for_attempt("),
-    );
-    for (const body of [proposeBody, confirmBody]) {
-      expect(body).not.toMatch(/FROM managed_accounts account[^;]*FOR UPDATE/);
-      expect(body).not.toMatch(/organization_memberships membership[^;]*FOR (SHARE|UPDATE)/);
-      const workspacePrefix = body.indexOf("FROM workspaces workspace");
-      const membershipLock = body.indexOf("FROM organization_memberships membership");
-      const sessionPrefix = body.indexOf("FOR SHARE OF session, turn, attempt");
-      const accountTouch = body.indexOf("FROM managed_accounts account");
-      expect(workspacePrefix).toBeGreaterThan(0);
-      expect(membershipLock).toBeGreaterThan(workspacePrefix);
-      expect(sessionPrefix).toBeGreaterThan(membershipLock);
-      const statementsBeforeSessionPrefix = body.slice(body.indexOf("\nBEGIN\n"), sessionPrefix);
-      expect(statementsBeforeSessionPrefix).not.toContain("managed_accounts");
-      expect(statementsBeforeSessionPrefix).not.toContain("FROM company_profile_heads");
-      if (accountTouch >= 0) expect(accountTouch).toBeGreaterThan(sessionPrefix);
-    }
-    expect(proposeBody).toMatch(
-      /FROM managed_accounts account\n {2}WHERE account\.id = p_account_id FOR KEY SHARE;/,
-    );
-    expect(confirmBody).not.toContain("FROM managed_accounts account");
-    expect(confirmBody.indexOf("company_profile_apply_activation(")).toBeGreaterThan(
-      confirmBody.indexOf("FOR SHARE OF session, turn, attempt"),
-    );
-    expect(migration).toContain("company_profile_agent_confirmation_summary(p_content_json)");
-    expect(migration).toContain("proposal.execution_generation <= request.turn_generation");
-    expect(migration).toContain("request.turn_generation < p_execution_generation");
-    expect(migration).not.toContain("receipt.execution_generation = p_execution_generation");
-    expect(migration).not.toContain("request.turn_generation = p_execution_generation");
-    expect(migration).not.toContain("proposal.execution_generation + 1");
-    expect(migration).not.toContain("request.turn_generation + 1");
-    expect(migration).toContain("request.responded_by = actor_membership.subject_id");
-    expect(migration).toContain("request.questions = proposal.human_input->'questions'");
-    expect(migration).toContain("answer.value->'values' = '[\"activate\"]'::jsonb");
-    expect(migration).toContain("p_content_json, p_content_hash, 'agent_admin'");
-    expect(migration).toContain("company_profile_apply_activation(");
-    expect(migration.match(/FOREIGN KEY \(workspace_id, session_id\)/g)).toHaveLength(2);
-    expect(migration.match(/REFERENCES sessions\(workspace_id, id\)/g)).toHaveLength(2);
-    expect(migration).not.toContain("REFERENCES sessions(account_id, workspace_id, id)");
-    expect(migration.match(/FOREIGN KEY \(workspace_id, turn_id\)/g)).toHaveLength(2);
-    expect(migration.match(/REFERENCES session_turns\(workspace_id, id\)/g)).toHaveLength(2);
-    expect(migration).not.toContain(
-      "REFERENCES session_turns(account_id, workspace_id, session_id, id)",
-    );
-    expect(migration).not.toContain("workspace_learning_policy");
-    expect(migration).not.toContain("governed_learning");
-  });
-
   test("uses the canonical G to G+1 lifecycle, activates, records P <= R < L, and replays", async () => {
     if (!shared || !client) return;
     const f = await fixture();

@@ -2348,31 +2348,6 @@ describe("one chat Skill confirmation", () => {
     expect(after).toEqual(before);
   });
 
-  test("forward Skill cutover refuses a connected runtime before changing schema", async () => {
-    if (!client || !shared) return;
-    const f = await fixture("suggest");
-    await saveSkill(client.db, f.input);
-    const migration = await Bun.file(
-      new URL("../../db/drizzle/0435_skill_chat_confirmation.sql", import.meta.url),
-    ).text();
-    const runtimeRole = decodeURIComponent(new URL(shared.appUrl).username);
-    await expect(
-      shared.admin.begin(async (tx) => {
-        await tx`select set_config('opengeni.migration_application_roles',${JSON.stringify([runtimeRole])},true)`;
-        await tx.unsafe(migration);
-      }),
-    ).rejects.toThrow("0435 requires drained application sessions");
-    expect(
-      (
-        await readSkill(
-          client.db,
-          { ...f.context, subjectId: f.human.actor.subjectId },
-          f.input.skillId,
-        )
-      )?.activeRevisionId,
-    ).toBeTruthy();
-  });
-
   test("direct agent Skill installation returns one bound chat review and activates installed files", async () => {
     if (!client || !shared) return;
     const f = await fixture("suggest");

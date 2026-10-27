@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import postgres from "postgres";
+
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniClient } from "@opengeni/sdk";
@@ -74,36 +74,6 @@ afterAll(async () => {
     }
   }
 }, 60_000);
-
-test("rolling owner-RLS repair replay preserves definitions, ownership and ACLs", async () => {
-  const definitions = () => shared.admin`select p.proname, pg_get_functiondef(p.oid) as definition,
-    p.proowner, p.proacl::text as acl from pg_proc p
-    where p.oid in ('prepare_workspace_membership_removal_settlements(jsonb)'::regprocedure,
-      'workspace_membership_removal_command(jsonb)'::regprocedure) order by p.proname`;
-  const before = await definitions();
-  const repair = await Bun.file(
-    new URL(
-      "../../../packages/db/drizzle/0558_external_membership_removal_owner_rls.sql",
-      import.meta.url,
-    ),
-  ).text();
-  const owner = postgres(shared.ownerUrl, { max: 1 });
-  try {
-    // Simulate SQL commit followed by a lost migration-ledger receipt. Replay
-    // must work under the same non-bypass owner, not merely skip via migrate().
-    await owner.begin(async (tx) => {
-      await tx.unsafe(repair);
-    });
-    await owner.begin(async (tx) => {
-      await tx.unsafe(repair);
-    });
-    expect(await definitions()).toEqual(before);
-  } finally {
-    await owner.end();
-  }
-  await migrate(shared.ownerUrl, "public", { applicationDatabaseRoles: [appRole] });
-  expect(await definitions()).toEqual(before);
-}, 180_000);
 
 async function fixture() {
   const [account] =

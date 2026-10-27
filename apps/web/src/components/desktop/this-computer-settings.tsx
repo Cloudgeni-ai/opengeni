@@ -547,7 +547,7 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
           label="Offer to record calls"
           description={
             detection.enabled
-              ? "When Zoom, Teams, Slack, or a meeting in your browser starts using the microphone, a notification asks whether to record it."
+              ? "When Zoom, Teams, Slack, or a meeting in your browser starts using the microphone, a card in the top corner of the screen asks whether to record it."
               : "Off. Start meeting recordings yourself from Meetings."
           }
           error={meetings.saving ? undefined : (meetings.failed ?? detection.problem)}

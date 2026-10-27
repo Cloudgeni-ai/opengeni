@@ -95,9 +95,9 @@ the console uses:
   keeps going while the person moves around. A recording stays with the
   workspace it started in until it stops, even when `workspaceId` changes or
   is null for a while; then the recorder moves to the workspace shown. In
-  the desktop app it also carries out the call notifications ("Record this
-  meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say where those
-  open. `onOpenMeeting` gets the meeting's workspace, which may not be the
+  the desktop app it also carries out the choices on the app's call card
+  ("Record this meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say
+  where those open. `onOpenMeeting` gets the meeting's workspace, which may not be the
   one shown, and `MeetingsListPage` uses it to open a recording made in
   another workspace after Stop. A host that mounts it above sign-in passes
   `scope`, such as the signed-in person's id: a new value ends a recording
@@ -181,6 +181,52 @@ any Electron app that shows Opengeni's meetings, with `@opengeni/desktop`:
 
 Inside an Electron app that doesn't, the recorder offers no tab audio, because
 Electron shows no share picker of its own.
+
+The same app can offer to record calls, as the Opengeni desktop app does.
+When Zoom, Teams, Slack, Webex, FaceTime, Discord or a browser starts using
+the microphone, a small card in the top right corner of the screen asks
+"Record this meeting?"; when the call being recorded ends, it asks whether to
+stop. The card is the app's own window, above full-screen apps and without
+taking the keyboard, so Focus and Do Not Disturb don't hide it the way they
+hide notifications. A question to record goes away after 45 seconds, unless
+the pointer is on it. It uses the same helper, which tells which apps use the
+microphone without asking for any permission:
+
+```ts
+import {
+  createMeetingDetection,
+  handleMeetingDetectionIpc,
+} from "@opengeni/desktop/meeting-detection";
+
+const meetings = createMeetingDetection({
+  helperPath, // the same helper as above
+  appId: "com.example.app", // so your app's own microphone isn't a call
+  dataDir: app.getPath("userData"), // where the person's on/off switch is kept
+  logDir: app.getPath("logs"), // meeting-detection.log: what it asked and when
+  iconPath: join(process.resourcesPath, "icon.png"), // shown on the card
+  words: () => cardWordsIn(currentLanguage()), // English by default
+  reveal: () => showYourWindow(), // the person chose Record or Stop
+});
+handleMeetingDetectionIpc({ ipcMain, detection: meetings, allow: (event) => assertYourWebApp(event) });
+app.whenReady().then(() => meetings.start());
+app.on("will-quit", () => meetings.stop());
+```
+
+In the preload, call `exposeMeetingDetection()` from
+`@opengeni/desktop/preload/meeting-detection` next to `exposeSystemAudio()`.
+It defines `window.opengeniMeetingDetection`: `MeetingRecorderProvider`
+starts recording when the person chooses Record and stops when they choose
+Stop recording, and your settings can show the switch with
+`getDesktopMeetingDetection()` from `@opengeni/sdk/desktop-bridge` (its
+`status()` and `update({ enabled })`).
+
+The app asks only once a page that can record has said so: the provider
+takes the card's choices while someone is signed in and it has a
+`workspaceId` (or a recording is going). So an app nobody can record in yet,
+such as one signed out or for an account without meetings, never shows the
+card. The app remembers the answer, so after a restart it asks before any
+window has loaded; a page that closes doesn't change it, because Record opens
+the window again.
 
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:
@@ -553,9 +599,9 @@ version. A microphone alone keeps diarized `Speaker 1`, `Speaker 2`, ….
 A meeting has two Markdown documents beside its transcript. The `notepad` is
 what people jot down while it is recorded. The `notes` are the written-up
 summary, decisions and action items, by a person or by an agent afterwards
-(an automation that runs when `recording.transcript.ready` arrives is the
-usual way). Anyone who can see the meeting can read and replace both, as with
-its title and speakers; deleting the meeting deletes them.
+(Opengeni writes them itself, see "Built-in summary" below). Anyone who can
+see the meeting can read and replace both, as with its title and speakers;
+deleting the meeting deletes them.
 
 - `GET …/recordings/:recordingId/notes` returns the notes saved so far, each
   with its `revision`, `updatedAt` and who saved it (`updatedBy.sessionId` is
@@ -568,6 +614,14 @@ its title and speakers; deleting the meeting deletes them.
 
 Saving the `notes` is a `recording.notes.updated` event; the notepad, which
 saves as people type, is not.
+
+Agents read a meeting with the `meeting_read` tool. Its details give each
+speaker's `label` (and `personId` for a person from the workspace's
+directory), the `notepad` and the `notes` with their `revision`. The
+`meeting_notes_save` tool saves the `notes` through the same path as the
+`PUT` above, for the person the agent acts for, with `expectedRevision`; a
+newer save answers `notes_changed`. The meeting page shows notes an agent's
+chat saved as "Written by an agent".
 
 ### Mentions in the notes
 
@@ -598,6 +652,56 @@ on `MeetingDetailPage`.
 A summary usually opens with a short overview paragraph, then a heading per
 topic with nested bullets, then `## Decisions` and `## Action items`
 (`- [ ] [Name](speaker:speaker_1) does what, by when`).
+
+### Built-in summary
+
+When a meeting's shown transcript first becomes ready, Opengeni starts one
+ordinary chat that writes its notes. A re-run of the transcript starts
+another only while the meeting still has no notes, and one transcript
+version never starts two (the chat is keyed by the version).
+
+- **Whose chat.** The meeting owner's: an Only me chat owned by them for an
+  Only me meeting, or a workspace chat for a meeting shared with the
+  workspace. Opengeni starts it ("Opengeni meeting notes"); the owner never
+  has to ask.
+- **What it may do.** Only read that one meeting and save that meeting's
+  notes. The chat has no sandbox, resources, Skills or other servers, and
+  its only tools are `meeting_read` and `meeting_notes_save`. Session
+  creation refuses any other chat that claims to be a meeting summary, and
+  the database's private-chat guard (migration 1005) accepts an Only me one
+  only for the owner of that Only me meeting. It keeps that shape for its
+  whole life: changing its tools, Skills, agent, resources, sandbox,
+  Connected Machine or variable sets answers 409, and the database refuses
+  the same change (or an added server) whoever makes it. In the chat, `meetings_search`
+  is refused and every other meeting is not found. An Only me summary reads
+  its meeting as its owner; a workspace one sees only shared meetings.
+- **How it is paid for.** Like any background chat, on the workspace's
+  shared Codex or Claude subscription accounts, never a person's own. It
+  uses the model a new chat would get when a subscription account serves
+  it, else the first model one serves. When no subscription account can
+  serve a model, it does not start, so it never spends Opengeni credits or
+  an API key. Its turns are placed like any other subscription turn
+  ([subscription accounts](subscription-accounts.md)).
+- **Notes come first.** It writes nothing over saved notes: it does not start
+  when the meeting has notes, even cleared ones, and its
+  `meeting_notes_save` writes only the first notes or revises the notes
+  that same chat saved; anything else answers `notes_changed`.
+- **Automations.** When the meeting's owner has an active automation of
+  their own that runs on `recording.transcript.ready` (such as the
+  "Meeting notes" template) and event triggers are on, that automation
+  writes the notes and the built-in summary does not start.
+- **Failures are quiet.** If it can't start, the worker only logs why; the
+  meeting keeps its transcript and shows "No notes yet", and anyone can
+  still ask an agent to write notes.
+- **Turning it off.** It is on unless the workspace sets
+  `settings.recordings.autoSummary: false`, which admins change with the
+  "Write notes after each meeting" switch in the meeting settings.
+
+The notes follow one format: a one-paragraph overview, a `##` heading per
+topic with nested bullets, `## Decisions`, then `## Action items` as a
+checklist with each owner and due date when one was said, in the names,
+terms and language people used, without small talk. Speakers and people are
+written as the mentions above, with the labels and ids `meeting_read` gives.
 
 ## Recognizing people by voice
 
@@ -687,10 +791,13 @@ A dictation differs from a meeting in a few ways:
   one answers 403 with `details.code: "policy_blocked"` when voice input is
   off, and 503 when no voice input provider is available.
 - Its `transcription` can name only the `language` spoken (an ISO 639-1 or
-  639-3 code such as `nb` or `en`); anything else answers 400. Without a
-  language, the provider detects it. A dictation does not take the
-  workspace's meeting language, because people dictate in more languages
-  than they hold meetings in.
+  639-3 code such as `nb` or `en`) and `keyterms`, the person's vocabulary;
+  anything else answers 400. Without a language, the provider detects it. A
+  dictation does not take the workspace's meeting language, because people
+  dictate in more languages than they hold meetings in. Keyterms reach a
+  model that takes them (ElevenLabs Scribe and Azure Speech as keyterms,
+  OpenAI and Azure OpenAI as the prompt) and are left out for one that
+  doesn't.
 - It is billed like voice input: each piece is charged against the
   dictating person's usage, and a refused charge fails the transcript with
   that code (for example `insufficient_credits`).
@@ -706,7 +813,8 @@ offer the text of a dictation an earlier page, tab or device left behind.
 `useVoiceInput` (in `@opengeni/react/recordings`, used by the web composer)
 and `useNativeDictation` (in `@opengeni/react-native/recordings`) do all of
 this; their `language` option (and `ComposerTranscriptionControl`'s
-`language` prop) sets the language each new dictation is heard in. Taking
+`language` prop) sets the language each new dictation is heard in, and
+`useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
 insert the same speech twice. Cancel or Escape keeps anything longer than
@@ -717,6 +825,82 @@ sends one request, as before.
 
 Dictation recordings replace the older `transcription-recordings` routes,
 which are deprecated and kept for older clients until their sunset.
+
+### Dictation from anywhere (desktop)
+
+In the desktop app, a shortcut dictates into whatever app has the cursor:
+press it, speak, press it again (or hold it while speaking), and the text is
+typed there. Each dictation is an ordinary dictation recording of the
+signed-in person, so it is kept the same way: a failed transcription offers
+Retry, and a dismissed or cancelled one (after the first few seconds) stays
+saved for the composer to offer. The pieces:
+
+- The main process (`@opengeni/desktop/dictation`) owns the shortcuts, a
+  small window at the bottom of the screen that shows the dictation's
+  progress, and where the text goes. It types the text by pasting it and
+  then puts the person's clipboard back, or only copies it. Several
+  shortcuts can each have their own language (one for English, one for
+  Norwegian); most people keep the one, which detects the language. On macOS
+  a shortcut can be modifier keys alone (Control and Fn by default) and
+  typing needs Accessibility. On Windows it pastes with PowerShell; on Linux
+  with xdotool (X11), wtype or ydotool (Wayland), and only copies without
+  them.
+- The person can list a vocabulary (names and terms, one per line) that
+  every dictation listens for, and set two more shortcuts: one that
+  transcribes the last dictation again and types it, and one that cancels
+  the dictation in progress (Escape always does).
+- The last 50 dictations are kept on the computer, each with its text and
+  its speech (up to 32 MB each, readable only by the person). From the
+  settings page the person can copy a text, play its speech, or transcribe
+  it again; transcribing again uploads the kept speech as a new dictation
+  (`uploadRecordingAudio` in `@opengeni/sdk/recordings`) and replaces the
+  text. Clearing the history deletes the speech too.
+- While dictation is on, the app opens (without a window) when the person
+  logs in, so the shortcuts work from the start.
+- `DesktopDictationHost` (`@opengeni/react/desktop-dictation`), mounted once
+  on the signed-in pages, records and transcribes when the app asks, with
+  `useVoiceInput`. When no page is open, the app opens one in the background
+  and starts once it listens.
+- `DesktopDictationSettings` is the stock settings UI, or build your own on
+  `useDesktopDictation()`.
+
+An Electron app other than Opengeni's wires it like system audio:
+
+```ts
+// Main process
+import {
+  createDesktopDictation,
+  ENGLISH_DICTATION_WORDS,
+  handleDictationIpc,
+} from "@opengeni/desktop/dictation";
+
+const dictation = createDesktopDictation({
+  productName: "Example",
+  dataDir: app.getPath("userData"),
+  reveal: () => showMainWindow(),
+  wake: () => openMainWindowInBackground(), // optional
+  // optional: the small window's words in the app's language (English by default)
+  words: () => ({ ...ENGLISH_DICTATION_WORDS, transcribing: "Transkriberer…" }),
+  // optional: the language the first shortcut hears until the person picks another
+  // (it detects the language by default)
+  language: "nb",
+});
+handleDictationIpc({ ipcMain, dictation, allow: (event) => assertYourWebApp(event) });
+dictation.start();
+app.on("will-quit", () => dictation.stop());
+
+// Preload of the web app's window
+import { exposeDictation } from "@opengeni/desktop/preload/dictation";
+exposeDictation(); // defines window.opengeniDictation
+
+// Web app, on the signed-in pages
+<DesktopDictationHost client={client} workspaceId={workspaceId} />
+```
+
+The settings page (`DesktopDictationSettings`) and the host's failure messages
+use the `desktopDictation.*` keys of the React messages, so a translated
+catalog covers them. The app's status names problems by code
+(`shortcutErrors[].problem`, `paste.blocker`) for the page to put in words.
 
 ## Deletion
 

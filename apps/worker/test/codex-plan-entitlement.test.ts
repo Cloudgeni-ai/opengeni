@@ -12,7 +12,6 @@ import {
   agentRunFailurePayload,
   classifyCodexCredentialFailure,
 } from "../src/activities/agent-turn/errors";
-import { selectCodexCredentialLeaseForTurn } from "./fixtures/legacy-codex/rotation";
 
 const model = "codex/gpt-6-sol";
 const now = new Date("2026-09-27T12:00:00.000Z");
@@ -368,59 +367,6 @@ describe("Codex plan entitlement admission", () => {
         ],
       }),
     ).toBeNull();
-  });
-});
-
-describe("Codex plan entitlement allocation", () => {
-  test("the allocator skips a plan-excluded account for that model only", () => {
-    const leaseAccount = (id: string, overrides: Record<string, unknown> = {}) => ({
-      ...account(id, overrides),
-      chatgptAccountId: id,
-      status: "active",
-      isActive: id === "a",
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastError: null,
-      primaryUsedPercent: 0,
-      primaryResetAt: null,
-      secondaryUsedPercent: 0,
-      secondaryResetAt: null,
-      usageCheckedAt: null,
-      exhaustedUntil: null,
-      exhaustedKind: null,
-      activeLeaseCount: 0,
-      selectionCount: 0,
-      lastSelectedAt: null,
-    });
-    const select = (modelId: string, at = now) =>
-      selectCodexCredentialLeaseForTurn({
-        context: {
-          accounts: [
-            leaseAccount("a", {
-              planType: "free",
-              planEntitlementExclusion: freeExclusion,
-            }),
-            leaseAccount("b"),
-          ] as never,
-          activeCredentialId: "a",
-          rotationEnabled: false,
-          rotationStrategy: "sharded",
-          existingCredentialId: "a",
-          modelId,
-          policyScope: null,
-          unavailableDiagnostics: [],
-        },
-        sessionId: "session-1",
-        sessionPinnedCredentialId: null,
-        sessionPinSource: null,
-        sessionLastCredentialId: null,
-        now: at,
-      });
-    // Even the existing same-turn lease is not reused for the excluded model.
-    expect(select(model).credentialId).toBeNull();
-    expect(select("codex/gpt-6-luna").credentialId).toBe("a");
-    // After the TTL the account may serve the model again (one probe).
-    expect(select(model, new Date(now.getTime() + 48 * 60 * 60 * 1000)).credentialId).toBe("a");
   });
 });
 

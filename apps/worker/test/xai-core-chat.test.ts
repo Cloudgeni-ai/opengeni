@@ -14,7 +14,7 @@ import {
 } from "../src/activities/agent-turn/credential-leases";
 import {
   buildXaiCoreRequestAuthorization,
-  selectXaiTurnCapacityByRoute,
+  selectXaiTurnCapacity,
   xaiCoreLanesRecoverAfterCheckpoint,
   xaiCoreRequestOutcomeUnknown,
   xaiCoreTitleCustody,
@@ -109,12 +109,11 @@ function capacityDeps(overrides: { source?: string; isXaiTurn?: boolean } = {}) 
   return deps as unknown as CapacityPhaseDeps;
 }
 
-function route(value: db.SubscriptionCoreProviderRoute) {
+function scopedDb() {
   spy(db, "withRlsContext").mockImplementation(
     async (_db: unknown, _context: unknown, callback: (scoped: never) => Promise<unknown>) =>
       await callback({} as never),
   );
-  return spy(db, "readSubscriptionCoreProviderRoute").mockResolvedValue(value);
 }
 
 function coreTurns(
@@ -147,46 +146,21 @@ const runPlacement = {
   connectedCount: 1,
 } as unknown as db.SubscriptionCorePlacement;
 
-describe("SuperGrok capacity by provider route", () => {
-  test("a legacy route fails closed exactly as maintenance after exactly one route read", async () => {
-    // The legacy SuperGrok selector was deleted (M4 X4): after the X3 receipt
-    // nothing but the core may fund a SuperGrok turn.
-    const read = route("legacy");
-    const { place } = coreTurns(runPlacement);
-    const deps = capacityDeps();
-    await expect(selectXaiTurnCapacityByRoute(deps)).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(read.mock.calls[0]![1]).toEqual({ accountId: "account-1", provider: "xai" });
-    expect(place).not.toHaveBeenCalled();
-    expect(deps.leases.xai.holderId).toBeNull();
-  });
-
-  test("a non-SuperGrok turn reads no route", async () => {
-    const read = route("core");
-    expect(await selectXaiTurnCapacityByRoute(capacityDeps({ isXaiTurn: false }))).toEqual({
+describe("SuperGrok capacity on the shared core", () => {
+  test("a non-SuperGrok turn is not placed", async () => {
+    scopedDb();
+    expect(await selectXaiTurnCapacity(capacityDeps({ isXaiTurn: false }))).toEqual({
       ok: true,
     });
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  test("maintenance fails closed and never places", async () => {
-    route("maintenance");
-    const { place } = coreTurns(runPlacement);
-    await expect(selectXaiTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-      payload: { code: "subscription_core_cutover_disabled", retryable: false },
-    });
-    expect(place).not.toHaveBeenCalled();
   });
 
   test("core places the accepted turn and adopts the core lease", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     const { place, recover } = coreTurns(runPlacement);
     const deps = capacityDeps();
     try {
-      expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({ ok: true });
+      expect(await selectXaiTurnCapacity(deps)).toEqual({ ok: true });
       expect(recover).toHaveBeenCalledTimes(1);
       expect(place).toHaveBeenCalledWith(deps.db, {
         identity,
@@ -214,7 +188,7 @@ describe("SuperGrok capacity by provider route", () => {
   });
 
   test("a core wait parks the same turn on its SuperGrok core waiter and re-evaluates it", async () => {
-    route("core");
+    scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue({
       productModelId: "supergrok/grok-4.7",
@@ -274,7 +248,7 @@ describe("SuperGrok capacity by provider route", () => {
       events: [],
     });
     const deps = capacityDeps();
-    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectXaiTurnCapacity(deps)).toEqual({
       exit: {
         status: "waiting_capacity",
         capacityWait: {
@@ -311,7 +285,7 @@ describe("SuperGrok capacity by provider route", () => {
   });
 
   test("a core wait for compaction defers with its request preserved, never parks", async () => {
-    route("core");
+    scopedDb();
     const arm = spy(db, "armSubscriptionCoreCapacityWait");
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);
     coreTurns({
@@ -327,7 +301,7 @@ describe("SuperGrok capacity by provider route", () => {
       settled.push(value);
       return true;
     };
-    expect(await selectXaiTurnCapacityByRoute(deps)).toEqual({
+    expect(await selectXaiTurnCapacity(deps)).toEqual({
       exit: { status: "idle", deferredUntilWake: true, turnId: "turn-1" },
     });
     expect(JSON.stringify(settled)).toContain('"requestPreserved":true');
@@ -675,15 +649,6 @@ describe("SuperGrok request custody on the core", () => {
     expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toBeNull();
     expect(await xaiCoreLanesRecoverAfterCheckpoint(core, async () => {})).toBe(true);
   });
-});
-
-test("no SuperGrok turn on the legacy route touches durable events", async () => {
-  route("legacy");
-  const publish = spy(events, "publishDurableSessionEvents");
-  await expect(selectXaiTurnCapacityByRoute(capacityDeps())).rejects.toMatchObject({
-    payload: { code: "subscription_core_cutover_disabled" },
-  });
-  expect(publish).not.toHaveBeenCalled();
 });
 
 test("a SuperGrok core source disconnect is recognised as a disconnect, as Codex's is", () => {

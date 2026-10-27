@@ -5186,7 +5186,6 @@ mod tests {
                 "connection_missing",
                 false,
             ),
-            (RenewNowError::LegacyOrigin, "legacy_origin", false),
             (RenewNowError::LocalState, "local_state_unavailable", false),
         ] {
             let response = credential_renew_response("r2".into(), Err(failure));
@@ -5676,7 +5675,7 @@ mod tests {
         // Exercise the periodic renewal path and the same state reconciliation
         // as the file watcher, not just the short quiet interval after rejection.
         let mut diagnostics = crate::credential_renewal::RenewalDiagnostics::default();
-        crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+        crate::credential_renewal::renew_due_connections(&mut diagnostics)
             .await
             .unwrap();
         let listener = renewal_server.await.unwrap();
@@ -5691,7 +5690,7 @@ mod tests {
             let mut suspended = rejected.clone();
             suspended.authentication_state = saved.authentication_state;
             updates.send(vec![suspended, healthy.clone()]).unwrap();
-            crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+            crate::credential_renewal::renew_due_connections(&mut diagnostics)
                 .await
                 .unwrap();
         }
