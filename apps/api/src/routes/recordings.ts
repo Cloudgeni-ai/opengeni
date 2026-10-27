@@ -258,9 +258,10 @@ export function registerRecordingRoutes(
   /**
    * A dictation is transcribed by the workspace's voice input: its preferred
    * provider, else the first ready one, as text without speakers, in the
-   * language the dictation was started in (detected when none). The version
-   * records the provider and the model it runs; the worker may still fall
-   * over to another provider that refused before hearing it.
+   * language the dictation was started in (detected when none), listening for
+   * the person's vocabulary when the model takes one. The version records the
+   * provider and the model it runs; the worker may still fall over to another
+   * provider that refused before hearing it.
    */
   async function dictationChoice(
     actor: {
@@ -286,7 +287,15 @@ export function registerRecordingRoutes(
       dictationProviders(deployment).find((provider) => provider.id === providerId)?.model.model ??
       "voice-input";
     const language = recording.transcription?.language;
-    return { providerId, model, options: language ? { language } : {} };
+    const keyterms = recording.transcription?.keyterms;
+    return {
+      providerId,
+      model,
+      options: {
+        ...(language ? { language } : {}),
+        ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
+      },
+    };
   }
 
   /** The workspace's voice input settings, refusing when voice input can't run. */
@@ -485,11 +494,12 @@ export function registerRecordingRoutes(
         throw invalid("A dictation has exactly one microphone track");
       }
       // The workspace's voice input picks the model; the dictation names only
-      // the language it is spoken in, or none to detect it.
-      const { language, ...other } = body.transcription ?? {};
+      // the language it is spoken in (or none to detect it) and the words to
+      // listen for.
+      const { language, keyterms, ...other } = body.transcription ?? {};
       if (Object.keys(other).length > 0) {
         throw invalid(
-          "A dictation uses the workspace's voice input model; only its language can be set",
+          "A dictation uses the workspace's voice input model; only its language and keyterms can be set",
         );
       }
       const result = await guard(() =>
@@ -503,7 +513,14 @@ export function registerRecordingRoutes(
           externalRef: body.externalRef,
           metadata: body.metadata,
           tracks: body.tracks,
-          ...(language ? { transcription: { language } } : {}),
+          ...(language || keyterms?.length
+            ? {
+                transcription: {
+                  ...(language ? { language } : {}),
+                  ...(keyterms?.length ? { keyterms } : {}),
+                },
+              }
+            : {}),
         }),
       );
       if (result.recording.purpose !== "dictation") {

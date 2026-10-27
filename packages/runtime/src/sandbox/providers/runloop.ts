@@ -12,6 +12,7 @@ export const runloopProvider: ProviderRegistration = {
   // the inherited unique-path tar primitive instead.
   workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.runloop,
+  sessionSupportsPty: false,
   validateCredentials(settings) {
     if (!settings.runloopApiKey) {
       throw new SandboxConfigError("runloop", "OPENGENI_RUNLOOP_API_KEY is required");

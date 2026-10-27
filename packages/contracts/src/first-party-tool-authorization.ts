@@ -141,6 +141,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // request (never a tool approval, which stays human-only).
   session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
   set_other_session_title: { allOf: ["sessions:control"] },
+  bot_template_save: { sessionRequired: true, allOf: ["sessions:create"] },
   interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },

@@ -627,7 +627,7 @@ export const englishMessages = {
   "automations.template.meetingNotes.description":
     "A summary, decisions and action items from each meeting you record.",
   "automations.template.meetingNotes.instructions":
-    "Write notes for the meeting from the event; its data.recordingId names the meeting. Read the meeting with its transcript and any notes taken during it. Then write a short summary, the decisions made, and the action items, each with its owner and a due date when one was said. Use the names and terms people used, and leave out small talk. Reply with the notes, and if you can save notes on the meeting, save them there too.",
+    "Write notes for the meeting from the event; its data.recordingId names the meeting. Read the whole meeting with meeting_read, following nextCursor until it is null; it lists each speaker's label (and personId for a person from the workspace), the notes taken during it and the written-up notes with their revision. Write the notes in Markdown, in this order: a one-paragraph overview; a ## heading for each topic discussed, with nested bullets; ## Decisions; and ## Action items as a checklist, each with its owner and a due date when one was said. Use the names and terms people used, in the meeting's language, and leave out small talk. Link a person from the workspace as [Name](person:<personId>) and any other speaker as [Name](speaker:<label>), using the labels and ids meeting_read gave. Unless the meeting already has notes (a revision above 0), save them with meeting_notes_save and expectedRevision 0. Reply with the notes.",
   "automations.template.meetingNotes.name": "Meeting notes",
   "automations.template.meetingNotes.when": "When a meeting's transcript is ready",
   "automations.template.morningBrief.description":
@@ -1565,6 +1565,9 @@ export const englishMessages = {
   "desktopDictation.settings.allowed": "Allowed",
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
+  "desktopDictation.settings.cancelShortcutDescription":
+    "Throws away the dictation you're speaking. Esc does this too.",
+  "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
   "desktopDictation.settings.chordToggle":
     "Press the keys together and let go to start. Press them again to finish.",
@@ -1573,7 +1576,8 @@ export const englishMessages = {
   "desktopDictation.settings.description":
     "Press a shortcut in any app and speak. The text is typed where your cursor is.",
   "desktopDictation.settings.detectAutomatically": "Detect automatically",
-  "desktopDictation.settings.historyDescription": "Kept on this computer only.",
+  "desktopDictation.settings.historyDescription":
+    "Kept on this computer only, with what you said, to play or transcribe again.",
   "desktopDictation.settings.historyTitle": "Recent dictations",
   "desktopDictation.settings.keyCombination": "Key combination…",
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
@@ -1584,6 +1588,8 @@ export const englishMessages = {
   "desktopDictation.settings.modeLabel": "How the keys work",
   "desktopDictation.settings.modeToggle": "Press to start and finish",
   "desktopDictation.settings.modeToggleDescription": "Press once to start and again to finish.",
+  "desktopDictation.settings.noShortcut": "None",
+  "desktopDictation.settings.otherKeyCombination": "Other key combination…",
   "desktopDictation.settings.outputCopy": "Copy it only",
   "desktopDictation.settings.outputCopyDescription": "Paste it yourself where you want it.",
   "desktopDictation.settings.outputDescription": "Where the text goes when you finish.",
@@ -1603,8 +1609,12 @@ export const englishMessages = {
     "Install wtype or ydotool so {product} can type into other apps. Until then, the text is copied.",
   "desktopDictation.settings.pasteXdotool":
     "Install xdotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.play": "Play",
   "desktopDictation.settings.recordKeys": "Press the key combination now. Esc cancels.",
   "desktopDictation.settings.remove": "Remove shortcut",
+  "desktopDictation.settings.retryShortcutDescription":
+    "Transcribes your last dictation again and types it, such as after a failure.",
+  "desktopDictation.settings.retryShortcutLabel": "Retry shortcut",
   "desktopDictation.settings.saveFailed": "Couldn't save the change. Try again.",
   "desktopDictation.settings.shortcutFailed":
     "The shortcut couldn't be set up. Turn dictation off and on again.",
@@ -1615,13 +1625,22 @@ export const englishMessages = {
     "That key combination is taken or not allowed. Choose another.",
   "desktopDictation.settings.shortcutUnsupported":
     "This computer can't use those keys alone. Choose a key combination.",
+  "desktopDictation.settings.stopPlaying": "Stop",
   "desktopDictation.settings.title": "Dictation",
   "desktopDictation.settings.toggleLabel": "Dictate from anywhere",
   "desktopDictation.settings.toggleOff": "Off. Turn on to dictate into any app with a shortcut.",
   "desktopDictation.settings.toggleOn": "{shortcut} starts and finishes dictation in any app.",
   "desktopDictation.settings.toggleOnHold": "Hold {shortcut} while you speak, in any app.",
   "desktopDictation.settings.toggleOnMany": "Each shortcut dictates in its language, in any app.",
+  "desktopDictation.settings.transcribeAgain": "Transcribe again",
   "desktopDictation.settings.usedByAnother": "Another shortcut uses these keys.",
+  "desktopDictation.settings.vocabularyDescription":
+    "Names and words to listen for, such as people, products and terms you use. One per line.",
+  "desktopDictation.settings.vocabularyLabel": "Vocabulary",
+  "desktopDictation.settings.vocabularyPlaceholder": "Ada Lovelace\nKubernetes",
+  "desktopDictation.settings.vocabularyTermTooLong":
+    "“{term}” is too long. Keep each to {max} characters.",
+  "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
@@ -1971,7 +1990,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "Your remaining credits don't cover this model. Choose a model they cover or add credits. The conversation is preserved.",
+    "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
@@ -1999,7 +2018,7 @@ export const englishMessages = {
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
+    "There aren't enough credits for this model. Add credits, or choose another model. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -2755,6 +2774,7 @@ export const englishMessages = {
   "meetings.settings.agreedForThemselves": "Agreed for themselves",
   "meetings.settings.agreedForThemselvesNotHeard":
     "Agreed for themselves · Not heard in a meeting yet",
+  "meetings.settings.anAgentWritesTheNotes": "An agent writes the notes after each meeting",
   "meetings.settings.anOrganizationAdminNeedsTo":
     "An organization admin needs to connect a transcription provider before meetings are transcribed.",
   "meetings.settings.anOrganizationAdminNeedsTo2":
@@ -2813,6 +2833,7 @@ export const englishMessages = {
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
   "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
   "meetings.settings.newMeetingsArePrivate": "New meetings are private",
@@ -2869,8 +2890,11 @@ export const englishMessages = {
   "meetings.settings.valuePerHour": "${value} per hour",
   "meetings.settings.voicesForgottenPeopleArenT":
     "Voices forgotten. People aren't recognized by voice anymore",
+  "meetings.settings.whenATranscriptIsReady":
+    "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
   "meetings.settings.workspace": "Workspace",
+  "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
     "You agreed. Your voice is learned the next time you're named in a meeting.",
   "meetings.settings.yourSubscription": "Your subscription",
@@ -5561,6 +5585,8 @@ export const englishMessages = {
   "timeline.toolStep.runCommand.running": "Running a command",
   "timeline.toolStep.runSchedule.done": "Ran an automation",
   "timeline.toolStep.runSchedule.running": "Running an automation",
+  "timeline.toolStep.saveBotTemplate.done": "Saved a bot template",
+  "timeline.toolStep.saveBotTemplate.running": "Saving a bot template",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

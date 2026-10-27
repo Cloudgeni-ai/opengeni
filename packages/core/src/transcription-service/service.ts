@@ -395,6 +395,11 @@ export function createTranscriptionService(input: {
             model: provider.model.model,
             diarize: false,
             ...(request.language ? { language: request.language } : {}),
+            ...(request.keyterms &&
+            request.keyterms.length > 0 &&
+            provider.model.capabilities.keyterms
+              ? { keyterms: request.keyterms }
+              : {}),
             signal: deadline.signal,
             scope: {
               accountId: request.accountId,

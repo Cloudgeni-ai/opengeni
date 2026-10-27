@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { NEW_SESSION_STARTERS, NewSessionStarters } from "./new-session-starters";
+import {
+  EVERYDAY_SESSION_STARTERS,
+  NEW_SESSION_STARTERS,
+  NewSessionStarters,
+} from "./new-session-starters";
 
 let priorActEnvironmentDescriptor: PropertyDescriptor | undefined;
 
@@ -92,5 +96,54 @@ test("without the chat list, the new-chat page shows no recent chats or project 
 test("the new-chat page's Add credits button follows the addCredits switch", () => {
   const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
   expect(route).toContain('const addCredits = useSessionUiFeature("addCredits");');
-  expect(route).toMatch(/\{addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/);
+  expect(route).toMatch(
+    /const canTopUpCredits =\s*addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/,
+  );
+  expect(route).toMatch(/\{canTopUpCredits && workspace\?\.accountId \? \(/);
+});
+
+test("help with everyday things gets six plain everyday asks, with no services to connect", async () => {
+  const onSelect = mock((_prompt: string) => {});
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" workspaceId="ws-1" onSelect={onSelect} />),
+    );
+    expect(container.querySelector("h2")?.textContent).toBe("Suggestions");
+    const buttons = [...container.querySelectorAll("button")];
+    expect(buttons.map((button) => button.textContent)).toEqual(
+      EVERYDAY_SESSION_STARTERS.map((starter) => starter.title + starter.description),
+    );
+    // No product demo link, no service logos, none of the general starters.
+    expect(container.querySelector("a, img")).toBeNull();
+    const general = NEW_SESSION_STARTERS.map((starter) => starter.title);
+    expect(general.some((title) => container.textContent?.includes(title))).toBe(false);
+    expect(container.textContent).not.toMatch(/Slack|GitHub|Linear|agent|repository/i);
+    for (const [index, starter] of EVERYDAY_SESSION_STARTERS.entries()) {
+      expect(buttons[index]!.dataset.starter).toBe(starter.id);
+      await act(async () => buttons[index]!.click());
+      expect(onSelect.mock.calls[index]).toEqual([starter.prompt]);
+    }
+
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" onSelect={onSelect} disabled />),
+    );
+    expect(container.querySelectorAll("button:disabled")).toHaveLength(6);
+
+    // Without uploads nothing promises a photo; with them, "Explain something" offers one.
+    expect(EVERYDAY_SESSION_STARTERS.some((starter) => /photo/i.test(starter.prompt))).toBe(false);
+    onSelect.mockClear();
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" fileUploads onSelect={onSelect} />),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-starter="explain"]')!.click(),
+    );
+    expect(onSelect.mock.calls[0]?.[0]).toContain("attach a photo");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });

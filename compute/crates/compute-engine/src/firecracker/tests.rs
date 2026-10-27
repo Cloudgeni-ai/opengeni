@@ -374,6 +374,101 @@ async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
     assert!(matches!(error, ApiError::Timeout(_)), "{error}");
 }
 
+/// Makes a group's `memory.pressure` report its processes waiting for
+/// memory all the time, as when the kernel slows them, until dropped.
+struct Waiting {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Waiting {
+    fn start(group: &Path) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (group, stopped) = (group.to_owned(), std::sync::Arc::clone(&stop));
+        let writer = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !stopped.load(Ordering::Relaxed) {
+                // Ahead of the clock, so no look finds less than all of
+                // its time waited.
+                let total = started.elapsed().as_micros() * 2;
+                let next = group.join("memory.pressure.next");
+                fs::write(
+                    &next,
+                    format!(
+                        "some avg10=100.00 avg60=100.00 avg300=100.00 total={total}\n\
+                         full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                    ),
+                )
+                .unwrap();
+                fs::rename(&next, group.join("memory.pressure")).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Self {
+            stop,
+            writer: Some(writer),
+        }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// Once the VMs together pass the memory the host leaves them, the kernel
+/// slows every VMM thread that takes more, and a VMM it slows answers
+/// late: its request waits that out instead of failing, then has its own
+/// time again.
+#[tokio::test]
+async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(own);
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // Many times its 200 ms deadline.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(!call.is_finished(), "the slowed VMM's request kept waiting");
+    drop(waiting);
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_150) && took < Duration::from_secs(3),
+        "once no longer slowed it had its own time, then failed: {took:?}"
+    );
+}
+
+/// A VMM stuck while its group waits for memory for good, as under a limit
+/// of its own its guest keeps pushing against, still fails in the end: of
+/// time it waits, only so much a request goes uncounted.
+#[tokio::test]
+async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_vms, own) = vms_group(dir.path());
+    let _waiting = Waiting::start(own.path());
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api
+        .held_by(own)
+        .with_memory_wait_limit(Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    let error = api.call("GET", "/", None).await.unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(650) && took < Duration::from_secs(2),
+        "the 500 ms it may wait, then its 200 ms: {took:?}"
+    );
+}
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(

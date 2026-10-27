@@ -32,6 +32,17 @@ import {
   OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
   OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,
 } from "../src/sandbox/providers/opensandbox";
+import { BlaxelSandboxSession } from "@openai/agents-extensions/sandbox/blaxel";
+import { CloudflareSandboxSession } from "@openai/agents-extensions/sandbox/cloudflare";
+import { DaytonaSandboxSession } from "@openai/agents-extensions/sandbox/daytona";
+import { E2BSandboxSession } from "@openai/agents-extensions/sandbox/e2b";
+import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
+import { RunloopSandboxSession } from "@openai/agents-extensions/sandbox/runloop";
+import { VercelSandboxSession } from "@openai/agents-extensions/sandbox/vercel";
+import { DockerSandboxSession, UnixLocalSandboxSession } from "@openai/agents/sandbox/local";
+import { ComputeSandboxSession } from "../src/sandbox/compute/session";
+import { OpenSandboxSession } from "../src/sandbox/providers/opensandbox-adapter";
+import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -198,6 +209,46 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     const tarSession = { state: { workspacePersistence: "tar", sandboxId: "box" } };
     prepareProviderForTeardownAfterCapture("vercel", tarSession);
     expect(tarSession.state).toEqual({ workspacePersistence: "tar", sandboxId: "box" });
+  });
+
+  test("each provider's declared write_stdin support is what its live session answers", () => {
+    // A lazy turn binds its tools with the declared value; a turn whose box was
+    // resolved first binds with the live session's answer. They must agree or
+    // the tool list differs between turns. Conditional SDK answers are read
+    // with a configured session's fields.
+    const live = (
+      session: { prototype: { supportsPty(): boolean } },
+      fields: Record<string, unknown> = {},
+    ) => session.prototype.supportsPty.call(fields);
+    const answers: Record<SandboxBackendType, boolean> = {
+      docker: live(DockerSandboxSession),
+      local: live(UnixLocalSandboxSession),
+      modal: live(ModalSandboxSession),
+      cloudflare: live(CloudflareSandboxSession),
+      runloop: live(RunloopSandboxSession),
+      vercel: live(VercelSandboxSession),
+      e2b: live(E2BSandboxSession, { sandbox: { pty: { create: () => undefined } } }),
+      blaxel: live(BlaxelSandboxSession, { state: { sandboxUrl: "https://box" }, apiKey: "key" }),
+      daytona: live(DaytonaSandboxSession, {
+        sandbox: { process: { createPty: () => undefined } },
+      }),
+      opensandbox: live(OpenSandboxSession),
+      selfhosted: live(SelfhostedSession),
+      compute: live(ComputeSandboxSession),
+      none: false,
+    };
+    for (const backend of SandboxBackend.options) {
+      expect({ backend, supportsPty: PROVIDER_REGISTRY[backend].sessionSupportsPty }).toEqual({
+        backend,
+        supportsPty: answers[backend],
+      });
+    }
+    // The person's terminal is a separate capability: these backends give the
+    // person a PTY but run agent commands without stdin.
+    for (const backend of ["compute", "selfhosted", "opensandbox"] as const) {
+      expect(CAPABILITY_DESCRIPTORS[backend].capabilities.Terminal.pty).toBe(true);
+      expect(PROVIDER_REGISTRY[backend].sessionSupportsPty).toBe(false);
+    }
   });
 });
 

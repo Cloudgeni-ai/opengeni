@@ -10,9 +10,11 @@ import {
   createIndexedDbRecordingChunkStore,
   createMemoryRecordingChunkStore,
   desktopSystemAudioSource,
+  RECORDING_AUDIO_UPLOAD_PIECE_BYTES,
   RecorderCaptureError,
   RecordingUploader,
   sha256Hex,
+  uploadRecordingAudio,
   type RecordingChunk,
   type RecordingTransport,
 } from "../src/recordings";
@@ -838,5 +840,65 @@ describe("desktopSystemAudioSource", () => {
         reason: "capture_failed",
       });
     });
+  });
+});
+
+describe("uploadRecordingAudio", () => {
+  test("sends kept audio as one microphone track, in pieces that join back into it", async () => {
+    const calls: Array<{ kind: string; value: unknown }> = [];
+    const uploader = {
+      begin: async (value: unknown) => {
+        calls.push({ kind: "begin", value });
+      },
+      addChunk: async (value: RecordingChunk) => {
+        calls.push({ kind: "chunk", value });
+      },
+      finish: async (recordingId: string) => {
+        calls.push({ kind: "finish", value: recordingId });
+        return { recordingId, discarded: false, failed: null } as never;
+      },
+    } as unknown as RecordingUploader;
+    const bytes = new Uint8Array(RECORDING_AUDIO_UPLOAD_PIECE_BYTES + 10).fill(7);
+    await uploadRecordingAudio({
+      uploader,
+      workspaceId: "workspace",
+      recordingId: "recording",
+      audio: new Blob([bytes], { type: "audio/webm;codecs=opus" }),
+      durationMilliseconds: 4_000,
+      create: { purpose: "dictation", transcription: { keyterms: ["Kubernetes"] } },
+    });
+    expect(calls.map((call) => call.kind)).toEqual(["begin", "chunk", "chunk", "finish"]);
+    expect(calls[0]!.value).toMatchObject({
+      workspaceId: "workspace",
+      recordingId: "recording",
+      create: {
+        recordingId: "recording",
+        purpose: "dictation",
+        transcription: { keyterms: ["Kubernetes"] },
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+      },
+    });
+    const chunks = calls.slice(1, 3).map((call) => call.value as RecordingChunk);
+    expect(chunks.map((chunk) => chunk.bytes.byteLength)).toEqual([
+      RECORDING_AUDIO_UPLOAD_PIECE_BYTES,
+      10,
+    ]);
+    expect(chunks[0]!.startMilliseconds).toBe(0);
+    expect(chunks[1]!.startMilliseconds + chunks[1]!.durationMilliseconds).toBe(4_000);
+    expect(chunks[0]!.sha256).toBe(await sha256Hex(chunks[0]!.bytes));
+  });
+
+  test("refuses empty audio or audio without a type", async () => {
+    const uploader = {} as RecordingUploader;
+    await expect(
+      uploadRecordingAudio({
+        uploader,
+        workspaceId: "w",
+        audio: new Blob([], { type: "audio/wav" }),
+      }),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      uploadRecordingAudio({ uploader, workspaceId: "w", audio: new Blob([new Uint8Array(3)]) }),
+    ).rejects.toThrow(TypeError);
   });
 });

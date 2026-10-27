@@ -34,7 +34,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import { createHash } from "node:crypto";
-import { createRecordingActivities } from "../src/activities/recordings";
+import {
+  createRecordingActivities,
+  type RecordingActivityOptions,
+} from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
@@ -195,6 +198,7 @@ function activities(
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
   aligner: RecordingWordAligner | null = null,
+  startMeetingSummary?: RecordingActivityOptions["startMeetingSummary"],
 ) {
   const warnings: string[] = [];
   const services = async () =>
@@ -214,11 +218,73 @@ function activities(
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
       aligner: () => aligner,
+      ...(startMeetingSummary ? { startMeetingSummary } : {}),
     }),
   };
 }
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
+  test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Hello.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const started: unknown[] = [];
+    const ok = activities(storage, provider, "key", null, null, async (_services, input) => {
+      started.push(input);
+      return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
+    });
+    expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "complete",
+    });
+    expect(started).toEqual([
+      {
+        accountId: recording.input.accountId,
+        workspaceId: recording.input.workspaceId,
+        recordingId: recording.input.recordingId,
+        versionId: recording.input.versionId,
+        ownerSubjectId: recording.input.ownerSubjectId,
+      },
+    ]);
+    // The same version again is already complete: no second summary.
+    expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "skipped",
+    });
+    expect(started).toHaveLength(1);
+
+    const again = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: again,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    const failing = activities(storage, provider, "key", null, null, async () => {
+      throw new Error("no account free");
+    });
+    expect(
+      await failing.activities.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: again,
+        processingOwner: again,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect(failing.warnings).toContain("meeting summary not started");
+  });
+
   test("prepares each track, keeps the microphone as one speaker and diarizes the rest", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -739,7 +805,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
 async function capturedDictation(
   storage: ReturnType<typeof memoryStorage>,
   seconds = 3,
-  options: { language?: string } = {},
+  options: { language?: string; keyterms?: string[] } = {},
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -899,10 +965,13 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
   });
 
-  test("a dictation started in a language is heard in it", async () => {
+  test("a dictation started in a language is heard in it, listening for the vocabulary", async () => {
     if (!client) return;
     const storage = memoryStorage();
-    const dictation = await capturedDictation(storage, 3, { language: "nb" });
+    const dictation = await capturedDictation(storage, 3, {
+      language: "nb",
+      keyterms: ["Kubernetes"],
+    });
     const calls: TranscriptionRequest[] = [];
     const run = dictationActivities(storage, async (request) => {
       calls.push(request);
@@ -919,6 +988,7 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       outcome: "complete",
     });
     expect(calls.map((call) => call.language)).toEqual(["nb"]);
+    expect(calls.map((call) => call.keyterms)).toEqual([["Kubernetes"]]);
   });
 
   test("a retried dictation asks afresh and is still billed once per piece", async () => {

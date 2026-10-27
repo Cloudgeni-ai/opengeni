@@ -2,9 +2,7 @@
  * Chat turns on the shared subscription core, for any provider (M3 PR 1,
  * extracted in M4).
  *
- * Dormant until an organization's cutover row for the provider is enabled:
- * the worker calls into this module only for that disposition. Everything
- * here runs under the exact accepted turn (`withSubscriptionCoreAcceptedTurn`),
+ * Everything here runs under the exact accepted turn (`withSubscriptionCoreAcceptedTurn`),
  * so a caller cannot use it as a general account, connection or session
  * reader. The provider is data (`SubscriptionCoreProvider`): its adapter
  * decodes and refreshes the credential, and supplies the health policy and
@@ -63,7 +61,6 @@ import {
   decodeSubscriptionQuota,
   isSubscriptionSessionBindingRollingConflict,
   persistSubscriptionCoreRefreshWithPlan,
-  readSubscriptionProviderCutoverState,
   readSubscriptionSessionBinding,
   releaseSubscriptionTurnLease,
   writeSubscriptionSessionBinding,
@@ -217,8 +214,6 @@ export type SubscriptionCorePlacementRequest = {
 
 export type SubscriptionCorePlacement =
   | { kind: "not_visible" }
-  /** The organization's cutover for this provider is not enabled (checked in the same transaction). */
-  | { kind: "cutover_not_enabled" }
   /** Another attempt owns the turn, or a newer lease generation exists. */
   | { kind: "attempt_fenced" }
   /**
@@ -347,7 +342,6 @@ async function readLastContextReplacedAt(
 
 export type SubscriptionCorePlacementEvaluation =
   | { kind: "not_visible" }
-  | { kind: "cutover_not_enabled" }
   | { kind: "run"; connectionId: string; switch: PlacementSwitch }
   | {
       kind: "wait";
@@ -502,7 +496,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         lockBinding: true,
       },
       async (tx, worldInput): Promise<SubscriptionCorePlacement> => {
-        if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "cutover_not_enabled" };
         const fence = await readAttemptFence(tx, request);
         if (!fence) return { kind: "attempt_fenced" };
 
@@ -637,14 +630,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       },
     );
     return result.status === "not_visible" ? { kind: "not_visible" } : result.value;
-  }
-
-  /** Defense in depth: core reads and writes re-check the gate in their own transaction. */
-  async function cutoverEnabled(tx: Database, accountId: string): Promise<boolean> {
-    return (
-      (await readSubscriptionProviderCutoverState(tx, { accountId, provider: providerId })) ===
-      "enabled"
-    );
   }
 
   /** The world request for one chat turn: its accepted product model only. */
@@ -798,7 +783,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       provider,
       placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
       async (tx, worldInput) => {
-        if (!(await cutoverEnabled(tx, identity.accountId))) return false;
         if (request.operationRef) {
           const ref = request.operationRef;
           if (
@@ -885,7 +869,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       provider,
       placementWorldRequest(identity, request.productModelId, "medium", new Date()),
       async (tx, world) => {
-        if (!(await cutoverEnabled(tx, identity.accountId))) return false;
         const { input } = await providerPlacementInput(tx, identity, world, request.productModelId);
         return input.connections.some(
           (connection) =>
@@ -915,7 +898,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       provider,
       placementWorldRequest(identity, request.productModelId, request.reasoningLevel, now),
       async (tx, worldInput): Promise<SubscriptionCorePlacementEvaluation> => {
-        if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "cutover_not_enabled" };
         const { input, deletedExplicit } = await providerPlacementInput(
           tx,
           identity,
@@ -960,7 +942,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     identity: SubscriptionCoreTurnIdentity,
   ): Promise<number> {
     const access = await withSubscriptionCoreAcceptedTurn(db, identity, async (tx) => {
-      if (!(await cutoverEnabled(tx, identity.accountId))) return 0;
       const [row] = await rawRows<{ recovered: number | string }>(
         tx,
         sql`select opengeni_private.recover_subscription_core_connection_health(${providerId},
@@ -1275,7 +1256,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   /**
    * Give this transaction the per-connection personal capability for the
    * turn's frozen v2 entry for this provider. A no-op without that entry, for service and
-   * ownerless turns, and before the provider's cutover is enabled.
+   * ownerless turns.
    */
   async function authorizeSubscriptionCoreFrozenPersonal(
     tx: Database,
@@ -1314,8 +1295,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     operation: (tx: Database) => Promise<T>,
   ): Promise<{ status: "not_visible" } | { status: "lease_lost" } | { status: "ok"; value: T }> {
     const access = await withSubscriptionCoreAcceptedTurn(db, identity, async (tx) => {
-      if (!(await cutoverEnabled(tx, identity.accountId)))
-        return { status: "not_visible" } as const;
       const current = await assertSubscriptionTurnLeaseCurrent(tx, {
         accountId: identity.accountId,
         workspaceId: identity.workspaceId,
@@ -1452,8 +1431,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         generation: lease.generation,
       },
       async (tx, credential): Promise<SubscriptionCoreRefreshOutcome> => {
-        // Switch-off fails closed before any provider call.
-        if (!(await cutoverEnabled(tx, identity.accountId))) return { kind: "refused" };
         if (credential.refreshGeneration !== observedRefreshGeneration)
           return { kind: "superseded" };
         let current: unknown;
@@ -1686,7 +1663,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     identity: SubscriptionCoreTurnIdentity,
   ): Promise<number | null> {
     const access = await withSubscriptionCoreAcceptedTurn(db, identity, async (tx) => {
-      if (!(await cutoverEnabled(tx, identity.accountId))) return null;
       const [row] = await rawRows<{ refusals: number | string | null }>(
         tx,
         sql`select coalesce(sum(coalesce((recovery_evidence->>'refusals')::integer, 1)), 0) as refusals
