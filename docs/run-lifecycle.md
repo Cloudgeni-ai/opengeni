@@ -1986,7 +1986,12 @@ context overflow instead of compacting from a whole-request approximation.
 Each authoritative terminal response replaces the durable count with its usable
 input count or null; an omitted count never leaves an older response active.
 Local media-aware estimates remain confined to compaction-request fitting and
-history-only replacement reporting. See
+history-only replacement reporting. When a human/API turn in a root session
+completes with that durable count already at the limit, the worker requests the
+checkpoint immediately after settlement, labeled `proactive`; the same workflow
+claims it as the existing standalone `source="compaction"` maintenance
+execution instead of the next message waiting for it
+(`OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED`, default on). See
 [`context-compaction.md`](context-compaction.md).
 
 Outside the explicit durable compaction transition, model-visible history is

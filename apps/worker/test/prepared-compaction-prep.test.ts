@@ -13,7 +13,9 @@ import {
 
 for (const maintenance of [false, true]) {
   test(`remote compaction waits for real request preparation (maintenance=${maintenance})`, async () => {
-    const requested = spyOn(db, "isSessionCompactionRequested").mockResolvedValue(maintenance);
+    const requested = spyOn(db, "sessionCompactionRequestTrigger").mockResolvedValue(
+      maintenance ? "operator" : null,
+    );
     const settings = testSettings({ contextAutoCompactThresholdTokens: 100 });
     const agent = { instructions: "unprepared" };
     let compactionCalls = 0;
@@ -72,7 +74,7 @@ test("only Chat Completions providers keep the standalone checkpoint request", (
 
 for (const api of ["anthropic-messages", "responses"] as const) {
   test(`portable ${api} compaction waits for the prepared request`, async () => {
-    const requested = spyOn(db, "isSessionCompactionRequested").mockResolvedValue(false);
+    const requested = spyOn(db, "sessionCompactionRequestTrigger").mockResolvedValue(null);
     const settings = testSettings({ contextAutoCompactThresholdTokens: 100 });
     const agent = { instructions: "unprepared" };
     let summarized = 0;

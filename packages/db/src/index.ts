@@ -21651,6 +21651,7 @@ export async function failScheduledGeneratedSessionRoute(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
+            compactRequestTrigger: null,
             lastSequence: inserted.sequence,
             queueVersion: session.queueVersion + 1,
             updatedAt: now,
@@ -43564,7 +43565,9 @@ export async function applyContextCompaction(
             // Keep this field provider-only and let the first successful
             // post-compaction response install the next authoritative count.
             lastInputTokens: null,
-            ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(input.clearRequestedCompaction
+              ? { compactRequested: false, compactRequestTrigger: null }
+              : {}),
             ...(input.switchToPortableCompaction ? { codexCompactionMode: "portable" } : {}),
             ...(insertedEvents.length > 0
               ? {
@@ -43791,7 +43794,9 @@ export async function recordSkippedContextCompaction(
         await tx
           .update(schema.sessions)
           .set({
-            ...(clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(clearRequestedCompaction
+              ? { compactRequested: false, compactRequestTrigger: null }
+              : {}),
             lastSequence: fence.session.lastSequence + 1,
             updatedAt: new Date(),
           })
@@ -44331,7 +44336,8 @@ export async function countSessionHistoryItems(
 /**
  * Set the operator /compact request flag. The worker honors it before the next
  * turn (forced portable compaction) and clears it. Idempotent: repeated
- * requests collapse to one pending compaction.
+ * requests collapse to one pending compaction. An operator request always
+ * relabels a pending request as `operator`; the label never changes what runs.
  */
 export async function requestSessionCompaction(
   db: Database,
@@ -44349,19 +44355,137 @@ export async function requestSessionCompaction(
       .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    await scopedDb
-      .update(schema.sessions)
-      .set({ compactRequested: true, updatedAt: new Date() })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
-    const temporalWorkflowId = session.temporalWorkflowId ?? `session-${sessionId}`;
-    const wakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+    return await setSessionCompactionRequestInTransaction(scopedDb, {
       accountId: session.accountId,
       workspaceId,
       sessionId,
-      temporalWorkflowId,
-      reason: "compaction_requested",
+      temporalWorkflowId: session.temporalWorkflowId,
+      trigger: "operator",
     });
-    return { wakeRevision, temporalWorkflowId };
+  });
+}
+
+async function setSessionCompactionRequestInTransaction(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    temporalWorkflowId: string | null;
+    trigger: schema.CompactRequestTrigger;
+  },
+): Promise<{ wakeRevision: number; temporalWorkflowId: string }> {
+  await scopedDb
+    .update(schema.sessions)
+    .set({
+      compactRequested: true,
+      compactRequestTrigger: input.trigger,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    );
+  const temporalWorkflowId = input.temporalWorkflowId ?? `session-${input.sessionId}`;
+  const wakeRevision = await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    temporalWorkflowId,
+    reason: "compaction_requested",
+  });
+  return { wakeRevision, temporalWorkflowId };
+}
+
+export type IdleSessionCompactionRequestResult =
+  | { requested: true; wakeRevision: number; temporalWorkflowId: string }
+  | {
+      requested: false;
+      reason: "not_found" | "not_idle" | "child_session" | "already_requested" | "below_threshold";
+    };
+
+/**
+ * Request a `proactive` checkpoint for a session that just went idle at its
+ * automatic compaction threshold, so the compaction runs now instead of in
+ * front of the next message. It reuses the operator request exactly: the same
+ * durable flag, workflow wake, and born-running `source="compaction"`
+ * maintenance execution, never prompt-queue work.
+ *
+ * Everything is rechecked under the session row lock: the session must still
+ * be idle with no active turn, be a root session, have no pending request, and
+ * hold a provider-reported `last_input_tokens` at or above the threshold. A
+ * session that already moved on (a queued or running turn) keeps its ordinary
+ * pre-inference threshold check instead. A pending operator request is never
+ * relabeled.
+ */
+export async function requestIdleSessionCompactionIfDue(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; thresholdTokens: number },
+): Promise<IdleSessionCompactionRequestResult> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        accountId: schema.sessions.accountId,
+        temporalWorkflowId: schema.sessions.temporalWorkflowId,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+        parentSessionId: schema.sessions.parentSessionId,
+        compactRequested: schema.sessions.compactRequested,
+        lastInputTokens: schema.sessions.lastInputTokens,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("no key update")
+      .limit(1);
+    if (!session) return { requested: false, reason: "not_found" };
+    if (session.status !== "idle" || session.activeTurnId !== null) {
+      return { requested: false, reason: "not_idle" };
+    }
+    if (session.parentSessionId !== null) return { requested: false, reason: "child_session" };
+    if (session.compactRequested) return { requested: false, reason: "already_requested" };
+    if (
+      !(input.thresholdTokens > 0) ||
+      session.lastInputTokens === null ||
+      session.lastInputTokens < input.thresholdTokens
+    ) {
+      return { requested: false, reason: "below_threshold" };
+    }
+    const requested = await setSessionCompactionRequestInTransaction(scopedDb, {
+      accountId: session.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: session.temporalWorkflowId,
+      trigger: "proactive",
+    });
+    return { requested: true, ...requested };
+  });
+}
+
+/** Who asked for the pending compaction, or null when none is pending. A
+ * request written by an older binary carries no label and reads as operator. */
+export async function sessionCompactionRequestTrigger(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<schema.CompactRequestTrigger | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        compactRequested: schema.sessions.compactRequested,
+        compactRequestTrigger: schema.sessions.compactRequestTrigger,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (session?.compactRequested !== true) return null;
+    return session.compactRequestTrigger ?? "operator";
   });
 }
 
@@ -77186,7 +77310,10 @@ export async function claimSessionWorkForAttempt(
                     sequence: session.lastSequence + 1,
                     type: "session.context.compaction.requested",
                     payload: {
-                      trigger: "operator",
+                      // A worker-requested idle checkpoint is labeled
+                      // proactive; /compact and older unlabeled requests
+                      // remain operator.
+                      trigger: session.compactRequestTrigger ?? "operator",
                       initiator: compactionInitiator.initiator,
                     },
                     occurredAt: now,
@@ -81500,6 +81627,7 @@ async function settleSessionWorkBeforeAttemptClaim(
             status: "failed",
             activeTurnId: null,
             compactRequested: false,
+            compactRequestTrigger: null,
             ...(retirement
               ? {
                   inputWaitTurnId: null,
@@ -84445,7 +84573,9 @@ export async function applySessionTurnSettlement(
         .set({
           status: effectiveSessionStatus,
           activeTurnId: input.activeTurnId,
-          ...(input.compactionRequestFailure ? { compactRequested: false } : {}),
+          ...(input.compactionRequestFailure
+            ? { compactRequested: false, compactRequestTrigger: null }
+            : {}),
           lastSequence: sequence,
           queueVersion: session.queueVersion + 1,
           updatedAt: now,
