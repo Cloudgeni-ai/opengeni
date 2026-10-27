@@ -30,6 +30,7 @@
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@pierre/diffs": "1.2.11",
+    "@simplewebauthn/browser": "14.0.0",
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/react-router": "^1.170.15",
     "@tanstack/react-virtual": "^3.14.11",

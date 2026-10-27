@@ -2256,6 +2256,11 @@ export const englishMessages = {
   "mcpConnectionStatus.connect": "Connect",
   "mcpConnectionStatus.connected": "Connected",
   "mcpConnectionStatus.reviewConnection": "Review connection",
+  "meetings.ask.couldNotAsk": "Couldn't start the chat",
+  /** The input at the bottom of a meeting's Summary and Transcript tabs. */
+  "meetings.ask.placeholder": "Ask about this meeting",
+  /** The send button of "Ask about this meeting". */
+  "meetings.ask.send": "Ask",
   "meetings.deleteDialog.couldnTDeleteThisMeeting": "Couldn't delete this meeting",
   "meetings.deleteDialog.deleteMeeting": "Delete meeting?",
   "meetings.deleteDialog.deleteMeeting2": "Delete meeting",
@@ -2346,11 +2351,15 @@ export const englishMessages = {
   "meetings.detailPage.setItWhenTheMeeting": "Pick one if the transcript got the language wrong.",
   "meetings.detailPage.settings": "Settings",
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
+  /** Names the Summary · Transcript · Notepad switch for screen readers. */
+  "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
   "meetings.detailPage.starting": "Starting…",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested by voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
+  /** The meeting page's first tab: the written notes. */
+  "meetings.detailPage.summary": "Summary",
   "meetings.detailPage.theAudioForThisMeeting":
     "The audio is gone, so this meeting can't be played or transcribed again.",
   "meetings.detailPage.theAudioIsOnThe": "Waiting for the audio from the device that recorded it.",
@@ -2451,6 +2460,10 @@ export const englishMessages = {
   "meetings.notes.cancel": "Cancel",
   "meetings.notes.changedMeanwhile":
     "Someone else changed these notes while you were editing. Saving replaces their changes.",
+  "meetings.notes.copied": "Copied",
+  /** Copies the written notes as Markdown, with names in place of mentions. */
+  "meetings.notes.copy": "Copy",
+  "meetings.notes.couldNotCopy": "Couldn't copy the notes",
   "meetings.notes.couldNotSave": "Couldn't save the notes",
   "meetings.notes.edit": "Edit",
   "meetings.notes.edited": "Edited · {time}",
@@ -2779,6 +2792,8 @@ export const englishMessages = {
   "meetings.transcript.changeSpeaker": "Change speaker",
   "meetings.transcript.corrected": " (corrected)",
   "meetings.transcript.correctTheWords": "Correct the words",
+  /** The pencil beside a transcript turn; opens "Correct the words" for it. */
+  "meetings.transcript.correctTheWordsOfNameAt": "Correct the words of {name} at {formatClock}",
   "meetings.transcript.couldnTChangeTheSpeaker": "Couldn't change the speaker",
   "meetings.transcript.couldnTClearThisName": "Couldn't clear this name",
   "meetings.transcript.couldnTConfirmThisName": "Couldn't confirm this name",
@@ -3741,6 +3756,7 @@ export const englishMessages = {
   "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
+  "realtime.realtimeControl.checkingVoice": "Checking voice",
   "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
   "realtime.realtimeControl.chooseVoiceModelAndOptions": "Choose voice model and options",
   "realtime.realtimeControl.clientAck": "client ack",
@@ -3754,6 +3770,7 @@ export const englishMessages = {
   "realtime.realtimeControl.dismissFailuretext": "Dismiss: {failureText}",
   "realtime.realtimeControl.endingVoice": "Ending voice…",
   "realtime.realtimeControl.endVoiceConversation": "End voice conversation",
+  "realtime.realtimeControl.findingTheVoiceModelsYou": "Finding the voice models you can use.",
   "realtime.realtimeControl.ignoredProviderEvents": "ignored provider events",
   "realtime.realtimeControl.interruptNaturallyWheneverYouWant":
     "Interrupt naturally whenever you want.",
@@ -3762,6 +3779,8 @@ export const englishMessages = {
   "realtime.realtimeControl.labelDetail": "{label}. {detail}",
   "realtime.realtimeControl.lastIgnoredEvent": "last ignored event",
   "realtime.realtimeControl.listening": "Listening",
+  "realtime.realtimeControl.microphoneCantBeUsedHere":
+    "Your microphone can't be used here. Type your message instead.",
   "realtime.realtimeControl.microphoneMuted": "microphone muted",
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
@@ -3803,6 +3822,7 @@ export const englishMessages = {
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
+  "realtime.realtimeControl.voiceCouldNotLoad": "Voice couldn't load. Try again later.",
   "realtime.realtimeControl.voiceLanguage": "Language",
   "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
   "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",

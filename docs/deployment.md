@@ -1229,6 +1229,85 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Rotating the runtime database password
+
+PostgreSQL keeps one password per role, and every runtime pool keeps opening
+new connections (30 s idle timeout, 600 s maximum lifetime, growth under load).
+A password that is fixed in `OPENGENI_DATABASE_URL` at process start therefore
+fails every new connection with SQLSTATE `28P01` from the moment the role's
+password changes until each pod restarts. To rotate `opengeni_app` while pods
+keep serving, without restarting them, give the runtime its password through
+files instead:
+
+| Setting | Meaning |
+| --- | --- |
+| `OPENGENI_DATABASE_PASSWORD_FILE` | File with the current password. Missing or empty: the URL password. |
+| `OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE` | File with the previous password during a rotation. Missing or empty: none. |
+
+Both are optional. Unset, the runtime uses the URL password exactly as before.
+Each pool that logs in as the runtime role re-reads the files on every new
+connection (trailing newlines are ignored) and keeps the candidates
+`[previous, current]` (previous only when non-empty and different). It starts
+on the previous password, moves to the current one after a single `28P01` and
+then stays there. Only a change in the files' contents starts the order over.
+Logs and metrics never carry a password; the pools log only content-free
+events such as `switched database credential candidate` with candidate indexes.
+
+A query or transaction start refused with `28P01` is retried on the newly
+selected candidate, but only at the connection layer, only while another
+distinct candidate exists, and at most once per candidate. This is safe
+because PostgreSQL raises `28P01` only while authenticating a new connection,
+before any statement runs. With a single candidate (no previous password), a
+wrong password fails fast exactly as before. Session persistence, turn
+admission and the API add no retry of their own.
+
+This covers the API's application pool, its session-list LISTEN connection and
+the Better Auth (managed auth) pool; the worker's application, readiness and
+activity pools; and the `db:assert-runtime-posture`, session-content compaction
+and (when it falls back to the runtime URL) lifecycle backfill commands.
+Migration, role-provisioning and dedicated service logins (artifact
+materializer, outbox dispatcher) keep their own URLs.
+
+With Helm, set `runtimeDatabasePasswordFiles.enabled=true`. The api,
+worker-control and worker-turns pods then mount the optional keys
+`OPENGENI_DATABASE_PASSWORD` and `OPENGENI_DATABASE_PREVIOUS_PASSWORD` of the
+runtime Secret (or `runtimeDatabasePasswordFiles.secretName`) read-only at
+`/var/run/opengeni/database/password` and
+`/var/run/opengeni/database/previous-password`, and set both file settings.
+The volume is optional, so pods start and keep using the URL password while
+the keys are absent. It is a directory mount, because `subPath` mounts never
+receive kubelet's Secret updates. Because the pods also load the runtime
+Secret as environment variables, the two keys also appear as unused
+environment variables of the same names; the runtime ignores them.
+
+To rotate, in this order:
+
+1. Write `OPENGENI_DATABASE_PREVIOUS_PASSWORD` = the old password and
+   `OPENGENI_DATABASE_PASSWORD` = the new one into the runtime Secret. The
+   pools keep using the old password, which is still valid. Before step 2,
+   confirm that every api, worker-control and worker-turns pod sees both
+   files. kubelet refreshes them on its sync period plus its Secret cache TTL
+   (often one to two minutes), so check rather than wait a fixed time, without
+   printing the files: for example `kubectl exec <pod> -- test -s
+   /var/run/opengeni/database/previous-password` on each pod (when the image
+   has `test`), or a `reloaded database credential candidates` log line with
+   `candidates: 2` from each pod.
+2. In one step, with no release in between: run `ALTER ROLE opengeni_app
+   PASSWORD ...` with the new password, set `OPENGENI_APP_DATABASE_PASSWORD`
+   (role provisioning resets the role to it on every release), and set the
+   password in `OPENGENI_DATABASE_URL` to the new value (release jobs such as
+   `db:assert-runtime-posture` log in with the URL and mount no files). Update
+   every source those values are rebuilt from as well, such as CI secrets.
+   Running pods keep using the files, and each pool meets one `28P01` on its
+   next new connection and switches to the new password.
+3. Clear `OPENGENI_DATABASE_PREVIOUS_PASSWORD`.
+
+Change the role only after the files show both passwords. If the role changes
+first, new connections fail until the files catch up. Outside Kubernetes,
+where the files are written one at a time, write the previous file before the
+current one: the other order briefly leaves only the new password, and a
+single password fails fast.
+
 ### Pre-registration invitation cutover (0314)
 
 `0314_unregistered_organization_invitations.sql` is a drained application
@@ -1380,6 +1459,50 @@ drain the old runtime writers, apply the migration and role provisioning, then
 start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
+
+### Managed passkey sign-in
+
+Managed deployments in the legacy browser session-set mode offer passkey
+(WebAuthn) sign-in on any trusted browser origin served over HTTPS or from
+`localhost`. The relying party is that origin's hostname, so a passkey made on
+one public hostname does not sign in on another. Migration 0998 is rolling: it
+adds `auth_passkeys` and the `mutate_managed_passkey` routine, and counts a
+passkey as a usable sign-in method.
+
+Passkeys ship in two releases. The previous release's readiness check refuses
+runtime access to a table and routine it doesn't know, so 0998 withholds both
+from the runtime role and provisioning keeps them withheld; until then the
+server offers no passkeys (client config reports `passkeySignIn: false`) and
+the sign-in-method routes refuse passkey changes. A later migration grants
+them once a release containing 0998 is the previous release, and passkeys turn
+on by themselves within a minute of that grant. Granting them by hand does not
+stick: provisioning revokes them again.
+
+- Anyone signed in can add passkeys under their sign-in methods and sign in
+  with one instead of a password. Removing the last usable method is refused as
+  before.
+- `OPENGENI_MANAGED_AUTH_PASSKEY_SIGNUP_ENABLED` (default `false`) also lets a
+  new person create an account with only a name and a passkey, with no email
+  address or password. It applies only while new sign-ups are open (both
+  sign-up switches above), no `OPENGENI_ALLOWED_USER_EMAILS` allowlist is set
+  and the signup challenge, when enabled, passes. Such an account has no email
+  address, so it gets no sign-in notices or password resets; its passkeys are
+  its only way in, and its last passkey can't be removed. Recommend that these
+  people add a second passkey.
+- Before enabling passkey-only accounts, settle the public hostname and the
+  session-set mode. Passkeys belong to the hostname they were made on and are
+  offered only in the legacy session-set mode, so moving the deployment to
+  another hostname or switching session-set modes leaves passkey-only accounts
+  with no way to sign in and no email address to recover through.
+- Removing a passkey signs the person out everywhere, as a password change
+  does: sessions don't record which passkey opened them, so ending all of them
+  is the only way to shut out a removed passkey.
+- Ceremonies are single use, expire after five minutes and are bound to the
+  origin that started them. Requests for new ceremonies are rate limited per
+  client address. Credentials are stored as public keys only; the signature
+  counter only moves forward.
+
+The dual and broker session-set modes do not offer passkeys yet.
 
 ### Password sign-up email verification
 

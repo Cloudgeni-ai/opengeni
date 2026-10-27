@@ -359,14 +359,22 @@ describe("app actions in a chat", () => {
       createdBy: { kind: "subject", subjectId: org.owner },
       sender: org.owner,
     });
+    // Even with workspace settings recorded (a Personal workspace owner's chat).
+    const settings = {
+      subjectId: org.owner,
+      changes: "confirm" as const,
+      permissions: [...SENT_PERMISSIONS, "workspace:admin" as const],
+    };
     const child = await claimedTurn(org, {
       createdBy: { kind: "subject", subjectId: org.owner },
       sender: org.owner,
       parentSessionId: parent.sessionId,
+      frozen: settings,
     });
     const service = await claimedTurn(org, {
       createdBy: { kind: "service", subjectId: org.owner },
       sender: org.owner,
+      frozen: settings,
     });
     for (const turn of [child, service]) {
       const key = {

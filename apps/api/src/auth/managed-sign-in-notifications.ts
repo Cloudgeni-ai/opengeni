@@ -7,7 +7,7 @@ const Claim = z.object({
   operationId: z.string().uuid(),
   leaseId: z.string().uuid(),
   email: z.string().email(),
-  provider: z.enum(["password", "google", "github"]),
+  provider: z.enum(["password", "google", "github", "passkey"]),
   sender: z.string(),
 });
 const started = new WeakSet<object>();

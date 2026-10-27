@@ -160,13 +160,15 @@ impl PagerConfig {
 /// A live guest's kernel takes such a connection by itself, however busy
 /// the guest is, so the defaults leave a live guest that answers slowly
 /// for a while (one of a burst of restores on a busy host takes seconds)
-/// a wide margin: a stopped guest is found within three minutes.
+/// a wide margin: a guest that hangs is found within three minutes. One
+/// that said it halted, as a guest that halts or powers off does, is found
+/// at its first miss, within a check's period and its reach limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GuestChecks {
     /// Between two checks of one guest.
     pub every: Duration,
     /// Checks in a row a guest may miss before it counts as stopped; at
-    /// least one.
+    /// least one. A guest that said it halted may miss none.
     pub misses: u32,
 }
 
