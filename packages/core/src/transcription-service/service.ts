@@ -394,6 +394,7 @@ export function createTranscriptionService(input: {
             },
             model: provider.model.model,
             diarize: false,
+            ...(request.language ? { language: request.language } : {}),
             signal: deadline.signal,
             scope: {
               accountId: request.accountId,

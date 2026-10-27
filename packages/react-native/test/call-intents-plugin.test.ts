@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { intentsSource, resolveOptions } = require("../plugin/call-intents.cjs") as {
+const { intentsSource, pluginFeatures, resolveOptions } = require("../plugin/call-intents.cjs") as {
   intentsSource(call: Record<string, unknown>): string;
+  pluginFeatures(props?: Record<string, unknown> | null): { call: boolean; recording: boolean };
   resolveOptions(props?: Record<string, unknown>): {
     call: Record<string, unknown> & { phrases: string[] };
     alternativeAppNames: string[];
@@ -44,6 +45,23 @@ describe("native call config plugin", () => {
     expect(() => resolveOptions({ call: { phrases: ["Call the agent"] } })).toThrow("{app}");
     expect(() => resolveOptions({ call: { phrases: ["{app} calls {app}"] } })).toThrow("{app}");
     expect(() => resolveOptions({ call: { phrases: [] } })).toThrow("phrases");
+  });
+
+  test("sets up calls only when asked, so a meetings-only app gets no VoIP or Siri setup", () => {
+    // The bare plugin has always meant calls.
+    expect(pluginFeatures()).toEqual({ call: true, recording: false });
+    expect(pluginFeatures(null)).toEqual({ call: true, recording: false });
+    expect(pluginFeatures({ microphonePermission: "Talk." })).toEqual({
+      call: true,
+      recording: false,
+    });
+    expect(pluginFeatures({ recording: true })).toEqual({ call: false, recording: true });
+    expect(pluginFeatures({ recording: true, call: {} })).toEqual({ call: true, recording: true });
+    expect(pluginFeatures({ recording: true, call: true })).toEqual({
+      call: true,
+      recording: true,
+    });
+    expect(pluginFeatures({ call: false })).toEqual({ call: false, recording: false });
   });
 });
 

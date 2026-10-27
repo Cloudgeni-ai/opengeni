@@ -305,6 +305,11 @@ export type KnowledgeEntryRecord = z.infer<typeof KnowledgeEntryRecord>;
 export const KnowledgeEntryListRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      /**
+       * Ranks by relevance. Without a query, lists come newest first: by latest
+       * change (a collection changes when anything inside it does), or by
+       * creation when `createdSince` is set. Ties keep that order under a query.
+       */
       query: z.string().max(4096).optional(),
       mode: z.enum(["hybrid", "keyword", "vector"]).default("hybrid"),
       scope: KnowledgeEntryScope.optional(),
@@ -354,6 +359,11 @@ export const KnowledgeSearchToolRequest = /* @__PURE__ */ defineSchema(() => {
 export const KnowledgeEntrySummary = /* @__PURE__ */ defineSchema(() =>
   KnowledgeEntryRecord.omit({ revision: true }).extend({
     score: z.number().finite().optional(),
+    /**
+     * When a list ordered by latest change last saw this entry change; for a
+     * collection, the newest change to it or anything inside it you can read.
+     */
+    lastChangedAt: primitives.string.datetime({ offset: true }).optional(),
     excerpts: z
       .array(
         z.object({

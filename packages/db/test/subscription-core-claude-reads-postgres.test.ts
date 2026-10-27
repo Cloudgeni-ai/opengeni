@@ -3,9 +3,8 @@
  * the shared core (design 5.3, Claude track C2a), on real PostgreSQL as the
  * non-owner application role.
  *
- * The production registry and migrated database admit Claude. A separate
- * historical fixture proves the pre-receipt legacy route. Only the adapter's
- * token transport is replaced; usage is scripted and real network is denied.
+ * The production registry and migrated database admit Claude. Only the
+ * adapter's token transport is replaced; usage is scripted and real network is denied.
  *
  * Run this file in its own process: the registration replaces module
  * bindings for the whole process.
@@ -23,8 +22,6 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { installNetworkDenialGuard } from "./fixtures/subscription-core-fake-api-key";
 
 setDefaultTimeout(180_000);
-
-const productionProviderIds = productionRegistry.subscriptionCoreProviderIds();
 
 /** The OAuth token endpoint; only the credential refresh tests script it. */
 let tokenEndpoint: typeof fetch = (async () => {
@@ -55,7 +52,6 @@ const {
   resetSubscriptionCoreClaudeUsageThrottle,
   subscriptionCoreClaudeAcceptedAuthorityAdmitsOrganization,
 } = await import("../src");
-const { upsertOrganizationClaudeSubscription } = await import("./fixtures/legacy-claude/accounts");
 const {
   rawRows,
   setSubjectRlsContext,
@@ -461,74 +457,6 @@ describe("the application role", () => {
       sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
     );
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
-  });
-});
-
-describe("before the Claude cutover receipt (legacy route)", () => {
-  let current: { shared: SharedTestDatabase; client: DbClient };
-  beforeAll(async () => {
-    current = { shared, client };
-    const legacy = await acquireSharedTestDatabase("claude-reads-before-cutover", {
-      withheldMigrations: [
-        "0748_subscription_core_claude_cutover.sql",
-        "0751_subscription_core_legacy_retirement.sql",
-      ],
-    });
-    if (!legacy) throw new Error("Real PostgreSQL is required");
-    shared = legacy;
-    client = createDb(shared.appUrl, { max: 6 });
-  }, 180_000);
-  afterAll(async () => {
-    if (client !== current.client) await client.close();
-    if (shared !== current.shared) await shared.release();
-    ({ shared, client } = current);
-  }, 60_000);
-
-  test("the production binding does not bypass the missing cutover receipt", () => {
-    expect(productionProviderIds).toContain("claude");
-  });
-
-  test("without the cutover receipt admission fails closed even with a valid legacy pool", async () => {
-    const org = await organization();
-    await setCutover(org, true);
-    expect(
-      await readSubscriptionCoreProviderRouteForWorkspace(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        provider: "claude",
-      }),
-    ).toBe("legacy");
-    // A core connection is not read on the legacy route.
-    await sharedConnection(org, "legacy-core-row");
-    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    const secret = {
-      version: 1 as const,
-      token: "sk-ant-oat01-legacy-admission",
-      identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-    };
-    // Seed historical data only with the fixture administrator: current app
-    // roles deliberately no longer execute retired Claude writer routines.
-    // Every admission assertion below still runs as the restricted app role.
-    const seed = createDb(shared.adminUrl, { max: 1 });
-    try {
-      await upsertOrganizationClaudeSubscription(seed.db, {
-        organizationId: org.accountId,
-        actorSubjectId: org.ownerSubjectId,
-        encryptionKey: key,
-        secret,
-        providerAccountId: secret.identity.accountUuid,
-        label: null,
-        accountEmail: null,
-        expiresAt: null,
-      });
-    } finally {
-      await seed.close();
-    }
-    expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    expect(
-      await admit(org, org.opus, { authoritySnapshot: { version: 1, scope: "workspace" } }),
-    ).toBeNull();
-    expect(await admit(org, org.opus, organizationSnapshot, { subject: false })).toBeNull();
   });
 });
 

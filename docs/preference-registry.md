@@ -260,8 +260,6 @@ Canonical implementation:
 - `packages/contracts/src/preference-registry.ts`;
 - `packages/db/src/preference-registry-schema.ts`;
 - `packages/db/src/preference-registry.ts`;
-- `packages/db/drizzle/0137_preference_registry.sql`;
-- `packages/db/drizzle/0157_session_policy_role_snapshots.sql`;
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`;

@@ -1402,6 +1402,39 @@ describe("Live transcript", () => {
     }
   });
 
+  test("without a live default from the host, the recorder follows the workspace's setting", async () => {
+    const liveChecked = async (hostDefault: boolean | undefined) => {
+      const fixture = createMeetingsFixture({ liveTranscript: true });
+      const view = await render(
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          {...(hostDefault === undefined ? {} : { liveTranscriptDefault: hostDefault })}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />,
+      );
+      try {
+        await waitForText(view.container, "Start recording");
+        const trigger = view.container.querySelector<HTMLButtonElement>(
+          'button[aria-label^="Recording options"]',
+        );
+        await act(async () => {
+          trigger!.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+          );
+        });
+        await waitFor(() => document.querySelector('[role="menuitemcheckbox"]') !== null);
+        return document.querySelector('[role="menuitemcheckbox"]')!.getAttribute("aria-checked");
+      } finally {
+        await view.unmount();
+      }
+    };
+    expect(await liveChecked(undefined)).toBe("true");
+    // A host that decides for itself still wins.
+    expect(await liveChecked(false)).toBe("false");
+  });
+
   test("streamed pieces are joined without doubled or stray punctuation", async () => {
     const { tidyLiveText, tidyPartialText } = await import("./live-transcript");
     expect(tidyLiveText(["It's between you…", ". And the dog ."])).toBe(

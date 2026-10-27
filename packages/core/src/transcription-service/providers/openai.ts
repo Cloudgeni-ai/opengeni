@@ -11,7 +11,11 @@ import {
   textRequestAudio,
   textTranscriptionResult,
 } from "../text-models";
-import { createOpenAiRealtimeLiveSession, openAiRealtimeTranscribes } from "./openai-realtime";
+import {
+  createOpenAiRealtimeLiveSession,
+  openAiLanguage,
+  openAiRealtimeTranscribes,
+} from "./openai-realtime";
 
 /** OpenAI's file transcription API: about 25 minutes or 25 MB per request. */
 export const OPENAI_TRANSCRIPTION_LIMITS = {
@@ -57,9 +61,8 @@ export function createOpenAiTranscriptionProvider(input: {
       const form = new FormData();
       form.append("file", audioBlob(audio, mimeType), filename);
       form.append("model", input.model);
-      if (request.language && /^[a-z]{2}$/u.test(request.language)) {
-        form.append("language", request.language);
-      }
+      const language = openAiLanguage(request.language);
+      if (language) form.append("language", language);
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(input.model)) {
         form.append("response_format", "verbose_json");

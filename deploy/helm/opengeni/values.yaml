@@ -137,9 +137,7 @@ config:
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",
-  # apply the drained maintenance migration
-  # 0389_model_catalog_and_gateway_custom_models.sql and follow the
-  # compatibility-first catalog cutover in docs/deployment.md; do not expose
+  # follow the compatibility-first catalog cutover in docs/deployment.md; do not expose
   # database-only membership during a mixed code/database rollout.
   OPENGENI_MODEL_CATALOG_SOURCE: code
   # Optional non-secret JSON values may be supplied here:
@@ -1569,8 +1567,12 @@ computeControl:
     domain: ""
     # Templates by id, as `image:VCPUSxMEMORY_MIB`, or with a disk size
     # `image:VCPUSxMEMORY_MIBxDISK_MIB` (default diskMib), for example
-    # {base: "base:2x1024", github-runner: "runner:4x8192x30720"}. Empty:
-    # `base`, the default image at 2x1024.
+    # {base: "base:2x1024", github-runner: "runner:4x8192x30720"}. Either
+    # may end in `,memory-request=MIB` and `,cpu-request=MILLIS`: sandboxes
+    # guaranteed only that much, using more when their host has it free, so
+    # a host runs more of them at once
+    # ("runner:8x24576x65536,memory-request=8192"). Empty: `base`, the
+    # default image at 2x1024.
     templates: {}
     # More NetworkPolicy peers that may reach it.
     ingressFrom: []
@@ -1700,6 +1702,7 @@ computeRunners:
   #     service:                # how runners, outside the cluster, reach it
   #       type: ClusterIP
   #       port: 8080
+  #       nodePort: null        # with type NodePort, the node's port
   #       annotations: {}
   #       loadBalancerSourceRanges: []
   #   resources: {}             # default: computeRunners.resources

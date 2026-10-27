@@ -131,36 +131,6 @@ const RETIRED_DESIGN_RECORD_PATH = new RegExp(
   "gi",
 );
 const MACHINE_NIX_STORE_PATH = /\/nix\/store\/[a-z0-9]{20,}-/gi;
-const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
-  "packages/db/drizzle/0017_sandbox_leases.sql",
-  "packages/db/drizzle/0018_sandbox_os.sql",
-  "packages/db/drizzle/0019_session_stream_acknowledgments.sql",
-  "packages/db/drizzle/0020_session_recordings.sql",
-  "packages/db/drizzle/0021_sandbox_pty_sessions.sql",
-  "packages/db/drizzle/0024_sandboxes_enrollments_metrics.sql",
-  "packages/db/drizzle/0025_device_enrollment_requests.sql",
-  "packages/db/drizzle/0045_workspace_captures.sql",
-  "packages/db/drizzle/0053_codex_credential_leases.sql",
-  "packages/db/drizzle/0057_durable_queue_control.sql",
-  "packages/db/drizzle/0061_session_workflow_wake_outbox.sql",
-  "packages/db/drizzle/0062_session_list_snapshot_reaper.sql",
-  "packages/db/drizzle/0063_session_control_mega_foundation.sql",
-  "packages/db/drizzle/0064_rotation_strategy_sharded_backfill.sql",
-  "packages/db/drizzle/0067_session_event_payload_bounds.sql",
-  "packages/db/drizzle/0068_workspace_control_event_bounds.sql",
-  "packages/db/drizzle/0069_session_event_history_backfill.sql",
-  "packages/db/drizzle/0074_session_activity_revisions.sql",
-  "packages/db/drizzle/0120_durable_goal_wake.sql",
-]);
-// This already-released migration cannot be rewritten. Retain only its exact
-// historical issue marker; edited bytes, other paths and all other rules remain
-// checked. Unlike the older filename allowlist, this grants no future exemption.
-const FROZEN_MIGRATION_ISSUE = {
-  file: "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql",
-  bytes: 16960,
-  sha256: "663c19d4e7935d043f3483d76363085ed188dec133817cc295a2c0f6c02a37f3",
-  offset: 35,
-};
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");
 const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
@@ -192,38 +162,22 @@ export function auditPublicText(file: string, source: string): Finding[] {
   );
   collectMatches(file, source, MACHINE_NIX_STORE_PATH, "machine-specific Nix store path", findings);
   collectMatches(file, source, PERSONAL_NAME, "personal name", findings);
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_PATH,
-      "retired internal design-record path",
-      findings,
-    );
-  }
-
-  if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    const frozenMigrationMatches =
-      file === FROZEN_MIGRATION_ISSUE.file &&
-      Buffer.byteLength(source, "utf8") === FROZEN_MIGRATION_ISSUE.bytes &&
-      createHash("sha256").update(source, "utf8").digest("hex") === FROZEN_MIGRATION_ISSUE.sha256;
-    collectMatches(
-      file,
-      source,
-      INTERNAL_ISSUE_REFERENCE,
-      "internal issue reference",
-      findings,
-      (match) => frozenMigrationMatches && match.index === FROZEN_MIGRATION_ISSUE.offset,
-    );
-    collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
-    collectMatches(
-      file,
-      source,
-      RETIRED_DESIGN_RECORD_TERM,
-      "retired internal design-record terminology",
-      findings,
-    );
-  }
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_PATH,
+    "retired internal design-record path",
+    findings,
+  );
+  collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
+  collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
+  collectMatches(
+    file,
+    source,
+    RETIRED_DESIGN_RECORD_TERM,
+    "retired internal design-record terminology",
+    findings,
+  );
 
   PRIVATE_PROJECT_CODENAME.lastIndex = 0;
   for (const match of source.matchAll(PRIVATE_PROJECT_CODENAME)) {

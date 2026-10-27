@@ -280,12 +280,16 @@ export async function transcribeExpoRecording(input: {
   client: Pick<OpenGeniClient, "fetchApi">;
   workspaceId: string;
   recording: NativeVoiceRecording;
+  /** The language spoken ("nb", "en"); omitted or null detects it. */
+  language?: string | null | undefined;
 }): Promise<string> {
   const form = new FormData();
   // expo-file-system's File is a Blob, which Expo's fetch uploads from disk.
   form.append("audio", new File(input.recording.uri) as unknown as Blob, "dictation.m4a");
   form.append("mimeType", input.recording.mimeType);
   form.append("durationSeconds", input.recording.durationSeconds.toFixed(3));
+  const language = input.language?.trim();
+  if (language) form.append("language", language);
   try {
     const response = await input.client.fetchApi(
       `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/transcriptions`,

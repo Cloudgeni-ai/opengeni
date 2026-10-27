@@ -1,4 +1,3 @@
-import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { MeetingsList } from "@opengeni/react-native/meetings";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
@@ -24,7 +23,7 @@ export default function MeetingsScreen() {
 function Meetings({ workspaceId }: { workspaceId: string }) {
   const c = useNativeTimelineTheme().colors;
   const insets = useSafeAreaInsets();
-  const { client, workspace } = useAccount();
+  const { client } = useAccount();
   const [focused, setFocused] = useState(false);
   useFocusEffect(
     useCallback(() => {
@@ -32,9 +31,6 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
       return () => setFocused(false);
     }, []),
   );
-  const liveDefault =
-    resolveWorkspaceRecordingSettings(workspace?.id === workspaceId ? workspace.settings : null)
-      .liveTranscript === true;
   return (
     <>
       <Stack.Screen
@@ -48,7 +44,6 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
       <MeetingsList
         client={client}
         workspaceId={workspaceId}
-        liveTranscriptDefault={liveDefault}
         focused={focused}
         // iOS keeps the list clear of the home indicator by itself.
         bottomInset={Platform.OS === "ios" ? 0 : insets.bottom}

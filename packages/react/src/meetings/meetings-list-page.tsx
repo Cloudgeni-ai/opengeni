@@ -73,7 +73,7 @@ function useNarrow(): boolean {
 
 function MeetingsListPageContent({
   workspaceId,
-  liveTranscriptDefault = false,
+  liveTranscriptDefault,
   liveTranscript = true,
   defaultLanguage,
   recordings: recordingsClient,
@@ -86,7 +86,10 @@ function MeetingsListPageContent({
   viewerName = null,
 }: {
   workspaceId: string;
-  /** Whether the workspace shows a live transcript while recording by default. */
+  /**
+   * Whether the recorder starts with the live transcript on. By default the
+   * workspace's setting, from the server.
+   */
   liveTranscriptDefault?: boolean;
   /** Offer the live transcript preview at all; false hides it even when a live model is connected. */
   liveTranscript?: boolean;
@@ -207,7 +210,10 @@ function MeetingsListPageContent({
             viewerName={viewerName}
             liveTranscript={
               liveTranscript && liveModel
-                ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
+                ? {
+                    defaultOn: liveTranscriptDefault ?? models.liveTranscript ?? false,
+                    usdPerHour: liveModel.usdPerHour,
+                  }
                 : null
             }
           />

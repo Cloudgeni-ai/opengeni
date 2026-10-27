@@ -424,7 +424,14 @@ audio goes. Boot fails if the pinned model is not configured.
 The recording providers:
 
 - **ElevenLabs Scribe v2** ($0.22 an hour) uses the workspace's own
-  ElevenLabs key, or its organization's.
+  ElevenLabs key, or its organization's. A product that embeds Opengeni with
+  only an organization API key gives a workspace its key from its server:
+  `POST /v1/workspaces/:workspaceId/connections` (`client.createConnection`)
+  with `providerDomain: "api.elevenlabs.io"`, `kind: "api_key"`,
+  `subjectId: null`, `credential: { apiKey }`,
+  `metadata: { credentialRole: "elevenlabs" }` and an `operationId`. The key
+  needs `connections:write` and `capabilities:manage`, which a full
+  organization key holds.
 - **Azure Speech with MAI-Transcribe-2** ($0.10 an hour at its launch price)
   uses the deployment's own Azure Speech account. Audio is processed in the
   account's region, so a deployment that must keep audio in the EU uses an
@@ -679,6 +686,11 @@ A dictation differs from a meeting in a few ways:
   the voice input setting), not `settings.recordings.transcription`. Creating
   one answers 403 with `details.code: "policy_blocked"` when voice input is
   off, and 503 when no voice input provider is available.
+- Its `transcription` can name only the `language` spoken (an ISO 639-1 or
+  639-3 code such as `nb` or `en`); anything else answers 400. Without a
+  language, the provider detects it. A dictation does not take the
+  workspace's meeting language, because people dictate in more languages
+  than they hold meetings in.
 - It is billed like voice input: each piece is charged against the
   dictating person's usage, and a refused charge fails the transcript with
   that code (for example `insufficient_credits`).
@@ -693,14 +705,82 @@ offer the text of a dictation an earlier page, tab or device left behind.
 
 `useVoiceInput` (in `@opengeni/react/recordings`, used by the web composer)
 and `useNativeDictation` (in `@opengeni/react-native/recordings`) do all of
-this. Taking the text deletes the dictation first and inserts the text only
+this; their `language` option (and `ComposerTranscriptionControl`'s
+`language` prop) sets the language each new dictation is heard in. Taking
+the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
 insert the same speech twice. Cancel or Escape keeps anything longer than
 three seconds to insert later. A client without the recordings API (only
-`transcribeAudio`) records in memory and sends one request, as before.
+`transcribeAudio` or, on a phone, `transcribeExpoRecording`, both of which
+also take a `language`) records in memory and
+sends one request, as before.
 
 Dictation recordings replace the older `transcription-recordings` routes,
 which are deprecated and kept for older clients until their sunset.
+
+### Dictation from anywhere (desktop)
+
+In the desktop app, a shortcut dictates into whatever app has the cursor:
+press it, speak, press it again (or hold it while speaking), and the text is
+typed there. Each dictation is an ordinary dictation recording of the
+signed-in person, so it is kept the same way: a failed transcription offers
+Retry, and a dismissed or cancelled one (after the first few seconds) stays
+saved for the composer to offer. The pieces:
+
+- The main process (`@opengeni/desktop/dictation`) owns the shortcuts, a
+  small window at the bottom of the screen that shows the dictation's
+  progress, and where the text goes. It types the text by pasting it and
+  then puts the person's clipboard back, or only copies it. Several
+  shortcuts can each have their own language (one for English, one for
+  Norwegian); most people keep the one, which detects the language. On macOS
+  a shortcut can be modifier keys alone (Control and Fn by default) and
+  typing needs Accessibility. On Windows it pastes with PowerShell; on Linux
+  with xdotool (X11), wtype or ydotool (Wayland), and only copies without
+  them. Recent text is kept on the computer to copy again.
+- `DesktopDictationHost` (`@opengeni/react/desktop-dictation`), mounted once
+  on the signed-in pages, records and transcribes when the app asks, with
+  `useVoiceInput`. When no page is open, the app opens one in the background
+  and starts once it listens.
+- `DesktopDictationSettings` is the stock settings UI, or build your own on
+  `useDesktopDictation()`.
+
+An Electron app other than Opengeni's wires it like system audio:
+
+```ts
+// Main process
+import {
+  createDesktopDictation,
+  ENGLISH_DICTATION_WORDS,
+  handleDictationIpc,
+} from "@opengeni/desktop/dictation";
+
+const dictation = createDesktopDictation({
+  productName: "Example",
+  dataDir: app.getPath("userData"),
+  reveal: () => showMainWindow(),
+  wake: () => openMainWindowInBackground(), // optional
+  // optional: the small window's words in the app's language (English by default)
+  words: () => ({ ...ENGLISH_DICTATION_WORDS, transcribing: "Transkriberer…" }),
+  // optional: the language the first shortcut hears until the person picks another
+  // (it detects the language by default)
+  language: "nb",
+});
+handleDictationIpc({ ipcMain, dictation, allow: (event) => assertYourWebApp(event) });
+dictation.start();
+app.on("will-quit", () => dictation.stop());
+
+// Preload of the web app's window
+import { exposeDictation } from "@opengeni/desktop/preload/dictation";
+exposeDictation(); // defines window.opengeniDictation
+
+// Web app, on the signed-in pages
+<DesktopDictationHost client={client} workspaceId={workspaceId} />
+```
+
+The settings page (`DesktopDictationSettings`) and the host's failure messages
+use the `desktopDictation.*` keys of the React messages, so a translated
+catalog covers them. The app's status names problems by code
+(`shortcutErrors[].problem`, `paste.blocker`) for the page to put in words.
 
 ## Deletion
 

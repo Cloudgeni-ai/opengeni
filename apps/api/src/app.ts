@@ -199,7 +199,7 @@ import {
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   inferenceFeatureAvailability,
-  inferenceFeatureRegionAllowed,
+  inferenceFeatureRegionRestricted,
   settingsWithInferenceResidency,
   selectDefaultSessionModel,
   isWorkspaceModelAdmissible,
@@ -867,6 +867,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Conversation-Filter",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Covered-First",
@@ -4300,19 +4302,21 @@ function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
 /** Client-safe agent-configuration projection. */
 export function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
-  // EU-only: capabilities with no configured EU route here.
+  // EU-only: capabilities whose routes here are all outside the EU. One the
+  // server turned off keeps that reason; it isn't the region's doing.
   const regionRestricted: Partial<Record<(typeof AGENT_CAPABILITY_IDS)[number], boolean>> = {
-    webSearch: !inferenceFeatureRegionAllowed(settings, "web_search"),
+    webSearch: inferenceFeatureRegionRestricted(settings, "web_search"),
     media:
-      !inferenceFeatureRegionAllowed(settings, "image_generation") &&
-      !inferenceFeatureRegionAllowed(settings, "video_generation"),
+      inferenceFeatureRegionRestricted(settings, "image_generation") &&
+      inferenceFeatureRegionRestricted(settings, "video_generation"),
   };
   return {
     // Deprecated: agent configuration is always on. Kept for client compatibility.
     enabled: true,
     defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
-      if (regionRestricted[id]) {
+      const reason = policy.unavailable[id];
+      if (reason === undefined && regionRestricted[id]) {
         return {
           id,
           available: false,
@@ -4320,7 +4324,6 @@ export function clientAgentConfig(settings: Settings): ClientAgentConfig {
           code: REGION_RESTRICTED,
         };
       }
-      const reason = policy.unavailable[id];
       return reason === undefined ? { id, available: true } : { id, available: false, reason };
     }),
   };

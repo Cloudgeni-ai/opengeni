@@ -405,10 +405,6 @@ This slice deliberately does not implement:
 Canonical implementation: `packages/contracts/src/workspace-instruction-policies.ts`,
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
-`packages/db/drizzle/0130_workspace_instruction_policies.sql`,
-`packages/db/drizzle/0157_session_policy_role_snapshots.sql`,
-`packages/db/drizzle/0168_workspace_instruction_policy_operation_receipts.sql`,
-`packages/db/drizzle/0169_workspace_instruction_policy_onboarding_proposals.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
 `packages/sdk/src/workspace-instruction-policies.ts`, with the bounded admin
 composer in `apps/web/src/routes/workspace-state.tsx`, plus runtime composition in

@@ -1248,14 +1248,44 @@ Both are optional. Unset, the runtime uses the URL password exactly as before.
 Each pool that logs in as the runtime role re-reads the files on every new
 connection (trailing newlines are ignored) and keeps the candidates
 `[previous, current]` (previous only when non-empty and different). It starts
-on the previous password, moves to the current one after a single `28P01` and
-then stays there. Only a change in the files' contents starts the order over.
-Logs and metrics never carry a password; the pools log only content-free
-events such as `switched database credential candidate` with candidate indexes.
+on the previous password, moves to the current one after the first `28P01` of
+a login that used the previous password, and then stays there. Each refusal is
+attributed to the password that refused login actually used: logins that were
+already authenticating with a password the pool has since replaced are refused
+without moving the pool again (stale refusals). A refusal of the newly selected
+password moves the pool on at once, back to the first candidate after the last
+(for example when a rollback restored the old password); there is no
+time-based grace. Only a change in the files' contents starts the order over.
+Logs and metrics never carry a password. Each pool logs one content-free
+warning per event (`reloaded database credential candidates`, `database
+credential candidate refused`, `switched database credential candidate`,
+`database credential retries exhausted`, `database password file
+unreadable; treating it as missing`) with the fields `databasePool` (`api`,
+`managed-auth`, `worker`, `worker-readiness`, `worker-activities`, with a
+`-notifications` suffix for the API's LISTEN connection), `credentialIndex`,
+`credentialFromIndex`, `credentialToIndex`, `credentialCandidates`,
+`credentialStale` (refusals), and `credentialFile` and
+`credentialFileErrorCode` (unreadable files), plus `reason` on exhaustion
+lines. Indexes are positions in `[previous, current]`: while both files are
+set, 0 is the previous password and 1 the current one.
+The same events are counted, labelled by `pool`, in
+`opengeni_database_credential_refusals_total` (`index`, and `refusal` =
+`stale` or `fresh`), `opengeni_database_credential_switches_total`
+(`from_index`, `to_index`), `opengeni_database_credential_exhaustions_total`
+(`index`, and `reason` = `every_candidate_refused` or `attempt_cap`, also on
+the log line) and `opengeni_database_credential_reloads_total`
+(`candidates`). The counters are exact; repeated refusal, switch and
+exhaustion lines of one pool are logged at most once per 10 seconds per kind,
+the next line carrying `suppressedCount`. A rotation should show exactly one
+switch per pool and no exhaustion; stale refusals are expected, at most one per
+connection that was logging in when the password changed.
 
 A query or transaction start refused with `28P01` is retried on the newly
-selected candidate, but only at the connection layer, only while another
-distinct candidate exists, and at most once per candidate. This is safe
+selected candidate, but only at the connection layer, and only when the pool
+now selects another password than the refused login used (a stale refusal, or
+a fresh one that moved the pool on). A rotation costs an operation at most one
+extra attempt (two when a rollback lands while it retries), and no operation
+makes more than five attempts. This is safe
 because PostgreSQL raises `28P01` only while authenticating a new connection,
 before any statement runs. With a single candidate (no previous password), a
 wrong password fails fast exactly as before. Session persistence, turn
@@ -1291,7 +1321,8 @@ To rotate, in this order:
    printing the files: for example `kubectl exec <pod> -- test -s
    /var/run/opengeni/database/previous-password` on each pod (when the image
    has `test`), or a `reloaded database credential candidates` log line with
-   `candidates: 2` from each pod.
+   `credentialCandidates: 2` (or a `candidates="2"` reload counter) from each
+   pod.
 2. In one step, with no release in between: run `ALTER ROLE opengeni_app
    PASSWORD ...` with the new password, set `OPENGENI_APP_DATABASE_PASSWORD`
    (role provisioning resets the role to it on every release), and set the
@@ -1301,6 +1332,12 @@ To rotate, in this order:
    Running pods keep using the files, and each pool meets one `28P01` on its
    next new connection and switches to the new password.
 3. Clear `OPENGENI_DATABASE_PREVIOUS_PASSWORD`.
+
+To roll back after step 2, mirror it: write the files reversed (previous = the
+new password, current = the old one), confirm every pod sees them, then
+restore the role's old password. A change in the files starts the order over
+at the first candidate, which is then the password the server still has, so
+nothing is refused until the role changes back, and each pool switches once.
 
 Change the role only after the files show both passwords. If the role changes
 first, new connections fail until the files catch up. Outside Kubernetes,
@@ -1959,8 +1996,9 @@ only the process bundle, runtime assets and the exact installed dependency graph
 of its external packages (including optional native bindings and required peers).
 The worker retains its prebuilt workflows and managed Codemode client; API retains
 signed machine installers, the read-only artifact runtime, bundled database
-commands with the unchanged SQL ledger, and the stock catalog-import command and
-reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+commands with the unchanged SQL ledger, the stock catalog-import command, the
+`model-catalog:upsert` command and reviewed catalog/logo assets.
+Office/OCR/media, Docker and source-control tools
 are unchanged. Temporal retains only its loader-selected native platform binary;
 its Rust build tree and foreign binaries are not runtime dependencies. Source
 workflow compilation remains available but its compiler is loaded only on demand.

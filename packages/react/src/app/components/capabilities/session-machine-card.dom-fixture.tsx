@@ -460,16 +460,26 @@ describe("Connected Machine conversation card", () => {
     };
     const h = await render();
     try {
-      // A reachable machine makes "Use in this chat" the one primary action.
+      // No machine is promoted over the others: each reachable one offers Use.
       expect(h.text()).toContain("Choose where this chat runs.");
       expect(h.button("Connect a computer")).toBeNull();
-      expect(h.button("Connect another machine")).toBeNull();
+      expect(h.button("Connect another computer")).toBeNull();
       expect(h.button("Use build-box in this chat")?.textContent).toBe("Use");
+      expect(h.button("Use Studio Mac in this chat")?.textContent).toBe("Use");
       // An offline machine is listed but cannot take the chat.
       expect(h.button("Use Old laptop in this chat")).toBeNull();
       expect(h.text()).toContain("Offline");
       // Members who cannot remove machines are not told to.
       expect(h.text()).not.toContain("remove a connected machine");
+      // Chrome belongs to the machine this chat runs on, once there is one.
+      expect(h.text()).not.toContain("Chrome");
+      fleet.machines = [
+        sessionBox,
+        machine("linux", "build-box", { os: "linux", hasDisplay: false }),
+        machine("mac", "Studio Mac", { active: true }),
+        machine("old", "Old laptop", { state: "offline" }),
+      ];
+      await h.rerender();
       await h.rerender();
       expect(h.text()).toContain("Work on Studio Mac");
       expect(h.text()).not.toContain("Teammate");
@@ -521,22 +531,58 @@ describe("Connected Machine conversation card", () => {
     }
   });
 
-  test("with a machine already available, connecting another is a secondary action", async () => {
-    fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+  test("with a machine already available, connecting another computer is a peer of using it", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { allowScreenControl: true }),
+      machine("pc", "Home laptop", { os: "windows", state: "offline" }),
+    ];
     const h = await render();
     try {
       expect(h.button("Connect a computer")).toBeNull();
-      await click(h.button("Connect another machine"));
+      expect(h.text()).toContain("Choose where this chat runs, or connect another computer.");
+      // Neither the one reachable machine nor connecting is promoted.
+      expect(h.button("Use Studio Mac in this chat")?.textContent).toBe("Use");
+      const connect = h.button("Connect another computer");
+      expect(connect?.textContent).toBe("Connect");
+      expect(connect?.closest("[data-slot='connected-machines']")).not.toBeNull();
+      // Its own list: it isn't a connected machine.
+      expect(connect?.closest("[aria-label='Connected machines']")).toBeNull();
+      expect(connect?.closest("[aria-label='Connect another computer']")).not.toBeNull();
+      // Screen control and Chrome wait until this chat runs on a machine.
+      expect(h.text()).not.toContain("Screen control");
+      expect(h.text()).not.toContain("Chrome");
+      await click(connect);
       expect(mintEnrollToken).not.toHaveBeenCalled();
       expect(h.dialogText()).toContain("Use your computer");
       expect(h.command()).toBe("");
+      await click(h.dialogButton("Close"));
+
+      // On a machine, the row stays for connecting a different one.
+      fleet.machines = [
+        sessionBox,
+        machine("mac", "Studio Mac", { allowScreenControl: true, active: true }),
+        machine("pc", "Home laptop", { os: "windows", state: "offline" }),
+      ];
+      await h.rerender();
+      expect(h.text()).toContain("This chat runs on Studio Mac");
+      expect(h.button("Connect another computer")).not.toBeNull();
+      expect(h.text()).toContain("Screen control");
+      // It ends the card, after the chat machine's screen control and Chrome
+      // rows rather than between the machine and them.
+      const lists = [...h.container.querySelectorAll(":not(button)[aria-label]")].map((node) =>
+        node.getAttribute("aria-label"),
+      );
+      const order = ["Connected machines", "Screen control", "Chrome", "Connect another computer"];
+      expect(lists.filter((label) => order.includes(label ?? ""))).toEqual(order);
     } finally {
       await h.close();
     }
   });
 
   test("screen control turns on in place, then follows each Mac permission", async () => {
-    const mac = (overrides: Partial<Machine>) => machine("mac", "Studio Mac", overrides);
+    const mac = (overrides: Partial<Machine>) =>
+      machine("mac", "Studio Mac", { active: true, ...overrides });
     fleet.machines = [sessionBox, mac({ runtime: runtime(false, granted(false, false, false)) })];
     const h = await render();
     try {
@@ -593,6 +639,7 @@ describe("Connected Machine conversation card", () => {
     fleet.machines = [
       sessionBox,
       machine("mac", "Studio Mac", {
+        active: true,
         allowScreenControl: true,
         runtime: runtime(false, null, false),
       }),
@@ -606,7 +653,12 @@ describe("Connected Machine conversation card", () => {
       // Reports from before the agent said whether it holds the consent.
       fleet.machines = [
         sessionBox,
-        machine("pc", "Linux box", { os: "linux", allowScreenControl: true, runtime: null }),
+        machine("pc", "Linux box", {
+          os: "linux",
+          active: true,
+          allowScreenControl: true,
+          runtime: null,
+        }),
       ];
       await h.rerender();
       expect(h.text()).toContain("Agents can see and use this screen");
@@ -621,13 +673,20 @@ describe("Connected Machine conversation card", () => {
       reason: "renewal_failed",
       message: "The machine couldn't refresh its credentials. Try again in a moment.",
     };
-    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { runtime: runtime(false) })];
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { active: true, runtime: runtime(false) }),
+    ];
     const h = await render();
     try {
       await click(h.button("Turn on"));
       fleet.machines = [
         sessionBox,
-        machine("mac", "Studio Mac", { allowScreenControl: true, runtime: runtime(false) }),
+        machine("mac", "Studio Mac", {
+          active: true,
+          allowScreenControl: true,
+          runtime: runtime(false),
+        }),
       ];
       await h.rerender();
       expect(h.text()).toContain("couldn't refresh its credentials");
@@ -645,13 +704,20 @@ describe("Connected Machine conversation card", () => {
       reason: "reconnect_required",
       message: "Run the connect command on the machine again with screen control on.",
     };
-    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { runtime: runtime(false) })];
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { active: true, runtime: runtime(false) }),
+    ];
     const h = await render();
     try {
       await click(h.button("Turn on"));
       fleet.machines = [
         sessionBox,
-        machine("mac", "Studio Mac", { allowScreenControl: true, runtime: runtime(false) }),
+        machine("mac", "Studio Mac", {
+          active: true,
+          allowScreenControl: true,
+          runtime: runtime(false),
+        }),
       ];
       await h.rerender();
       expect(h.text()).toContain("Needs a fresh connection");
@@ -670,9 +736,9 @@ describe("Connected Machine conversation card", () => {
         ...(h.dialog()?.querySelectorAll<HTMLElement>('[role="radio"]') ?? []),
       ].find((radio) => radio.textContent?.startsWith("This workspace"));
       expect(thisWorkspace?.getAttribute("aria-checked")).toBe("true");
-      // A plain Connect another machine afterwards starts from the defaults.
+      // A plain Connect another computer afterwards starts from the defaults.
       await click(h.dialogButton("Close"));
-      await click(h.button("Connect another machine"));
+      await click(h.button("Connect another computer"));
       expect(h.command()).toBe("");
       await click(
         [...(h.dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) =>
@@ -696,7 +762,7 @@ describe("Connected Machine conversation card", () => {
     };
     fleet.machines = [
       sessionBox,
-      machine("mac", "Studio Mac", { scope: "user", runtime: runtime(false) }),
+      machine("mac", "Studio Mac", { scope: "user", active: true, runtime: runtime(false) }),
     ];
     const h = await render();
     try {
@@ -704,6 +770,7 @@ describe("Connected Machine conversation card", () => {
       fleet.machines = [
         sessionBox,
         machine("mac", "Studio Mac", {
+          active: true,
           scope: "user",
           allowScreenControl: true,
           runtime: runtime(false),
@@ -724,6 +791,7 @@ describe("Connected Machine conversation card", () => {
     fleet.machines = [
       sessionBox,
       machine("mac", "Studio Mac", {
+        active: true,
         allowScreenControl: true,
         desktopUnavailableReason:
           "Screen Recording permission not granted — enable it for Opengeni in System Settings.",
@@ -744,7 +812,7 @@ describe("Connected Machine conversation card", () => {
   test("an organization machine needs an organization admin", async () => {
     const { OpenGeniApiError } = await import("@opengeni/sdk");
     enableFailure = new OpenGeniApiError(403, "missing permission: account:admin", {});
-    fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { active: true })];
     const h = await render();
     try {
       await click(h.button("Turn on"));
@@ -760,7 +828,7 @@ describe("Connected Machine conversation card", () => {
     ];
     fleet.canManage = false;
     fleet.canConnect = false;
-    fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { active: true })];
     const h = await render();
     try {
       expect(h.text()).toContain("Ask a workspace admin to turn it on");
@@ -978,7 +1046,7 @@ describe("Connected Machine conversation card", () => {
       expect(attach).not.toHaveBeenCalled();
       expect(h.text()).toContain("Studio Mac connected.");
 
-      await click(h.button("Connect another machine"));
+      await click(h.button("Connect another computer"));
       expect(h.dialogText()).toContain("Use your computer");
       await click(h.dialogButton("Close"));
       expect(h.dialog()).toBeNull();

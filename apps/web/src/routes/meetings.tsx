@@ -27,14 +27,12 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const { workspaces, clientConfig } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
-  const liveTranscript = settings.liveTranscript === true;
   // EU-only workspace without an EU transcription route: no new recordings.
   const recordingRestricted = inferenceFeatureRestriction(t, clientConfig, "meeting_transcription");
   return (
     <ContentPage width="standard" className="pt-6">
       <MeetingsListPage
         workspaceId={workspaceId}
-        liveTranscriptDefault={liveTranscript}
         defaultLanguage={settings.language ?? null}
         viewerName={meetingViewerName(context)}
         recordingOff={recordingRestricted}

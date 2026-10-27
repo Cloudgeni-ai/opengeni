@@ -113,10 +113,5 @@ export const LEGACY_POOL_RUNTIME: LegacySubscriptionRetirement = {
       reason:
         "The retired-object inventory (dropped objects and the Codex names of renamed ones) the runtime posture requires absent after migration 0751; never a call.",
     },
-    "packages/db/src/codex-subscription-core-cutover.ts": {
-      declarations: ["moveCodexCredentials"],
-      reason:
-        "0689 migration codec stage: runs only while that historical migration replays, before 0721 renames the reach table it fills.",
-    },
   },
 };

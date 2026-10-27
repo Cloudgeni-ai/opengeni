@@ -638,7 +638,7 @@ export function PrivateChatsRow({
 
 type AgentAccessChoice = "sessionAdminAccessAllowed" | "chatActionsAllowed";
 
-export function AgentAdminAccessRow({
+function AgentAdminAccessRow({
   client,
   identity,
 }: {

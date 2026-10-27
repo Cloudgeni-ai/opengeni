@@ -4,7 +4,7 @@
 import { t } from "@opengeni/react/app/lib/console-text";
 import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
-import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import {
   lazy,
   Suspense,
@@ -22,6 +22,8 @@ import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
 import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
 import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
+import { desktopCapability } from "@opengeni/react/app/lib/desktop";
+import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/contracts";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
@@ -51,6 +53,12 @@ const LazyWorkspaceManagementShell = lazy(() =>
     default: module.WorkspaceManagementShell,
   })),
 );
+// Only the desktop app has a dictation shortcut, so other pages never load it.
+const LazyDesktopDictationHost = lazy(() =>
+  import("@opengeni/react/desktop-dictation").then((module) => ({
+    default: module.DesktopDictationHost,
+  })),
+);
 function WorkspaceManagementShell(props: ComponentProps<typeof LazyWorkspaceManagementShell>) {
   return (
     <Suspense fallback={<LoadingPanel label="Loading settings" />}>
@@ -64,6 +72,25 @@ type SlackAccessState = {
   error: string | null;
   busy: boolean;
 };
+
+function useWorkspaceManagementLocation(workspaceId: string) {
+  // The URL can advance while Outlet still renders the outgoing matches.
+  // Choose the shell from those same matches, so a pending navigation does not
+  // remount the outgoing page inside the other shell (a session inside the
+  // settings shell, or settings inside the sessions shell).
+  return useMatches({
+    select: (matches) => {
+      const match = matches.at(-1);
+      return match
+        ? workspaceManagementLocation(
+            match.pathname,
+            workspaceId,
+            "section" in match.search ? match.search.section : undefined,
+          )
+        : null;
+    },
+  });
+}
 
 export function workspaceControlEventInvalidatesWorkspace(
   event: Pick<WorkspaceControlEvent, "scope">,
@@ -491,12 +518,7 @@ function AuthorizedWorkspaceShell({
   children: ReactNode;
   onMount?: () => void;
 }) {
-  const location = useRouterState({ select: (state) => state.location });
-  const managementLocation = workspaceManagementLocation(
-    location.pathname,
-    workspaceId,
-    location.search.section,
-  );
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
@@ -522,6 +544,17 @@ function AuthorizedWorkspaceShell({
       <SecretsUiProvider value={webSecretsUi}>
         <DesktopThisComputerProvider workspaceId={workspaceId}>
           <AppShotCoordinator workspaceId={workspaceId} />
+          {/* In the desktop app, the dictation shortcut records here and the
+          app types the text into whatever app has the cursor. */}
+          {desktopCapability("dictation") ? (
+            <Suspense fallback={null}>
+              <LazyDesktopDictationHost
+                client={context.client}
+                workspaceId={workspaceId}
+                enabled={resolveWorkspaceVoiceInputEnabled(activeWorkspace?.settings) ?? true}
+              />
+            </Suspense>
+          ) : null}
           {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
@@ -561,17 +594,13 @@ function WorkspaceStreamHealth(): null {
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const location = useRouterState({ select: (state) => state.location });
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   return (
     <WorkspaceShellRouteContent
       workspaceId={workspaceId}
       context={context}
       navigate={navigate}
-      managementLocation={workspaceManagementLocation(
-        location.pathname,
-        workspaceId,
-        location.search.section,
-      )}
+      managementLocation={managementLocation}
     />
   );
 }

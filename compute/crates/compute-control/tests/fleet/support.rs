@@ -4,7 +4,7 @@
 //! adopted, archiving on a hand-off, claiming the archive on an adopt), or
 //! as a test tells them to.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,7 @@ use compute_protocol::fleet::{
     Answer, Answered, Boot, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH,
     RENEW_PATH, ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
-use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request};
+use compute_protocol::host::{ErrorCode, Id, ImageId, LevelName, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject as _;
@@ -431,6 +431,14 @@ impl Fleet {
         host
     }
 
+    /// As [`Self::host`], for a host that builds images with the guest
+    /// programs of digest `guest` (see [`FakeHost::builds_with`]).
+    pub async fn host_building_with(&self, name: &str, guest: &str) -> FakeHost {
+        let host = FakeHost::start_building_with(self, name, roomy(), &[], Some(guest)).await;
+        self.sees(&host).await;
+        host
+    }
+
     /// Waits until this replica's view has `host` under its current
     /// registration.
     pub async fn sees(&self, host: &FakeHost) {
@@ -452,6 +460,7 @@ impl Fleet {
 #[must_use]
 pub fn roomy() -> Capacity {
     Capacity {
+        guest: None,
         memory_free_mib: 64 * 1024,
         memory_reclaimable_mib: 0,
         cpu_millis: 64_000,
@@ -519,6 +528,10 @@ struct HostInner {
     held: Mutex<HashMap<Id, u64>>,
     /// How many times each OCI image was asked to be built.
     prepares: Mutex<HashMap<String, u32>>,
+    /// The sandboxes it holds saved, which it may capture.
+    saved: Mutex<HashSet<Id>>,
+    /// How many times each capture key was asked.
+    captures: Mutex<HashMap<String, u32>>,
     saves: AtomicU64,
     seen: Mutex<Vec<Seen>>,
     behaviour: Mutex<Behaviour>,
@@ -567,6 +580,18 @@ impl FakeHost {
         capacity: Capacity,
         offers: &[&str],
     ) -> Self {
+        Self::start_building_with(fleet, name, capacity, offers, None).await
+    }
+
+    /// As [`Self::start_offering`], for a host that builds images with
+    /// the guest programs of digest `guest`, if it says.
+    pub async fn start_building_with(
+        fleet: &Fleet,
+        name: &str,
+        capacity: Capacity,
+        offers: &[&str],
+        guest: Option<&str>,
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let http = reqwest::Client::builder()
@@ -582,12 +607,17 @@ impl FakeHost {
             archive: fleet.archive.clone(),
             hosts_url: format!("https://{}", fleet.running.hosts),
             http,
-            capacity: Mutex::new(capacity),
+            capacity: Mutex::new(Capacity {
+                guest: guest.map(str::to_owned),
+                ..capacity
+            }),
             id: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             seq: AtomicU64::new(0),
             held: Mutex::new(HashMap::new()),
             prepares: Mutex::new(HashMap::new()),
+            saved: Mutex::new(HashSet::new()),
+            captures: Mutex::new(HashMap::new()),
             saves: AtomicU64::new(0),
             seen: Mutex::new(Vec::new()),
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
@@ -632,6 +662,15 @@ impl FakeHost {
     #[must_use]
     pub fn boot(&self) -> Boot {
         self.inner.boot.lock().unwrap().clone()
+    }
+
+    /// Has it build images with the guest programs of digest `guest`, as
+    /// an agent upgraded in place to a bundle with them would, telling so
+    /// with what it can take on from its next renewal: the image it builds
+    /// from a source is [`built_with`] the two.
+    pub fn builds_with(&self, guest: Option<&str>) {
+        self.inner.capacity.lock().unwrap().guest = guest.map(str::to_owned);
+        self.inner.prepares.lock().unwrap().clear();
     }
 
     /// Has its machine restart, as far as the boot it names goes: it
@@ -812,6 +851,7 @@ pub fn op_name(request: &Request) -> &'static str {
         Request::HandOff { .. } => "hand_off",
         Request::Adopt { .. } => "adopt",
         Request::Sleep { .. } => "sleep",
+        Request::Capture { .. } => "capture",
         _ => "other",
     }
 }
@@ -1073,8 +1113,28 @@ fn status(inner: &HostInner) -> Reply {
 /// The stored image an ordinary host builds from the OCI image `source`.
 #[must_use]
 pub fn built_from(source: &str) -> ImageId {
-    ImageId(*blake3::hash(source.as_bytes()).as_bytes())
+    built_with(source, None)
 }
+
+/// The stored image an ordinary host builds from the OCI image `source`
+/// with the guest programs of digest `guest`, if it says.
+#[must_use]
+pub fn built_with(source: &str, guest: Option<&str>) -> ImageId {
+    let built = match guest {
+        Some(guest) => format!("{source} with {guest}"),
+        None => source.to_owned(),
+    };
+    ImageId(*blake3::hash(built.as_bytes()).as_bytes())
+}
+
+/// The stored image an ordinary host captures sandbox `id` as.
+#[must_use]
+pub fn captured_from(id: Id) -> ImageId {
+    ImageId(*blake3::hash(format!("capture of {id}").as_bytes()).as_bytes())
+}
+
+/// The length of every disk an ordinary host captures: 3 GiB and a byte.
+pub const CAPTURED_LENGTH: u64 = (3 << 30) + 1;
 
 /// What an ordinary host answers.
 async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
@@ -1085,17 +1145,29 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             inner.held.lock().unwrap().insert(*id, owner_epoch);
             Reply::Done
         }
-        Request::Wake { id, .. } if holds(id) => Reply::Woken {
-            waited_us: 5,
-            during: None,
-            generation: 1,
-        },
-        Request::Connect { id, .. } if holds(id) => Reply::Connected {
-            waited_us: 5,
-            connect_us: 3,
-            generation: 1,
-        },
-        Request::Sleep { id, .. } if holds(id) => Reply::Done,
+        Request::Wake { id, .. } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Woken {
+                waited_us: 5,
+                during: None,
+                generation: 1,
+            }
+        }
+        Request::Connect { id, .. } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Connected {
+                waited_us: 5,
+                connect_us: 3,
+                generation: 1,
+            }
+        }
+        Request::Sleep { id, level, .. } if holds(id) => {
+            if matches!(level, LevelName::Saved | LevelName::Archived) {
+                inner.saved.lock().unwrap().insert(*id);
+            }
+            Reply::Done
+        }
+        Request::Capture { id, key, .. } if holds(id) => capture(inner, *id, key).await,
         Request::Status => status(inner),
         // The first ask starts the build; later ones find it stored.
         Request::Prepare { image } => {
@@ -1105,12 +1177,14 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             if *asked == 1 {
                 Reply::Preparing
             } else {
+                let guest = inner.capacity.lock().unwrap().guest.clone();
                 Reply::Prepared {
-                    image: built_from(image),
+                    image: built_with(image, guest.as_deref()),
                     digest: image
                         .split_once('@')
                         .map_or("", |(_, digest)| digest)
                         .to_owned(),
+                    guest,
                 }
             }
         }
@@ -1153,6 +1227,46 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             Err(why) => error(ErrorCode::Stale, &why.to_string()),
         },
         _ => Reply::Done,
+    }
+}
+
+/// How an ordinary host answers a capture of `id` it holds: refused while
+/// awake; once saved, the first ask with a key stores the image, and
+/// later ones learn it is stored.
+async fn capture(inner: &HostInner, id: Id, key: &str) -> Reply {
+    if !inner.saved.lock().unwrap().contains(&id) {
+        return error(ErrorCode::Busy, "it is awake");
+    }
+    let asked = {
+        let mut captures = inner.captures.lock().unwrap();
+        let asked = captures.entry(key.to_owned()).or_default();
+        *asked += 1;
+        *asked
+    };
+    let image = captured_from(id);
+    if asked > 1 {
+        return Reply::Captured {
+            image,
+            length: CAPTURED_LENGTH,
+        };
+    }
+    let stamp = Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save: 1,
+    };
+    match inner.archive.begin(&image.pointer(), stamp).await {
+        Ok(Begun::Publish(publication)) => {
+            let stored = inner
+                .archive
+                .publish(publication, b"a captured disk".to_vec())
+                .await;
+            match stored {
+                Ok(()) => Reply::Capturing,
+                Err(why) => error(ErrorCode::Internal, &why.to_string()),
+            }
+        }
+        Ok(Begun::Stored(_)) => Reply::Capturing,
+        other => error(ErrorCode::Internal, &format!("not stored: {other:?}")),
     }
 }
 

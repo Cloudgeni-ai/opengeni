@@ -9,6 +9,7 @@ import {
 } from "@opengeni/config";
 import {
   assertSideFeatureRoute,
+  sideFeatureRequiresEu,
   sideFeatureRouteRunnable,
   type BuildAgentOptions,
 } from "@opengeni/runtime";
@@ -90,11 +91,14 @@ export function gateVideoGenerationOption(
     videoGeneration: {
       capabilities: videoGeneration.capabilities,
       execute: async (input, context) => {
-        assertSideFeatureRoute(
-          settings,
-          typeof route === "string" ? route : await route(),
-          "video_generation",
-        );
+        // Read a live route only when EU applies here; otherwise nothing to check.
+        if (sideFeatureRequiresEu(settings)) {
+          assertSideFeatureRoute(
+            settings,
+            typeof route === "string" ? route : await route(),
+            "video_generation",
+          );
+        }
         return await videoGeneration.execute(input, context);
       },
     },
