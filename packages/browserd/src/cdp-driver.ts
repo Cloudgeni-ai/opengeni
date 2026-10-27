@@ -145,9 +145,12 @@ const TRANSFER_UPLOAD_FILES_FUNCTION = `function (parts, files) {
     transfer.items.add(new File(chunks, file.name, { type: file.type, lastModified: file.lastModified }));
   });
   this.files = transfer.files;
+  // What the page then does with them shows on the page, as with files a
+  // person picks: a change handler may read them and clear the input (so the
+  // same file can be picked again), or turn a file away.
   this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
-  return this.files.length;
+  return 'selected';
 }`;
 // Chrome derives an uploaded file's type from its extension; mirror the
 // common ones so pages that check File.type accept the transferred file.
@@ -6234,23 +6237,58 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "check": {
+        const startedAt = Date.now();
         const node = await this.resolveActionLocator(state, action.locator);
         const current = await this.callOnNode(state, node.backendDOMNodeId, CHECKED_FUNCTION, []);
-        if (typeof current !== "boolean") {
+        if (!isRecord(current) || typeof current.checked !== "boolean") {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
             "browser locator is not a checkable control",
           );
         }
-        if (current !== action.checked)
-          await this.clickNode(
-            state,
-            node.backendDOMNodeId,
-            "left",
-            1,
-            node.frameId ?? state.frame.id,
+        if (current.checked === action.checked) return;
+        if (current.radio === true && !action.checked) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "a radio button turns off only when another option in its group is chosen; check that option instead",
           );
-        return;
+        }
+        await this.clickNode(
+          state,
+          node.backendDOMNodeId,
+          "left",
+          1,
+          node.frameId ?? state.frame.id,
+        );
+        // A page may show the new state a while after the click (a framework's
+        // next render, a switch that saves first), within the time the action
+        // has to find its element. A control the page replaced is found again
+        // by its locator; one that cannot be read is not counted as done.
+        const deadline = state.locatorDeadline ?? startedAt + LOCATOR_WAIT_MS;
+        const read = async (backendId: number | null) =>
+          await this.callOnNode(state, backendId, CHECKED_FUNCTION, []).catch(() => null);
+        let target = node.backendDOMNodeId;
+        let shown: unknown = null;
+        for (;;) {
+          shown = await read(target);
+          if (isRecord(shown) && shown.connected === false && action.locator.kind !== "ref") {
+            const replacement = await this.resolveLocator(state, action.locator).catch(() => null);
+            if (replacement && replacement.backendDOMNodeId !== null) {
+              target = replacement.backendDOMNodeId;
+              shown = await read(target);
+            }
+          }
+          const readable = isRecord(shown) && shown.connected === true;
+          if (isRecord(shown) && readable && shown.checked === action.checked) return;
+          if (Date.now() >= deadline) break;
+          await delay(readable ? 50 : 100);
+        }
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          isRecord(shown) && shown.connected === true
+            ? `the control was clicked but does not show ${action.checked ? "checked" : "unchecked"}; look at it before clicking it again`
+            : "the control was clicked but its state could not be read afterwards; look at it before clicking it again",
+        );
       }
       case "scroll": {
         // A located scroll moves the nearest box that can scroll that way, as a
@@ -6681,12 +6719,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
           "upload target is no longer an enabled file input",
-        );
-      }
-      if (selected !== files.length) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          "the file input did not keep every uploaded file; inspect it before continuing",
         );
       }
     } finally {
@@ -7344,6 +7376,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     count: 1 | 2,
     frameId?: string,
   ): Promise<void> {
+    // A control the page draws through its label (a checkbox that takes no
+    // pointer input under a styled box) is clicked where a person clicks it:
+    // on the label's box or plain text, which activates the control. Never
+    // on a link or other control inside the label; without such a spot the
+    // control keeps its refusal.
+    if (
+      backendDOMNodeId !== null &&
+      (await this.callOnNode(state, backendDOMNodeId, POINTER_LABELLED_FUNCTION, []).catch(
+        () => false,
+      )) === true
+    ) {
+      // Where the label lands is read with the control in view.
+      await this.actionPoint(state, backendDOMNodeId, false, frameId);
+      backendDOMNodeId =
+        (await this.relatedNode(state, backendDOMNodeId, POINTER_LABEL_FUNCTION, [])) ??
+        backendDOMNodeId;
+    }
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
@@ -8371,6 +8420,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     label: string,
   ): Promise<number | null> {
+    return await this.relatedNode(state, backendDOMNodeId, POPUP_OPTION_FUNCTION, [
+      { value: label },
+    ]);
+  }
+
+  /** The element a function run on a node returns, as a node ID, or null when
+   * it returns none. */
+  private async relatedNode(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    functionDeclaration: string,
+    args: Array<{ value: unknown }>,
+  ): Promise<number | null> {
     if (backendDOMNodeId === null) return null;
     const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
       backendNodeId: backendDOMNodeId,
@@ -8388,8 +8450,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Runtime.callFunctionOn",
         {
           objectId: resolved.object.objectId,
-          functionDeclaration: POPUP_OPTION_FUNCTION,
-          arguments: [{ value: label }],
+          functionDeclaration,
+          arguments: args,
           returnByValue: false,
         },
         { potentialEffect: false },
@@ -11184,8 +11246,72 @@ const VISIBLE_FUNCTION = `function() {
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
+/** A checkable control's state, or null for anything else: a native
+ * checkbox or radio (or an element with a boolean checked property), a
+ * label's own control, or an element with an ARIA checkable role, whose
+ * "mixed" state counts as unchecked. `radio` marks a control that is turned
+ * off only by choosing another option, and `connected` whether the page
+ * still shows it rather than one it put in its place. */
 const CHECKED_FUNCTION = `function() {
-  return typeof this.checked === "boolean" ? this.checked : null;
+  const element = this instanceof HTMLLabelElement && this.control ? this.control : this;
+  if (!(element instanceof Element)) return null;
+  const connected = element.isConnected;
+  if (element instanceof HTMLInputElement) {
+    if (element.type !== "checkbox" && element.type !== "radio") return null;
+    return { checked: element.checked, radio: element.type === "radio", connected };
+  }
+  if (typeof element.checked === "boolean") {
+    return { checked: element.checked, radio: element.getAttribute("type") === "radio", connected };
+  }
+  const role = (element.getAttribute("role") || "").trim().split(/\\s+/)[0];
+  if (!["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"].includes(role)) return null;
+  return {
+    checked: element.getAttribute("aria-checked") === "true",
+    radio: role === "radio" || role === "menuitemradio",
+    connected,
+  };
+}`;
+
+/** Whether a form control takes no pointer input itself (pointer-events:
+ * none) but has a label that does. A disabled control keeps its refusal. */
+const POINTER_LABELLED_FUNCTION = `function() {
+  return this instanceof HTMLElement && !!this.labels && this.labels.length > 0 &&
+    !this.matches(":disabled") && getComputedStyle(this).pointerEvents === "none" &&
+    Array.from(this.labels).some((label) => label.getClientRects().length > 0 && getComputedStyle(label).pointerEvents !== "none");
+}`;
+
+/** For a control that takes no pointer input, the part of its label a person
+ * clicks instead, or null: the box the label draws over the control, else the
+ * label itself, and only when a click at its center lands on the label's own
+ * plain content. A link, button, field or other control inside the label
+ * would take that click instead, so then there is none. Run with the control
+ * in view. */
+const POINTER_LABEL_FUNCTION = `function() {
+  if (!(this instanceof HTMLElement) || !this.labels) return null;
+  const interactive = 'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), [role=link], [role=button], [role=checkbox], [role=switch], [role=radio], [role=menuitem], [role=tab], [role=option], [role=combobox], [role=textbox], [role=slider]';
+  const center = (element) => {
+    const box = element.getBoundingClientRect();
+    return [box.left + box.width / 2, box.top + box.height / 2];
+  };
+  // What a click at the point reaches, when it is the label or plain content of it.
+  const plainAt = (label, [x, y]) => {
+    const root = label.getRootNode();
+    const hit = (typeof root.elementFromPoint === "function" ? root : document).elementFromPoint(x, y);
+    if (!hit || !label.contains(hit)) return null;
+    for (let node = hit; node && node !== label; node = node.parentElement) {
+      if (node.matches(interactive)) return null;
+    }
+    return hit;
+  };
+  for (const label of this.labels) {
+    if (label.getClientRects().length === 0 || getComputedStyle(label).pointerEvents === "none") continue;
+    const drawn = plainAt(label, center(this));
+    for (const candidate of [drawn, label]) {
+      const hit = candidate && plainAt(label, center(candidate));
+      if (hit && candidate.contains(hit)) return candidate;
+    }
+  }
+  return null;
 }`;
 
 /** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
