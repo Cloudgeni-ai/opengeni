@@ -14,6 +14,7 @@ import {
 import { DICTATION_RETENTION_MILLISECONDS } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  completeRecordingTranscriptVersion,
   createDb,
   createRecording,
   createRecordingTranscriptVersion,
@@ -458,6 +459,152 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       recordingId: recording.input.recordingId,
     });
     expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
+
+  test("a charged transcript whose save briefly fails past its budget is still saved", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en" },
+    });
+    // The version exists by now, so its budget runs out within `window` of this.
+    const window = 30_000;
+    const outOfTimeAt = Date.now() + window + 500;
+    const answered = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Saved.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const funded: RecordingTranscriptionProvider = {
+      ...answered,
+      funding: "deployment",
+      models: answered.models.map((model) => ({
+        ...model,
+        creditPricing: { microsPerMinute: 10_000 },
+      })),
+    };
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const charged = { settled: 0 };
+    const warnings: string[] = [];
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath, usageLimitsMode: "managed" }),
+        observability: {
+          warn: (message: string) => warnings.push(message),
+          info: () => undefined,
+          error: () => undefined,
+        },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    let saves = 0;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([funded]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => null,
+      aligner: () => null,
+      now: () => Date.now() + budget - window,
+      saveRetryDelaysMilliseconds: [0, 0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
+      // The database drops the first two saves, the first one only once the
+      // budget has run out.
+      saveTranscript: async (db, version) => {
+        saves += 1;
+        if (saves === 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, outOfTimeAt - Date.now())),
+          );
+        }
+        if (saves <= 2) throw new Error("connection terminated unexpectedly");
+        return completeRecordingTranscriptVersion(db, version);
+      },
+      billing: () => ({
+        admit: async () => undefined,
+        settle: async () => {
+          charged.settled += 1;
+          return { creditCostMicros: 1_000 };
+        },
+      }),
+    });
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(saves).toBe(3);
+    expect(charged.settled).toBe(1);
+    expect(warnings.filter((message) => message.includes("trying again"))).toHaveLength(2);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "complete", errorCode: null });
+  }, 60_000);
+
+  test("a charged transcript whose save keeps failing is left to retry, never failed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en" },
+    });
+    const answered = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Kept.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
+        observability: { warn: () => undefined, info: () => undefined, error: () => undefined },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    let saves = 0;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([answered]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => null,
+      aligner: () => null,
+      saveRetryDelaysMilliseconds: [0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
+      saveTranscript: async () => {
+        saves += 1;
+        throw new Error("connection terminated unexpectedly");
+      },
+    });
+    await expect(run.transcribeRecordingVersion(recording.input)).rejects.toThrow(
+      "connection terminated unexpectedly",
+    );
+    expect(saves).toBe(3);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version?.state).not.toBe("failed");
   }, 60_000);
 
   test("prepares each track, keeps the microphone as one speaker and diarizes the rest", async () => {
