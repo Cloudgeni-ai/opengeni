@@ -171,6 +171,7 @@ export function sessionTitleCodexRequestContext(
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
     ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
+    ...(context.onReportedUsage ? { onReportedUsage: context.onReportedUsage } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -881,8 +882,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
-                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    onReportedUsage: (usage) => creditGuard.observe(usage),
                     persistUsageHeaders: async (snapshot) => {
                       if (!coreCodex) return;
                       await recordCoreCodexUsageReading({
