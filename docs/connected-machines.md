@@ -961,10 +961,10 @@ of the command: the daemon chooses that workload's cgroup and OOM score. Operato
 must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
-installer never resets them with runtime `set-property`. A verified self-update
-migrates only the byte-identical old generated unit after proving its live MainPID,
-canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
-left untouched with an actionable diagnostic. The default operation leaf has no
+installer never resets them with runtime `set-property`. The agent never rewrites
+a unit on its own: at startup it only warns when the live unit is custom or systemd
+did not place it in the `supervisor` subgroup, and `service install --restart`
+adopts the generated unit. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1400,10 +1400,7 @@ private to the user, and ends the agent's process tree only if it does not stop
 within 45 seconds. The agent stays paused across sign-ins until `start`.
 `status` prints `opengeni-agent background task: running`, `paused`, `stopped`
 or `not installed`, read from the agent's own instance lock. The agent does not
-run while nobody is signed in to Windows. Earlier releases
-registered an `OpengeniAgent` Windows Service that could never start; `start`
-deletes it when allowed, and otherwise prints the one elevated command that
-removes it.
+run while nobody is signed in to Windows.
 
 The agent also never treats a filesystem root or the Windows system directory
 as its workspace, so an older service definition needs no manual step: when
@@ -1723,9 +1720,8 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `agent_update_required`: the agent predates the `credential_renew`
   capability. Update it, and the successor's Hello applies it.
 - `renewal_failed`: retry the request.
-- `reconnect_required`: the machine's connection predates in-place renewal
-  (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on. The chat card's **Connect again** opens the
+- `reconnect_required`: the machine's saved connection can't be renewed in
+  place. Run the connect command on it again with screen control on. The chat card's **Connect again** opens the
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
