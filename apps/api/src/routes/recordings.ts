@@ -993,31 +993,31 @@ export function registerRecordingRoutes(
             : []),
         ]
       : [...registry.values()];
-    const availability = new Map(
+    const scope = {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+    };
+    // Per provider: whether it serves this workspace, and whether EU-only
+    // inference lets it, for meetings and for the live transcript (whose
+    // client connects to the provider itself). A failed EU-only read fails
+    // the request; it never becomes a wrong label.
+    const perProvider = new Map(
       await Promise.all(
-        offered.map(
-          async (provider) =>
-            [
-              provider.id,
-              await deployment.available(provider.id, {
-                accountId: actor.accountId,
-                workspaceId: actor.workspaceId,
-                subjectId: actor.subjectId,
-              }),
-            ] as const,
-        ),
-      ),
-    );
-    const regionAllowed = new Map(
-      await Promise.all(
-        offered.map(
-          async (provider) =>
-            [
-              provider.id,
-              // A failed EU-only read fails the request; it never becomes a wrong label.
-              await deployment.regionAllowed(provider.id, actor),
-            ] as const,
-        ),
+        offered.map(async (provider) => {
+          const hasLive = provider.models.some((spec) => spec.capabilities.live);
+          const [available, liveAvailable, region, liveRegion] = await Promise.all([
+            deployment.available(provider.id, scope),
+            hasLive
+              ? deployment.available(provider.id, scope, "live_transcription")
+              : Promise.resolve(false),
+            deployment.regionAllowed(provider.id, actor),
+            hasLive
+              ? deployment.regionAllowed(provider.id, actor, "live_transcription")
+              : Promise.resolve(true),
+          ]);
+          return [provider.id, { available, liveAvailable, region, liveRegion }] as const;
+        }),
       ),
     );
     // The models a meeting can use: each places every word in time, or the
@@ -1036,18 +1036,26 @@ export function registerRecordingRoutes(
             provider.id === pinned.providerId ||
             (liveDefault?.providerId === provider.id && liveDefault.model === spec.model));
         if (!meeting && !live) return [];
+        const state = perProvider.get(provider.id);
+        // Each entry offers what the region allows; with nothing left it
+        // stays listed, switched off, so clients show "Not supported in EU".
+        const meetingRegion = meeting && state?.region !== false;
+        const liveRegion = live && state?.liveRegion !== false;
+        const restricted = !meetingRegion && !liveRegion;
         return [
           {
             providerId: provider.id,
             providerName: provider.name,
             model: spec.model,
             name: spec.name,
-            available: availability.get(provider.id) ?? false,
-            ...(regionAllowed.get(provider.id) === false
-              ? { unavailableReason: REGION_RESTRICTED }
-              : {}),
+            available: restricted
+              ? false
+              : ((meetingRegion ? state?.available : state?.liveAvailable) ?? false),
+            ...(restricted ? { unavailableReason: REGION_RESTRICTED } : {}),
             funding: provider.funding,
-            capabilities: { ...spec.capabilities, batch: meeting, live },
+            capabilities: restricted
+              ? { ...spec.capabilities, batch: meeting, live }
+              : { ...spec.capabilities, batch: meetingRegion, live: liveRegion },
             // A price only where this workspace pays it: its own key, or credits
             // charged for a deployment's model. Otherwise the hour costs it nothing.
             usdPerHour:
@@ -1095,7 +1103,9 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
-    await deployment.assertRegion(provider.id, actor, "meeting_transcription");
+    // EU-only: the client takes the minted secret straight to the provider,
+    // past the server's transport guard, so the secret itself is refused.
+    await deployment.assertRegion(provider.id, actor, "live_transcription");
     await admitRecordingUsage(actor);
     const resolved = await deployment.credentials(provider.id, actor);
     const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };

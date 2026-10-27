@@ -212,7 +212,9 @@ function hostOf(baseUrl: string): string | null {
  * request body names. Segments are percent-decoded, empty segments are
  * dropped and `deployments` matches in any case, the way the provider reads
  * the path. An empty string means the path calls a deployment that can't be
- * read (no name, an undecodable one, or different names): refuse it under EU.
+ * read (no name, an undecodable segment, a decoded `.` or `..` segment that
+ * a server could resolve to another deployment, or different names): refuse
+ * it under EU.
  */
 export function modelEndpointDeployment(url: string | URL): string | null {
   let pathname: string;
@@ -229,9 +231,14 @@ export function modelEndpointDeployment(url: string | URL): string | null {
     } catch {
       decoded = null;
     }
-    // A decoded `%2F` separates segments too.
+    // A decoded `%2F` separates segments too; a dot segment is unreadable.
     if (decoded === null) segments.push(null);
-    else segments.push(...decoded.split("/").filter((segment) => segment !== ""));
+    else {
+      for (const segment of decoded.split("/")) {
+        if (segment === "") continue;
+        segments.push(segment === "." || segment === ".." ? null : segment);
+      }
+    }
   }
   const names = new Set<string>();
   segments.forEach((segment, index) => {
@@ -239,7 +246,7 @@ export function modelEndpointDeployment(url: string | URL): string | null {
     names.add(segments[index + 1] ?? "");
   });
   if (names.size === 0) return null;
-  if (names.size > 1 || names.has("")) return "";
+  if (names.size > 1 || names.has("") || segments.includes(null)) return "";
   return [...names][0]!;
 }
 

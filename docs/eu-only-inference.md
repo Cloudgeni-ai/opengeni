@@ -177,10 +177,13 @@ integration, never a region, and is never read for EU status.
   SaaS search APIs (TinyFish, Parallel, Perplexity, Exa, Tavily, Brave),
   OpenAI hosted image generation, Vercel AI Gateway (images, video, live
   voice), the Codex and SuperGrok subscriptions, ElevenLabs, OpenAI
-  transcription, and the Jev and OpenRouter decision models. None is EU.
+  transcription and OpenAI Realtime live transcripts, and the Jev and
+  OpenRouter decision models. None is EU.
 - **Operator declarations** cover routes a deployment can place in the EU:
   Firecrawl, Jina and SearXNG search (self-hosted), Azure Live voice, Azure
-  OpenAI and Azure Speech transcription, the Knowledge embedding endpoint, and
+  OpenAI and Azure Speech transcription, Azure OpenAI Realtime live
+  transcripts (`transcription.azure-openai-realtime`, declared separately
+  from batch transcription), the Knowledge embedding endpoint, and
   an OpenAI-compatible decision model. Each declaration describes one
   endpoint: it applies only when the call sends to that same origin, so a
   changed base URL, an Azure resource other than the declared one, or a
@@ -241,7 +244,8 @@ added later, is refused unless its route's record is EU. Non-empty
 | Video generation | Off. Funding options report "Not supported in EU"; the video Skill is hidden. |
 | Web search | Hosted search is off. Provider search keeps only declared-EU providers, and failover skips the rest. Self-hosted SearXNG with a declaration stays on. |
 | Live voice | Only a declared-EU Azure Live deployment. Admission refuses others with `422 region_restricted`; nothing substitutes another model. |
-| Voice input and transcription | Only declared-EU Azure OpenAI or Azure Speech. Dictation fallback stays on EU providers; recordings, uploads and live sessions are refused otherwise. The local diarizer stays on. |
+| Voice input and transcription | Only declared-EU Azure OpenAI or Azure Speech. Dictation fallback stays on EU providers; recordings and uploads are refused otherwise. The local diarizer stays on. |
+| Live transcripts | The client connects to the provider with a secret the server mints, past the transport guard, so the mint itself is refused (`422 region_restricted`) unless the provider's live route is declared EU. Only Azure OpenAI Realtime can be; OpenAI Realtime and ElevenLabs are refused. |
 | Knowledge embeddings | Only a declared-EU embedding endpoint. Otherwise search falls back to keyword (`fallbackReason: "region_restricted"`) and indexing waits. The local deterministic embedder stays on. |
 | Code search and tool routing | Only a declared-EU OpenAI-compatible decision model. Otherwise code search is off and tool routing uses local ranking. |
 | Site viewer conversations | Only EU models, for the model and its fallback. |
@@ -252,7 +256,8 @@ added later, is refused unless its route's record is EU. Non-empty
 Clients read one list from `GET /v1/config/client?workspaceId=`:
 `inferenceFeatures[]` holds `{ id, available, unavailableReason }` for
 `web_search`, `image_generation`, `video_generation`, `realtime_voice`,
-`voice_input`, `meeting_transcription`, `knowledge_embeddings` and
+`voice_input`, `meeting_transcription`, `live_transcription`,
+`knowledge_embeddings` and
 `code_search`, with `unavailableReason: "region_restricted"` when EU-only
 inference leaves the feature no route. The answer follows the routes the
 deployment is configured to use (its search providers, embedder, decision
@@ -261,7 +266,8 @@ provider changes nothing. It is the region answer only; whether a feature is
 configured stays where it was. Existing lists carry the same code: model
 availability `reason: "region_restricted"` (client config and the workspace
 model catalog), realtime catalog `unavailableCode`, recording models
-`unavailableReason`, video funding options `unavailableCode` (beside the
+`unavailableReason` (an entry keeps only the capabilities its region allows;
+with none left it stays listed, switched off), video funding options `unavailableCode` (beside the
 "Not supported in EU" `unavailableReason`), and agent capabilities `code`
 (beside `reason`). Agents are not offered tools that are switched off, and the
 session's effective tools omit them.

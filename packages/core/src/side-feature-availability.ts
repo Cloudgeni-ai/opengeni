@@ -19,6 +19,7 @@ import {
 } from "@opengeni/contracts";
 import { isWorkspaceEuOnly, type Database } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
+import { openAiRealtimeTranscribes } from "./transcription-service/providers/openai-realtime";
 
 /** What the deployment runs that settings alone do not describe. */
 export type InferenceFeatureSources = {
@@ -72,6 +73,13 @@ function configuredDeclarableTargets(
       }
       return targets;
     }
+    case "live_transcription":
+      // Only Azure OpenAI's Realtime API could be EU; OpenAI's is code-owned.
+      return resolveVoiceInputProviderRegistry(settings).flatMap((config) =>
+        config.kind === "azure-openai" && openAiRealtimeTranscribes(config.model)
+          ? [{ route: "transcription.azure-openai-realtime", endpoint: config.endpoint } as const]
+          : [],
+      );
     case "knowledge_embeddings":
       return sources.embedder ? [knowledgeEmbeddingTarget(sources.embedder)] : [];
     case "code_search": {

@@ -47,6 +47,7 @@ const INFERENCE_FEATURE_LABELS: Record<InferenceFeatureId, string> = {
   realtime_voice: "Live voice",
   voice_input: "Voice input",
   meeting_transcription: "Transcription",
+  live_transcription: "Live transcript",
   knowledge_embeddings: "Semantic Knowledge search",
   code_search: "Code search",
 };

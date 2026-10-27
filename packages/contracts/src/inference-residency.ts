@@ -47,6 +47,7 @@ export const INFERENCE_FEATURE_IDS = [
   "realtime_voice",
   "voice_input",
   "meeting_transcription",
+  "live_transcription",
   "knowledge_embeddings",
   "code_search",
 ] as const;

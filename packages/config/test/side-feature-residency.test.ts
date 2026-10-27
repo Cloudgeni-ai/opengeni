@@ -190,6 +190,7 @@ describe("side-feature residency records", () => {
       "realtime_voice.azure_live",
       "transcription.azure-openai",
       "transcription.azure-speech",
+      "transcription.azure-openai-realtime",
       "knowledge.embeddings",
       "decision_model.openai",
     ]);

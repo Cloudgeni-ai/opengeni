@@ -53,6 +53,9 @@ const subscription = (label: string): Rule => ({
 
 const WEB = ["web_search"] as const;
 const TRANSCRIPTION = ["voice_input", "meeting_transcription"] as const;
+// A live transcript's client connects to the provider itself with a secret
+// the server mints, so these routes describe where that connection lands.
+const LIVE = ["live_transcription"] as const;
 // Tool routing also uses the decision model, and falls back to local ranking
 // (no model call) when the route may not run, so only code search switches off.
 const DECISIONS = ["code_search"] as const;
@@ -148,6 +151,18 @@ export const SIDE_FEATURE_ROUTES = {
   // The deployment's own Azure OpenAI and Azure Speech resources.
   "transcription.azure-openai": { features: TRANSCRIPTION, declarable: true },
   "transcription.azure-speech": { features: TRANSCRIPTION, declarable: true },
+  "transcription.openai-realtime": {
+    features: LIVE,
+    declarable: false,
+    rule: {
+      geography: "us",
+      deploymentType: "provider_default",
+      reference: "OpenAI Realtime on api.openai.com processes in the US.",
+    },
+  },
+  // The Realtime API on the deployment's Azure OpenAI resource; its own
+  // declaration, since a batch deployment's region says nothing about it.
+  "transcription.azure-openai-realtime": { features: LIVE, declarable: true },
   "transcription.elevenlabs": {
     features: TRANSCRIPTION,
     declarable: false,

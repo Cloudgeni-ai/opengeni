@@ -241,6 +241,71 @@ describe("speech to text under EU-only inference", () => {
     const deployment = createSpeechToTextDeployment({ settings: testSettings(azureSpeech) });
     expect(await deployment.regionAllowed("openai", scope)).toBe(false);
   });
+
+  describe("live transcripts, whose clients connect to the provider directly", () => {
+    const AZURE_OPENAI = "https://ai.example.cognitiveservices.azure.com/";
+    const azureOpenAi = {
+      voiceInputProviderOrder: "openai,azure-openai",
+      voiceInputOpenaiApiKey: "sk-test",
+      voiceInputAzureEndpoint: AZURE_OPENAI,
+      voiceInputAzureDeployment: "gpt-4o-transcribe",
+      voiceInputAzureApiKey: "az-key",
+    } satisfies Partial<Settings>;
+    const batchOnly = declare({
+      "transcription.azure-openai": [AZURE_OPENAI, declaration("azure_data_zone", "swedencentral")],
+    });
+
+    test("a batch declaration never admits the live secret; OpenAI's and ElevenLabs' are refused", async () => {
+      const settings = testSettings({ ...azureOpenAi, sideFeatureResidencyJson: batchOnly });
+      const deployment = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => true });
+      expect(await deployment.regionAllowed("azure-openai", scope)).toBe(true);
+      for (const providerId of ["azure-openai", "openai", "elevenlabs"]) {
+        expect(await deployment.regionAllowed(providerId, scope, "live_transcription")).toBe(false);
+        expect(await deployment.available(providerId, scope, "live_transcription")).toBe(false);
+        await expect(
+          deployment.assertRegion(providerId, scope, "live_transcription"),
+        ).rejects.toMatchObject({ code: "region_restricted" });
+      }
+      expect(
+        inferenceFeatureAvailability({ ...settings, requiredModelGeography: "eu" }).find(
+          (f) => f.id === "live_transcription",
+        ),
+      ).toEqual({
+        id: "live_transcription",
+        available: false,
+        unavailableReason: "region_restricted",
+      });
+    });
+
+    test("a declared-EU Realtime endpoint is admitted; outside EU nothing changes", async () => {
+      const settings = testSettings({
+        ...azureOpenAi,
+        sideFeatureResidencyJson: declare({
+          "transcription.azure-openai-realtime": [
+            AZURE_OPENAI,
+            declaration("azure_data_zone", "swedencentral"),
+          ],
+        }),
+      });
+      const eu = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => true });
+      expect(await eu.regionAllowed("azure-openai", scope, "live_transcription")).toBe(true);
+      expect(await eu.regionAllowed("openai", scope, "live_transcription")).toBe(false);
+      // The batch route still needs its own declaration.
+      expect(await eu.regionAllowed("azure-openai", scope)).toBe(false);
+      expect(
+        inferenceFeatureAvailability({ ...settings, requiredModelGeography: "eu" }).find(
+          (f) => f.id === "live_transcription",
+        ),
+      ).toEqual({ id: "live_transcription", available: true, unavailableReason: null });
+      const open = createSpeechToTextDeployment(
+        { settings: testSettings(azureOpenAi) },
+        { isEuOnly: async () => false },
+      );
+      for (const providerId of ["azure-openai", "openai", "elevenlabs"]) {
+        expect(await open.regionAllowed(providerId, scope, "live_transcription")).toBe(true);
+      }
+    });
+  });
 });
 
 describe("feature availability", () => {

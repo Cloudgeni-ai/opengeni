@@ -306,6 +306,9 @@ describe("the model a workspace's meetings run", () => {
       },
       {
         providers: [subscription(input.signedIn ?? [])],
+        // Without a database the EU-only setting cannot be read (fail closed);
+        // these workspaces are not EU-only.
+        isEuOnly: async () => false,
         loadWorkspaceKey: async (_provider, { workspaceId }) =>
           (input.keyed ?? []).includes(workspaceId) ? "el" : null,
       },

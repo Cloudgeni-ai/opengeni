@@ -64,9 +64,19 @@ describe("deployment-path endpoints and residency", () => {
       "/openai/deployments/",
       "/openai/deployments/%E0%A4%A",
       "/openai/deployments/gpt-eu/deployments/gpt-global",
+      // A decoded dot segment a server could resolve to another deployment.
+      "/openai/deployments/gpt-eu%2F..%2Fgpt-global/",
+      "/openai/deployments/gpt-eu%2F.%2F/responses",
+      "/openai/%2E%2E%2Fdeployments/gpt-eu",
     ]) {
       expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("");
     }
+    expect(
+      modelResidencyRouteProblems(euDataZone, {
+        baseUrl: "https://res.openai.azure.com/openai/deployments/gpt-eu%2F..%2Fgpt-global/",
+        upstreamModelId: "gpt-eu",
+      }),
+    ).toHaveLength(1);
     // An EU claim on a deployment path is right only for the deployment it calls.
     const route = { baseUrl: "https://res.openai.azure.com/openai/deployments/gpt-eu" };
     expect(

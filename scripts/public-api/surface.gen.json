@@ -18591,7 +18591,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"code_search\\\"\",\"\\\"image_generation\\\"\",\"\\\"knowledge_embeddings\\\"\",\"\\\"meeting_transcription\\\"\",\"\\\"realtime_voice\\\"\",\"\\\"video_generation\\\"\",\"\\\"voice_input\\\"\",\"\\\"web_search\\\"\"]"
+        "$": "enum=[\"\\\"code_search\\\"\",\"\\\"image_generation\\\"\",\"\\\"knowledge_embeddings\\\"\",\"\\\"live_transcription\\\"\",\"\\\"meeting_transcription\\\"\",\"\\\"realtime_voice\\\"\",\"\\\"video_generation\\\"\",\"\\\"voice_input\\\"\",\"\\\"web_search\\\"\"]"
       }
     },
     "InlineOpenApiDocumentSource": {
