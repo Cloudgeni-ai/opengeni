@@ -567,6 +567,17 @@ describe("reaping a real cluster", () => {
         }
       }
       await admin`UPDATE pg_database SET datistemplate = true WHERE datname = ${template}`;
+      // A dead owner's role holding privileges outside the test databases is
+      // never touched there, so it stays.
+      const deadOutside = await createRole(databaseOwnerComment(deadOwner));
+      const outside = await createDatabase(`${sub}outside`);
+      const outsideSql = postgres(databaseUrl(outside), { max: 1, onnotice: () => undefined });
+      try {
+        await outsideSql.unsafe(`CREATE TABLE probe (id int)`);
+        await outsideSql.unsafe(`GRANT SELECT ON probe TO ${quoteIdent(deadOutside)}`);
+      } finally {
+        await outsideSql.end();
+      }
       // Memberships in both directions, like `grant opengeni_app to <bypass>`.
       const group = `${sub}group`;
       const member = `${sub}member`;
@@ -597,7 +608,9 @@ describe("reaping a real cluster", () => {
         await holder`SELECT 1`;
         const clock = { now: () => Date.now(), pruneTemplates: false, rolePrefix };
         const first = await reap(clock);
-        expect(first.errors).toEqual([]);
+        expect(first.errors).toEqual([
+          `${deadOutside}: has privileges outside test databases (${outside})`,
+        ]);
         expect(first.rolesDropped).toEqual([dead]);
         expect(await roleExists(dead)).toBe(false);
         const memberships = await admin`
@@ -613,12 +626,17 @@ describe("reaping a real cluster", () => {
         for (const name of [kept, template]) expect(await exists(name)).toBe(true);
         // An unowned role goes only after staying unused across the window;
         // a foreign owner's waits out its longer window.
-        const later = await reap({ ...clock, now: () => Date.now() + 16 * 60_000 });
-        expect(later.errors).toEqual([]);
+        const early = await reap({ ...clock, now: () => Date.now() + 16 * 60_000 });
+        expect(early.rolesDropped).toEqual([]);
+        const later = await reap({ ...clock, now: () => Date.now() + 61 * 60_000 });
         expect(later.rolesDropped).toEqual([unowned]);
-        for (const name of [connected, live, foreign, annotated, offScheme]) {
+        for (const name of [connected, live, foreign, annotated, offScheme, deadOutside]) {
           expect(await roleExists(name)).toBe(true);
         }
+        const [outsideGrant] = await admin<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid
+           WHERE d.datname = ${outside} AND s.deptype = 'a'`;
+        expect(outsideGrant?.n).toBe(1);
       } finally {
         await holder.end();
       }

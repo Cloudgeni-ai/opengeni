@@ -1576,9 +1576,11 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 // - Scratch login roles named `opengeni_bypass_<32 hex>` or
 //   `migration_<4 digits>_<32 hex>` (a test records its owner with
 //   recordTestRoleOwner()) follow the database owner and idle rules; one with
-//   a current connection is never dropped. Before DROP ROLE, which also
-//   removes their memberships, privileges they hold in any database are
-//   revoked there (templates under the container lock). Template builds also
+//   a current connection is never dropped; one without an owner record waits
+//   `unownedRoleIdleWindowMs`. Before DROP ROLE, which also removes their
+//   memberships, privileges they hold are revoked in the harness's own
+//   databases (templates under the container lock); a role with privileges
+//   anywhere else, or owning objects, is kept with a note. Template builds also
 //   strip grants to scratch roles that some migrations copy to every
 //   privileged role, so templates never carry them (scrubScratchRoleGrants).
 // Every failure is reported in the result and never thrown.
@@ -1788,7 +1790,7 @@ export async function scrubScratchRoleGrants(
        AND EXISTS (
              SELECT 1 FROM pg_shdepend s
               WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = r.oid
-                AND s.deptype = 'a'
+                AND s.deptype IN ('a', 'r')
                 AND s.dbid IN (0, (SELECT oid FROM pg_database WHERE datname = current_database())))
        AND NOT EXISTS (
              SELECT 1 FROM pg_shdepend s
@@ -1881,6 +1883,8 @@ export type ReapOptions = {
   templatePrefix?: string;
   /** Scratch roles considered: `<rolePrefix><32 hex>`. */
   rolePrefix?: string;
+  /** Idle window for scratch roles without an owner record. */
+  unownedRoleIdleWindowMs?: number;
   /** Templates never pruned (this checkout's). */
   protectedTemplates?: readonly string[];
   /** Run template pruning under the harness's container lock. */
@@ -1936,6 +1940,7 @@ export const DEFAULT_FOREIGN_IDLE_WINDOW_MS = 6 * 60 * 60_000;
 export const DEFAULT_TEMPLATE_MIN_IDLE_MS = 6 * 60 * 60_000;
 export const DEFAULT_TEMPLATE_SOFT_CAP = 20;
 export const DEFAULT_TEMPLATE_PRESSURE_IDLE_MS = 60 * 60_000;
+export const DEFAULT_UNOWNED_ROLE_IDLE_WINDOW_MS = 60 * 60_000;
 
 type DatabaseRow = {
   oid: string;
@@ -2086,12 +2091,16 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
 
     await reapScratchRoles(sql, {
       rolePrefix: options.rolePrefix,
+      scopePrefix,
+      templatePrefix,
       adminUrl: options.adminUrl,
       withTemplateLock: options.withTemplateLock ?? ((fn) => fn()),
       observations,
       nextObservations,
       idleWindowMs,
       foreignIdleWindowMs,
+      unownedRoleIdleWindowMs:
+        options.unownedRoleIdleWindowMs ?? DEFAULT_UNOWNED_ROLE_IDLE_WINDOW_MS,
       maxDrops,
       deadline,
       dryRun: options.dryRun === true,
@@ -2152,12 +2161,15 @@ async function reapScratchRoles(
   sql: postgres.Sql,
   context: {
     rolePrefix: string | undefined;
+    scopePrefix: string;
+    templatePrefix: string;
     adminUrl: string;
     withTemplateLock: <T>(fn: () => Promise<T>) => Promise<T>;
     observations: ObservationState;
     nextObservations: ObservationState;
     idleWindowMs: number;
     foreignIdleWindowMs: number;
+    unownedRoleIdleWindowMs: number;
     maxDrops: number;
     deadline: number;
     dryRun: boolean;
@@ -2199,7 +2211,12 @@ async function reapScratchRoles(
       continue;
     }
     if (status !== "dead") {
-      const window = owner ? context.foreignIdleWindowMs : context.idleWindowMs;
+      // Roles have no session counter, so passes only see connections at
+      // that moment: an unowned role (from a checkout that predates owner
+      // records) waits well past any test's lifetime.
+      const window = owner
+        ? context.foreignIdleWindowMs
+        : Math.max(context.idleWindowMs, context.unownedRoleIdleWindowMs);
       const previous = context.observations.roles[role.rolname];
       const since = previous && previous.oid === role.oid ? previous.since : now();
       context.nextObservations.roles[role.rolname] = { oid: role.oid, sessions: "0", since };
@@ -2256,6 +2273,8 @@ async function revokeScratchRoleEverywhere(
   role: { oid: string; rolname: string },
   context: {
     rolePrefix: string | undefined;
+    scopePrefix: string;
+    templatePrefix: string;
     adminUrl: string;
     withTemplateLock: <T>(fn: () => Promise<T>) => Promise<T>;
     deadline: number;
@@ -2275,6 +2294,21 @@ async function revokeScratchRoleEverywhere(
   const owned = databases.filter((database) => database.owns).map((database) => database.datname);
   if (owned.length > 0) {
     context.result.errors.push(`${role.rolname}: owns objects in ${owned.slice(0, 3).join(", ")}`);
+    return false;
+  }
+  // Only ever connect to the harness's own databases: never `postgres`,
+  // `template1` or anything else on a shared or developer cluster.
+  const foreign = databases
+    .map((database) => database.datname)
+    .filter(
+      (name) =>
+        !isPerTestDatabaseName(name, context.scopePrefix, context.templatePrefix) &&
+        !isTemplateDatabaseName(name, context.templatePrefix),
+    );
+  if (foreign.length > 0) {
+    context.result.errors.push(
+      `${role.rolname}: has privileges outside test databases (${foreign.slice(0, 3).join(", ")})`,
+    );
     return false;
   }
   for (const database of databases) {
