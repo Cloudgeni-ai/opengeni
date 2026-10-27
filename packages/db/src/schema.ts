@@ -13181,7 +13181,7 @@ export const usageEvents = pgTable(
     billingProviderEventId: text("billing_provider_event_id"),
     // Where a model-backed side feature processed this call (geography,
     // deployment type, regions of its route's residency record; never
-    // evidence). Null before 0990 and for events that are not such calls.
+    // evidence). Null before 1002 and for events that are not such calls.
     processingResidency: jsonb("processing_residency").$type<{
       geography: string;
       deploymentType: string;
