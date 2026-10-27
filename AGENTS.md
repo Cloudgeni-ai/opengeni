@@ -757,6 +757,33 @@ For native PostgreSQL test fixtures, set `OPENGENI_REQUIRE_REAL_DB=1` and
 `OPENGENI_TEST_PG_URL` to an isolated pgvector-enabled test cluster's superuser
 maintenance URL. The shared harness retains full migrations, restricted app
 roles and FORCE-RLS checks; it never starts or stops that external server.
+The harness also reaps databases that killed or crashed test runs left behind:
+a detached background pass, at most every five minutes, drops per-test
+`og_<label>_<12 hex>` databases whose recorded owner process is gone (or, for
+unowned ones, that stayed idle with no connections for 15 minutes), never with
+FORCE and never failing a test. It leaves migrated templates alone unless
+`OPENGENI_TEST_PG_PRUNE_TEMPLATES=1`, which also prunes templates idle for 6
+hours beyond the 10 most recently used (1 hour once there are more than 20
+templates). Runs without it don't record when they use a template, so on a
+shared server the setting judges usage reliably only when every user of the
+server sets it; otherwise use it for one-off cleanups. Call `retainTestDatabase` for
+a database you keep on
+purpose. Scratch login roles a test creates on the shared cluster must be named
+`opengeni_bypass_<32 hex>` or `migration_<4 digits>_<32 hex>` and recorded with
+`recordTestRoleOwner`; the reaper revokes their grants and drops them (and
+their memberships) the same way once their test is gone, and template builds
+strip grants to them that migrations copy to every privileged role. Each test
+process also removes, when it first acquires the cluster, the memberships of
+scratch roles whose owner provably died, so a leftover cannot block other
+runs' `opengeni_app` provisioning until the reaper gets to it.
+Template names depend only on the contents of the migrations and the
+files the migration runner and role provisioning load, so worktrees with the
+same inputs share one. Notes
+go to `reaper.log` beside the harness lock state; `OPENGENI_TEST_PG_REAP=0`
+turns it off (it is off under `CI`). `bun test --no-orphans` (as in
+`test:unit`) kills the detached pass when its test process exits, so a short
+run may cut a pass short; the next one finishes the work. See the header of
+`packages/testing/src/shared-pg.ts`.
 
 Bun services launched by the test harness ignore implicit checkout `.env` files.
 Supply fixture settings through the service environment, or use an explicit
