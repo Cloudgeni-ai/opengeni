@@ -10,6 +10,7 @@ export const daytonaProvider: ProviderRegistration = {
   instanceIdFields: ["sandboxId"],
   workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.daytona,
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     if (!settings.daytonaApiKey) {
       throw new SandboxConfigError("daytona", "OPENGENI_DAYTONA_API_KEY is required");
