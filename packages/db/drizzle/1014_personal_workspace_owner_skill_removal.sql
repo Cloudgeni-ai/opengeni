@@ -18,28 +18,29 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
 DO $personal_workspace_owner_skill_removal$
-DECLARE definition text; anchor text; replacement text;
+DECLARE definition text; anchor text;
 BEGIN
-  SELECT pg_get_functiondef(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', current_schema())::regprocedure)
-    INTO STRICT definition;
+  definition := pg_get_functiondef(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', current_schema())::regprocedure);
 
   -- 1. A removal names no destination.
   anchor := $a$    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
       IF NOT ((scope='user' AND p_request->>'scope'='workspace')$a$;
-  replacement := $r$    IF operation='remove' AND p_request ? 'scope' THEN
-      RAISE EXCEPTION 'Skill scope is not available to this chat' USING ERRCODE='42501'; END IF;
-    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
-      IF NOT ((scope='user' AND p_request->>'scope'='workspace')$r$;
   IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
     RAISE EXCEPTION 'skill_apply_lifecycle removal scope anchor drifted';
   END IF;
-  definition := replace(definition, anchor, replacement);
+  definition := replace(definition, anchor, $r$    IF operation='remove' AND p_request ? 'scope' THEN
+      RAISE EXCEPTION 'Skill scope is not available to this chat' USING ERRCODE='42501'; END IF;
+    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
+      IF NOT ((scope='user' AND p_request->>'scope'='workspace')$r$);
 
   -- 2. The owner's own Personal workspace Skills.
   anchor := $a$      IF operation='remove' OR NOT ((head.scope='workspace' AND scope='user')
         OR (head.scope='user' AND scope='workspace' AND learning_actor->>'subjectId' IS NOT NULL)) THEN
         RAISE EXCEPTION 'Skill outside accepted learning scope' USING ERRCODE='42501'; END IF;$a$;
-  replacement := $r$      IF operation='remove' AND head.scope='workspace' AND scope='user'
+  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
+    RAISE EXCEPTION 'skill_apply_lifecycle personal workspace removal anchor drifted';
+  END IF;
+  definition := replace(definition, anchor, $r$      IF operation='remove' AND head.scope='workspace' AND scope='user'
         AND head.scope_workspace_id=p_workspace_id AND learning_actor->>'subjectId' IS NOT NULL
         AND get_workspace_kind(p_account_id,p_workspace_id)='personal' THEN
         -- Only the verified owner's own Personal workspace: its workspace
@@ -57,9 +58,6 @@ BEGIN
         END;
       ELSIF operation='remove' OR NOT ((head.scope='workspace' AND scope='user')
         OR (head.scope='user' AND scope='workspace' AND learning_actor->>'subjectId' IS NOT NULL)) THEN
-        RAISE EXCEPTION 'Skill outside accepted learning scope' USING ERRCODE='42501'; END IF;$r$;
-  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
-    RAISE EXCEPTION 'skill_apply_lifecycle personal workspace removal anchor drifted';
-  END IF;
-  EXECUTE replace(definition, anchor, replacement);
+        RAISE EXCEPTION 'Skill outside accepted learning scope' USING ERRCODE='42501'; END IF;$r$);
+  EXECUTE definition;
 END $personal_workspace_owner_skill_removal$;
