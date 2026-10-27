@@ -67,12 +67,13 @@ export default defineConfig({
               priority: 22,
             },
             {
-              // Startup's permission and organization helpers read these two
-              // small pure modules. Entry-aware grouping can fold them into
-              // the app-context chunk, which imports the API chunk that in
-              // turn imports startup, a load-time cycle. Keep them in a leaf.
+              // Startup's permission, organization and account-email helpers
+              // read these small pure modules. Entry-aware grouping can fold
+              // them into the app-context chunk, which imports the API chunk
+              // that in turn imports startup, a load-time cycle. Keep them in
+              // a leaf.
               name: "startup-access-helpers",
-              test: /packages[\\/](?:contracts[\\/]src[\\/]personal-integration-setup|react[\\/]src[\\/]organization-model)\.tsx?$/,
+              test: /packages[\\/](?:contracts[\\/]src[\\/](?:personal-integration-setup|passkey-only-account)|react[\\/]src[\\/]organization-model)\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
