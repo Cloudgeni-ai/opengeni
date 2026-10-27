@@ -93,6 +93,8 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `"/api/opengeni"`. Follow Excel's theme with `officeTheme` and
   `watchOfficeTheme`, and send `workbookContextItem` plus
   `selectionContextItem` (fed by `watchSelection`) as `messageContext`.
+  `workbookContextItem` names `excel_run` as its tool, so a chat that starts
+  in a connected pane can call `excel_run` in its first model request.
 - **Sign-in.** A pane on Excel on the web runs in a third-party iframe, where
   the product's own session cookie may not arrive. Sign in with
   `openOfficeDialog(url)`, a top-level window on the product's origin, and

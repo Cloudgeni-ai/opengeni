@@ -13,6 +13,13 @@ export type MessageContextItem = Readonly<{
   label?: string | undefined;
   /** Longer description in the pill's tooltip. */
   detail?: string | undefined;
+  /**
+   * Tools this context is for, such as the tool that reaches the open
+   * document it names. A new chat that starts with this context has them in
+   * its first model request, so the agent can use them right away; context
+   * that arrives later never changes a chat's tools.
+   */
+  tools?: readonly string[] | undefined;
 }>;
 
 /**
@@ -43,6 +50,8 @@ export type MessageContextStore = Readonly<{
   include(id: string): void;
   /** The context text to send with a message now, without excluded items. */
   forSend(): string | undefined;
+  /** The tools the context sent now is for (see {@link MessageContextItem.tools}). */
+  toolsForSend(): string[] | undefined;
 }>;
 
 function itemsOf(input: MessageContextInput): readonly MessageContextItem[] {
@@ -109,6 +118,7 @@ export function createMessageContextStore(initial?: MessageContextInput): Messag
   }
 
   recompute();
+  const included = () => itemsOf(input).filter((item) => !excluded.has(exclusionKey(item)));
   return {
     set(next) {
       input = next;
@@ -123,11 +133,31 @@ export function createMessageContextStore(initial?: MessageContextInput): Messag
     include: (id) => toggle(id, false),
     forSend() {
       if (typeof input === "function") return input()?.trim() || undefined;
-      const text = itemsOf(input)
-        .filter((item) => !excluded.has(exclusionKey(item)))
+      const text = included()
         .map((item) => item.text.trim())
         .join("\n\n");
       return text || undefined;
     },
+    toolsForSend() {
+      const tools = [...new Set(included().flatMap((item) => item.tools ?? []))];
+      return tools.length ? tools : undefined;
+    },
+  };
+}
+
+/**
+ * A new chat's create request with the page's context: the tools that context
+ * is for travel only with the context itself.
+ */
+export function withOpeningContext<T extends object>(
+  request: T,
+  context: string | undefined,
+  tools: readonly string[] | undefined,
+): T | (T & { modelContext: string; modelContextTools?: string[] }) {
+  if (!context) return request;
+  return {
+    ...request,
+    modelContext: context,
+    ...(tools?.length ? { modelContextTools: [...tools] } : {}),
   };
 }

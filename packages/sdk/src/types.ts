@@ -3868,6 +3868,13 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
+   * First-party tools `modelContext` is for, such as the tool that reaches the
+   * open document it names. They join the new session's first model request,
+   * so its first turn can use them without searching. Decided once at
+   * creation; names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
+  /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser
    * or app the client fills in the device's zone when this is omitted;

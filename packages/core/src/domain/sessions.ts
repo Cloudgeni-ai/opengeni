@@ -279,6 +279,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
+  newSessionModelContextTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -3688,6 +3689,7 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
+  tools = newSessionModelContextTools(tools, firstPartyMcpTools, payload.modelContextTools);
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.

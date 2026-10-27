@@ -15625,6 +15625,8 @@
         "$.metadata{}": "unknown",
         "$.model": "string?",
         "$.modelContext": "string?",
+        "$.modelContextTools": "array?",
+        "$.modelContextTools[]": "string",
         "$.personalResourceAttachment": "ref(PersonalResourceAttachmentIntent)?",
         "$.policyRole": "string?",
         "$.reasoningEffort": "ref(ReasoningEffort)?",

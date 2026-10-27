@@ -19914,6 +19914,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
       modelContext: primitives.string.trim().min(1).max(32768).optional(),
+      // First-party tools the opening context is for, such as the tool that
+      // reaches the open document or record it names. They join this new
+      // session's first model request, so its first turn can use them without
+      // searching. Decided once at creation: later messages never change the
+      // session's tool set. Names outside the session's tool selection are
+      // ignored; this grants no tool or permission.
+      modelContextTools: z.array(z.string().min(1).max(200)).max(16).optional(),
       // The IANA time zone of the person sending the initial message, so the
       // model sees its local time. Ignored without an initial message.
       timeZone: MessageTimeZone.optional(),

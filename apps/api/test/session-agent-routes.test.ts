@@ -20,11 +20,13 @@ import {
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
+import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "@opengeni/runtime";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { withMcpClient } from "./helpers/first-party-tool-client";
+import { withFirstPartyToolClient, withMcpClient } from "./helpers/first-party-tool-client";
 
 // Agent configuration on the public session API: create, PUT .../agent with the
 // shared tool-policy CAS, typed 422s, the omitted-agent default, MCP child
@@ -194,6 +196,80 @@ function sorted(values: readonly string[]): string[] {
   return [...values].sort();
 }
 
+const FIRST_PARTY_URL = "http://127.0.0.1:8000/v1/workspaces/{workspaceId}/mcp";
+
+/**
+ * The tools block of a stored session's first model request: the runtime
+ * prepares the session's own refs against the real first-party tool listing
+ * (narrowed to the session's selection, as the API lists it) and a scripted
+ * model records the request.
+ */
+async function firstRequestTools(session: Session): Promise<unknown[]> {
+  const listed = await withFirstPartyToolClient(async (mcp) => (await mcp.listTools()).tools);
+  const selected = listed.filter((tool) =>
+    session.firstPartyMcpTools.includes(tool.name as FirstPartyMcpToolName),
+  );
+  const runtimeSettings = testSettings({
+    sandboxBackend: "none",
+    webSearchEnabled: false,
+    lazyToolSearchEnabled: true,
+    codexToolSearchEnabled: true,
+    integrationsAllowPrivateNetworkTargets: true,
+    mcpServers: [{ id: "opengeni", url: FIRST_PARTY_URL, cacheToolsList: false }],
+  });
+  const prepared = await prepareAgentTools(
+    runtimeSettings,
+    session.tools.filter((tool) => tool.kind === "mcp" && tool.id === "opengeni"),
+    {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      firstPartyTools: [...session.firstPartyMcpTools],
+      deferNonEagerUntilToolDemand: true,
+      mcpFetchImpl: async (_url, init) => {
+        if (init?.method !== "POST") return new Response(null, { status: 405 });
+        const rpc = JSON.parse(String(init.body));
+        if (rpc.id === undefined) return new Response(null, { status: 202 });
+        const result =
+          rpc.method === "initialize"
+            ? {
+                protocolVersion: "2025-03-26",
+                capabilities: { tools: {} },
+                serverInfo: { name: "opengeni", version: "1" },
+              }
+            : { tools: selected };
+        return Response.json({ jsonrpc: "2.0", id: rpc.id, result });
+      },
+    },
+  );
+  try {
+    const model = new ScriptedModel("ok");
+    const agent = buildOpenGeniAgent(runtimeSettings, [], {
+      model,
+      lazyToolTransport: "openai_native",
+      mcpServers: prepared.mcpServers,
+      inputWaitYield: prepared.inputWaitYield,
+      ...(prepared.ready ? { toolPreparationReady: prepared.ready.then(() => undefined) } : {}),
+    });
+    const stream = await runAgentStream(agent, "hello", runtimeSettings);
+    for await (const _event of stream) {
+      /* drain the real SDK stream */
+    }
+    await stream.completed;
+    return model.requests[0]!.tools;
+  } finally {
+    await prepared.close();
+  }
+}
+
+function toolName(entry: unknown): string | undefined {
+  const tool = entry as { type?: string; name?: string };
+  return tool.type === "function" ? tool.name : undefined;
+}
+
 describe("agent configuration client config and MCP (real PostgreSQL)", () => {
   test("client config always reports agent configuration on", async () => {
     if (!available) return;
@@ -264,6 +340,60 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(saved?.tools.find((tool) => tool.id === "opengeni")?.eager).toEqual([
       "knowledge_search",
     ]);
+  });
+  test("tools the opening context is for join the first request; nothing else changes", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app({
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
+    const context = 'The person is writing from their open workbook "Budget". Use excel_run.';
+    const bound = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["excel_run", "not_a_tool"],
+    });
+    expect(bound.status).toBe(202);
+    const eager = (tools: Array<{ id: string; eager?: unknown }>) =>
+      tools.find((tool) => tool.id === "opengeni")?.eager;
+    expect(eager(bound.json.tools)).toEqual(["knowledge_search", "excel_run"]);
+    const saved = await getSession(client.db, grant.workspaceId, bound.json.id);
+    expect(eager(saved!.tools)).toEqual(["knowledge_search", "excel_run"]);
+
+    // A chat without such context keeps today's tools exactly.
+    const plain = await create(target, grant, {});
+    const contextOnly = await create(target, grant, { modelContext: context });
+    const unknownOnly = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["not_a_tool"],
+    });
+    for (const created of [contextOnly, unknownOnly]) {
+      expect(created.status).toBe(202);
+      expect(JSON.stringify(created.json.tools)).toBe(JSON.stringify(plain.json.tools));
+    }
+
+    // A name outside the session's own tool selection grants nothing.
+    const narrowed = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["excel_run"],
+      agent: { capabilities: "none" },
+    });
+    const narrowedPlain = await create(target, grant, { agent: { capabilities: "none" } });
+    expect(narrowed.status).toBe(202);
+    expect(JSON.stringify(narrowed.json.tools)).toBe(JSON.stringify(narrowedPlain.json.tools));
+
+    // The first model request: the bound chat can call excel_run right away;
+    // a chat without such context sends exactly today's tools block.
+    const sessionOf = async (id: string) => (await getSession(client.db, grant.workspaceId, id))!;
+    const boundFirst = await firstRequestTools(await sessionOf(bound.json.id));
+    const plainFirst = await firstRequestTools(await sessionOf(plain.json.id));
+    const contextFirst = await firstRequestTools(await sessionOf(contextOnly.json.id));
+    expect(boundFirst.map(toolName)).toContain("opengeni__excel_run");
+    expect(plainFirst.map(toolName)).not.toContain("opengeni__excel_run");
+    expect(JSON.stringify(contextFirst)).toBe(JSON.stringify(plainFirst));
+    // The bound chat's block is today's block plus excel_run, nothing else.
+    expect(
+      JSON.stringify(boundFirst.filter((entry) => toolName(entry) !== "opengeni__excel_run")),
+    ).toBe(JSON.stringify(plainFirst));
   });
   test('"all" matches an omitted agent exactly; "none" keeps runtime mechanics', async () => {
     if (!available) return;
