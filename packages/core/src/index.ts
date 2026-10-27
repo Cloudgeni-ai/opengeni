@@ -14,6 +14,7 @@ export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
+export * from "./domain/meeting-summary";
 export * from "./domain/voice-input-billing";
 export * from "./domain/web-search-billing";
 export * from "./domain/realtime-voice-billing";

@@ -32809,6 +32809,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.autoSummary": "boolean?",
         "$.defaultVisibility": "ref(SessionVisibility)?",
         "$.diarizer": "ref(RecordingDiarizer)?",
         "$.language": "string?",
