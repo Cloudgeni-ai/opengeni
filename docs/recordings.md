@@ -424,7 +424,14 @@ audio goes. Boot fails if the pinned model is not configured.
 The recording providers:
 
 - **ElevenLabs Scribe v2** ($0.22 an hour) uses the workspace's own
-  ElevenLabs key, or its organization's.
+  ElevenLabs key, or its organization's. A product that embeds Opengeni with
+  only an organization API key gives a workspace its key from its server:
+  `POST /v1/workspaces/:workspaceId/connections` (`client.createConnection`)
+  with `providerDomain: "api.elevenlabs.io"`, `kind: "api_key"`,
+  `subjectId: null`, `credential: { apiKey }`,
+  `metadata: { credentialRole: "elevenlabs" }` and an `operationId`. The key
+  needs `connections:write` and `capabilities:manage`, which a full
+  organization key holds.
 - **Azure Speech with MAI-Transcribe-2** ($0.10 an hour at its launch price)
   uses the deployment's own Azure Speech account. Audio is processed in the
   account's region, so a deployment that must keep audio in the EU uses an
