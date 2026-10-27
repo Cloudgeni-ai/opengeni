@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`fe18680aaf51127d6bf04ca908d301535987ba08`: upstream `cua-driver-rs-v0.37.0`
+`006e02ab0fd759c944da12e9a9e2aec86dee1bb8`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -22,9 +22,16 @@ A press that puts the caret in a text field reports a confirmed effect when the
 field then holds the keyboard focus, instead of an unconfirmed click.
 It also carries the macOS follow-ups of `cu-macos-followups` (`03323b47`) and,
 on top, Return pressing the default button of a background app's sheet
-(`cu-sheet-default-button`) and a press that closes its own window counting as
-done (`cu-office-menus`), and popup options chosen without pressing their items
-(`cu-popup-options`, below).
+(`cu-sheet-default-button`), a press that closes its own window counting as
+done (`cu-office-menus`), and an accessibility action on an item of an app's
+menu bar that no longer depends on the addressed window
+(`cu-menu-bar-after-window-closes`): the menu bar hangs off the app, so a batch
+whose earlier step closed or hid its window can still open the app's menu.
+A `run_steps` step addressed to a window that reads no elements and is closed
+or off screen fails at once (`window_not_on_screen`) instead of waiting out
+its timeout.
+Popup options are chosen without pressing their items (`cu-popup-options`,
+below).
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -292,6 +299,20 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   (not its selects, which take set_value) are invoked by role. Keys for a shortcut
   whose menu item is disabled while the app is in the background (Terminal's
   Close Window) are reported as a likely no-op.
+- A batch acts on one window. On macOS, when an earlier action closes or hides
+  that window (a start screen's Cancel), a later action on an item of the app's
+  menu bar still runs, as it would through another window of the app; a later
+  action on an element of the window itself is refused before anything is sent,
+  reported as not run, and the refusal says to act on one of the app's windows
+  that is shown.
+- A focus action on a macOS window brings it to the front and leaves it there
+  (CUA's `bring_to_front`), for what works only in the active app, and is
+  reported done only once the window is the front app's focused window. It is
+  refused before anything is sent while someone other than Opengeni used the
+  keyboard, mouse or trackpad within the last minute (the reading listings
+  report as `personInputSecondsAgo`), since the front app is the one they are
+  working in. On Windows and Linux a focus action is refused: input there acts
+  on a window without it.
 - On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
   click, double-click, key press or element invoke the driver reports as
   unverifiable, with no element changed after it, is reported as possibly not
@@ -348,7 +369,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/fe18680aaf51127d6bf04ca908d301535987ba08/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/006e02ab0fd759c944da12e9a9e2aec86dee1bb8/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

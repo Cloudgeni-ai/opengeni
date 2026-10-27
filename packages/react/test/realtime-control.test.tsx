@@ -1700,7 +1700,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(reason()).toBeNull();
   });
 
-  test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
+  test("shows no voice control while no voice model can run", async () => {
     await act(async () => {
       root.render(
         <RealtimeVoiceControl
@@ -1719,21 +1719,13 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
 
-    const start = container.querySelector<HTMLButtonElement>(
-      '[data-testid="realtime-primary-action"]',
-    );
-    expect(start?.dataset.phase).toBe("unavailable");
-    expect(start?.disabled).toBe(true);
-    // The disabled control names its blocker instead of offering to start.
-    expect(start?.getAttribute("aria-label")).toBe(
-      "Voice model unavailable: Connect Codex to use this voice model.",
-    );
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "Voice model unavailable",
-    );
+    // A disabled button that explains a setup step greets people who never
+    // asked for voice; the control appears once a voice model is available.
+    expect(container.querySelector('[data-testid="realtime-primary-action"]')).toBeNull();
+    expect(container.textContent).not.toContain("Voice model unavailable");
   });
 
-  test("says it is checking voice, not Connect Codex, until the catalog arrives", async () => {
+  test("shows no voice control, and never Connect Codex, until the catalog arrives", async () => {
     let resolveCatalog!: (value: { models: unknown[] }) => void;
     const response = new Promise<{ models: unknown[] }>((resolve) => {
       resolveCatalog = resolve;
@@ -1753,13 +1745,10 @@ describe("ordinary session Codex realtime control", () => {
       ),
     );
     const start = () =>
-      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]')!;
-    expect(start().disabled).toBe(true);
-    // A neutral wait, not the alert treatment of a real blocker.
-    expect(start().dataset.phase).toBe("checking");
-    expect(start().getAttribute("aria-label")).toBe(
-      "Checking voice: Finding the voice models you can use.",
-    );
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-primary-action"]');
+    // Until a voice model is known to be usable there is nothing to offer, so
+    // no control greets someone who never asked for voice.
+    expect(start()).toBeNull();
     expect(container.textContent).not.toContain("Connect Codex");
 
     await act(async () => {
@@ -1778,8 +1767,8 @@ describe("ordinary session Codex realtime control", () => {
       });
       await response;
     });
-    expect(start().disabled).toBe(false);
-    expect(start().getAttribute("aria-label")).toBe("Start voice");
+    expect(start()?.disabled).toBe(false);
+    expect(start()?.getAttribute("aria-label")).toBe("Start voice");
   });
 
   test("says voice couldn't load when the catalog fails, not Connect Codex", async () => {

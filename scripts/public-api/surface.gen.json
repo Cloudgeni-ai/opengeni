@@ -20944,6 +20944,7 @@
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
         "$.personalWorkspacesEnabled": "boolean?",
+        "$.signupUseCase": "enum?=[\"\\\"cloud\\\"\",\"\\\"embed\\\"\",\"\\\"everyday\\\"\"]",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },
@@ -36005,6 +36006,7 @@
       "RecorderPlatform": "type",
       "RecorderSnapshot": "type",
       "RecorderState": "type",
+      "RECORDING_AUDIO_UPLOAD_PIECE_BYTES": "value",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
       "RecordingTransport": "type",
@@ -36017,7 +36019,9 @@
       "StoredRecordingChunk": "type",
       "SystemAudioCapture": "type",
       "SystemAudioKind": "type",
-      "SystemAudioSource": "type"
+      "SystemAudioSource": "type",
+      "uploadRecordingAudio": "value",
+      "UploadRecordingAudioOptions": "type"
     },
     "@opengeni/sdk/secret-use-approval": {
       "SECRET_USE_APPROVAL_QUESTION_PREFIX": "value",

@@ -521,8 +521,21 @@ with the workspace's voice input and kept like any dictation.
   them.
 - **Failures keep the speech.** A failed transcription shows Retry; Dismiss
   or Escape keeps anything longer than a few seconds as a saved dictation
-  that the composer offers later. The last 50 texts are kept on the computer
-  (`dictation.json`, readable only by the person) to copy again.
+  that the composer offers later.
+- **History, replay and transcribing again.** The last 50 dictations are kept
+  on the computer with their speech (`dictation.json` and
+  `dictation-audio/`, readable only by the person, up to 32 MB each). The
+  page hands the app each dictation's microphone audio with its text. From
+  the settings page the person copies a text, plays the speech, or
+  transcribes it again, which uploads the kept speech as a new dictation and
+  replaces the text. An optional retry shortcut does that for the last
+  dictation and types the new text; an optional cancel shortcut works like
+  Escape.
+- **Vocabulary.** Names and terms the person lists (up to 100) go with every
+  dictation as the recording's `keyterms`, and reach the voice input model
+  when it takes them.
+- **Opens at login.** While dictation is on, the app registers itself to open
+  without a window at login, so the shortcut works after a restart.
 
 Not built yet: dictation on phones (the system keyboard is the only way to
 type into other apps there), and inserting text through Accessibility

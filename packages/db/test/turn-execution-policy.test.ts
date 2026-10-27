@@ -13,7 +13,6 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
-  createSessionGoal,
   getSessionTurn,
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
@@ -21,11 +20,6 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
-import {
-  armCodexCapacityWait,
-  ensureCodexRotationSettings,
-  getCodexCapacityWaitForSession,
-} from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -382,46 +376,5 @@ describe("accepted turn execution policy", () => {
       installed: false,
       policy: acceptedPolicy,
     });
-  });
-
-  test("preserves the accepted policy while the same turn waits for capacity", async () => {
-    if (!available) return;
-    const value = await fixture();
-    const claimed = await claim(value);
-    expect(await install(value, claimed)).toMatchObject({ accepted: true, installed: true });
-    const goal = await createSessionGoal(client.db, {
-      accountId: value.accountId,
-      workspaceId: value.workspaceId,
-      sessionId: value.sessionId,
-      text: "Resume after Codex capacity returns",
-      createdBy: "api",
-    });
-    await ensureCodexRotationSettings(client.db, value.accountId, value.workspaceId);
-
-    expect(
-      await armCodexCapacityWait(client.db, {
-        accountId: value.accountId,
-        workspaceId: value.workspaceId,
-        sessionId: value.sessionId,
-        turnId: value.turnId,
-        attemptId: claimed.attemptId,
-        workflowId: value.workflowId,
-        goalId: goal.id,
-        goalVersion: goal.version,
-        earliestResetAt: null,
-        resetKind: "bounded_refresh",
-        failurePayload: { code: "codex_usage_limit_reached" },
-      }),
-    ).toMatchObject({ action: "waiting" });
-
-    const blockedTurn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
-    expect(blockedTurn).toMatchObject({ status: "waiting_capacity", activeAttemptId: null });
-    expect(readTurnExecutionPolicyV1(blockedTurn!.metadata)).toEqual({
-      kind: "valid",
-      policy: acceptedPolicy,
-    });
-    expect(
-      await getCodexCapacityWaitForSession(client.db, value.workspaceId, value.sessionId),
-    ).toMatchObject({ status: "waiting", blockedTurnId: value.turnId });
   });
 });

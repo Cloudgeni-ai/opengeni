@@ -52,7 +52,11 @@ function sourcePrivateFunctionReferences(): string[] {
         visit(path);
       } else if (/\.[cm]?tsx?$/.test(entry.name)) {
         const source = readFileSync(path, "utf8");
-        for (const match of source.matchAll(/opengeni_private\.([a-z_][a-z0-9_]*)\s*\(/gi)) {
+        // An insert target's column list also follows the name with "(", so
+        // skip names right after "insert into": those are tables.
+        for (const match of source.matchAll(
+          /(?<!insert\s+into\s+)opengeni_private\.([a-z_][a-z0-9_]*)\s*\(/gi,
+        )) {
           references.add(match[1]!.toLowerCase());
         }
       }
