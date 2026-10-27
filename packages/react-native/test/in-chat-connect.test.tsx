@@ -149,6 +149,7 @@ const {
   NativeAuthNeededRow,
   NativeConnectSetup,
   NativeIntegrationCapabilityCard,
+  NativeMcpCapabilityCard,
   nativeConnectWindowHost,
   useNativeInChatConnect,
 } =
@@ -614,6 +615,72 @@ describe("native saved sign-in attempts", () => {
   });
 });
 
+describe("native MCP saved sign-in attempts", () => {
+  test("a cancelled or expired attempt is forgotten once the card picks it up", async () => {
+    for (const state of ["cancelled", "expired"] as const) {
+      const key = "opengeni:session-connect:workspace:session:mcp:example-calendar";
+      const stored = new Map([[key, "attempt-old"]]);
+      const settled = attempt({
+        id: "attempt-old",
+        providerId: "example-calendar",
+        revision: 4,
+        state,
+        nextAction: { type: "none" },
+      });
+      const item = {
+        id: "mcp:example-calendar",
+        kind: "mcp",
+        source: "library",
+        stale: false,
+        authKind: "oauth2",
+        metadata: {},
+        name: "Example Calendar",
+        description: "Read and plan your calendar.",
+        providerDomain: "calendar.example.com",
+        mcpUrl: "https://calendar.example.com/mcp",
+        enabled: false,
+        connectionRef: null,
+      };
+      const client = new Proxy(
+        {
+          listCapabilities: async () => ({ items: [item] }),
+          listConnections: async () => [],
+          connectTransport: () => fakeTransport({ get: () => settled }).transport,
+          getSession: async () => ({ toolPolicy: { mode: "custom" }, tools: [] }),
+        },
+        { get: (target, name) => (name in target ? Reflect.get(target, name) : async () => ({})) },
+      );
+      mounted = await renderComponent(
+        <NativeMcpCapabilityCard
+          client={client as never}
+          workspaceId="workspace"
+          sessionId="session"
+          capabilityId="mcp:example-calendar"
+          name="Example Calendar"
+          rationale="To read your calendar."
+          personalOnly={false}
+          options={{
+            browser: { openAuthSession: async () => undefined },
+            returnUrl: "https://console.example/return",
+            attemptHints: {
+              read: (entry) => stored.get(entry) ?? null,
+              remember: (entry, id) => void stored.set(entry, id),
+              forget: (entry) => void stored.delete(entry),
+            },
+          }}
+        />,
+      );
+      for (let pass = 0; pass < 3; pass += 1) await flush();
+      expect(stored.size).toBe(1);
+      await act(async () => buttonNamed("Connect Example Calendar")!.click());
+      for (let pass = 0; pass < 4; pass += 1) await flush();
+      expect({ state, saved: stored.size }).toEqual({ state, saved: 0 });
+      await mounted.unmount();
+      mounted = null;
+    }
+  });
+});
+
 describe("native approval without recorded arguments", () => {
   test("keeps Approve, as before", async () => {
     const decided: string[] = [];
@@ -632,5 +699,58 @@ describe("native approval without recorded arguments", () => {
     expect(approve).toBeDefined();
     await act(async () => approve!.click());
     expect(decided).toEqual(["call-old:approve"]);
+  });
+});
+
+describe("native MCP service card", () => {
+  test("a reviewed catalog service shows its provider, not an MCP server label", async () => {
+    const render = async (source: string) => {
+      const item = {
+        id: "mcp:example-calendar",
+        kind: "mcp",
+        source,
+        stale: false,
+        authKind: "oauth2",
+        metadata: {},
+        name: "Example Calendar",
+        description: "Read and plan your calendar.",
+        providerDomain: "calendar.example.com",
+        mcpUrl: "https://calendar.example.com/mcp",
+        enabled: false,
+        connectionRef: null,
+      };
+      const client = new Proxy(
+        {
+          listCapabilities: async () => ({ items: [item] }),
+          listConnections: async () => [],
+          connectTransport: () => fakeTransport({}).transport,
+        },
+        { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+      );
+      const view = await renderComponent(
+        <NativeMcpCapabilityCard
+          client={client as never}
+          workspaceId="workspace"
+          sessionId="session"
+          capabilityId="mcp:example-calendar"
+          name="Example Calendar"
+          rationale="To read your calendar."
+          personalOnly={false}
+          options={{
+            browser: { openAuthSession: async () => undefined },
+            returnUrl: "https://console.example/return",
+          }}
+        />,
+      );
+      for (let pass = 0; pass < 3; pass += 1) await flush();
+      const text = view.container.textContent ?? "";
+      await view.unmount();
+      return {
+        label: text.includes("MCP server"),
+        provider: text.includes("calendar.example.com"),
+      };
+    };
+    expect(await render("library")).toEqual({ label: false, provider: true });
+    expect(await render("manual")).toEqual({ label: true, provider: true });
   });
 });

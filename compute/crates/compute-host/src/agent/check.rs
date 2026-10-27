@@ -18,6 +18,14 @@
 //! disk. A running guest's memory has no current saved copy, so none of
 //! the stopped guest is kept either.
 //!
+//! A guest that halted (or powered off) says so: its kernel's last words
+//! on its console are that it stopped its processors (see
+//! [`Engine::halted`]). Such a guest is ended at its first miss that
+//! counts, as soon as a reboot would have ended it, rather than after
+//! all of them; only a guest that hangs without a word waits them out.
+//! The words alone end nothing: a guest can write them whenever it likes,
+//! but a live one still takes the connection.
+//!
 //! A check is made only while the guest can run: the agent holds the VM
 //! (it lends it to a step only to pause it or work on it paused), the VM
 //! is running, and the agent may act (once its lease has run out, the
@@ -89,6 +97,20 @@ pub(super) struct Check {
     next: Instant,
     /// The one under way, if any.
     pending: Option<Pending>,
+}
+
+/// How a check of VM process `incarnation` of `id`'s guest ended.
+#[derive(Debug)]
+pub(super) struct Checked {
+    pub id: Id,
+    pub incarnation: u64,
+    pub reach: Reach,
+    /// The host has no guard, or its guard says it did not freeze the VMs
+    /// while the check connected.
+    pub unfrozen: bool,
+    /// The guest took no connection, and its last words were that it
+    /// halted (see [`Engine::halted`]).
+    pub halted: bool,
 }
 
 /// A check under way, and what held when it began.
@@ -164,6 +186,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let vsock = slot.spec.vsock_path();
             let events = self.events_tx.clone();
             let guard = guard.clone();
+            let halted = self.engine.halted(&live.vm);
             tokio::spawn(async move {
                 let before = guard.as_ref().and_then(|freezes| freezes.as_ref()?.read());
                 let reach = reachable(&vsock, port, REACH_LIMIT).await;
@@ -180,21 +203,37 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     _ => true,
                 };
-                let _ = events.send(Event::Checked {
+                // Only a miss needs the guest's last words.
+                let halted = match reach {
+                    Reach::Unreached(_) => halted.await.unwrap_or_else(|error| {
+                        tracing::debug!(%id, %error, "could not read whether the guest said it halted");
+                        false
+                    }),
+                    _ => false,
+                };
+                let _ = events.send(Event::Checked(Checked {
                     id,
                     incarnation,
                     reach,
                     unfrozen,
-                });
+                    halted,
+                }));
             });
         }
     }
 
-    /// A check of VM process `incarnation` of `id` ended. A miss counts only
-    /// if its guest could run all through the check, and the guard (if the
-    /// host has one) says it did not freeze it meanwhile; the last one
-    /// allowed ends the VM.
-    pub(super) fn checked(&mut self, id: Id, incarnation: u64, reach: Reach, unfrozen: bool) {
+    /// A check ended. A miss counts only if its guest could run all through
+    /// the check, and the guard (if the host has one) says it did not
+    /// freeze it meanwhile; the last one allowed ends the VM, as does any
+    /// one of a guest that said it halted.
+    pub(super) fn checked(&mut self, done: Checked) {
+        let Checked {
+            id,
+            incarnation,
+            reach,
+            unfrozen,
+            halted,
+        } = done;
         let acting = self.may_act();
         let runs = self
             .core
@@ -243,16 +282,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         check.misses += 1;
         if check.misses < allowed {
-            tracing::warn!(%id, misses = check.misses, %error, "guest took no connection on its notice port");
-            return;
+            if !halted {
+                tracing::warn!(%id, misses = check.misses, %error, "guest took no connection on its notice port");
+                return;
+            }
+            tracing::error!(
+                %id,
+                misses = check.misses,
+                %error,
+                "guest said it halted (powered off or halted) and took no connection on its \
+                 notice port; ending its VM, and its next wake boots from its disk"
+            );
+        } else {
+            tracing::error!(
+                %id,
+                misses = check.misses,
+                "guest took no connection on its notice port for {} checks in a row: it stopped \
+                 (powered off, halted or hung); ending its VM, and its next wake boots from its disk",
+                check.misses
+            );
         }
-        tracing::error!(
-            %id,
-            misses = check.misses,
-            "guest took no connection on its notice port for {} checks in a row: it stopped \
-             (powered off, halted or hung); ending its VM, and its next wake boots from its disk",
-            check.misses
-        );
         slot.check = None;
         self.lost_vm(id, incarnation);
     }

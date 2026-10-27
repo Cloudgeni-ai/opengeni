@@ -7,6 +7,7 @@ import {
   deleteWorkspace,
   type DbClient,
 } from "../src/index";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // Deleting a workspace removes its connections. The result must not depend on
 // the order in which PostgreSQL fires the workspace's foreign key actions:
@@ -64,7 +65,7 @@ async function refusal(statement: () => Promise<unknown>): Promise<string | null
     await statement();
     return null;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   }
 }
 

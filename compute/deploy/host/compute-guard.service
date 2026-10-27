@@ -40,6 +40,16 @@ FileDescriptorStorePreserve=yes
 # The guard holds no memory worth reclaiming and must never be the one the
 # kernel ends.
 OOMScoreAdjust=-1000
+# However loaded the host, the guard must feed the watchdog within its 3 s,
+# or the watchdog resets the machine and every sandbox on it loses its
+# programs. So its turn comes before any VM's or the agent's (the lowest
+# real-time priority, which also lets its few allocations draw on the
+# kernel's reserve), it locks its memory in as it starts, so a host
+# swapping under guests that hold more than it has does not make it wait
+# on the disk for its own code, and it waits on neither the journal nor
+# systemd (docs/operations.md says what this does not cover).
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=1
 
 [Install]
 WantedBy=multi-user.target

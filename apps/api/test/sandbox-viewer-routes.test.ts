@@ -94,6 +94,21 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
     expect(gate.slice(0, 400)).toContain("HTTPException(404");
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
   });
+
+  test("every terminal mint grants typing from terminal:attach, never from desktop control", () => {
+    // The relay forwards keystrokes only for a `control` token. Each terminal
+    // mint must pass the route's terminal:attach verdict, or every terminal
+    // silently becomes read-only.
+    const body = handlerBody(sessionsRoute, "post", NEW_ROUTES[1]!.path);
+    expect(body).toContain('requirePermission(grant, "terminal:attach")');
+    const mints = body.split("mintTerminalStream(").slice(1);
+    expect(mints.length).toBeGreaterThanOrEqual(2);
+    for (const mint of mints) {
+      const call = mint.slice(0, mint.indexOf("});"));
+      expect(call).toContain('terminalInput: hasPermission(grant.permissions, "terminal:attach")');
+      expect(call).not.toContain("streamControlEnabled");
+    }
+  });
 });
 
 describe("P1.4 capability negotiation read returns a coherent SessionCapabilities", () => {

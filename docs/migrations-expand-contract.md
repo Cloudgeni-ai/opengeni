@@ -262,7 +262,7 @@ recording retention inventory withheld, and 0950 granted it. 0978 created the
 personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
-withheld the same way, with the same caller check. 0999 created the EU-only
+withheld the same way, with the same caller check. 1002 created the EU-only
 inference change function withheld the same way; until it is granted the
 setting stays off.
 

@@ -205,6 +205,14 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
     expect(cb?.leaseEpoch).toBe(2);
   });
 
+  test("the token claims the input mode the caller granted, watch-only by default", async () => {
+    const session = fakeSession({ host: "h", port: 443, tls: true });
+    const control = await exposeStreamPort(session, { ...baseInput, mode: "control" });
+    const view = await exposeStreamPort(session, baseInput);
+    expect((await verifyStreamToken(SECRET, control.token))?.mode).toBe("control");
+    expect((await verifyStreamToken(SECRET, view.token))?.mode).toBe("view");
+  });
+
   test("a session with no resolveExposedPort throws StreamPortUnavailableError (caller degrades to transport:null)", async () => {
     await expect(exposeStreamPort({}, baseInput)).rejects.toBeInstanceOf(
       StreamPortUnavailableError,

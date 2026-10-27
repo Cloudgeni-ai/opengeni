@@ -21,6 +21,7 @@ import {
 } from "../lib/relay-wire";
 import { usePageLiveActivity } from "./internal";
 import { useOpenGeniText } from "../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type BrowserFrameConnectionState =
   | "idle"
@@ -444,6 +445,6 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
 }
 
 function isPlacementGenerationLossError(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = errorMessage(cause);
   return /placement instance changed|controller authority changed/i.test(message);
 }

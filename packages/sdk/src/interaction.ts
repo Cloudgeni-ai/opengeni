@@ -19,6 +19,7 @@ export type {
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "./errors";
 import type { RetainedArtifactReference } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Public Browser/Computer protocol version. Driver and provider details stay private. */
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
@@ -1444,6 +1445,9 @@ export type ComputerActionReceipt = {
   error: InteractionError | null;
   /** Actions that acted on an element of another role than the one named. */
   roleStandIns?: ComputerActionRoleStandIn[] | undefined;
+  /** The action sent raw input (a click or a key press) that its driver
+   * reported as delivered without any confirmation that the app acted on it. */
+  unconfirmedInput?: true | undefined;
 };
 
 /** An action that named a button or link by role and name, when nothing of
@@ -3373,8 +3377,4 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

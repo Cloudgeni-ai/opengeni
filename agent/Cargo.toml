@@ -140,6 +140,8 @@ atspi = { version = "0.30", default-features = false, features = ["connection", 
 zbus = { version = "=5.5.0", default-features = false }
 zvariant = { version = "=5.2.0", default-features = false }
 zvariant_utils = { version = "=3.2.0", default-features = false }
+# GNOME Wayland: Mutter reports its active keyboard layout group to EIS clients.
+reis = { version = "=0.7.1", default-features = false, features = ["tokio"] }
 proc-macro-crate = "=3.2.0"
 indexmap = "=2.7.1"
 async-lock = "=3.4.0"

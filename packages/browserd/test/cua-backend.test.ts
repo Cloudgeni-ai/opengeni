@@ -849,6 +849,45 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a click or key press CUA only sent is reported as unconfirmed, unlike confirmed or semantic actions", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const reported: string[] = [];
+      const click = async (label: string) => {
+        const frame = await backend.capture(target.id);
+        await backend.dispatch(
+          {
+            ...command(await backend.observe(target.id)),
+            expectedFrameId: frame.frameId,
+            action: { type: "pointer", action: "click", frameId: frame.frameId, x: 20, y: 20 },
+          },
+          undefined,
+          () => reported.push(label),
+        );
+      };
+      fixture.mutation = result({ effect: "unverifiable", route: "synthetic_events" });
+      await click("click");
+      await backend.dispatch(
+        {
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "Meta+W" },
+        },
+        undefined,
+        () => reported.push("key"),
+      );
+      await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
+        reported.push("invoke"),
+      );
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      await click("confirmed click");
+      expect(reported).toEqual(["click", "key"]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keys fenced on a reading another read has since replaced go where that reading showed the focus", async () => {
     const fixture = new Fixture();
     fixture.applyFocused = true;

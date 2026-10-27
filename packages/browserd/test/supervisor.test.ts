@@ -27,6 +27,7 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
+import { offscreenBrowserNotice } from "../src/supervisor";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
 import {
   adoptionPaths,
@@ -149,6 +150,58 @@ describe("BrowserSupervisor", () => {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  test("reports the display a headed browser was launched with, and says plainly when it has no window", async () => {
+    const directory = await mkdtemp("/tmp/ogb-display-");
+    const displays: Record<string, "window" | "offscreen" | null> = {
+      [reference(61).browserSessionId]: "offscreen",
+      [reference(62).browserSessionId]: "window",
+      [reference(63).browserSessionId]: null,
+    };
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      createDriver: async (context) => ({
+        ...fakeDriver(context),
+        display: displays[context.browserSessionId] ?? null,
+      }),
+    });
+    try {
+      const offscreen = await supervisor.createSession({ ...reference(61), headed: true });
+      expect(offscreen.display).toBe("offscreen");
+      expect(offscreen.notice).toBe(offscreenBrowserNotice(process.platform));
+      // Asking again for the live browser reports the same display; the
+      // notice belongs to the launch only.
+      const again = await supervisor.createSession({ ...reference(61), headed: true });
+      expect(again.display).toBe("offscreen");
+      expect(again.notice).toBeUndefined();
+
+      const windowed = await supervisor.createSession({ ...reference(62), headed: true });
+      expect(windowed.display).toBe("window");
+      expect(windowed.notice).toBeUndefined();
+
+      const unreported = await supervisor.createSession({ ...reference(63), headed: false });
+      expect("display" in unreported).toBe(false);
+      expect(unreported.notice).toBeUndefined();
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("names what to use instead when a headed browser has no window", () => {
+    // Model-visible text: exact strings and bytes, kept short because a Mac
+    // managed browser is offscreen by default.
+    const mac = offscreenBrowserNotice("darwin");
+    expect(mac).toBe(
+      "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId.",
+    );
+    expect(Buffer.byteLength(mac)).toBe(172);
+    const linux = offscreenBrowserNotice("linux");
+    expect(linux).toBe(
+      "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.",
+    );
+    expect(Buffer.byteLength(linux)).toBe(107);
   });
 
   test("holds the browser's windows presented for each use and while a live view is open", async () => {

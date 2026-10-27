@@ -41,8 +41,9 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
-    pattern: /\/callback$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
-    reason: "a provider's browser redirect back to Opengeni",
+    pattern:
+      /\/callback$|^\/v1\/integrations\/connect\/finished$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
+    reason: "a provider's browser redirect back to Opengeni, and the page it ends on",
   },
   {
     pattern:
@@ -346,21 +347,99 @@ const ACCESS_GATES = new Set([
 ]);
 
 /**
+ * Timing wrappers a route may run its access check inside (`await
+ * measureInsightsPhase(observe, "auth", () => requireAccessGrant(...))`).
+ * Only these count: each always calls the work it is given, exactly once,
+ * and passes on its refusal, so the check can't be skipped. A test runs each
+ * one to keep that true; an unlisted wrapper names no permission.
+ */
+export const ACCESS_GATE_WRAPPERS: ReadonlySet<string> = new Set([
+  "measureInsightsPhase",
+  "measureSessionCreatePhase",
+]);
+
+/**
+ * Route-local access helpers that take an operation name rather than a
+ * permission (`await authorize(c, deps, "read")`), with the permission each
+ * operation needs a person in the workspace to hold first, or null for none.
+ * The usage and allowance routes (apps/api/src/routes/usage-allowances.ts):
+ * reading the workspace's usage or budget and setting a member's allowance
+ * need workspace:admin, setting the workspace budget needs an organization
+ * admin, and reading one's own usage needs nothing. Organization keys have
+ * their own way in; the route's own checks still decide. A test keeps the
+ * operations equal to that file's `Operation` type and checks that every
+ * route calling the helper gets its operation's permission.
+ */
+export const ACCESS_GATE_OPERATIONS: Readonly<
+  Record<string, Readonly<Record<string, string | null>>>
+> = {
+  authorize: {
+    read: "workspace:admin",
+    "budget-read": "workspace:admin",
+    "member-write": "workspace:admin",
+    "workspace-write": "account:admin",
+    own: null,
+  },
+};
+
+/** The permission an access-check call names: a shared gate's last argument, or a helper operation's. */
+function gateCallPermission(call: AstNode): string | null {
+  const name = calleeName(call) ?? "";
+  const args = call.arguments as AstNode[];
+  const last = args.at(-1);
+  const literal = last?.type === "Literal" && typeof last.value === "string" ? last.value : null;
+  if (literal === null) return null;
+  const operations = ACCESS_GATE_OPERATIONS[name];
+  const permission = ACCESS_GATES.has(name)
+    ? literal
+    : operations && args.length === 3 && Object.hasOwn(operations, literal)
+      ? operations[literal]!
+      : null;
+  return permission !== null && contracts.Permission.safeParse(permission).success
+    ? permission
+    : null;
+}
+
+function isGateCall(call: AstNode): boolean {
+  const name = calleeName(call) ?? "";
+  return (
+    ACCESS_GATES.has(name) ||
+    (Object.hasOwn(ACCESS_GATE_OPERATIONS, name) && (call.arguments as AstNode[]).length === 3)
+  );
+}
+
+/**
  * The permission a route requires before it does anything else: the one its
  * handler passes to a shared access check (`await requireAccessGrant(c, deps,
- * workspaceId, "sessions:read")`) in its opening declarations and statements,
- * before any branch, return or throw that could skip it. Every handler of the
- * route must name the same one. Anything less certain names none.
+ * workspaceId, "sessions:read")`) or the operation it passes to a listed
+ * helper (`await authorize(c, deps, "read")`), in its opening declarations
+ * and statements, before any branch, return or throw that could skip it. The
+ * check may open a `try { } finally { }` block (no `catch` that could swallow
+ * its refusal), or be what the arrow function given to a listed wrapper
+ * returns. Every handler of the route must name the same one. Anything less
+ * certain names none.
  */
 function gatePermission(sources: readonly string[]): { permission?: string } {
-  const found = sources.map((source) => {
-    const parsed = parseSync("handler.js", `(${source});`);
-    if (parsed.errors.length > 0) return null;
-    const handler = astNodes(parsed.program).find(
-      (node) => node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression",
-    );
-    if (handler?.body?.type !== "BlockStatement") return null;
-    for (const statement of handler.body.body as AstNode[]) {
+  const gateCall = (expression: AstNode | null | undefined): AstNode | null => {
+    const call = expression?.type === "AwaitExpression" ? expression.argument : expression;
+    if (call?.type !== "CallExpression") return null;
+    if (isGateCall(call)) return call;
+    if (expression?.type !== "AwaitExpression" || !ACCESS_GATE_WRAPPERS.has(calleeName(call) ?? ""))
+      return null;
+    for (const argument of call.arguments as AstNode[]) {
+      if (argument.type !== "ArrowFunctionExpression" || argument.body?.type === "BlockStatement")
+        continue;
+      const inner = gateCall(argument.body);
+      if (inner) return inner;
+    }
+    return null;
+  };
+  // The gate's permission; null when something before it could skip it or it
+  // names none; undefined when these statements hold no gate at all.
+  const scan = (statements: readonly AstNode[]): string | null | undefined => {
+    for (const statement of statements) {
+      if (statement.type === "TryStatement")
+        return statement.handler ? null : (scan(statement.block.body) ?? null);
       const expressions =
         statement.type === "VariableDeclaration"
           ? (statement.declarations as AstNode[]).map((declarator) => declarator.init)
@@ -369,17 +448,21 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
             : null;
       if (!expressions) return null;
       for (const expression of expressions) {
-        const call = expression?.type === "AwaitExpression" ? expression.argument : null;
-        if (call?.type !== "CallExpression" || !ACCESS_GATES.has(calleeName(call) ?? "")) continue;
-        const last = (call.arguments as AstNode[]).at(-1);
-        return last?.type === "Literal" &&
-          typeof last.value === "string" &&
-          contracts.Permission.safeParse(last.value).success
-          ? last.value
-          : null;
+        const call = expression?.type === "AwaitExpression" ? gateCall(expression) : null;
+        if (!call) continue;
+        return gateCallPermission(call);
       }
     }
-    return null;
+    return undefined;
+  };
+  const found = sources.map((source) => {
+    const parsed = parseSync("handler.js", `(${source});`);
+    if (parsed.errors.length > 0) return null;
+    const handler = astNodes(parsed.program).find(
+      (node) => node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression",
+    );
+    if (handler?.body?.type !== "BlockStatement") return null;
+    return scan(handler.body.body as AstNode[]) ?? null;
   });
   const [first] = found;
   return first && found.every((permission) => permission === first) ? { permission: first } : {};

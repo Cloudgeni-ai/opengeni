@@ -23,6 +23,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             memory_mib: 30_000,
             cpu_millis: 7_000,
             disk_mib: 100_000,
+            boot: None,
         },
         state,
         capacity: Reported {

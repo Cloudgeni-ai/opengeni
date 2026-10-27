@@ -23,6 +23,7 @@ import {
   endsText,
   type AdminAccessDuration,
 } from "../../../session-admin-access-model";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export { ADMIN_ACCESS_DURATIONS, endsText, type AdminAccessDuration };
 
@@ -115,7 +116,7 @@ export function useSessionAdminAccess(session: {
       })
       .catch((error: unknown) => {
         toast.error("Couldn't turn off full access", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       })
       .finally(() => setBusy(false));

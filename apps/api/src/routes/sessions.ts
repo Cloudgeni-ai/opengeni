@@ -428,6 +428,7 @@ import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discov
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { measureSessionCreatePhase } from "../session-create-observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -568,7 +569,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         realtimeId: input.realtimeId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
       return null;
     }
@@ -4356,6 +4357,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               authorization,
               delegatedSignInChangesEnabled:
                 settings.delegatedSignInAppActionChangesEnabled === true,
+              // Only `changes` is read here; nothing is frozen.
+              workspaceSettings: false,
             })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,
@@ -4919,6 +4922,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
+            // terminal:attach (required above) is the interactive grant: the
+            // token may type into the PTY, independent of desktop control.
+            terminalInput: hasPermission(grant.permissions, "terminal:attach"),
             // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
@@ -4972,6 +4978,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
+              terminalInput: hasPermission(grant.permissions, "terminal:attach"),
               lease,
             });
           }

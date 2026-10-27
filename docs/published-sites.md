@@ -167,6 +167,20 @@ model instead, and when the workspace has none they are refused
 existing conversation holds a subscription model. The publication's
 `outsideAgentModel` names the model they get.
 
+Their turns are paid with the workspace's credits. When the workspace can't
+pay for that model, people outside the workspace are told the assistant isn't
+available right now (`not_available_for_viewer`, `feature: "agent"`) rather
+than shown the owner's prompt, and `site.capabilities.agent` is false for
+them. With no credits for the model the `reason` is `no_credits` and the
+publication warns with `agent_model_outside_no_credits`; with the workspace's
+usage allowance used up the `reason` is `allowance_exhausted` and the warning
+is `agent_model_outside_allowance_used`. Members keep the ordinary refusals
+(`payment_required` with `details.code: "insufficient_credits"`, or
+`allowance_exhausted`). Other admission refusals, such as a deployment's
+static monthly caps, are not hidden: the turn reports them. `site.capabilities`
+reuses a workspace's funding answer for up to 30 seconds, so adding credits
+shows there within that window; turns always run the live check.
+
 Published model lists, admission checks, and the outside-workspace fallback
 resolve the current deployment and workspace catalog, as the console does.
 Database catalog changes take effect without restarting the API; the viewer's
@@ -225,6 +239,8 @@ or a named query's audience. Members-only Sites have no warnings.
 | `site_sql_query_signed_in`         | A query needs a signed-in viewer; guests can't run it (fixable)       |
 | `site_sql_query_managers`          | A managers-only query the page runs (fixable)                         |
 | `agent_model_outside_unavailable`  | Outsiders get no agent: no credit-billed model                        |
+| `agent_model_outside_no_credits`   | Outsiders get no agent: no credits for the outside model              |
+| `agent_model_outside_allowance_used` | Outsiders get no agent: the workspace's usage allowance is used up  |
 | `page_not_checked`                 | The page is over 2 MB, so what it uses was not checked                |
 | `public_sign_in_required`          | A public Site on a login-only deployment: every visitor signs in first |
 

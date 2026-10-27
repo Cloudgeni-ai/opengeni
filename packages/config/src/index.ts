@@ -111,6 +111,7 @@ export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Default maximum provider silence on a generic OpenAI-compatible model stream
@@ -346,6 +347,15 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // Optional files holding the runtime login's password (the user in
+  // databaseUrl), read on every new connection so the password can be rotated
+  // without a restart. Unset → the URL password, exactly as before. A missing
+  // or empty current file also falls back to the URL password; a missing or
+  // empty previous file means no previous candidate. During a rotation the
+  // pools try previous first and switch to current after one rejected login.
+  // See docs/deployment.md ("Rotating the runtime database password").
+  databasePasswordFile: z.string().optional(),
+  databasePreviousPasswordFile: z.string().optional(),
   // LISTEN needs a session-pinned connection. Direct deployments reuse the
   // ordinary URL; transaction poolers supply this separate direct endpoint.
   databaseNotificationUrl: z.string().optional(),
@@ -3043,7 +3053,7 @@ export function safeResolveVoiceInputPricing(
   try {
     explicit = parseVoiceInputPricingJson(raw, env);
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: errorMessage(error) };
   }
   return {
     ok: true,
@@ -3777,10 +3787,9 @@ export function parseModelCostPolicyJson(raw: string): Record<string, ModelCostC
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `OPENGENI_MODEL_COST_POLICY_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`OPENGENI_MODEL_COST_POLICY_JSON must be valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   return z.record(z.string().min(1), ModelCostClass).parse(parsed);
 }
@@ -3790,10 +3799,9 @@ export function parseModelNotesJson(raw: string): Record<string, string> {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `OPENGENI_MODEL_NOTES_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`OPENGENI_MODEL_NOTES_JSON must be valid JSON: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   return z.record(z.string().min(1), ModelNote).parse(parsed);
 }
@@ -5509,6 +5517,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    databasePasswordFile: optional("OPENGENI_DATABASE_PASSWORD_FILE"),
+    databasePreviousPasswordFile: optional("OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE"),
     databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
@@ -11130,7 +11140,7 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     }
     return parsed;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, {
       cause: error,
     });
@@ -11147,7 +11157,7 @@ export function parseModelPricingJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -11175,7 +11185,7 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(
       `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be valid JSON: ${message}`,
       { cause: error },
@@ -11224,7 +11234,7 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -11242,7 +11252,7 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
     try {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${message}`, {
         cause: error,
       });
@@ -11260,7 +11270,7 @@ export function parseIntegrationsOauthClientsJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -11326,7 +11336,7 @@ export function parseSocialOauthClientsJson(
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -11363,7 +11373,7 @@ export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -11379,7 +11389,7 @@ export function parseStaticEntitlementsJson(raw: string): EntitlementsConfig {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });
@@ -13017,7 +13027,7 @@ function parseGcsCredentialsJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`, {
       cause: error,
     });

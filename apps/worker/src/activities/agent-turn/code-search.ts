@@ -27,6 +27,7 @@ import {
 import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
 import { configuredDecisionModel, type WorkerDecisionSettings } from "./decision-model";
 import { sideFeatureRouteRunnable } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * One breaker per worker process. Repeated decision-provider outages (including an exhausted
@@ -252,7 +253,7 @@ export function createCodeSearchAttemptToolDefinition(input: {
             })
             .catch((error: unknown) => {
               input.observability.warn("code_search usage record failed", {
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMessage(error),
               });
             });
         }

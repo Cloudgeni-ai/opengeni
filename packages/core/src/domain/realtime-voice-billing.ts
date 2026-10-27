@@ -35,6 +35,7 @@ import {
 import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
 import { TranscriptionBillingRefusedError } from "../transcription";
 import { workspaceCreditsDisabled } from "./workspace-credits";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** Credit debit type and usage source for deployment-funded live voice. */
 export const REALTIME_VOICE_DEBIT_TYPE = "voice_realtime_debit";
@@ -63,7 +64,7 @@ function tolerantPricing<T>(parse: () => T, fallback: T): T {
   try {
     return parse();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     if (!reportedPricingErrors.has(message)) {
       reportedPricingErrors.add(message);
       console.error(`Live voice pricing ignored: ${message}`);

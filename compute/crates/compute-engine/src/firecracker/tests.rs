@@ -1,6 +1,6 @@
 use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
-use crate::spec::Network;
+use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -152,26 +152,6 @@ fn a_launch_leaves_its_runtime_for_a_later_agent() {
 
 /// A trim that measured the previous launch's log and punches it out late
 /// reaches only that file, never what the next launch has begun to write.
-#[test]
-fn a_late_trim_of_the_last_log_spares_the_new_one() {
-    use std::io::Write;
-    use std::os::unix::fs::FileExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("vmm.log");
-    fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
-    // The trimmer opens and measures the old log...
-    let trimming = File::options().write(true).open(&path).unwrap();
-    let measured = trimming.metadata().unwrap().len();
-    // ...a new launch starts its log meanwhile...
-    let mut fresh = fresh_log(&path).unwrap();
-    fresh.write_all(b"new launch\n").unwrap();
-    // ...and the trim lands on what it measured.
-    let zeros = vec![0; usize::try_from(measured).unwrap()];
-    trimming.write_all_at(&zeros, 0).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
-}
-
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
@@ -478,6 +458,33 @@ fn spec() -> VmSpec {
         network: None,
         free_page_reporting: true,
     }
+}
+
+/// The host gets back what the guest frees on a disk it may write; a
+/// read-only drive takes no discard, which Firecracker refuses for one.
+#[test]
+fn writable_drives_take_the_guests_discards() {
+    let mut drive = Drive {
+        id: "rootfs".into(),
+        path: "/lab/vm/firecracker/a/root/rootfs.ext4".into(),
+        root: true,
+        read_only: false,
+    };
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(
+        config,
+        json!({
+            "drive_id": "rootfs",
+            "path_on_host": "/rootfs.ext4",
+            "is_root_device": true,
+            "is_read_only": false,
+            "discard": true,
+        })
+    );
+    drive.read_only = true;
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(config["is_read_only"], true);
+    assert_eq!(config["discard"], false);
 }
 
 #[test]

@@ -2,6 +2,7 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback, useEffect, useState } from "react";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type AgentKnowledgePromptKind = "company_profile" | "skill" | "workspace_instructions";
 
@@ -104,7 +105,7 @@ export function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & 
             workspaceId,
             models: [],
             loading: false,
-            error: caught instanceof Error ? caught.message : String(caught),
+            error: errorMessage(caught),
           });
         }
       }

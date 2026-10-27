@@ -171,6 +171,7 @@ import {
   recordScheduledTaskAccountChoiceChanges,
   scheduledTaskAccountChoiceChanges,
 } from "./scheduled-task-account-audit";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
@@ -2295,7 +2296,7 @@ export class ScheduledTaskSyncError extends Error {
   readonly persistenceRestored: boolean;
 
   constructor(cause: unknown, persistenceRestored: boolean) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    super(errorMessage(cause), { cause });
     this.name = "ScheduledTaskSyncError";
     this.persistenceRestored = persistenceRestored;
   }

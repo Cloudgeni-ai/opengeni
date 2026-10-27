@@ -64,27 +64,46 @@ if (previewTheme === "dark" || previewTheme === "light") {
   document.documentElement.classList.toggle("dark", previewTheme === "dark");
   document.documentElement.dataset.ogTheme = previewTheme;
 }
+// `?desktop=macos|windows`: the desktop shell's platform attribute
+// (`browser` or none: the web app).
+// `?rail=collapsed`: the app shell's collapsed rail, a 56px strip beside the
+// page, marked as the shell marks it for page chrome.
+const previewDesktop = new URLSearchParams(window.location.search).get("desktop");
+if (previewDesktop && previewDesktop !== "browser")
+  document.documentElement.dataset.desktop = previewDesktop;
+const collapsedRail = new URLSearchParams(window.location.search).get("rail") === "collapsed";
 
 const root = createRootRoute({
   component: () => (
     <OpenGeniProvider client={client} workspaceId={workspaceId}>
       <TooltipProvider>
-        <main className="flex h-dvh min-w-0 bg-bg text-fg">
-          <aside
-            aria-label="Workspace sidebar"
-            className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
-          >
-            <header className="shrink-0 px-6 pb-5 pt-6">
-              <p className="text-sm font-medium">Product engineering</p>
-              <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
-            </header>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
-              <SessionList />
-            </div>
-            <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
-              Alex Morgan
-            </footer>
-          </aside>
+        <main
+          className="flex h-dvh min-w-0 bg-bg text-fg"
+          data-rail-collapsed={collapsedRail ? "true" : undefined}
+        >
+          {collapsedRail ? (
+            <nav
+              aria-label="Primary"
+              data-collapsed="true"
+              className="h-dvh w-[56px] shrink-0 border-r border-border bg-surface"
+            />
+          ) : (
+            <aside
+              aria-label="Workspace sidebar"
+              className="flex h-dvh w-full shrink-0 flex-col border-r border-border bg-surface md:w-[288px]"
+            >
+              <header className="shrink-0 px-6 pb-5 pt-6">
+                <p className="text-sm font-medium">Product engineering</p>
+                <p className="mt-1 text-xs text-fg-subtle">Shared workspace</p>
+              </header>
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
+                <SessionList />
+              </div>
+              <footer className="shrink-0 border-t border-border px-6 py-4 text-xs text-fg-muted">
+                Alex Morgan
+              </footer>
+            </aside>
+          )}
           <MainArea />
         </main>
         <Toaster />

@@ -40,6 +40,7 @@ import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/co
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { SecureContextWarning } from "@/components/secure-context-warning";
+import type { SignedOutPitch } from "@/components/signed-out-page";
 import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
@@ -170,6 +171,15 @@ export function RootRouteComponent() {
     select: (state) => Object.keys(state.location.search).length > 0,
   });
   const analyticsSearch = useRouterState({ select: (state) => state.location.searchStr });
+  // The Excel add-in opens sign-in in an Office dialog at
+  // /native-sign-in?platform=office; speak to Excel users there.
+  const signedOutPitch = useRouterState({
+    select: (state): SignedOutPitch =>
+      /^\/native-sign-in\/?$/.test(state.location.pathname) &&
+      new URLSearchParams(state.location.searchStr).get("platform") === "office"
+        ? "excel"
+        : "product",
+  });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
@@ -277,7 +287,11 @@ export function RootRouteComponent() {
   ) : managedAuthRequired && !authSession ? (
     <DesktopSignedOutRecovery>
       <Suspense fallback={<LoadingPanel />}>
-        <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
+        <SignedOutPage
+          legalLinks={clientConfig?.legal}
+          pitch={signedOutPitch}
+          supportEmail={clientConfig?.supportEmail}
+        >
           {browserAccountsEnabled ? (
             <BrowserAccountsSignedOutPanel
               presentation="embedded"

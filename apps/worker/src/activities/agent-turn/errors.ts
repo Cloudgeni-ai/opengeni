@@ -14,6 +14,7 @@ import {
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
   KnowledgeLearningScopeChangedError,
+  nestedErrorRecords,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -131,6 +132,7 @@ import {
   validProviderOverloadRecoveryDelay,
   windowedRecoveryPolicy,
 } from "./provider-recovery-policy";
+import { errorMessage } from "@opengeni/contracts/values";
 export {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
@@ -1333,7 +1335,7 @@ export function classifyContextWindowOverflowError(
   if (!matched) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const code = fields.find((value) => /context[_\s-]*length[_\s-]*exceeded/i.test(value));
   return {
     message,
@@ -1368,7 +1370,7 @@ export function classifyMcpTransportTimeoutError(
   if (!matchedText && !sanitizedSdkTimeout) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const matched = matchedText ?? fields.find((value) => /\bmcp\b/i.test(value));
   return {
     message,
@@ -1592,7 +1594,7 @@ export function isTransientProviderError(error: unknown): boolean {
     return status >= 500 && status < 600;
   }
   if (transientTransportCode(error)) return true;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
@@ -1712,19 +1714,8 @@ export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome |
 // The generic turn-failure boundary also receives application/provider errors.
 // A five-character code or generic severity alone does not establish a driver error.
 function findPostgresDriverError(error: unknown): Record<string, unknown> | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  for (let index = 0; index < queue.length && index < 64; index += 1) {
-    const current = queue[index];
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    const record = current as Record<string, unknown>;
+  for (const record of nestedErrorRecords(error)) {
     if (record.name === "PostgresError") return record;
-    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
-      const nested = record[key];
-      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return null;
 }
@@ -2112,7 +2103,7 @@ function baseAgentRunFailurePayload(
       detail: error.detail,
     };
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const status = providerHttpStatus(error);
   const code =
     typeof error === "object" && error !== null && "code" in error

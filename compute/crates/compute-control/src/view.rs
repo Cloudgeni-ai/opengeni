@@ -458,6 +458,7 @@ mod tests {
                 memory_mib: 16 * 1024,
                 cpu_millis: 8000,
                 disk_mib: 100 * 1024,
+                boot: None,
             },
             epoch: HostEpoch(1),
             state: HostState::Live,

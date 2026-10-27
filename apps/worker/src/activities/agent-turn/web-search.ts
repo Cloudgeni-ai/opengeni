@@ -43,6 +43,7 @@ import {
   sideFeatureRouteRunnable,
 } from "@opengeni/runtime";
 import { hostedWebSearchForTurn } from "./tool-policy";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Which web search one turn gets: the provider's hosted tool, Opengeni's
@@ -342,7 +343,7 @@ export function webSearchToolDefinitions(input: {
       input.observability.warn("web search usage settlement failed", {
         operation: cost.operation,
         provider: cost.provider,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   };

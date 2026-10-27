@@ -225,14 +225,13 @@ export function SubagentsLabel({ count }: { count: number }) {
 /**
  * The header gives the breadcrumb and the title equal shares of a crowded
  * row, so neither squeezes the other to nothing; the parent's name truncates
- * within its share. Phones, narrow headers and a narrow title area
- * (`titlegroup`) show only an arrow back to the parent.
+ * within its share. Phones and narrow headers show only an arrow back to the
+ * parent.
  */
 const CRUMB_NAV = "flex min-w-0 items-center text-xs";
-const WIDE_CRUMB =
-  "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden! @max-[20rem]/titlegroup:hidden!";
+const WIDE_CRUMB = "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden!";
 const NARROW_CRUMB =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:size-11 sm:hidden @max-[34rem]/titlebar:inline-flex! @max-[20rem]/titlegroup:inline-flex!";
+  "inline-flex size-6 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:size-11 sm:hidden @max-[34rem]/titlebar:inline-flex!";
 const CRUMB_LINK =
   "block min-w-0 max-w-40 truncate outline-hidden transition-colors hover:text-fg focus-visible:text-fg";
 

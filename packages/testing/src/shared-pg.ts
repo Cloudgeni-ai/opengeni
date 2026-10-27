@@ -855,7 +855,7 @@ export async function acquireSharedTestDatabase(
  * DEFERRED_RUNTIME_TARGET_ROUTINES and RUNTIME_DEFERRED_FULL_DML_TABLES):
  * EXECUTE on the personal-machine owner lookup (0978), the connected-command
  * re-arm (0984), the queued-turn hold summary (0988) and the EU-only inference
- * change function (0999), and passkey storage (0998). Tests that exercise them
+ * change function (1002), and passkey storage (0998). Tests that exercise them
  * run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(

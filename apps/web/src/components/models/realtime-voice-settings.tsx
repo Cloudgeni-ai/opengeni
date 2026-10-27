@@ -22,6 +22,7 @@ import {
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
 } from "@opengeni/react/app/lib/shared-query";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
    Voice settings for each realtime voice model: the voice, the conversation
@@ -197,8 +198,7 @@ function DefaultVoiceModelRow({
                   toast.success(
                     model ? `New voice conversations start with ${model.label}` : automatic.saved,
                   ),
-                (error: unknown) =>
-                  toast.error(error instanceof Error ? error.message : String(error)),
+                (error: unknown) => toast.error(errorMessage(error)),
               )
               .finally(() => setSaving(false));
           }}
@@ -407,8 +407,7 @@ function VoiceSettingsRows({
                                     ? `${model.label} uses the organization's default again`
                                     : `${model.label} is back to its defaults`,
                                 ),
-                              (error: unknown) =>
-                                toast.error(error instanceof Error ? error.message : String(error)),
+                              (error: unknown) => toast.error(errorMessage(error)),
                             );
                           }}
                         >

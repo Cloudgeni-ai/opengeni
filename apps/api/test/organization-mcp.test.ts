@@ -4,14 +4,20 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   OPENGENI_API_CONTRACT_HEADER,
+  Permission,
   SitePublishWarningFix,
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
-import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
+import {
+  measureInsightsPhase,
+  verifiedDelegatedHumanAuthorizationForRequest,
+} from "@opengeni/core";
 
 import surface from "../../../scripts/public-api/surface.gen.json";
 import {
+  ACCESS_GATE_OPERATIONS,
+  ACCESS_GATE_WRAPPERS,
   ACTION_CATALOG_BROWSER_ONLY,
   buildActionCatalog,
   isActionCatalogExempt,
@@ -37,6 +43,7 @@ import {
   type OrganizationMcpCaller,
   searchActions,
 } from "../src/organization-mcp";
+import { measureSessionCreatePhase } from "../src/session-create-observability";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -796,6 +803,39 @@ describe("organization MCP action inputs", () => {
         return c.json(await list(grant, payload));
       }`),
     ).toBe("sessions:read");
+    // At the start of a try/finally, or returned by an awaited wrapper's
+    // arrow function, as a measured phase does.
+    expect(
+      gate(`async (c) => {
+        const startedAt = performance.now();
+        try {
+          const workspaceId = c.req.param("workspaceId");
+          const grant = await measureInsightsPhase(observe, "auth", () =>
+            requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
+          );
+          return c.json(await read(grant));
+        } finally {
+          observe(performance.now() - startedAt);
+        }
+      }`),
+    ).toBe("workspace:admin");
+    // A listed helper's operation names its permission; one it doesn't list,
+    // or reading one's own usage, names none.
+    expect(gate(`async (c) => { const scope = await authorize(c, deps, "read"); }`)).toBe(
+      "workspace:admin",
+    );
+    expect(gate(`async (c) => { await authorize(c, deps, "own"); }`)).toBeUndefined();
+    expect(gate(`async (c) => { await authorize(c, deps, "renamed"); }`)).toBeUndefined();
+    // Not when a catch could swallow the refusal.
+    expect(
+      gate(`async (c) => {
+        try {
+          await requireAccessGrant(c, deps, id, "workspace:admin");
+        } catch {
+          return c.json({});
+        }
+      }`),
+    ).toBeUndefined();
     // Not when a branch, return or throw could skip the check, the checked
     // value isn't a permission, or the route's handlers disagree.
     expect(
@@ -813,6 +853,92 @@ describe("organization MCP action inputs", () => {
     ).toBeUndefined();
     expect(byId("listSessionPage").permission).toBe("sessions:read");
     expect(byId("getMyUsage").permission).toBeUndefined();
+    expect(byId("getWorkspaceInsights").permission).toBe("workspace:admin");
+    expect(byId("createSession").permission).toBe("sessions:create");
+    // Helper-gated usage routes, from the hand-named table.
+    expect(byId("getUsage").permission).toBe("workspace:admin");
+    expect(byId("setWorkspaceAllowance").permission).toBe("account:admin");
+  });
+
+  test("every route checked through an operation helper gets that operation's permission", async () => {
+    const operations = ACCESS_GATE_OPERATIONS.authorize!;
+    for (const permission of Object.values(operations))
+      if (permission !== null)
+        expect(Permission.safeParse(permission).success, permission).toBe(true);
+    // The listed operations are exactly the helper's own, so a renamed,
+    // removed or new operation fails here.
+    const helper = await Bun.file(
+      new URL("../src/routes/usage-allowances.ts", import.meta.url),
+    ).text();
+    const declared = [
+      ...(/type Operation =([^;]+);/u.exec(helper)?.[1] ?? "").matchAll(/"([^"]+)"/gu),
+    ].map((match) => match[1]!);
+    expect(declared.sort()).toEqual(Object.keys(operations).sort());
+    // Every route that calls the helper, wherever in its handler, carries its
+    // operation's permission in the catalog; a route the reader can't decode
+    // (the call moved behind a branch) fails here rather than being offered.
+    const used = new Set<string>();
+    for (const route of registeredApiRoutes()) {
+      const called = (route.sources ?? []).flatMap((source) =>
+        [...source.matchAll(/\bauthorize\(\s*c\s*,\s*deps\s*,\s*"([^"]+)"\s*\)/gu)].map(
+          (match) => match[1]!,
+        ),
+      );
+      if (called.length === 0) continue;
+      const key = routeKey(route);
+      for (const operation of called) {
+        expect(Object.keys(operations), key).toContain(operation);
+        used.add(operation);
+      }
+      const entry = ACTION_CATALOG.find((action) => routeKey(action) === key);
+      expect(entry, key).toBeDefined();
+      expect(entry!.permission, key).toBe(operations[called[0]!] ?? undefined);
+    }
+    expect([...used].sort()).toEqual(Object.keys(operations).sort());
+  });
+
+  test("every listed access-check wrapper runs its work once and passes on its refusal", async () => {
+    const span = { end: async () => undefined };
+    const runs: Record<string, ((work: () => Promise<string>) => Promise<string>)[]> = {
+      measureInsightsPhase: [
+        (work) => measureInsightsPhase(undefined, "auth", work),
+        (work) => measureInsightsPhase(() => undefined, "auth", work),
+      ],
+      measureSessionCreatePhase: [
+        (work) => measureSessionCreatePhase(null, "authorization", work),
+        (work) =>
+          measureSessionCreatePhase({ startSpan: () => span } as never, "authorization", work),
+      ],
+    };
+    expect(Object.keys(runs).sort()).toEqual([...ACCESS_GATE_WRAPPERS].sort());
+    for (const [name, variants] of Object.entries(runs)) {
+      for (const run of variants) {
+        let calls = 0;
+        expect(
+          await run(async () => {
+            calls += 1;
+            return "granted";
+          }),
+          name,
+        ).toBe("granted");
+        expect(calls, name).toBe(1);
+        const refusal = new Error("missing permission");
+        await expect(
+          run(async () => {
+            throw refusal;
+          }),
+          name,
+        ).rejects.toBe(refusal);
+      }
+    }
+    // An unlisted wrapper names nothing, even around a gate.
+    expect(
+      routeInputs([
+        `async (c) => {
+          const grant = await maybe(() => requireAccessGrant(c, deps, id, "workspace:admin"));
+        }`,
+      ]).permission,
+    ).toBeUndefined();
   });
 
   test("every hand-named request schema is still needed", () => {

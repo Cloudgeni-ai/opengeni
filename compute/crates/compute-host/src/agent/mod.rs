@@ -403,15 +403,9 @@ enum Event<V> {
         step: Step,
         stays: bool,
     },
-    /// A check of whether VM process `incarnation` of `id`'s guest still
-    /// takes connections ended (see [`check`]). `unfrozen`: the host has
-    /// no guard, or its guard says it did not freeze the VMs meanwhile.
-    Checked {
-        id: Id,
-        incarnation: u64,
-        reach: crate::restore_notice::Reach,
-        unfrozen: bool,
-    },
+    /// A check of whether a guest still takes connections ended (see
+    /// [`check`]).
+    Checked(check::Checked),
     /// The check of a template found on disk ended.
     TemplateChecked {
         shape: Shape,
@@ -1065,7 +1059,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Admission refuses what needs disk until it has a reading, and
         // spare VMs wait for a memory reading too, so one is taken before
         // any build starts or request is served.
-        self.sample();
+        self.sample().await;
         self.recovering = false;
         self.start_templates(shapes);
         tracing::info!(
@@ -1242,7 +1236,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick(), if acting => self.sample(),
+                _ = sample.tick(), if acting => self.sample().await,
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),

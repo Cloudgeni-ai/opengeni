@@ -112,6 +112,33 @@ pub fn sync() {
     unsafe { libc::sync() };
 }
 
+/// `struct fstrim_range` of `linux/fs.h`.
+#[repr(C)]
+struct TrimRange {
+    start: u64,
+    len: u64,
+    minlen: u64,
+}
+
+/// `FITRIM`: `_IOWR('X', 121, struct fstrim_range)`.
+const FITRIM: libc::Ioctl = libc::_IOWR::<TrimRange>(0x58, 121);
+
+/// Has the file system holding `path` discard its free space, in runs of
+/// at least `min_len` bytes (`FITRIM`), and returns the bytes it
+/// discarded. A device that takes no discards fails with `EOPNOTSUPP`.
+pub fn trim(path: &str, min_len: u64) -> io::Result<u64> {
+    let dir = File::open(path)?;
+    let mut range = TrimRange {
+        start: 0,
+        len: u64::MAX,
+        minlen: min_len,
+    };
+    // SAFETY: an open descriptor and a `fstrim_range` that outlives the
+    // call, which the kernel reads and then updates in place.
+    check(unsafe { libc::ioctl(dir.as_raw_fd(), FITRIM, &raw mut range) })?;
+    Ok(range.len)
+}
+
 /// Whether any process but this one (and kernel threads) is left.
 pub fn others_alive() -> bool {
     // SAFETY: no pointers; signal 0 only checks.
@@ -371,5 +398,17 @@ pub fn add_default_route(gateway: Ipv4Addr) -> io::Result<()> {
     }) {
         Err(error) if error.raw_os_error() == Some(libc::EEXIST) => Ok(()),
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FITRIM, ioctl_number};
+
+    /// The number `linux/fs.h` gives `FITRIM` on every architecture the
+    /// guest is built for.
+    #[test]
+    fn trim_is_the_kernels_fitrim() {
+        assert_eq!(FITRIM, ioctl_number(0xC018_5879));
     }
 }
