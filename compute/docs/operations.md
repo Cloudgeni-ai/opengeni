@@ -414,6 +414,13 @@ Workflows say `runs-on: <pool name>`, and with a warm template check out
 with `clean: false` so the prepared dependencies stay. A pool's log shows
 each job it takes, each runner it starts and ends, and each warm refresh.
 
+A pool whose jobs deploy to a private destination, such as a cluster's
+API, reaches it as an offer of the hosts (see **Private destinations only
+some sandboxes need** under Network): give that pool a team of its own and
+grant the team the offer (`--team-reach TEAM=NAME`). Its sandboxes, created
+through the front door, reach every offer their team is given and go only
+to hosts that offer them; other pools' teams reach none.
+
 ## Hosts
 
 - **Adding hosts.** On GCP the service grows the group itself as spare
@@ -1071,7 +1078,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   offers it). Grant each team the names its sandboxes may ask for on the
   control service, `--team-reach TEAM=NAME`, repeated (in the chart,
   `computeControl.extraArgs`); a create asking for one its team was not
-  given is refused with 400. A sandbox keeps its `reach` for life,
+  given is refused with 400. E2B's API has no way to name an offer, so a
+  create through the E2B front door (runner pools' among them) reaches
+  every offer its team is given: give such workloads a team of their own.
+  A sandbox keeps its `reach` for life,
   including on another host after a move, which must offer it too; one on
   a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni

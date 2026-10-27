@@ -34,7 +34,9 @@ Sandboxes run untrusted code next to each other and next to the host.
   answer its names; others' do not. A host tells the control service its
   offers' names, placement puts such a sandbox only on a host that makes
   every one it asks for, and the operator grants each team the offers its
-  sandboxes may ask for (`--team-reach`). Otherwise a destination only some
+  sandboxes may ask for (`--team-reach`). A create through the E2B front
+  door, whose API cannot ask, reaches every offer its team is given, so
+  such workloads get a team of their own. Otherwise a destination only some
   workloads need, such as a private cluster's API that only deploy jobs
   use, would open to every sandbox on the host, or need a host of its own
   that placement cannot steer to.

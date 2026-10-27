@@ -2,7 +2,7 @@
 //! the lifecycle it records, and sandbox traffic through the guest's
 //! gateway.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{
-    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, captured_from, host_status, sandbox_status,
-    until,
+    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, TEAM, captured_from, host_status,
+    sandbox_status, until,
 };
 
 /// What the fake guest saw.
@@ -148,7 +148,16 @@ struct Levels {
 /// A host whose sandboxes run on connects and wakes, sleep as asked,
 /// keep holds, report all of it in their status, and run the fake guest.
 async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>) {
-    let host = fleet.host("h1").await;
+    host_offering(fleet, seen, &[]).await
+}
+
+/// As [`host`], for a host that offers sandboxes `offers`.
+async fn host_offering(
+    fleet: &Fleet,
+    seen: &Arc<Seen>,
+    offers: &[&str],
+) -> (FakeHost, Arc<Mutex<Levels>>) {
+    let host = fleet.host_offering("h1", offers).await;
     let levels = Arc::new(Mutex::new(Levels::default()));
     let state = Arc::clone(&levels);
     host.behave(move |envelope| {
@@ -350,6 +359,49 @@ async fn a_template_with_a_disk_size_gives_its_sandboxes_that_disk() {
             assert_eq!(detail["diskSizeMB"], disk, "{detail}");
         }
     }
+}
+
+/// E2B's API cannot name what a sandbox reaches of what hosts offer, so
+/// the front door's creates reach every offer their team is given, and
+/// those of a team given none reach none.
+#[tokio::test]
+async fn an_e2b_create_reaches_the_offers_its_team_is_given() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.reach = BTreeMap::from([(
+            TEAM.to_owned(),
+            BTreeSet::from(["builds".to_owned(), "previews".to_owned()]),
+        )]);
+    })
+    .await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host_offering(&fleet, &seen, &["builds", "previews"]).await;
+    let door = Door::start(&fleet).await;
+    let reach_of = |id: &Value| -> Vec<String> {
+        let id: Id = id.as_str().unwrap().parse().unwrap();
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config.reach),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let given = door.create(json!({"templateID": "base"})).await;
+    assert_eq!(reach_of(&given["sandboxID"]), ["builds", "previews"]);
+    let (status, other) = door
+        .call(
+            reqwest::Method::POST,
+            "/v2/sandboxes",
+            OTHER_KEY,
+            Some(json!({"templateID": "base"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{other}");
+    assert_eq!(reach_of(&other["sandboxID"]), Vec::<String>::new());
 }
 
 #[tokio::test]

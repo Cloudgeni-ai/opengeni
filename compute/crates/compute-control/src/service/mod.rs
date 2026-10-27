@@ -189,6 +189,17 @@ impl Settings {
             None => Ok(()),
         }
     }
+
+    /// Every offer `team`'s sandboxes may reach, in name order: what the
+    /// E2B front door's creates ask for, as E2B's API has no way to name
+    /// one.
+    #[must_use]
+    pub fn reach_of(&self, team: &str) -> Vec<String> {
+        self.reach
+            .get(team)
+            .map(|granted| granted.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Default for Settings {
@@ -777,5 +788,7 @@ mod tests {
             "{refused}"
         );
         assert!(settings.may_reach("team-b", &names(&["previews"])).is_err());
+        assert_eq!(settings.reach_of("team-a"), names(&["builds", "previews"]));
+        assert_eq!(settings.reach_of("team-b"), Vec::<String>::new());
     }
 }

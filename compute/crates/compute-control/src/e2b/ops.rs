@@ -147,15 +147,20 @@ pub async fn create<S: Store>(
     let spec = Spec {
         image: template.image.clone(),
         // E2B's running sandbox sleeps and checkpoints like any other
-        // fleet sandbox whose create says nothing.
-        config: template.disk.into_iter().fold(
-            SandboxConfig::new(
-                template.vcpus,
-                template.memory_mib,
-                front.service.settings().sleep,
-            ),
-            SandboxConfig::with_disk_mib,
-        ),
+        // fleet sandbox whose create says nothing, and reaches every
+        // offer its team is given: E2B's API cannot name one.
+        config: template
+            .disk
+            .into_iter()
+            .fold(
+                SandboxConfig::new(
+                    template.vcpus,
+                    template.memory_mib,
+                    front.service.settings().sleep,
+                ),
+                SandboxConfig::with_disk_mib,
+            )
+            .with_reach(front.service.settings().reach_of(team)),
         agent: None,
     };
     let metadata: BTreeMap<String, String> = body.metadata.unwrap_or_default();

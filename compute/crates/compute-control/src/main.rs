@@ -202,7 +202,8 @@ struct Serve {
     /// What a team's sandboxes may ask to reach of what hosts offer
     /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
     /// given none may ask for none. Taking one away refuses new sandboxes
-    /// that ask for it; those made before keep it.
+    /// that ask for it; those made before keep it. Creates through the E2B
+    /// front door, which cannot ask, reach every offer their team is given.
     #[arg(long = "team-reach", value_parser = parse_team_reach)]
     team_reach: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
