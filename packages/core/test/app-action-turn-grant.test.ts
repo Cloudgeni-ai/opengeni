@@ -43,6 +43,7 @@ test("a person signed in to the app confirms changes, within their own access", 
       accountGrant: { accountId: "org-1", subjectId: member, permissions: ["billing:read"] },
     }),
     delegatedSignInChangesEnabled: false,
+    workspaceSettings: false,
   });
   expect(frozen?.changes).toBe("confirm");
   expect(frozen?.subjectId).toBe(member);
@@ -53,6 +54,7 @@ test("a person signed in to the app confirms changes, within their own access", 
     grant: value,
     authorization: authorization(value, { canonicalLocalHumanSession: true }),
     delegatedSignInChangesEnabled: false,
+    workspaceSettings: false,
   });
   expect(local?.changes).toBe("confirm");
 });
@@ -68,6 +70,7 @@ test("an embed's host-issued token can only read, capped by that token", () => {
     grant: value,
     authorization: authorization(value),
     delegatedSignInChangesEnabled: false,
+    workspaceSettings: false,
   });
   expect(frozen).toEqual({ subjectId: member, changes: "none", permissions: ["workspace:read"] });
   // An external user mapped by the host likewise.
@@ -77,6 +80,7 @@ test("an embed's host-issued token can only read, capped by that token", () => {
       grant: external,
       authorization: authorization(external),
       delegatedSignInChangesEnabled: false,
+      workspaceSettings: false,
     })?.changes,
   ).toBe("none");
   // A deployment that vouches for its embeds opts them in; the cap stays.
@@ -85,8 +89,31 @@ test("an embed's host-issued token can only read, capped by that token", () => {
       grant: value,
       authorization: authorization(value),
       delegatedSignInChangesEnabled: true,
+      workspaceSettings: false,
     }),
   ).toEqual({ subjectId: member, changes: "confirm", permissions: ["workspace:read"] });
+});
+
+test("workspace settings are recorded exactly when the request itself could change them", () => {
+  // A Personal workspace's owner holds no admin grant there but configures it:
+  // their chat records workspace:admin, and nothing else is added.
+  const value = grant();
+  const owner = turnAppActionGrant({
+    grant: value,
+    authorization: authorization(value, { canonicalManagedHumanSession: true }),
+    delegatedSignInChangesEnabled: false,
+    workspaceSettings: true,
+  });
+  expect([...(owner?.permissions ?? [])].sort()).toEqual(
+    ["sessions:create", "sessions:read", "workspace:admin", "workspace:read"].sort(),
+  );
+  const nonOwner = turnAppActionGrant({
+    grant: value,
+    authorization: authorization(value, { canonicalManagedHumanSession: true }),
+    delegatedSignInChangesEnabled: false,
+    workspaceSettings: false,
+  });
+  expect(nonOwner?.permissions).not.toContain("workspace:admin");
 });
 
 test("agents, API keys, services and unverified requests get nothing", () => {
@@ -102,18 +129,25 @@ test("agents, API keys, services and unverified requests get nothing", () => {
         grant: value,
         authorization: authorization(value, { canonicalManagedHumanSession: true }),
         delegatedSignInChangesEnabled: true,
+        workspaceSettings: true,
       }),
     ).toBeNull();
   }
   const value = grant();
   expect(
-    turnAppActionGrant({ grant: value, authorization: null, delegatedSignInChangesEnabled: true }),
+    turnAppActionGrant({
+      grant: value,
+      authorization: null,
+      delegatedSignInChangesEnabled: true,
+      workspaceSettings: true,
+    }),
   ).toBeNull();
   expect(
     turnAppActionGrant({
       grant: value,
       authorization: authorization(value, { contextIntegrity: false }),
       delegatedSignInChangesEnabled: true,
+      workspaceSettings: true,
     }),
   ).toBeNull();
   expect(
@@ -123,6 +157,7 @@ test("agents, API keys, services and unverified requests get nothing", () => {
         canonicalManagedHumanSession: true,
       }),
       delegatedSignInChangesEnabled: true,
+      workspaceSettings: true,
     }),
   ).toBeNull();
 });

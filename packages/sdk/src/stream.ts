@@ -1,6 +1,7 @@
 import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./errors";
 import { parseSseStream } from "./sse";
 import type { SessionEvent } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const SESSION_EVENT_STREAM_COVERAGE = Symbol.for(
   "@opengeni/sdk/session-event-stream-covered-through",
@@ -176,7 +177,7 @@ export async function* streamSessionEvents(
       failedAttempts += 1;
       if (failedAttempts > maxAttempts) {
         throw new OpenGeniStreamError(
-          `event stream gave up after ${maxAttempts} consecutive failed reconnect attempts: ${error instanceof Error ? error.message : String(error)}`,
+          `event stream gave up after ${maxAttempts} consecutive failed reconnect attempts: ${errorMessage(error)}`,
         );
       }
     }
@@ -361,6 +362,77 @@ function markSessionEventStreamCoverage(event: SessionEvent, covered: number): v
     configurable: false,
     writable: false,
   });
+}
+
+/**
+ * The reconnecting reader shared by the workspace streams. Each SSE message
+ * goes through `read`, which returns the advanced cursor and any event to
+ * deliver, or null to skip the message. A dropped stream reopens from the
+ * latest cursor with jittered exponential backoff; a clean end that delivered
+ * nothing new waits one base delay before reopening.
+ */
+export async function* reconnectingCursorStream<Cursor, Event>(input: {
+  /** Names the stream in the give-up error, for example "workspace control stream". */
+  label: string;
+  options: Omit<StreamSessionEventsOptions, "after">;
+  cursor: Cursor;
+  open: (cursor: Cursor, signal: AbortSignal | undefined) => Promise<ReadableStream<Uint8Array>>;
+  read: (data: string, cursor: Cursor) => { cursor: Cursor; event?: Event } | null;
+  sameCursor?: (a: Cursor, b: Cursor) => boolean;
+}): AsyncGenerator<Event, void, void> {
+  const { options } = input;
+  const sameCursor = input.sameCursor ?? Object.is;
+  const signal = options.signal;
+  const reconnect = options.reconnect ?? true;
+  const baseDelayMs = options.reconnectDelayMs ?? 500;
+  const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
+  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
+  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
+  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
+  const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
+  let cursor = input.cursor;
+  let failures = 0;
+  let delayMs = baseDelayMs;
+  let everConnected = false;
+
+  for (;;) {
+    if (signal?.aborted) return;
+    options.onStateChange?.(everConnected || failures > 0 ? "reconnecting" : "connecting");
+    const cursorAtOpen = cursor;
+    try {
+      const body = await input.open(cursor, signal);
+      everConnected = true;
+      failures = 0;
+      delayMs = baseDelayMs;
+      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
+      options.onStateChange?.("live");
+      for await (const message of parseSseStream(
+        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
+      )) {
+        if (signal?.aborted) return;
+        const read = input.read(message.data, cursor);
+        if (!read) continue;
+        cursor = read.cursor;
+        if (read.event !== undefined) yield read.event;
+      }
+      if (!reconnect) return;
+      if (sameCursor(cursor, cursorAtOpen)) {
+        await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
+      }
+      continue;
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) return;
+      if (!reconnect || !isRetryableStreamError(error)) throw error;
+      failures += 1;
+      if (failures > maxAttempts) {
+        throw new OpenGeniStreamError(
+          `${input.label} gave up after ${maxAttempts} reconnect attempts: ${errorMessage(error)}`,
+        );
+      }
+    }
+    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
+    delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
+  }
 }
 
 async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {

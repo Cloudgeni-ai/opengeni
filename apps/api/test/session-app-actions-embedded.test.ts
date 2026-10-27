@@ -104,6 +104,7 @@ async function appActionTools(
     turnId: claim.turn.id,
     call: handlers.get("admin_action_call")!,
     search: handlers.get("admin_actions_search")!,
+    describe: handlers.get("admin_action_describe")!,
   };
 }
 
@@ -183,6 +184,40 @@ describe("an embedded chat's message, through the real embed request path", () =
     });
     expect(usage.isError, textOf(usage)).toBeUndefined();
     expect(JSON.parse(textOf(usage))).toMatchObject({ status: 200 });
+
+    // "How much have I used this month?" needs no lookup first: search names
+    // the chat's workspace, a call without it runs there, and the answer says
+    // its unit and the month it covers, with no budget configured.
+    const found = JSON.parse(
+      textOf(await tools.search({ query: "my usage", limit: 5, offset: 0 })),
+    );
+    expect(found.pathParameterDefaults).toEqual({ workspaceId: person.personalWorkspaceId });
+    expect(found.actions.map((action: { id: string }) => action.id)).toContain("getMyUsage");
+    const described = JSON.parse(textOf(await tools.describe({ id: "getMyUsage" })));
+    expect(described).toMatchObject({
+      pathParameters: ["workspaceId"],
+      pathParameterDefaults: { workspaceId: person.personalWorkspaceId },
+      changes: false,
+    });
+    const now = new Date();
+    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    // No workspaceId: the MCP server fills the left-out path parameters with {}.
+    const thisMonth = await tools.call({
+      id: "getMyUsage",
+      pathParameters: {},
+      query: { period: month },
+    });
+    expect(thisMonth.isError, textOf(thisMonth)).toBeUndefined();
+    const answer = JSON.parse(textOf(thisMonth)) as {
+      status: number;
+      body: { unit: string; period: { start: string | null; end: string | null } };
+    };
+    expect(answer.status).toBe(200);
+    expect(answer.body.unit).toBe("usd_micros");
+    expect(new Date(answer.body.period.start!).toISOString()).toBe(`${month}-01T00:00:00.000Z`);
+    expect(new Date(answer.body.period.end!).getTime()).toBe(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1),
+    );
   });
 });
 
@@ -326,6 +361,11 @@ describe("app actions for a person in an embedded chat", () => {
       "updateMachineAgent",
       "listRigs",
       "listDocumentBases",
+      // Workspace-wide usage and insights need workspace:admin, which the
+      // route checks through a helper or inside a measured phase.
+      "getUsage",
+      "getWorkspaceInsights",
+      "getWorkspaceAllowance",
     ])
       expect(offered).not.toContain(id);
     for (const id of offered) {

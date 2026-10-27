@@ -13,7 +13,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
 import { setActiveSandbox } from "./active-sandbox";
-import { nestedPostgresSqlState } from "./persistence-errors";
+import { nestedErrorRecords, nestedPostgresSqlState } from "./persistence-errors";
 import { registerSessionWorkflowWakeInTransaction } from "./session-control";
 import { endSessionRealtimeForPrivateTransitionInTransaction } from "./session-realtime";
 import {
@@ -123,26 +123,12 @@ const SESSION_FORK_POINT_REFUSALS: ReadonlyMap<string, SessionForkPointRefusal> 
   ["This message splits an unfinished tool exchange", "unfinished_tool_exchange"],
 ]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object");
-}
-
 /** Extract only the fixed fork-boundary refusal vocabulary from a nested driver error. */
 export function nestedSessionForkPointRefusal(error: unknown): SessionForkPointRefusal | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     if (typeof current.message === "string") {
       const refusal = SESSION_FORK_POINT_REFUSALS.get(current.message);
       if (refusal) return refusal;
-    }
-    for (const key of ["cause", "original", "driverError", "error", "errors"] as const) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return null;
@@ -150,20 +136,10 @@ export function nestedSessionForkPointRefusal(error: unknown): SessionForkPointR
 
 /** Extract only the fixed quiescence DETAIL vocabulary, never arbitrary driver detail. */
 export function nestedSessionTenancyBlocker(error: unknown): SessionTenancyBlocker | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     for (const key of ["detail", "detailMessage"] as const) {
       const parsed = SessionTenancyBlockerSchema.safeParse(current[key]);
       if (parsed.success) return parsed.data;
-    }
-    for (const key of ["cause", "original", "driverError", "error", "errors"] as const) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
     }
   }
   return null;

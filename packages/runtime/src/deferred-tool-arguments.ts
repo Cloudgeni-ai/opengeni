@@ -13,15 +13,12 @@
  * whose JSON text parses to a value of an allowed type. Anything else is left
  * unchanged for the normal schema validation to accept or reject.
  */
+import { isRecord } from "@opengeni/contracts/values";
 
 type JsonSchema = Record<string, unknown>;
 
 const NON_STRING_TYPES = new Set(["integer", "number", "boolean", "null", "array", "object"]);
 const MAX_DEPTH = 8;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parseFiniteJson(text: string): unknown {
   return JSON.parse(text, (_key, value: unknown) => {

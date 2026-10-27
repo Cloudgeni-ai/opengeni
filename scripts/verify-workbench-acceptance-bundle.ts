@@ -19,6 +19,7 @@ import {
   type ReleaseProducerMetadata,
   type TrustedReleaseArtifact,
 } from "./release-provenance";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
@@ -575,7 +576,7 @@ function producerMetadata(
       sourceTreeSha: expected.sourceTreeSha,
     });
   } catch (error) {
-    errors.push(`${path} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    errors.push(`${path} is invalid: ${errorMessage(error)}`);
     return null;
   }
 }

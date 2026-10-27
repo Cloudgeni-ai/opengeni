@@ -78,6 +78,26 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
   });
 }
 
+/**
+ * Core's "no credits for this model" refusal (a 402 whose cause is the
+ * `insufficient_credits` limit decision) keeps its public `payment_required`
+ * code and gains the stable `details.code: "insufficient_credits"`, so
+ * callers can tell it from other 402s without matching message text.
+ */
+export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
+  if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (cause.code !== "insufficient_credits") return null;
+  return new ApiHttpError(402, {
+    code: "payment_required",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "insufficient_credits" },
+  });
+}
+
 const SESSION_USAGE_LIMIT_ERROR_CODES: Record<SessionUsageLimitHttpError["code"], ErrorCode> = {
   session_usage_limit_conflict: "conflict",
   session_usage_limit_not_root: "conflict",

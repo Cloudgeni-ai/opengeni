@@ -58,6 +58,8 @@ export * from "./skills";
 export * from "./agent-config";
 export * from "./first-party-tool-authorization";
 export * from "./model-availability";
+export * from "./model-residency";
+import { ClientModelResidencyV1 } from "./model-residency";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -4550,7 +4552,7 @@ export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
     viewerId: primitives.uuid,
     // Fence: the token logically dies when the box is re-elected (epoch++).
     leaseEpoch: primitives.nonnegativeInteger,
-    // v1 is always "view"; "control" is the never-granted raw-input plane.
+    // "view" only watches; "control" lets the relay forward the viewer's input.
     mode: z.enum(["view", "control"]),
     // 6080 (noVNC); pins the token to ONE exposed port.
     port: primitives.positiveInteger,
@@ -22512,6 +22514,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     /** Transient health/readiness hint; membership in config models determines admission. */
     availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: primitives.string.regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+    residency: ClientModelResidencyV1.optional(),
   }),
 );
 export type ClientModel = z.infer<typeof ClientModel>;

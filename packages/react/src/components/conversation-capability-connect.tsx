@@ -1,8 +1,4 @@
-import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
-import {
-  PERSONAL_INTEGRATION_SETUP_PERMISSION,
-  personalIntegrationSetupAccess,
-} from "@opengeni/contracts/personal-integration-setup";
+import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
 import type { AccessContext, CapabilityCatalogItem, Permission } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "../timeline/types";
@@ -72,11 +68,12 @@ export function isAgentCapabilityRequest(item: AuthNeededItem): boolean {
  * person's own grant can finish every step it takes and the session proxy
  * lets the browser set chat tools: add it to this chat (`sessions:control`),
  * and either use the workspace's shared account (`connections:read`) or
- * connect an account as {@link personalIntegrationSetupAccess} allows (with
- * only `connections:personal`, their own account, enabling a reviewed OAuth
+ * connect an account as personal integration setup allows (with only
+ * `connections:personal`, their own account, enabling a reviewed OAuth
  * integration for personal accounts if it is not on yet). Anything else keeps
  * the default row. Host-managed connections (`authoritySource: "host"`)
- * never come here.
+ * never come here. The rule is `inChatCapabilitySetup`, which the agent's
+ * setup tool also applies, so the agent's reply matches this card.
  */
 export function inChatConnectDecision(
   item: AuthNeededItem,
@@ -86,37 +83,17 @@ export function inChatConnectDecision(
   if (!chatConnections || !isAgentCapabilityRequest(item)) return { kind: "default" };
   if (support.status !== "ready") return { kind: "default" };
   const requested = item.capability!;
-  const permissions = [...support.permissions];
-  const grant = { permissions, permissionMode: support.permissionMode };
-  const can = (permission: Permission) =>
-    permissions.includes(permission) ||
-    (support.permissionMode !== "explicit" && permissions.includes("workspace:admin"));
-  if (integrationDefinitionIdFromCapabilityId(requested.id)) {
-    // Connecting your own account is the whole step: the integration's tools
-    // are installed for that account only, never for the workspace, so the
-    // personal setup permission (included in connections:write) is enough.
-    return can("sessions:control") &&
-      (can(PERSONAL_INTEGRATION_SETUP_PERMISSION) || can("connections:write"))
-      ? { kind: "integration", capabilityId: requested.id, name: requested.name }
-      : { kind: "unavailable" };
-  }
   const capability = support.catalog.get(requested.id);
-  if (!capability || capability.kind !== "mcp" || capability.authKind !== "oauth2")
-    return { kind: "default" };
-  if (!can("sessions:control")) return { kind: "unavailable" };
-  const usesSharedAccount =
-    capability.enabled &&
-    capability.connectionRef !== null &&
-    capability.connectionRef !== undefined &&
-    capability.connectionRef.subjectScope !== "subject";
-  if (usesSharedAccount)
-    return can("connections:read")
-      ? { kind: "card", item: capability, personalOnly: false }
-      : { kind: "unavailable" };
-  const access = personalIntegrationSetupAccess(grant, capability);
-  return access
-    ? { kind: "card", item: capability, personalOnly: access === "personal" }
-    : { kind: "unavailable" };
+  const setup = inChatCapabilitySetup(
+    { permissions: [...support.permissions], permissionMode: support.permissionMode },
+    requested.id,
+    capability,
+  );
+  if (setup.kind === "integration")
+    return { kind: "integration", capabilityId: requested.id, name: requested.name };
+  if (setup.kind === "card" && capability)
+    return { kind: "card", item: capability, personalOnly: setup.personalOnly };
+  return setup.kind === "unavailable" ? { kind: "unavailable" } : { kind: "default" };
 }
 
 /**

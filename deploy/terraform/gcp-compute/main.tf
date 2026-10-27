@@ -61,6 +61,8 @@ resource "google_service_account" "control" {
 # What the control service does to the group (crates/compute-control/src/group.rs),
 # with its identity's token from the metadata server: read and resize the
 # group, list its instances, and read, reset, stop or start one to fence it.
+# It also reads the boot a host wrote to its instance's guest attributes, to
+# find a machine that restarted already fenced.
 resource "google_project_iam_custom_role" "control" {
   role_id     = replace("${var.name_prefix}_control", "-", "_")
   title       = "Opengeni compute control service"
@@ -69,6 +71,7 @@ resource "google_project_iam_custom_role" "control" {
     "compute.instanceGroupManagers.get",
     "compute.instanceGroupManagers.update",
     "compute.instances.get",
+    "compute.instances.getGuestAttributes",
     "compute.instances.reset",
     "compute.instances.start",
     "compute.instances.stop",
@@ -268,7 +271,9 @@ resource "google_compute_instance_template" "host" {
 
   scheduling {
     # Bare-metal machines cannot live-migrate. A host that restarts comes
-    # back as a fresh registration; the fleet fences what it ran (ADR 18).
+    # back as a fresh registration; the fleet fences what it ran (ADR 18),
+    # or finds it fenced already by the new boot the host writes to its
+    # guest attributes.
     on_host_maintenance = var.nested ? "MIGRATE" : "TERMINATE"
     automatic_restart   = true
   }
@@ -282,6 +287,7 @@ resource "google_compute_instance_template" "host" {
   metadata = {
     block-project-ssh-keys   = length(var.ssh_source_ranges) == 0 ? "true" : "false"
     enable-oslogin           = "TRUE"
+    enable-guest-attributes  = "TRUE"
     compute-bundle-url       = var.host_bundle.url
     compute-bundle-sha256    = var.host_bundle.sha256
     compute-control          = var.control_url

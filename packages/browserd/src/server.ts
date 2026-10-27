@@ -13,6 +13,7 @@ import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
@@ -82,6 +83,7 @@ import {
   type BrowserSupervisorSessionOptions,
 } from "./supervisor";
 import { RfbClientFilter } from "./rfb-client-filter";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -879,14 +881,18 @@ export class BrowserControlServer {
       );
     }
     if (operation === "state" && request.method === "GET") {
-      return success(await this.supervisor.targetState(reference, targetId));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.targetState(reference, targetId),
+      );
     }
     if (operation === "dom-read" && request.method === "POST") {
       const parsed = BrowserDomReadRequest.safeParse(await readJson(request));
       if (!parsed.success) {
         throw new ProtocolError("invalid_action", "browser DOM read request is invalid", 400);
       }
-      return success(await this.supervisor.readDom(reference, targetId, parsed.data));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.readDom(reference, targetId, parsed.data),
+      );
     }
     if (operation === "diagnostics" && request.method === "GET") {
       return success(
@@ -1026,12 +1032,20 @@ export class BrowserControlServer {
         request,
         async () => await supervisor.action(command),
       );
-      // Older clients parse receipts strictly. Return role stand-ins only to
-      // a caller that asked for them.
-      if (url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1")
-        return success(receipt);
-      const { roleStandIns: _roleStandIns, ...withoutStandIns } = receipt;
-      return success(withoutStandIns);
+      // Older clients parse receipts strictly. Return role stand-ins and
+      // unconfirmed input only to a caller that asked for each.
+      const { roleStandIns, unconfirmedInput, ...plain } = receipt;
+      return success({
+        ...plain,
+        ...(roleStandIns &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1"
+          ? { roleStandIns }
+          : {}),
+        ...(unconfirmedInput &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER) === "1"
+          ? { unconfirmedInput }
+          : {}),
+      });
     }
     if (segments.length === 4 && segments[3] === "heartbeat") {
       if (request.method !== "POST") {
@@ -2053,7 +2067,7 @@ export class BrowserControlServer {
           event: "browser.frame.socket.failed",
           browserSessionId: data.reference.browserSessionId,
           targetId: data.targetId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
           at: new Date().toISOString(),
         }),
       );
@@ -3157,10 +3171,6 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
   if (Object.keys(value).some((key) => !allowedSet.has(key))) {
     throw new ProtocolError("invalid_action", "request contains unknown fields", 400);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeOrigin(value: string): string {

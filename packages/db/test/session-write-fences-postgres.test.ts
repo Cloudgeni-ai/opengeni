@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { bootstrapWorkspace, createSession } from "../src";
 import { createDb } from "../src/database";
+import { errorMessage } from "@opengeni/contracts/values";
 
 let shared: SharedTestDatabase;
 let pool: ReturnType<typeof createDb>;
@@ -64,7 +65,7 @@ async function probeBindingFence(statement: string): Promise<FenceProbe> {
       await tx
         .savepoint((savepoint) => savepoint.unsafe(statement, [sessionId]))
         .catch((cause: unknown) => {
-          error = cause instanceof Error ? cause.message : String(cause);
+          error = errorMessage(cause);
         });
       const [row] = await tx<{ calls: number }[]>`
         select coalesce(pg_stat_get_xact_function_calls(

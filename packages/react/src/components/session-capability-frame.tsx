@@ -11,6 +11,7 @@ export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
+  /** A short kind label beside the name; empty shows none. */
   typeLabel: string;
   description: string;
   skill: boolean;
@@ -93,7 +94,7 @@ export function SessionCapabilityFrame({
         <h3>{name}</h3>
         <span>{subtitle}</span>
       </div>
-      <span className="og-session-capability-type">{typeLabel}</span>
+      {typeLabel ? <span className="og-session-capability-type">{typeLabel}</span> : null}
     </>
   );
   return (
@@ -187,8 +188,7 @@ export function SessionCapabilityFrame({
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {typeLabel}
-                  {subtitle ? ` · ${subtitle}` : ""}
+                  {[typeLabel, subtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (

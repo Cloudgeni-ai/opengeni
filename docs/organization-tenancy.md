@@ -808,7 +808,7 @@ reachable by link.
 
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only
-`organization_inference_residency_events`, migration 0999,
+`organization_inference_residency_events`, migration 1002,
 `/v1/organizations/:organizationId/inference-residency`). Any member can read
 it. Owners and admins, an organization key with administration rights, or an
 agent with the person's `account:admin` can turn it on; only an owner or admin
@@ -822,7 +822,7 @@ event together; the events table also rejects an off change recorded for any
 other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
-version, so repeating "on" never makes someone else's change stale. 0999
+version, so repeating "on" never makes someone else's change stale. 1002
 withholds the runtime's EXECUTE on that
 function for one release (see
 [migrations-expand-contract.md](migrations-expand-contract.md)); until a later

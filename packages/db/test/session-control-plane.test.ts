@@ -8869,6 +8869,54 @@ describe("clean session control plane", () => {
     });
   });
 
+  // The `session-mcp:` prefix is the store's guarantee that a session-MCP approval
+  // never carries a connector connection row's id. A host that registered a local
+  // MCP server with its own connection identity used to hand that identity through
+  // and hit this refusal at the pause (reported in #2537); the runtime now always
+  // sends the synthetic form. The store's invariant stays exactly as strict.
+  test("session MCP approval refuses a bare host connection identity and accepts the synthetic form", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run one host-registered MCP action");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`claim failed: ${claim.reason}`);
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      initiator: claim.turn.initiator,
+    };
+    const call = {
+      approvalId: "host-registered-mcp-call",
+      serverId: "host-pms",
+      toolName: "task_create",
+      arguments: { title: "exactly once" },
+      approvalMode: "session_mcp" as const,
+    };
+    await expect(
+      prepareConnectorActionApproval(client.db, identity, {
+        ...call,
+        connectionId: `host-attempt:${attemptId}`,
+      }),
+    ).rejects.toThrow("session MCP approval is missing its synthetic connection identity");
+    expect(
+      await prepareConnectorActionApproval(client.db, identity, {
+        ...call,
+        connectionId: `session-mcp:host-pms:${"b".repeat(64)}`,
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
+  });
+
   test("a committed session control command replays before its stale control fence is checked", async () => {
     const { grant, session } = await fixture();
     const before = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>

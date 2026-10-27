@@ -26,6 +26,7 @@ import {
   runArtifactRuntimeCli,
   type VerifiedArtifactRuntimeLocation,
 } from "./runtime-cli";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const DEVELOPMENT_ARTIFACT_RUNTIME_ENVIRONMENT = {
   manifest: "OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST",
@@ -654,10 +655,6 @@ function exactRecord(
     invalid(`${name} has unexpected fields`);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sha256(value: Uint8Array): `sha256:${string}` {

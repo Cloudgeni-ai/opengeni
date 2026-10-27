@@ -64,6 +64,7 @@ import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { routeRetired } from "../http/deprecation";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
@@ -905,7 +906,7 @@ function documentHttpException(error: unknown): HTTPException {
 
 function documentDomainErrorMessage(error: unknown): string {
   let current: unknown = error;
-  let message = error instanceof Error ? error.message : String(error);
+  let message = errorMessage(error);
   const seen = new Set<unknown>();
   while (current && typeof current === "object" && !seen.has(current) && seen.size < 8) {
     seen.add(current);

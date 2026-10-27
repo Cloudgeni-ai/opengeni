@@ -19,6 +19,7 @@ import {
   budgetFixLines,
   budgetViolationsForFile,
 } from "./migration-test-budgets";
+import { errorMessage } from "@opengeni/contracts/values";
 
 function main(): void {
   const root = process.cwd();
@@ -61,6 +62,6 @@ function main(): void {
 try {
   main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 }

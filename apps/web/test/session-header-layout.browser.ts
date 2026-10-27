@@ -48,6 +48,12 @@ type HeaderBox = {
   height: number;
   overflow: boolean;
   titleCenter: number | null;
+  /** The title's width; the row never squeezes it below 2rem. */
+  titleWidth: number;
+  /** The title's untruncated width, for titles shorter than 2rem. */
+  titleNaturalWidth: number;
+  /** Header controls that stick out of the header. */
+  outsideControls: string[];
   chipCenter: number | null;
   chipText: string | null;
   chipName: string | null;
@@ -75,11 +81,22 @@ async function measure(page: Page): Promise<HeaderBox[]> {
       const earlier = header.querySelector<HTMLElement>(
         'nav[aria-label="Session ancestry"] button[aria-label$="earlier sessions"]',
       );
+      const headerBox = header.getBoundingClientRect();
+      const title = header.querySelector("button[title$='click to rename']");
       return {
         state: section.getAttribute("data-header-state")!,
         height: header.getBoundingClientRect().height,
         overflow: header.scrollWidth > header.clientWidth + 1,
-        titleCenter: center(header.querySelector("button[title$='click to rename']")),
+        titleCenter: center(title),
+        titleWidth: title?.getBoundingClientRect().width ?? 0,
+        titleNaturalWidth: title?.scrollWidth ?? 0,
+        outsideControls: [...header.querySelectorAll<HTMLElement>("button, a[href]")]
+          .filter((control) => {
+            const box = control.getBoundingClientRect();
+            if (box.width === 0) return false;
+            return box.left < headerBox.left - 0.5 || box.right > headerBox.right + 0.5;
+          })
+          .map((control) => control.getAttribute("aria-label") ?? control.innerText.trim()),
         chipCenter: center(chip),
         chipText: chip?.innerText.trim() ?? null,
         chipName: chip?.getAttribute("aria-label") ?? null,
@@ -92,9 +109,14 @@ async function measure(page: Page): Promise<HeaderBox[]> {
 }
 
 const widths = [
-  { name: "desktop", viewport: { width: 1280, height: 900 }, phone: false },
-  { name: "tablet", viewport: { width: 768, height: 900 }, phone: false },
-  { name: "phone", viewport: { width: 390, height: 844 }, phone: true },
+  { name: "desktop", viewport: { width: 1280, height: 900 }, phone: false, tiny: false },
+  { name: "tablet", viewport: { width: 768, height: 900 }, phone: false, tiny: false },
+  { name: "phone", viewport: { width: 390, height: 844 }, phone: true, tiny: false },
+  // The smallest phones, with the access-key control too, and the same phone
+  // at 200% zoom. Here the actions (and at 200% the icons) move to a second
+  // row rather than crush the title.
+  { name: "small-phone", viewport: { width: 320, height: 740 }, phone: true, tiny: true },
+  { name: "zoomed-phone", viewport: { width: 160, height: 370 }, phone: true, tiny: true },
 ] as const;
 
 const browser = await chromium.launch({
@@ -105,24 +127,45 @@ const browser = await chromium.launch({
 });
 const errors: string[] = [];
 try {
-  for (const { name, viewport, phone } of widths) {
+  for (const { name, viewport, phone, tiny } of widths) {
     const page = await browser.newPage({ viewport, isMobile: phone, hasTouch: phone });
     page.on("pageerror", (error) => errors.push(`${name}: ${error.message}`));
-    await page.goto(`${base}${previewPath}?theme=light`);
+    await page.goto(`${base}${previewPath}?theme=light${tiny ? "&keyAuth=1" : ""}`);
     await expect(page.getByText("Watch the release checks")).toBeVisible();
+    // Measure first: a full-page screenshot briefly changes a phone's
+    // emulation (so phones capture only the screen), and the page is still
+    // settling for a moment after it.
+    const boxes = await measure(page);
     if (output) {
-      await page.screenshot({ path: path.join(output, `header-${name}.png`), fullPage: true });
+      await page.screenshot({ path: path.join(output, `header-${name}.png`), fullPage: !phone });
       await page
         .locator('section[data-header-state="Deep child, paused by its manager"]')
         .screenshot({ path: path.join(output, `header-deep-${name}.png`) });
     }
-    const boxes = await measure(page);
+    for (const box of boxes) {
+      expect(box.overflow, `${name} ${box.state} overflows`).toBe(false);
+      expect(box.outsideControls, `${name} ${box.state} controls outside`).toEqual([]);
+      expect(box.titleCenter, `${name} ${box.state} title`).not.toBeNull();
+      expect(box.titleWidth, `${name} ${box.state} title width`).toBeGreaterThanOrEqual(
+        Math.min(tiny ? 40 : 32, box.titleNaturalWidth),
+      );
+    }
+    if (tiny) {
+      // The way back stays beside the title even here.
+      for (const box of boxes) {
+        if (box.crumbCenter === null) continue;
+        expect(
+          Math.abs(box.crumbCenter - box.titleCenter!),
+          `${name} ${box.state}: the parent link is on the title's row`,
+        ).toBeLessThanOrEqual(2);
+      }
+      await page.close();
+      continue;
+    }
     const heights = new Set(boxes.map((box) => Math.round(box.height)));
     // One height for every chat: an automation or a parent never adds a row.
     expect([...heights], `${name} header heights ${JSON.stringify(boxes)}`).toHaveLength(1);
     for (const box of boxes) {
-      expect(box.overflow, `${name} ${box.state} overflows`).toBe(false);
-      expect(box.titleCenter, `${name} ${box.state} title`).not.toBeNull();
       if (box.chipCenter !== null) {
         expect(
           Math.abs(box.chipCenter - box.titleCenter!),

@@ -111,6 +111,7 @@ import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-cor
 import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -1072,10 +1073,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   if (usageLimit && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
-    const failurePayload = codexUsageLimitFailurePayload(
-      usageLimit,
-      error instanceof Error ? error.message : String(error),
-    );
+    const failurePayload = codexUsageLimitFailurePayload(usageLimit, errorMessage(error));
     if (
       !(await eventing.settle!({
         events: [

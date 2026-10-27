@@ -19,6 +19,7 @@ import {
   type Profile,
   type SmokeManifest,
 } from "./test-registry-dependency-exports";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type PackedCandidate = { manifest: SmokeManifest; tarball: string };
 export type RegistryManifest = SmokeManifest & { dist: { tarball: string; integrity: string } };
@@ -287,7 +288,7 @@ export async function proveEffectiveConsumers(
           `[effective-exports] ${name} locally packed root ${lane} browser/Node consumers passed\n`,
         );
       } catch (error) {
-        failures.push(`${name} ${lane}: ${error instanceof Error ? error.message : String(error)}`);
+        failures.push(`${name} ${lane}: ${errorMessage(error)}`);
       }
     }
   }
