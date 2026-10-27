@@ -9,6 +9,10 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildFilesMcpServer } from "../../src/mcp/files";
 import { buildOpenGeniMcpServer } from "../../src/mcp/server";
+import {
+  isHarnessControlMcpFunctionTool,
+  isInteractionEntryFunctionTool,
+} from "../../../../packages/runtime/src/codex-tool-search";
 import type { ToolSearchIndex } from "../../../../packages/runtime/src/tool-discovery-ranking";
 import { withMcpClient } from "./first-party-tool-client";
 
@@ -33,7 +37,10 @@ function searchable(name: string, description: string, parameters: unknown): Sea
  * The default first-party tools an agent turn can search, with their real
  * descriptions and schemas, named as the runtime names them: the Opengeni
  * MCP server (with selfhosted machines on), the files server, and the
- * in-process browser and computer tools.
+ * in-process browser and computer tools. Tools the runtime keeps in the first
+ * request instead (harness controls and interaction entry tools) are left out
+ * with the runtime's own predicates, so a ranking test can only expect a
+ * result a real search can return.
  */
 export async function defaultToolSearchPool(): Promise<SearchableTool[]> {
   const grant: AccessGrant = {
@@ -85,9 +92,14 @@ export async function defaultToolSearchPool(): Promise<SearchableTool[]> {
       definition.inputSchema,
     ),
   );
+  const mcpServerIds = new Set(["opengeni", "files"]);
   return [
     ...(await listed(buildOpenGeniMcpServer(deps, grant), "opengeni")),
     ...(await listed(buildFilesMcpServer(deps, grant), "files")),
     ...interaction,
-  ];
+  ].filter(
+    (tool) =>
+      !isHarnessControlMcpFunctionTool(tool, mcpServerIds) &&
+      !isInteractionEntryFunctionTool(tool, mcpServerIds),
+  );
 }

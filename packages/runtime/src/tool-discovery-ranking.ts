@@ -44,9 +44,6 @@ const OPERATIONS = [
   "send post deliver",
   "run execute trigger",
 ].map((group) => new Set(words(group)));
-// Generic device vocabulary, in the same spirit: people name their own computer
-// in many ways, and tools that act on a computer rarely use every word.
-const DEVICES = new Set(words("computer laptop desktop mac pc machine workstation"));
 const GENERIC_QUERY_TERMS = new Set(words("tool capability operation details available"));
 const isResourceTerm = (token: string) =>
   !OPERATIONS.some((group) => group.has(token)) && !GENERIC_QUERY_TERMS.has(token);
@@ -68,8 +65,6 @@ type Document = {
   terms: Set<string>;
   operation: Set<string> | undefined;
   resources: string[];
-  /** The tool's name or capability sentence names a device. */
-  device: boolean;
 };
 
 function field(text: string): Field {
@@ -103,9 +98,6 @@ function document(tool: Tool): Document {
     terms: new Set(fields.flatMap((f) => [...f.frequencies.keys()])),
     operation: OPERATIONS.find((group) => operationWord && group.has(operationWord)),
     resources: [...new Set(nameWords.filter(isResourceTerm))],
-    device: [...DEVICES].some(
-      (word) => fields[0]!.frequencies.has(word) || fields[1]!.frequencies.has(word),
-    ),
   };
 }
 
@@ -205,9 +197,6 @@ export class ToolSearchIndex {
     const resourceTokens = tokens.filter(isResourceTerm);
     for (const group of operations)
       for (const synonym of group) if (!queryWeights.has(synonym)) queryWeights.set(synonym, 0.25);
-    const namesDevice = tokens.some((token) => DEVICES.has(token));
-    if (namesDevice)
-      for (const synonym of DEVICES) if (!queryWeights.has(synonym)) queryWeights.set(synonym, 0.5);
     const weights = [4, 2, 0.5, 0.5];
     const normalization = [0.2, 0.25, 0.5, 0.5];
     return this.documents
@@ -230,9 +219,6 @@ export class ToolSearchIndex {
         const namedTerms = tokens.filter((token) => doc.fields[0]!.frequencies.has(token)).length;
         score *= 1 + namedTerms / tokens.length;
         if (doc.operation && operations.has(doc.operation)) score *= 1.5;
-        // A request about a computer is first a request for a tool that can
-        // reach one, whatever else it mentions (files, folders, downloads).
-        if (namesDevice && doc.device) score *= 2;
         const queryCoverage = resourceTokens.length
           ? resourceTokens.filter(
               (token) =>

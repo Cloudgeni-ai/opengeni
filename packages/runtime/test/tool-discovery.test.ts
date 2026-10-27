@@ -147,21 +147,6 @@ describe("tool discovery ranking", () => {
       "files__list_files",
     ]);
   });
-  test("a device named in the query reaches tools that name another device word", () => {
-    const download = candidate(
-      "files__get_download_url",
-      "Get a download URL for a file in the workspace's Downloads folder",
-    );
-    const computers = candidate(
-      "machines__list",
-      "List the person's connected computers so work can run on them",
-    );
-    const index = new ToolSearchIndex([download, computers]);
-    expect(index.rank("list files in the Downloads folder on my laptop", 1)).toEqual([computers]);
-    expect(index.rank("my Mac", 1)).toEqual([computers]);
-    expect(index.rank("list files in the Downloads folder", 1)).toEqual([download]);
-    expect(index.rank("get a download URL for a file", 1)).toEqual([download]);
-  });
 });
 
 describe("compact candidates and exact schema loading", () => {
