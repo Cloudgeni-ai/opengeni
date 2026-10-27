@@ -164,6 +164,29 @@ EU route, and nothing falls back to a route that is not EU.
 A refusal is `InferenceRegionRestrictedError` (code `region_restricted`), whose
 message says the model is not supported in EU.
 
+## Recorded region
+
+Every agent-session model call that writes a model-call fact (turn responses,
+the aggregate billing fallback, compaction and session titles) records where
+the route that served it processes data. Side-feature calls (decision models,
+transcription, embeddings, web search and the standalone model-call API) record
+it on `usage_events.processing_residency` instead (#6221). The worker resolves
+the record from the route that actually served the call (the resolved
+`ConfiguredModel.residency`, or `builtinModelResidency` for the built-in
+fallback), never from a name, and stores its claim
+(`ModelCallProcessingResidencyV1`: `geography`, `deploymentType`, `regions`,
+never evidence) on the call's `model_call_facts.processing_residency` and its
+durable `agent.model.usage` event as `processingResidency`. The independent
+title freezes its accepted route's record in its request; a title whose route
+was never resolved records `unknown`, not the turn's record. Facts rebuilt from
+usage events keep the event's value. A new call whose route has no readable
+record is recorded as `unknown`; null means only that the call was recorded
+before calls carried one (migration 1030). A stored `eu` claim reads back as
+`eu` only under the same rules as the route record (an EU-capable deployment
+type and, for Azure and Bedrock, EU regions only); anything else reads as
+`unknown`. Insights calls expose each call's `processingGeography`; it is
+undefined in responses from servers older than this release.
+
 ## Side features
 
 Every server feature that sends content to a model or AI provider outside the
