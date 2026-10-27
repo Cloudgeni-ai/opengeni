@@ -14,7 +14,16 @@ import {
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
 import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
-import { lazy, StrictMode, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  lazy,
+  StrictMode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   describeWorkbook,
@@ -36,7 +45,11 @@ const apiBaseUrl =
   String(import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/u, "") || window.location.origin;
 /** The web app, where pages the pane doesn't show (settings, billing) open. */
 const consoleUrl = window.location.origin;
+/** The web app's sign-up tab (`?mode=signup`), for people without an account. */
+const signUpUrl = `${consoleUrl}/?mode=signup`;
 const WORKSPACE_KEY = "opengeni.office.workspace";
+/** A retry stays visibly in progress at least this long, even when the answer is instant. */
+const RETRY_MIN_MS = 600;
 
 // The session panel's terminal, desktop viewer, code editor and highlighted diffs.
 enableWorkbench();
@@ -58,6 +71,15 @@ function remember(key: string, value: string): void {
     localStorage.setItem(key, value);
   } catch {
     // Not kept across reloads.
+  }
+}
+
+/** Opens a page in the person's browser: the task pane cannot navigate away. */
+function openInBrowser(url: string): void {
+  try {
+    office().context.ui.openBrowserWindow(url);
+  } catch {
+    window.open(url, "_blank", "noopener");
   }
 }
 
@@ -118,6 +140,68 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
           {pending ? "Signing in…" : "Sign in"}
         </button>
         {error ? <p className="pane-error">{error}</p> : null}
+        <p className="pane-note">
+          New to Opengeni?{" "}
+          <button type="button" className="pane-link" onClick={() => openInBrowser(signUpUrl)}>
+            Create an account
+          </button>
+          , then come back here and sign in.
+        </p>
+      </main>
+    </PaneScreen>
+  );
+}
+
+/**
+ * A pane screen that can't show chats yet, with a way forward and a way out.
+ * It stays on screen while a retry runs; the buttons keep their place (and
+ * focus) when the answer changes the notice.
+ */
+function PaneNotice(props: {
+  kind: "load-error" | "no-workspace";
+  title: string;
+  message: string;
+  openWeb?: boolean;
+  retrying: boolean;
+  onRetry: () => void;
+  onSignOut: () => void;
+}) {
+  const error = props.kind === "load-error";
+  const retryButton = useRef<HTMLButtonElement>(null);
+  const wasRetrying = useRef(props.retrying);
+  useEffect(() => {
+    // A finished retry leaves focus on its button, also where clicking doesn't focus (Safari).
+    if (wasRetrying.current && !props.retrying) retryButton.current?.focus();
+    wasRetrying.current = props.retrying;
+  }, [props.retrying]);
+  return (
+    <PaneScreen>
+      <main className="pane-center" aria-busy={props.retrying}>
+        {/* Keyed by kind: a changed notice is a new live region and is announced. */}
+        <div key={props.kind} className="pane-notice" role={error ? "alert" : "status"}>
+          <h1>{props.title}</h1>
+          <p className={error ? "pane-error" : undefined}>{props.message}</p>
+        </div>
+        {props.openWeb ? (
+          <button type="button" className="pane-primary" onClick={() => openInBrowser(consoleUrl)}>
+            Open Opengeni
+          </button>
+        ) : null}
+        <div className="pane-actions">
+          {/* aria-disabled rather than disabled, so the button keeps keyboard focus. */}
+          <button
+            ref={retryButton}
+            type="button"
+            className="pane-secondary"
+            aria-disabled={props.retrying}
+            onClick={props.retrying ? undefined : props.onRetry}
+          >
+            {props.retrying ? "Trying…" : "Try again"}
+          </button>
+          <button type="button" className="pane-secondary" onClick={props.onSignOut}>
+            Sign out
+          </button>
+        </div>
       </main>
     </PaneScreen>
   );
@@ -204,6 +288,8 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [retrying, setRetrying] = useState(false);
   const [link, setLink] = useState<WorkbookLinkState>({ status: "connecting" });
   const [busy, setBusy] = useState(false);
   const [workbook, setWorkbook] = useState<OfficeWorkbookInfo | null>(null);
@@ -211,24 +297,39 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
 
   useEffect(() => {
     let live = true;
+    // A retry keeps the notice up until the answer arrives, so nothing blanks;
+    // the minimum makes a retry that gets the same answer visibly finish.
+    const shown =
+      attempt > 0
+        ? new Promise<void>((resolve) => setTimeout(resolve, RETRY_MIN_MS))
+        : Promise.resolve();
     client
       .listWorkspaces()
-      .then((list) => {
+      .then(async (list) => {
+        await shown;
         if (!live) return;
         setWorkspaces(list);
+        setLoadError(null);
         setWorkspaceId((current) =>
           current && list.some((each) => each.id === current) ? current : (list[0]?.id ?? null),
         );
+        setRetrying(false);
       })
-      .catch((caught: unknown) => {
+      .catch(async (caught: unknown) => {
+        await shown;
         if (!live) return;
         if ((caught as { status?: number })?.status === 401) onSignedOut();
-        else setLoadError("Couldn't load your workspaces.");
+        else setLoadError("Check your connection, then try again.");
+        setRetrying(false);
       });
     return () => {
       live = false;
     };
-  }, [client, onSignedOut]);
+  }, [client, onSignedOut, attempt]);
+  const retry = useCallback(() => {
+    setRetrying(true);
+    setAttempt((count) => count + 1);
+  }, []);
 
   // The workbook joins the chosen workspace: agents there can reach it.
   useEffect(() => {
@@ -275,21 +376,28 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
 
   if (loadError) {
     return (
-      <PaneScreen>
-        <main className="pane-center">
-          <p className="pane-error">{loadError}</p>
-        </main>
-      </PaneScreen>
+      <PaneNotice
+        kind="load-error"
+        title="Couldn't load your workspaces"
+        message={loadError}
+        retrying={retrying}
+        onRetry={retry}
+        onSignOut={signOut}
+      />
     );
   }
   if (!workspaces) return null;
   if (!workspaceId) {
     return (
-      <PaneScreen>
-        <main className="pane-center">
-          <p>Your account has no workspace yet. Open Opengeni on the web to set one up.</p>
-        </main>
-      </PaneScreen>
+      <PaneNotice
+        kind="no-workspace"
+        title="No workspace yet"
+        message="Finish setting up Opengeni on the web, then come back and try again."
+        openWeb
+        retrying={retrying}
+        onRetry={retry}
+        onSignOut={signOut}
+      />
     );
   }
   return (
@@ -303,14 +411,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       surfaces={surfaces}
       messageContext={messageContext}
       onUnauthorized={onSignedOut}
-      openUrl={(url) => {
-        // The task pane cannot navigate away; open the browser instead.
-        try {
-          office().context.ui.openBrowserWindow(url);
-        } catch {
-          window.open(url, "_blank", "noopener");
-        }
-      }}
+      openUrl={openInBrowser}
       slots={{
         canvasBanners: <WorkbookStatus link={link} busy={busy} workbook={workbook} />,
         railFooter: (

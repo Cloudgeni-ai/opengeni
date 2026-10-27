@@ -229,6 +229,17 @@ export type MemberAllowanceUsage = z.infer<typeof MemberAllowanceUsage>;
 export const WorkspaceUsageResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      /**
+       * The unit of every amount (`limit`, `used`, `remaining`,
+       * `includedCredits`, `grantsRemaining`): integer USD micros, 1 USD =
+       * 1,000,000. Absent from servers that predate it; the unit is the same.
+       */
+      unit: z.literal("usd_micros").optional(),
+      /**
+       * The window the counters cover. Without a configured budget this is
+       * still the calendar month (UTC) being counted; null when the window
+       * is unknown (a past month with no recorded history) or lifetime.
+       */
       period: UsageAllowanceWindow,
       workspace: WorkspaceAllowanceUsage,
       members: z.array(MemberAllowanceUsage),

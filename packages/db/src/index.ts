@@ -1433,6 +1433,25 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export {
+  DATABASE_AUTHENTICATION_FAILURE_SQLSTATE,
+  DATABASE_CREDENTIAL_STALE_FAILURE_GRACE_MS,
+  databaseCredentialEventMessage,
+  databasePasswordFileOptions,
+  databasePasswordFileOptionsFromEnvironment,
+  rotatingDatabasePasswordFor,
+  databaseUrlPassword,
+  databaseUrlUser,
+  isDatabaseAuthenticationFailure,
+  logDatabaseCredentialEvent,
+  RotatingDatabasePassword,
+  withDatabaseAuthenticationRetry,
+  type DatabaseCredentialEvent,
+  type DatabaseCredentialEventListener,
+  type DatabaseCredentialPosition,
+  type DatabasePasswordFiles,
+  type RotatingDatabasePasswordOptions,
+} from "./database-credentials";
 export type {
   SessionListChangeSource,
   SessionListDatabaseChange,

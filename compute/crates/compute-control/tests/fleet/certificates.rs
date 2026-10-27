@@ -38,6 +38,7 @@ fn register(name: &str) -> Register {
             memory_mib: 1024,
             cpu_millis: 64_000,
             disk_mib: 1024,
+            boot: None,
         },
         capacity: roomy(),
         held: Vec::new(),
