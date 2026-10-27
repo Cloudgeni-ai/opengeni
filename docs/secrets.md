@@ -508,7 +508,7 @@ contract migration drops them.
 After the migration:
 
 - `/variable-sets/*`, `/environments/*` and `PUT /sessions/:id/variable-sets`
-  return 410 `variable_sets_removed`.
+  are gone and answer 404.
 - Non-empty `variableSetIds`, `variableSetId`, `environmentId` and rig
   `defaultVariableSetIds` return 422 `variable_sets_removed`. Empty arrays and
   null are accepted and ignored.

@@ -10,33 +10,8 @@ import {
   variableSetsRemovedErrorResponse,
   withoutLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
-import { registerVariableSetsRemovedRoutes } from "../src/routes/variable-sets-removed";
 
-const WORKSPACE = "00000000-0000-4000-8000-000000000001";
 const SET = "00000000-0000-4000-8000-000000000002";
-
-describe("RM-1 legacy Variable Set routes", () => {
-  const app = new Hono();
-  registerVariableSetsRemovedRoutes(app);
-
-  for (const [method, path] of [
-    ["GET", `/v1/workspaces/${WORKSPACE}/variable-sets`],
-    ["POST", `/v1/workspaces/${WORKSPACE}/variable-sets`],
-    ["GET", `/v1/workspaces/${WORKSPACE}/variable-sets/${SET}`],
-    ["PUT", `/v1/workspaces/${WORKSPACE}/variable-sets/${SET}/variables/API_KEY`],
-    ["POST", `/v1/workspaces/${WORKSPACE}/variable-sets/resolve-attachments`],
-    ["GET", `/v1/workspaces/${WORKSPACE}/environments`],
-    ["DELETE", `/v1/workspaces/${WORKSPACE}/environments/${SET}`],
-  ] as const) {
-    test(`${method} ${path.replace(WORKSPACE, ":ws")} answers 410 variable_sets_removed`, async () => {
-      const response = await app.request(path, { method });
-      expect(response.status).toBe(410);
-      const body = (await response.json()) as { error: string; details: { vaultsPath: string } };
-      expect(body.error).toBe("variable_sets_removed");
-      expect(body.details.vaultsPath).toBe("/vaults");
-    });
-  }
-});
 
 describe("RM-1 legacy Variable Set fields", () => {
   test("only fields that still carry a choice are legacy", () => {
