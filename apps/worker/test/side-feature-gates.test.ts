@@ -140,7 +140,8 @@ describe("image and video generation under EU-only inference", () => {
       ).rejects.toBeInstanceOf(InferenceRegionRestrictedError);
     });
     expect(video.executed).toEqual(["v3"]);
-    expect(reads).toEqual(["policy", "policy"]);
+    // Outside EU nothing is checked, so the policy is read only under EU.
+    expect(reads).toEqual(["policy"]);
   });
 });
 
