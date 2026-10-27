@@ -307,4 +307,6 @@ embeddings, decision models, credit-funded image generation) and for the
 standalone model-call API (`/v1/chat/completions`, which has no model call
 fact) record `processing_residency`: the route's geography, deployment type
 and regions, never its evidence. A route whose record cannot be read is
-recorded as unknown.
+recorded as unknown. The claim is the model-call fact's
+(`modelCallProcessingResidency`, `ModelCallProcessingResidencyV1`), so the
+same eu rules apply.

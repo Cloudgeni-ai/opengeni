@@ -1,8 +1,10 @@
 import {
   isEuResidency,
+  modelCallProcessingResidency,
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  type ModelCallProcessingResidencyV1,
   type InferenceFeatureId,
 } from "@opengeni/contracts";
 import { z } from "zod";
@@ -429,20 +431,12 @@ export function sideFeatureRouteAllowed(
  * reference text may name internal resources. The same shape model call
  * facts record.
  */
-export type SideFeatureProcessingResidency = {
-  geography: ModelResidencyV1["geography"];
-  deploymentType: ModelResidencyV1["deploymentType"];
-  regions: string[];
-};
+/** Where a side-feature call ran: the same claim a model-call fact records. */
+export type SideFeatureProcessingResidency = ModelCallProcessingResidencyV1;
 
 export function sideFeatureProcessingResidency(
   settings: SideFeatureResidencySettings,
   target: SideFeatureTarget,
 ): SideFeatureProcessingResidency {
-  const residency = sideFeatureRouteResidency(settings, target);
-  return {
-    geography: residency.geography,
-    deploymentType: residency.deploymentType,
-    regions: [...residency.regions],
-  };
+  return modelCallProcessingResidency(sideFeatureRouteResidency(settings, target));
 }
