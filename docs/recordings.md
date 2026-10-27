@@ -686,6 +686,11 @@ A dictation differs from a meeting in a few ways:
   the voice input setting), not `settings.recordings.transcription`. Creating
   one answers 403 with `details.code: "policy_blocked"` when voice input is
   off, and 503 when no voice input provider is available.
+- Its `transcription` can name only the `language` spoken (an ISO 639-1 or
+  639-3 code such as `nb` or `en`); anything else answers 400. Without a
+  language, the provider detects it. A dictation does not take the
+  workspace's meeting language, because people dictate in more languages
+  than they hold meetings in.
 - It is billed like voice input: each piece is charged against the
   dictating person's usage, and a refused charge fails the transcript with
   that code (for example `insufficient_credits`).
@@ -700,11 +705,14 @@ offer the text of a dictation an earlier page, tab or device left behind.
 
 `useVoiceInput` (in `@opengeni/react/recordings`, used by the web composer)
 and `useNativeDictation` (in `@opengeni/react-native/recordings`) do all of
-this. Taking the text deletes the dictation first and inserts the text only
+this; their `language` option (and `ComposerTranscriptionControl`'s
+`language` prop) sets the language each new dictation is heard in. Taking
+the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
 insert the same speech twice. Cancel or Escape keeps anything longer than
 three seconds to insert later. A client without the recordings API (only
-`transcribeAudio`) records in memory and sends one request, as before.
+`transcribeAudio`, which also takes a `language`) records in memory and
+sends one request, as before.
 
 Dictation recordings replace the older `transcription-recordings` routes,
 which are deprecated and kept for older clients until their sunset.

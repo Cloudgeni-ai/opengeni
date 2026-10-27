@@ -267,7 +267,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
