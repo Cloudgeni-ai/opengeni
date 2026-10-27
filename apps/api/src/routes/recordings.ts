@@ -976,11 +976,12 @@ export function registerRecordingRoutes(
   app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
-    const defaults = await meetingModelFor(
-      deployment,
-      resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
-      { accountId: actor.accountId, workspaceId: actor.workspaceId, subjectId: actor.subjectId },
-    );
+    const recordingSettings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const defaults = await meetingModelFor(deployment, recordingSettings.transcription, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+    });
     const pinned = deployment.pinned;
     const liveDefault = deployment.liveDefault;
     const offered = pinned
@@ -1064,7 +1065,8 @@ export function registerRecordingRoutes(
       default: defaults,
       dictationDefault,
       pinned: !!deployment.pinned,
-      language: resolveWorkspaceRecordingSettings(workspace?.settings).language ?? null,
+      language: recordingSettings.language ?? null,
+      liveTranscript: recordingSettings.liveTranscript === true,
     });
   });
 

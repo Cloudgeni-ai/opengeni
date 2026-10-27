@@ -3,6 +3,8 @@ import { ToolActionReviewCard } from "../components/tool-action-review";
 import { SecretRefText } from "../components/secret-ref-chip";
 import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { paymentPageOf } from "./payment-page";
+import { PaymentPageCard } from "./payment-page-card";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import { parseSandboxFileArtifactReceipt, type RetainedArtifactReference } from "@opengeni/sdk";
@@ -2045,6 +2047,12 @@ function ReviewedGenericRenderer(props: ToolRendererProps) {
 
 /* ---- the default registry -------------------------------------------------- */
 
+/** An app action that opened a payment page shows it as a button; every other one reads as usual. */
+function AppActionCallRenderer(props: ToolRendererProps) {
+  const page = paymentPageOf(props.item);
+  return page ? <PaymentPageCard page={page} /> : <GenericRenderer {...props} />;
+}
+
 function KnowledgeSaveRenderer({ item }: ToolRendererProps) {
   const output = unwrapMcpOutput(item.output);
   const parsed = tryParseJson(output.text);
@@ -2092,6 +2100,19 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
       matchPrefixedLeaf: false,
       render: KnowledgeSaveRenderer,
     })),
+  ),
+  // Only the Opengeni server's own app actions: a page another server returns
+  // is never drawn as a payment button. Spelled out here, like the knowledge
+  // tools above, because this registry is built while its chunk loads and the
+  // payment-page parser lives in a lazily shared chunk (the same names as its
+  // TRUSTED_APP_ACTION_CALL_NAMES, which a test keeps equal).
+  ...["admin_action_call", "opengeni__admin_action_call", "mcp__opengeni__admin_action_call"].map(
+    (trustedName) => ({
+      match: "name" as const,
+      name: trustedName,
+      matchPrefixedLeaf: false,
+      render: AppActionCallRenderer,
+    }),
   ),
   // Provider-native items carry `raw.type` on the wire — this is their source of
   // truth and is consulted first by the registry.
@@ -2200,6 +2221,7 @@ const PRESENTATION_RENDERERS: ReadonlyMap<ToolRenderer, PresentedToolKind> = new
   [WriteStdinRenderer, "write_stdin"],
   [ApplyPatchRenderer, "apply_patch"],
   [GenericRenderer, "generic"],
+  [AppActionCallRenderer, "generic"],
 ]);
 
 /**

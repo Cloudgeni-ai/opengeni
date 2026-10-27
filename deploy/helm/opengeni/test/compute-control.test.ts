@@ -623,7 +623,11 @@ describe("computeControl", () => {
         apiTls: { secretName: "compute-api-tls" },
         e2b: {
           enabled: true,
-          templates: { base: "base:2x1024", "github-runner": "runner:4x8192x30720" },
+          templates: {
+            base: "base:2x1024",
+            "github-runner": "runner:4x8192x30720",
+            ci: "runner:8x24576x65536,memory-request=8192,cpu-request=2000",
+          },
           ingressFrom: [{ podSelector: { matchLabels: { app: "e2b-client" } } }],
         },
       },
@@ -636,6 +640,9 @@ describe("computeControl", () => {
     expect(container.args).toContain("--e2b-tls-key=/etc/compute/api-tls/tls.key");
     expect(container.args).toContain("--e2b-template=base=base:2x1024");
     expect(container.args).toContain("--e2b-template=github-runner=runner:4x8192x30720");
+    expect(container.args).toContain(
+      "--e2b-template=ci=runner:8x24576x65536,memory-request=8192,cpu-request=2000",
+    );
     expect(container.ports).toContainEqual({ name: "e2b", containerPort: 3000 });
     const service = find(manifests, "Service", "cc-opengeni-compute-control");
     expect(service.spec.ports).toContainEqual({
@@ -667,17 +674,19 @@ describe("computeControl", () => {
     expect(plain.args.some((a: string) => a.startsWith("--e2b-tls"))).toBe(false);
     expect(plain.args.some((a: string) => a.startsWith("--e2b-template"))).toBe(false);
 
-    const malformed = await helmTemplate({
-      ...enabled,
-      computeControl: {
-        ...enabled.computeControl,
-        e2b: { enabled: true, templates: { big: "runner:4x8G" } },
-      },
-    });
-    expect(malformed.exitCode).not.toBe(0);
-    expect(malformed.stderr).toContain(
-      "computeControl.e2b.templates.big must be image:VCPUSxMEMORY_MIB",
-    );
+    for (const wrong of ["runner:4x8G", "runner:4x8192,memory-request=", "runner:4x8192,swap=1"]) {
+      const malformed = await helmTemplate({
+        ...enabled,
+        computeControl: {
+          ...enabled.computeControl,
+          e2b: { enabled: true, templates: { big: wrong } },
+        },
+      });
+      expect(malformed.exitCode).not.toBe(0);
+      expect(malformed.stderr).toContain(
+        "computeControl.e2b.templates.big must be image:VCPUSxMEMORY_MIB",
+      );
+    }
   });
 });
 
@@ -874,6 +883,31 @@ describe("computeRunners", () => {
     expect(container(manifests, "cc-opengeni-runners-light").args).not.toContain(
       "--cache-store=gs://example-cache/runners",
     );
+  });
+
+  test("serve a cache on a node's own port for a proxy in front of it", async () => {
+    const cache = (service: Record<string, unknown>) => ({
+      store: "gs://example-cache/runners",
+      url: "https://runner-cache.example.com",
+      existingSecret: "ci-cache",
+      service,
+    });
+    const ports = async (service: Record<string, unknown>) =>
+      find(
+        await render({ ...front, computeRunners: { pools: [{ ...pool, cache: cache(service) }] } }),
+        "Service",
+        "cc-opengeni-runners-ci",
+      ).spec;
+
+    const fixed = await ports({ type: "NodePort", nodePort: 30448 });
+    expect(fixed.type).toBe("NodePort");
+    expect(fixed.ports).toEqual([
+      { name: "cache", port: 8080, targetPort: "http", protocol: "TCP", nodePort: 30448 },
+    ]);
+    // A node port means nothing to any other kind of Service.
+    const cluster = await ports({ nodePort: 30448 });
+    expect(cluster.type).toBe("ClusterIP");
+    expect(cluster.ports[0].nodePort).toBeUndefined();
   });
 
   test("refuse pools they cannot run", async () => {

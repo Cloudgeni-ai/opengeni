@@ -148,4 +148,23 @@ describe("browser actions an older controller rejects", () => {
       );
     }
   });
+
+  test("names viewport_reset, alone or inside a batch, and its alternative", () => {
+    const message =
+      "This browser's controller runs in an older Opengeni agent that does not accept " +
+      'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+      "or set type viewport with the window's own width and height. Updating the agent adds support.";
+    expect(olderBrowserControllerMessage(sentAction({ type: "viewport_reset" }), true)).toBe(
+      message,
+    );
+    expect(
+      olderBrowserControllerMessage(
+        sentAction({
+          type: "batch",
+          actions: [{ type: "viewport_reset" }, { type: "navigate", url: "https://example.com/" }],
+        }),
+        true,
+      ),
+    ).toBe(message);
+  });
 });
