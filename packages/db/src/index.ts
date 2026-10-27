@@ -14916,6 +14916,12 @@ export async function listSlackThreadMessagesSinceLastInvocation(
     slackThreadTs: string;
     beforeMessageTs: string;
     notBefore: Date;
+    /**
+     * The invoking mention's own inbox row time. Rows recorded after it are
+     * never read, so a busy thread or a retried mention cannot push the
+     * messages before it out of the read window.
+     */
+    notAfter: Date;
     limit: number;
   },
 ): Promise<{ messages: SlackThreadContextMessage[]; truncated: boolean }> {
@@ -14941,6 +14947,7 @@ export async function listSlackThreadMessagesSinceLastInvocation(
             eq(schema.slackInteractionInbox.slackChannelId, input.slackChannelId),
             eq(schema.slackInteractionInbox.slackThreadTs, input.slackThreadTs),
             gte(schema.slackInteractionInbox.createdAt, input.notBefore),
+            lte(schema.slackInteractionInbox.createdAt, input.notAfter),
             inArray(schema.slackInteractionInbox.triggerKind, ["thread_reply", "app_mention"]),
           ),
         )
