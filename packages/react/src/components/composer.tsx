@@ -2176,7 +2176,9 @@ function AttachmentChips({
   }
 
   return (
-    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5">
+    // Compact chips extend their touch targets beyond their visible borders.
+    // Keep neighboring rows and columns outside those expanded hit areas.
+    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5 pointer-coarse:gap-2.5">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const secureContextRequired = attachment.errorCode === "secure_context_required";

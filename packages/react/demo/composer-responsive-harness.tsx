@@ -9,6 +9,8 @@ import {
   ChatComposer,
   ModelPolicyPicker,
   type ComposerState,
+  type FileAttachment,
+  type UseFileAttachmentsResult,
   type SlashCommand,
 } from "@opengeni/react";
 import { RealtimeVoiceControl, type RealtimeModelOption } from "@opengeni/react/realtime";
@@ -201,6 +203,35 @@ function ResponsiveComposerHarness() {
   const [width, setWidth] = useState(
     widths.includes(initialWidth as (typeof widths)[number]) ? initialWidth : 320,
   );
+  const [attachmentItems, setAttachmentItems] = useState<FileAttachment[]>(() =>
+    params.has("attachments")
+      ? ["e2e screenshot.png", "neighbor.png"].map((name) => ({
+          id: name,
+          name,
+          contentType: "image/png",
+          sizeBytes: 2048,
+          status: params.get("attachments") === "uploading" ? "uploading" : "ready",
+          previewUrl:
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL2GQAAAABJRU5ErkJggg==",
+        }))
+      : [],
+  );
+  const attachmentState: UseFileAttachmentsResult | undefined = params.has("attachments")
+    ? {
+        attachments: attachmentItems,
+        readyResources: [],
+        uploading: attachmentItems.some((item) => item.status === "uploading"),
+        hasUnresolved: attachmentItems.some((item) => item.status !== "ready"),
+        addFiles: () => {},
+        addFromPaste: () => {},
+        restoreReadyFiles: () => {},
+        retry: () => {},
+        retainPreview: () => undefined,
+        remove: (id) => setAttachmentItems((items) => items.filter((item) => item.id !== id)),
+        removeReadyFiles: () => {},
+        clear: () => setAttachmentItems([]),
+      }
+    : undefined;
   const [density, setDensity] = useState(initialDensity);
   const [theme, setTheme] = useState(initialTheme);
   const [paused, setPaused] = useState(params.get("paused") === "1");
@@ -349,6 +380,7 @@ function ResponsiveComposerHarness() {
             <ChatComposer
               header={contextStore ? <MessageContextPills /> : undefined}
               composer={composer}
+              attachments={attachmentState}
               responsiveBasis="container"
               effectiveControl={paused ? pausedControl : activeControl}
               transcription={{}}
