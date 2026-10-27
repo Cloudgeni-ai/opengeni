@@ -82,14 +82,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
- * 0999 withholds the held-browser inventory; until it is granted, the API
- * renews no browser holds.
+ * 0999 withheld the held-browser inventory and 1001 granted it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
-  "list_agent_held_browser_sessions(integer, bigint)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**

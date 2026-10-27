@@ -3994,7 +3994,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "summarize_queued_turns_by_hold()",
-      "list_agent_held_browser_sessions(integer, bigint)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
