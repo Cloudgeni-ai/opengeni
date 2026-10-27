@@ -18,6 +18,7 @@ import { PersonalResourceAttachmentSurface } from "../components/personal-resour
 import { useReadSessionInbox } from "../lib/inbox";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
 import { getComposerSendBlocker } from "../lib/composer-send-blocking";
+import { useSessionComposerDelivery } from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
@@ -2632,7 +2633,10 @@ function SessionChatPane(props: {
       durableToolSelection,
     ],
   );
-  const composerPolicyValidRef = useRef(false);
+  // Whether the composer's model choice can run, as last committed. It is
+  // worked out below from the composer's own policy; Send's guard reads it
+  // while the composer renders (see useSessionComposerDelivery).
+  const [committedComposerPolicyValid, setCommittedComposerPolicyValid] = useState(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const loadSkillReview = useCallback(
@@ -2677,7 +2681,7 @@ function SessionChatPane(props: {
     getComposerSendBlocker({
       uploadPending: attachments.hasUnresolved,
       repositoryError: repositories.error,
-      policyValid: composerPolicyValidRef.current,
+      policyValid: committedComposerPolicyValid,
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
@@ -2943,7 +2947,6 @@ function SessionChatPane(props: {
         ? "This model is no longer available. Select a different model to continue."
         : "Choose a model, reasoning level, and speed supported by this session."
       : null;
-  composerPolicyValidRef.current = composerPolicyValid;
 
   // Preselect a runnable model for the next message when the composer still
   // names an unavailable one. Accepted turns and history keep their frozen
@@ -2967,30 +2970,47 @@ function SessionChatPane(props: {
       props.session.codexCompactionMode,
     ],
   );
-  useEffect(() => {
-    if (!composerModelUnavailable || !unavailableReplacement) return;
-    if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+  const replacesUnavailableModel = Boolean(
+    composerModelUnavailable &&
+    unavailableReplacement &&
+    !composerDraftLoading &&
+    hasComposerPolicy &&
+    !modelPickerDisabled &&
+    !terminal &&
     // A failed session keeps its model until the person chooses: the
     // failure banner's Retry re-runs that turn with the composer's model.
-    if (!canControlSession || props.failure) return;
+    canControlSession &&
+    !props.failure,
+  );
+  useEffect(() => {
+    if (!replacesUnavailableModel || !unavailableReplacement) return;
     setComposerModel(unavailableReplacement.model);
     setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
     if (unavailableReplacement.latencyMode) {
       setComposerLatencyMode(unavailableReplacement.latencyMode);
     }
   }, [
-    canControlSession,
-    props.failure,
-    composerDraftLoading,
-    composerModelUnavailable,
-    hasComposerPolicy,
-    modelPickerDisabled,
+    replacesUnavailableModel,
     setComposerLatencyMode,
     setComposerModel,
     setComposerReasoningEffort,
-    terminal,
     unavailableReplacement,
   ]);
+  const composerDelivery = useSessionComposerDelivery(composerView, {
+    policyValid: composerPolicyValid,
+    committedPolicyValid: committedComposerPolicyValid,
+    commitPolicyValid: setCommittedComposerPolicyValid,
+    // What Send also waits on while the page opens. When one of them fails
+    // instead, it shows its own message.
+    loading:
+      (modelCatalog.loading && !composerPolicyValid) ||
+      replacesUnavailableModel ||
+      !durableToolsHydrated ||
+      durableToolsSaving ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing ||
+      connectionAccounts.loading,
+  });
   const unavailableModelNotice =
     (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
       <UnavailableModelNotice
@@ -3886,7 +3906,7 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composerView}
+                composer={composerDelivery}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}

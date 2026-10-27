@@ -1507,9 +1507,6 @@ export const englishMessages = {
   "connectWindowHost.allowPopups":
     "Your browser blocked the sign-in window. Allow pop-ups for this page, then try again.",
   "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
-  "conversationRenderBoundary.didNotLoad":
-    "Part of this chat didn't load. Check your connection, then reload.",
-  "conversationRenderBoundary.reload": "Reload",
   "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
   "copyButton.copy": "Copy",
@@ -1961,6 +1958,9 @@ export const englishMessages = {
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "list.loading": "Loading {label}",
+  "loadFailure.didNotLoad": "This didn't load. Check your connection, then reload.",
+  "loadFailure.partDidNotLoad": "This part didn't load.",
+  "loadFailure.reload": "Reload",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",

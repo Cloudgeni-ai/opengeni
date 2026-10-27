@@ -1,5 +1,6 @@
 import { Component, useState, type ErrorInfo, type ReactNode } from "react";
 import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { useOpenGeniText } from "../messages/runtime";
 
 type ConversationRenderBoundaryProps = {
@@ -55,33 +56,11 @@ class Boundary extends Component<
   render(): ReactNode {
     if (!this.state.failed) return this.props.children;
     return this.state.notLoaded ? (
-      <ConversationLoadError />
+      <LoadFailureNotice variant="block" />
     ) : (
       <ConversationRenderError onRetry={this.props.onRetry} />
     );
   }
-}
-
-function ConversationLoadError() {
-  const t = useOpenGeniText();
-  return (
-    <div
-      role="alert"
-      data-og-conversation-load-error=""
-      className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 py-8 text-center"
-    >
-      <p className="max-w-sm text-og-base text-og-fg-muted">
-        {t("conversationRenderBoundary.didNotLoad")}
-      </p>
-      <button
-        type="button"
-        onClick={() => window.location.reload()}
-        className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
-      >
-        {t("conversationRenderBoundary.reload")}
-      </button>
-    </div>
-  );
 }
 
 function ConversationRenderError({ onRetry }: { onRetry: () => void }) {

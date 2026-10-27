@@ -137,6 +137,16 @@ describe("Send pressed before the composer can send", () => {
     expect(sends).toEqual(["Sum column B and C"]);
   });
 
+  test("a held Send goes out as soon as Send is allowed, even while something else loads", async () => {
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <Harness sends={sends} initial={{ preparing: true, canSend: false }} />,
+    );
+    await pressEnter(textarea(mounted.container));
+    await settle(() => controls.setGate({ preparing: true, canSend: true }));
+    expect(sends).toEqual(["Sum column B"]);
+  });
+
   test("a held Send is dropped when the composer turns out unable to send", async () => {
     const sends: string[] = [];
     mounted = await renderComponent(

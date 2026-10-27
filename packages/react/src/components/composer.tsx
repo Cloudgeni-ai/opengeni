@@ -559,7 +559,9 @@ export function useChatComposerController({
   );
   // Send can be pressed before everything it needs has loaded (right after the
   // page opens). A draft sent then waits, shown as sending, and goes out once
-  // the delivery is ready instead of being silently ignored.
+  // Send is allowed, instead of being silently ignored. It is cancelled when
+  // the box is cleared, and otherwise ends only when the delivery has stopped
+  // preparing and still can't send: a real blocker, which shows its message.
   const preparing = delivery.preparing === true;
   const hasDraftText = visibleValue.trim().length > 0 || (attachments?.attachments.length ?? 0) > 0;
   const waitsForPreparation = preparing && hasDraftText;
@@ -572,10 +574,12 @@ export function useChatComposerController({
   const deliveryCanSend = delivery.canSend;
   useEffect(() => {
     const release = heldSendRef.current;
-    if (!release || waitsForPreparation) return;
+    if (!release) return;
+    const ready = deliveryCanSend && !disabled;
+    if (!ready && waitsForPreparation) return;
     heldSendRef.current = null;
-    release(!preparing && deliveryCanSend && !disabled);
-  }, [deliveryCanSend, disabled, preparing, waitsForPreparation]);
+    release(ready);
+  }, [deliveryCanSend, disabled, waitsForPreparation]);
   useEffect(
     () => () => {
       heldSendRef.current?.(false);

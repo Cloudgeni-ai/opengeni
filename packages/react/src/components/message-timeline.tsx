@@ -209,6 +209,8 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -3199,6 +3201,8 @@ type TimelineGroupRenderBoundaryProps = {
 
 type TimelineGroupRenderBoundaryState = {
   failed: boolean;
+  /** The item's code failed to download; only a reload helps. */
+  notLoaded: boolean;
   resetKeys: readonly unknown[];
 };
 
@@ -3239,11 +3243,12 @@ class TimelineGroupRenderBoundary extends Component<
 > {
   state: TimelineGroupRenderBoundaryState = {
     failed: false,
+    notLoaded: false,
     resetKeys: this.props.resetKeys,
   };
 
-  static getDerivedStateFromError(): Partial<TimelineGroupRenderBoundaryState> {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): Partial<TimelineGroupRenderBoundaryState> {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   static getDerivedStateFromProps(
@@ -3251,14 +3256,14 @@ class TimelineGroupRenderBoundary extends Component<
     state: TimelineGroupRenderBoundaryState,
   ): Partial<TimelineGroupRenderBoundaryState> | null {
     if (timelineRenderResetKeysChanged(state.resetKeys, props.resetKeys)) {
-      return { failed: false, resetKeys: props.resetKeys };
+      return { failed: false, notLoaded: false, resetKeys: props.resetKeys };
     }
     return null;
   }
 
   render(): ReactNode {
     if (this.state.failed) {
-      return <TimelineGroupRenderError />;
+      return this.state.notLoaded ? <LoadFailureNotice /> : <TimelineGroupRenderError />;
     }
     return this.props.children;
   }

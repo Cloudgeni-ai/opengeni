@@ -46,6 +46,8 @@ import { ToolKindIcon } from "./tool-icon";
 import { genericToolIconKind } from "./tool-presentation";
 import type { ActivityItem, AgentMessageItem, MemoryItem, ToolCallItem, WorkerItem } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "../components/load-failure-notice";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
@@ -601,27 +603,31 @@ function ToolRowRenderError({ name }: { name: string }) {
 
 class ToolRowBoundary extends Component<
   { name: string; resetKeys: readonly unknown[]; children: ReactNode },
-  { failed: boolean; resetKeys: readonly unknown[] }
+  { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] }
 > {
-  state = { failed: false, resetKeys: this.props.resetKeys };
+  state = { failed: false, notLoaded: false, resetKeys: this.props.resetKeys };
 
-  static getDerivedStateFromError(): { failed: boolean } {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): { failed: boolean; notLoaded: boolean } {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   /** A new status or renderer for the row gets a fresh attempt. */
   static getDerivedStateFromProps(
     props: { resetKeys: readonly unknown[] },
-    state: { failed: boolean; resetKeys: readonly unknown[] },
-  ): { failed: boolean; resetKeys: readonly unknown[] } | null {
+    state: { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] },
+  ): { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] } | null {
     const same =
       props.resetKeys.length === state.resetKeys.length &&
       props.resetKeys.every((key, index) => Object.is(key, state.resetKeys[index]));
-    return same ? null : { failed: false, resetKeys: props.resetKeys };
+    return same ? null : { failed: false, notLoaded: false, resetKeys: props.resetKeys };
   }
 
   render(): ReactNode {
     if (!this.state.failed) return this.props.children;
-    return <ToolRowRenderError name={this.props.name} />;
+    return this.state.notLoaded ? (
+      <LoadFailureNotice />
+    ) : (
+      <ToolRowRenderError name={this.props.name} />
+    );
   }
 }

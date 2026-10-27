@@ -288,8 +288,21 @@ function SessionAppRoot(props: { className?: string | undefined; children: React
   );
 }
 
-/** The session page or the new-chat page, from the in-memory location. */
+/**
+ * The session page or the new-chat page, from the in-memory location. A
+ * failure (including code that didn't download) stays inside the app instead
+ * of blanking the host page, and opening another screen gets a fresh attempt.
+ */
 function SessionAppRoutes({ workspaceId }: { workspaceId: string }) {
+  const location = useLocation();
+  return (
+    <ConversationRenderBoundary resetKey={`${workspaceId}:${location.pathname}`}>
+      <SessionAppRoute workspaceId={workspaceId} />
+    </ConversationRenderBoundary>
+  );
+}
+
+function SessionAppRoute({ workspaceId }: { workspaceId: string }) {
   const location = useLocation();
   const sessionId = sessionIdIn(location.pathname);
   const launch = parseComposerLaunchSearch(location.search);
@@ -348,11 +361,7 @@ function SessionAppWorkspace({
             <RailProvider workspaceId={workspaceId}>
               <ActionsProvider>
                 <SessionShell slots={slots}>
-                  {/* Contains a failure (including code that didn't download)
-                      inside the app instead of blanking the host page. */}
-                  <ConversationRenderBoundary resetKey={workspaceId}>
-                    <SessionAppRoutes workspaceId={workspaceId} />
-                  </ConversationRenderBoundary>
+                  <SessionAppRoutes workspaceId={workspaceId} />
                 </SessionShell>
               </ActionsProvider>
             </RailProvider>
