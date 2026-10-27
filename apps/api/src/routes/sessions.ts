@@ -799,7 +799,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const legacyFields = legacyVariableSetFields(payload);
       if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
       payload = withoutEmptyLegacyVariableSetFields(payload);
-      CreateSessionRequest.parse(payload);
+      const requestedProfile = CreateSessionRequest.parse(payload).profile;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
       if (
@@ -862,9 +862,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       // Checked before anything is created: an avatar the chat could not show
       // refuses the request instead of leaving a half-made chat.
-      const profile = CreateSessionRequest.parse(payload).profile;
-      if (profile?.avatar) {
-        await requireUsableSessionAvatar(deps, grant, profile.avatar, {
+      if (requestedProfile?.avatar) {
+        await requireUsableSessionAvatar(deps, grant, requestedProfile.avatar, {
           sharedWithWorkspace: (payload as { visibility?: unknown }).visibility !== "private",
         });
       }

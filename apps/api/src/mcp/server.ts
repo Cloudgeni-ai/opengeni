@@ -6843,7 +6843,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "set_other_session_title",
       {
-        description: `Name another chat in this workspace, or set its description and avatar. A title is a concise 3-7 word topic label with the same rules as set_session_title, unless the person gave the name. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        description: `Name a chat other than this one, by its session_id, or set its description and avatar. A title is a concise 3-7 word topic label with the same rules as set_session_title, unless the person gave the name. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           session_id: z4.string().uuid(),
           title: z4.string().min(1).max(200).optional(),
