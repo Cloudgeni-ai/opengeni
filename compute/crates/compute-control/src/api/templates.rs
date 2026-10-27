@@ -39,6 +39,12 @@ pub struct TemplateView {
     pub source: Id,
     pub vcpus: u8,
     pub memory_mib: u32,
+    /// What the sandbox it was captured from was guaranteed; E2B creates
+    /// from it are guaranteed the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_request_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_request_millis: Option<u32>,
     /// Its disk's length, which sandboxes from it start with at least.
     pub disk_mib: u64,
     pub created_ms: u64,
@@ -53,6 +59,8 @@ impl From<TemplateRow> for TemplateView {
             source: row.source,
             vcpus: row.vcpus,
             memory_mib: row.memory_mib,
+            memory_request_mib: row.memory_request_mib,
+            cpu_request_millis: row.cpu_request_millis,
             disk_mib: row.disk_mib,
             created_ms: row.created_ms,
         }

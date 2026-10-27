@@ -33,6 +33,12 @@ pub struct TemplateRow {
     /// creates state their own.
     pub vcpus: u8,
     pub memory_mib: u32,
+    /// What that sandbox was guaranteed (see
+    /// [`compute_protocol::host::SandboxConfig::memory_request_mib`] and
+    /// [`compute_protocol::host::SandboxConfig::cpu_request_millis`]),
+    /// which E2B creates from it are guaranteed too.
+    pub memory_request_mib: Option<u32>,
+    pub cpu_request_millis: Option<u32>,
     /// Its disk's length in MiB, rounded up.
     pub disk_mib: u64,
     pub created_ms: u64,

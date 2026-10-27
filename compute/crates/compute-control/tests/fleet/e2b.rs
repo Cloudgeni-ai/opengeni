@@ -2,7 +2,7 @@
 //! the lifecycle it records, and sandbox traffic through the guest's
 //! gateway.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{
-    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, captured_from, host_status, sandbox_status,
-    until,
+    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, TEAM, captured_from, host_status,
+    sandbox_status, until,
 };
 
 /// What the fake guest saw.
@@ -148,7 +148,16 @@ struct Levels {
 /// A host whose sandboxes run on connects and wakes, sleep as asked,
 /// keep holds, report all of it in their status, and run the fake guest.
 async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>) {
-    let host = fleet.host("h1").await;
+    host_offering(fleet, seen, &[]).await
+}
+
+/// As [`host`], for a host that offers sandboxes `offers`.
+async fn host_offering(
+    fleet: &Fleet,
+    seen: &Arc<Seen>,
+    offers: &[&str],
+) -> (FakeHost, Arc<Mutex<Levels>>) {
+    let host = fleet.host_offering("h1", offers).await;
     let levels = Arc::new(Mutex::new(Levels::default()));
     let state = Arc::clone(&levels);
     host.behave(move |envelope| {
@@ -323,6 +332,8 @@ async fn a_template_with_a_disk_size_gives_its_sandboxes_that_disk() {
             image: "base".into(),
             vcpus: 2,
             memory_mib: 1024,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             disk: Some(64 << 10),
             disk_mib: 64 << 10,
         },
@@ -350,6 +361,124 @@ async fn a_template_with_a_disk_size_gives_its_sandboxes_that_disk() {
             assert_eq!(detail["diskSizeMB"], disk, "{detail}");
         }
     }
+}
+
+/// A template may guarantee its sandboxes less memory and processor time
+/// than they may use, so a host runs more of them at once; a snapshot of
+/// one of its sandboxes guarantees the sandboxes started from it the same.
+#[tokio::test]
+async fn a_template_and_its_snapshots_guarantee_what_it_names() {
+    let fleet = Fleet::start().await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host(&fleet, &seen).await;
+    let mut settings = Settings::default();
+    settings.templates.insert(
+        "ci".into(),
+        Template {
+            image: "base".into(),
+            vcpus: 2,
+            memory_mib: 1024,
+            memory_request_mib: Some(256),
+            cpu_request_millis: Some(500),
+            disk: None,
+            disk_mib: 4096,
+        },
+    );
+    let door = Door::start_with(&fleet, settings).await;
+    let created = |of: Id| {
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create { id, config, .. } if id == of => Some(config),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let sandbox = door
+        .create(json!({"templateID": "ci", "timeout": 120}))
+        .await;
+    let source: Id = sandbox["sandboxID"].as_str().unwrap().parse().unwrap();
+    let config = created(source);
+    assert_eq!(
+        (config.vcpus, config.memory_mib),
+        (2, 1024),
+        "it may use all of its shape"
+    );
+    assert_eq!(
+        (config.memory_request_mib, config.cpu_request_millis),
+        (Some(256), Some(500))
+    );
+    let (status, snapshot) = door
+        .post(
+            &format!("/sandboxes/{source}/snapshots"),
+            json!({"name": "warm", "memory": false}),
+        )
+        .await;
+    assert_eq!(status, 201, "{snapshot}");
+    let from = door
+        .create(json!({"templateID": "warm", "timeout": 120}))
+        .await;
+    let config = created(from["sandboxID"].as_str().unwrap().parse().unwrap());
+    assert_eq!(config.image, Some(captured_from(source)));
+    assert_eq!(
+        (
+            config.vcpus,
+            config.memory_mib,
+            config.memory_request_mib,
+            config.cpu_request_millis
+        ),
+        (2, 1024, Some(256), Some(500))
+    );
+    let plain = door.create(json!({"templateID": "base"})).await;
+    let config = created(plain["sandboxID"].as_str().unwrap().parse().unwrap());
+    assert_eq!(
+        (config.memory_request_mib, config.cpu_request_millis),
+        (None, None),
+        "one that names none guarantees all of it"
+    );
+}
+
+/// E2B's API cannot name what a sandbox reaches of what hosts offer, so
+/// the front door's creates reach every offer their team is given, and
+/// those of a team given none reach none.
+#[tokio::test]
+async fn an_e2b_create_reaches_the_offers_its_team_is_given() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.reach = BTreeMap::from([(
+            TEAM.to_owned(),
+            BTreeSet::from(["builds".to_owned(), "previews".to_owned()]),
+        )]);
+    })
+    .await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host_offering(&fleet, &seen, &["builds", "previews"]).await;
+    let door = Door::start(&fleet).await;
+    let reach_of = |id: &Value| -> Vec<String> {
+        let id: Id = id.as_str().unwrap().parse().unwrap();
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config.reach),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let given = door.create(json!({"templateID": "base"})).await;
+    assert_eq!(reach_of(&given["sandboxID"]), ["builds", "previews"]);
+    let (status, other) = door
+        .call(
+            reqwest::Method::POST,
+            "/v2/sandboxes",
+            OTHER_KEY,
+            Some(json!({"templateID": "base"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{other}");
+    assert_eq!(reach_of(&other["sandboxID"]), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -877,6 +1006,8 @@ async fn pauses_that_cannot_finish_do_not_hold_up_later_timeouts() {
             image: "base".into(),
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             disk: None,
             disk_mib: 1024,
         },

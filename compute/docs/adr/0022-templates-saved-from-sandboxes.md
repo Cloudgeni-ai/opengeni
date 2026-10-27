@@ -15,7 +15,9 @@ without ever forgetting one a template or a create still needs.
 
 - `POST /v1/sandboxes/{id}/templates` (optional `name`, unique in the
   team) captures a sandbox's disk as a stored image and records a
-  template naming it, with the sandbox's shape and disk length. A create
+  template naming it, with the sandbox's shape, what it was guaranteed
+  (`memory_request_mib`, `cpu_request_millis`) and disk length, which E2B
+  creates from it take; native creates state their own. A create
   names it with `template`, by id or name; its sandbox boots afresh on a
   copy of that disk. `GET /v1/templates`, `GET` and `DELETE
   /v1/templates/{id or name}`. The sandbox is saved for the capture and

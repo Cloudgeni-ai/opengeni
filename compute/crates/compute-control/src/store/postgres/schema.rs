@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_4,
     MIGRATION_5,
     MIGRATION_6,
+    MIGRATION_7,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -164,6 +165,14 @@ create table if not exists compute_captured_images (
 create index if not exists compute_sandboxes_image on compute_sandboxes
     ((spec -> 'config' ->> 'image'));
 create index if not exists compute_images_image on compute_images (image);
+";
+
+/// Version 7: what the sandbox a template was saved from was guaranteed,
+/// which E2B creates from the template are guaranteed too; none for one
+/// saved before.
+const MIGRATION_7: &str = "
+alter table compute_templates add column if not exists memory_request_mib bigint;
+alter table compute_templates add column if not exists cpu_request_millis bigint;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

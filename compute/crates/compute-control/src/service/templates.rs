@@ -121,6 +121,8 @@ impl<S: Store> Service<S> {
                 source: id,
                 vcpus: row.spec.config.vcpus,
                 memory_mib: row.spec.config.memory_mib,
+                memory_request_mib: row.spec.config.memory_request_mib,
+                cpu_request_millis: row.spec.config.cpu_request_millis,
                 disk_mib: length.div_ceil(1 << 20),
                 created_ms: now_ms(),
             };

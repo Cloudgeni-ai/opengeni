@@ -18,8 +18,8 @@ use tokio_postgres::Row;
 use super::{PostgresStore, big, corrupt, database, small};
 use crate::store::{Collector, Inserted, Result, TemplateRow};
 
-const TEMPLATE_COLUMNS: &str =
-    "team, id, name, image, source, vcpus, memory_mib, disk_mib, created_ms";
+const TEMPLATE_COLUMNS: &str = "team, id, name, image, source, vcpus, memory_mib, \
+     memory_request_mib, cpu_request_millis, disk_mib, created_ms";
 
 /// Whether the image `image`, an SQL expression, is used: by a template,
 /// a sandbox's config or an image built from an OCI image.
@@ -36,6 +36,11 @@ fn template_of(row: &Row) -> Result<TemplateRow> {
     let image: String = row.get("image");
     let source: String = row.get("source");
     let vcpus: i32 = row.get("vcpus");
+    let request = |column: &str| -> Result<Option<u32>> {
+        row.get::<_, Option<i64>>(column)
+            .map(|value| u32::try_from(small(value)?).map_err(corrupt))
+            .transpose()
+    };
     Ok(TemplateRow {
         team: row.get("team"),
         id: row.get("id"),
@@ -44,6 +49,8 @@ fn template_of(row: &Row) -> Result<TemplateRow> {
         source: Id::from_str(&source).map_err(corrupt)?,
         vcpus: u8::try_from(vcpus).map_err(corrupt)?,
         memory_mib: u32::try_from(small(row.get("memory_mib"))?).map_err(corrupt)?,
+        memory_request_mib: request("memory_request_mib")?,
+        cpu_request_millis: request("cpu_request_millis")?,
         disk_mib: small(row.get("disk_mib"))?,
         created_ms: small(row.get("created_ms"))?,
     })
@@ -77,7 +84,7 @@ impl PostgresStore {
             .execute(
                 &format!(
                     "insert into compute_templates ({TEMPLATE_COLUMNS}) \
-                     values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing"
+                     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) on conflict do nothing"
                 ),
                 &[
                     &row.team,
@@ -87,6 +94,8 @@ impl PostgresStore {
                     &row.source.to_string(),
                     &i32::from(row.vcpus),
                     &i64::from(row.memory_mib),
+                    &row.memory_request_mib.map(i64::from),
+                    &row.cpu_request_millis.map(i64::from),
                     &big(row.disk_mib)?,
                     &big(row.created_ms)?,
                 ],

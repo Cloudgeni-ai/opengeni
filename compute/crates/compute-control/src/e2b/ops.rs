@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_guest::envd::InitData;
-use compute_protocol::host::{Id, LevelName, PriorityName, SandboxConfig};
+use compute_protocol::host::{Id, LevelName, PriorityName};
 use tokio::time::Instant;
 
 use super::lifecycle::{self, Due, OnConnect, OnPause, OnTimeout, Record, State};
@@ -147,15 +147,11 @@ pub async fn create<S: Store>(
     let spec = Spec {
         image: template.image.clone(),
         // E2B's running sandbox sleeps and checkpoints like any other
-        // fleet sandbox whose create says nothing.
-        config: template.disk.into_iter().fold(
-            SandboxConfig::new(
-                template.vcpus,
-                template.memory_mib,
-                front.service.settings().sleep,
-            ),
-            SandboxConfig::with_disk_mib,
-        ),
+        // fleet sandbox whose create says nothing, and reaches every
+        // offer its team is given: E2B's API cannot name one.
+        config: template
+            .config(front.service.settings().sleep)
+            .with_reach(front.service.settings().reach_of(team)),
         agent: None,
     };
     let metadata: BTreeMap<String, String> = body.metadata.unwrap_or_default();
@@ -185,7 +181,8 @@ pub async fn create<S: Store>(
 
 /// The template a create names by `key`: one of the fleet's, or else one
 /// of the team's saved from its sandboxes (a snapshot), by id or name,
-/// which creates start from booted afresh on its disk.
+/// which creates start from booted afresh on its disk, shaped and
+/// guaranteed as the sandbox it was saved from.
 async fn template<S: Store>(front: &Front<S>, team: &str, key: &str) -> Result<Template, Refused> {
     if let Some(template) = front.settings.templates.get(key) {
         return Ok(template.clone());
@@ -199,6 +196,8 @@ async fn template<S: Store>(front: &Front<S>, team: &str, key: &str) -> Result<T
         image: format!("{TEMPLATE_PREFIX}{}", saved.id),
         vcpus: saved.vcpus,
         memory_mib: saved.memory_mib,
+        memory_request_mib: saved.memory_request_mib,
+        cpu_request_millis: saved.cpu_request_millis,
         // The captured image is as long as the disk it was captured from.
         disk: None,
         disk_mib: saved.disk_mib,
