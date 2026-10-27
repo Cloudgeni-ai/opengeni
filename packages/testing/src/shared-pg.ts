@@ -144,6 +144,15 @@ async function templateDbName(): Promise<string> {
 }
 
 /**
+ * The template name for the @opengeni/db package at `dbPackageDir`, looking
+ * up the workspace packages it imports next to it. Same as
+ * `checkoutTemplateDbName(dirname(dbPackageDir))`.
+ */
+export async function sharedTestTemplateName(dbPackageDir: string): Promise<string> {
+  return checkoutTemplateDbName(dirname(dbPackageDir.replace(/[\\/]+$/u, "")));
+}
+
+/**
  * The base template name for the checkout whose `packages/` directory is
  * given. It depends only on file names relative to `packages/` and their
  * contents, never on where the checkout lives, so every worktree with the

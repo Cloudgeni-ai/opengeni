@@ -28,6 +28,7 @@ import {
   getSandbox,
   listEnrollments,
   listSandboxes,
+  meetingSummarySessionScope,
   nestedPostgresSqlState,
   readActiveSandbox,
   readLease,
@@ -830,6 +831,16 @@ export async function swapActiveSandbox(
   // never touches it); threaded straight into the epoch-fenced setActiveSandbox CAS.
   workingDir?: string | null,
 ): Promise<FleetSwapResult> {
+  // A built-in meeting-summary chat never gets a machine (docs/recordings.md,
+  // "Built-in summary"); the database refuses the same change.
+  if (
+    await meetingSummarySessionScope(services.db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.sessionId,
+    })
+  ) {
+    throw new HTTPException(409, { message: "A meeting notes chat keeps only its meeting tools." });
+  }
   const resolved = await resolveTarget(services, ctx, target);
   if (!resolved.ok) {
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {

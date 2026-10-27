@@ -977,7 +977,7 @@ a session creator or present browser user, or widen accepted work after an
 account-choice change. Never rotate permission, suspension, safety or validation
 failures. See docs/model-providers.md and docs/deployment.md.
 
-The legacy per-provider runtimes are retired. No runtime code reads the legacy
-subscription tables, and a missing or disabled cutover row fails closed, never
-falling back. Keep the reset-redemption live ledger and the Temporal names and
+The legacy per-provider runtimes are retired. Every organization runs on the
+shared core; no application code reads the legacy subscription tables or the
+per-organization cutover rows. Keep the reset-redemption live ledger and the Temporal names and
 omitted-provider decoding. Design: docs/design/subscription-core-2026-10-07.md.

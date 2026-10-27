@@ -681,6 +681,18 @@ describe("recording routes", () => {
     expect(people.map((person: { voice: unknown }) => person.voice)).toEqual([null, null]);
   });
 
+  test("the built-in meeting summary is a workspace setting that admins can turn off", async () => {
+    const scope = await fixture();
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { autoSummary: "off" } })).status,
+    ).toBe(400);
+    const off = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: false } });
+    expect(off.status).toBe(200);
+    expect(off.body.settings.recordings).toEqual({ autoSummary: false });
+    const on = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: true } });
+    expect(on.body.settings.recordings).toEqual({ autoSummary: true });
+  });
+
   test("people and models", async () => {
     const scope = await fixture();
     const personId = crypto.randomUUID();

@@ -51,12 +51,18 @@ import {
   MailOpenIcon,
   MessagesSquareIcon,
   PencilIcon,
+  UserRoundPenIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
   Trash2Icon,
   LinkIcon,
 } from "lucide-react";
+import { SessionAvatar } from "../session/session-avatar";
+import {
+  SessionProfileEditorDialog,
+  useCanEditSessionProfile,
+} from "../session/session-profile-editor";
 import { toast } from "../../lib/toast";
 import {
   createContext,
@@ -4997,6 +5003,8 @@ function SessionRow(props: {
   const title = sessionDisplayTitle(props.session);
   const archiveTarget = useWorkstreamArchiveTarget(props.session);
   const rename = useInlineRename(props.session, props.onRename);
+  const canEditProfile = useCanEditSessionProfile();
+  const [profileOpen, setProfileOpen] = useState(false);
   const contextPinSelection = useRef(false);
   const chatOps = useChatOperations();
   const copyLinkKeys = useActionShortcut("chat.copyLink");
@@ -5252,6 +5260,18 @@ function SessionRow(props: {
               >
                 <SessionRowContent
                   quickActionSlots={Number(!props.session.archived) + 1}
+                  leading={
+                    props.session.avatar ? (
+                      <SessionAvatar
+                        avatar={props.session.avatar}
+                        name={title}
+                        workspaceId={props.session.workspaceId}
+                        seed={props.session.id}
+                        size="xs"
+                        className="mr-0.5"
+                      />
+                    ) : null
+                  }
                   title={title}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
@@ -5318,6 +5338,12 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
+        {canEditProfile ? (
+          <ContextMenuItem onSelect={() => setProfileOpen(true)}>
+            <UserRoundPenIcon className="size-4" />
+            Edit profile…
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem
           aria-keyshortcuts={copyLinkKeys?.ariaKeys}
           onSelect={() => void chatOps.copyLink(props.session)}
@@ -5405,6 +5431,14 @@ function SessionRow(props: {
           </>
         ) : null}
       </ContextMenuContent>
+      {context.updateSessionProfile && profileOpen ? (
+        <SessionProfileEditorDialog
+          session={props.session}
+          update={context.updateSessionProfile}
+          open={profileOpen}
+          onOpenChange={setProfileOpen}
+        />
+      ) : null}
     </ContextMenu>
   );
 }
