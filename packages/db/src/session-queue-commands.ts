@@ -116,6 +116,7 @@ import {
 } from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
+import { maskSecretValuesForStorage } from "./secret-value-masking";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -2256,6 +2257,7 @@ export async function submitHumanPromptInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<SubmitHumanPromptResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   // Send is inert queue admission while paused; Steer deliberately resumes.
   // Tell the lock helper which path may need the exclusive control prefix.
@@ -3304,6 +3306,7 @@ export async function sendAgentMessageInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
@@ -3599,6 +3602,7 @@ export async function steerAgentSessionInTransaction(
     controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
+  input = maskSecretValuesForStorage(input, "message");
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
