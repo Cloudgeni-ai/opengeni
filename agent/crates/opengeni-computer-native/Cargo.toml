@@ -34,6 +34,7 @@ opengeni-agent-pipewire-ffi = { path = "../opengeni-agent-pipewire-ffi" }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 proc-macro-crate = { workspace = true }
+reis = { workspace = true }
 x11rb = { workspace = true }
 zbus = { workspace = true }
 zvariant = { workspace = true }

@@ -1462,7 +1462,12 @@ mod tests {
         // Typing's keymap lookup on a layout display (Xwayland) is checked the
         // same way and falls back to unchecked keysyms.
         assert_eq!(
-            crate::linux::linux_layout_text_keysyms(Some(&format!(":{number}")), "a").unwrap(),
+            crate::linux::linux_layout_text_keysyms(
+                Some(&format!(":{number}")),
+                &crate::linux::CompositorLayout::default(),
+                "a"
+            )
+            .unwrap(),
             vec![0x61]
         );
         assert_no_client(&squatter, "the keymap lookup reached the abstract listener");

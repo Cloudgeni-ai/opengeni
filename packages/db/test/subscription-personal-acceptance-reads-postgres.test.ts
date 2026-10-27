@@ -681,7 +681,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     );
     // 0988 adds the queued-turn hold summary over tables this schema has.
     heldBack.push("runtime definer summarize_queued_turns_by_hold() is missing or ambiguous");
-    // 0999 adds the held-browser inventory over tables this schema has.
+    // 1002 adds the held-browser inventory over tables this schema has.
     heldBack.push(
       "runtime definer list_agent_held_browser_sessions(integer, bigint) is missing or ambiguous",
     );

@@ -260,7 +260,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
       // Nor the queued-turn hold summary (0988).
       "runtime definer summarize_queued_turns_by_hold() is missing or ambiguous",
-      // Nor the held-browser inventory (0999).
+      // Nor the held-browser inventory (1002).
       "runtime definer list_agent_held_browser_sessions(integer, bigint) is missing or ambiguous",
     ]);
     expect(

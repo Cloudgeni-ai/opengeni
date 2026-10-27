@@ -610,6 +610,64 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(accepted.turnId).toBeString();
   }, 180_000);
 
+  test("a shared, workspace-memory session in a personal workspace admits prompts without a human; user memory still refuses", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    // A published Site's visitor conversation: shared, workspace memory, created
+    // by the Site's service principal. Its turns start without a human (0868),
+    // so its follow-ups must be admitted too.
+    const create = (memoryScope: "workspace" | "user") =>
+      createSessionWithIdempotencyKey(client!.db, {
+        accountId: human.accountId,
+        workspaceId: human.personalWorkspaceId,
+        visibility: "workspace_shared",
+        memoryScope,
+        initialMessage: "visitor conversation",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "service", subjectId: "site:fixture", label: "Site" },
+        subjectId: human.subjectId,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createIdempotencyKey: `site-visitor-${memoryScope}-${crypto.randomUUID()}`,
+      });
+    const submit = (sessionId: string) =>
+      withWorkspaceSubjectSessionActivityRls(
+        client!.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
+              accountId: human.accountId,
+              workspaceId: human.personalWorkspaceId,
+              sessionId,
+              subjectId: human.subjectId,
+              actor: { type: "service", subjectId: "site:fixture", subjectLabel: "Site" },
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "and a follow-up",
+              resources: [],
+              model: "test-model",
+              reasoningEffort: "medium",
+              reasoningEffortFallback: "medium",
+              source: "user",
+            }),
+          ),
+      );
+
+    const visitor = await create("workspace");
+    const accepted = await submit(visitor.session.id);
+    expect(accepted.turnId).toBeString();
+
+    const userMemory = await create("user");
+    await expect(submit(userMemory.session.id)).rejects.toBeInstanceOf(
+      PersonalSessionInitiatorRequiredError,
+    );
+  }, 180_000);
+
   test("an exact private parent attempt creates a same-owner private child", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

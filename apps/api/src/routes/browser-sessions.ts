@@ -164,6 +164,7 @@ import {
   recordLeaseControllerDataPlaneUrl,
   loadConnectionCredentialForBroker,
   startAuthRun,
+  recordBrowserSessionDisplay,
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
@@ -757,6 +758,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: launch.result?.display ?? null,
               });
               stages.mark("activate");
               return activated;
@@ -2883,6 +2885,9 @@ export function registerBrowserSessionRoutes(
                 tokenGeneration: record.tokenGeneration,
               });
               let client: BrowserControlClient | undefined;
+              const resumed: {
+                result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null;
+              } = { result: null };
               try {
                 // The heartbeat covers everything after dispatch, including
                 // provisioning the controller.
@@ -2915,7 +2920,7 @@ export function registerBrowserSessionRoutes(
                       prepared.session.headless,
                       linkedComputer !== null,
                     );
-                    return await client.createSession({
+                    resumed.result = await client.createSession({
                       browserSessionId,
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
@@ -2926,6 +2931,7 @@ export function registerBrowserSessionRoutes(
                       ...(networkRoute ? { networkRoute } : {}),
                       restore: restore!,
                     });
+                    return resumed.result;
                   },
                 );
               } catch (error) {
@@ -2991,6 +2997,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: resumed.result?.display ?? null,
               });
             },
           );
@@ -4950,7 +4957,7 @@ export function registerBrowserSessionRoutes(
       ) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
-      await client.createSession({
+      const recovered = await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
         tokenGeneration: record.tokenGeneration,
@@ -4960,6 +4967,23 @@ export function registerBrowserSessionRoutes(
         ...(recoverWorkingDirectory ? { recoverExistingWorkingDirectory: true } : {}),
         ...(linkedComputer ? { linkedComputer } : {}),
         ...(networkRoute ? { networkRoute } : {}),
+      });
+      // A relaunch can land in another environment (for example after the
+      // agent restarted outside the desktop session), so store the display
+      // this launch reports rather than keeping the previous one. The browser
+      // is already recovered, so a failed write only leaves the old report.
+      await recordBrowserSessionDisplay(routeDeps.db, {
+        accountId: grant.accountId,
+        workspaceId: record.session.workspaceId,
+        browserSessionId: record.session.id,
+        controllerGeneration: binding.controllerGeneration,
+        display: recovered.display ?? null,
+      }).catch((error: unknown) => {
+        console.warn("browser.recovered_display_record_failed", {
+          browserSessionId: record.session.id,
+          controllerGeneration: binding.controllerGeneration,
+          failure: interactionFailure(error),
+        });
       });
     } catch (error) {
       console.error("browser controller recovery failed", {
@@ -5098,6 +5122,9 @@ export function registerBrowserSessionRoutes(
             placement.controllerHostSandboxGroupId,
           ).catch(() => undefined);
         };
+        const adopted: {
+          result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null;
+        } = { result: null };
         try {
           await withInteractionHolderHeartbeat(
             deps,
@@ -5119,7 +5146,7 @@ export function registerBrowserSessionRoutes(
                 record.session.headless,
                 linkedComputer !== null,
               );
-              await client.createSession({
+              adopted.result = await client.createSession({
                 browserSessionId,
                 controllerGeneration: binding.controllerGeneration,
                 tokenGeneration: record.tokenGeneration,
@@ -5159,6 +5186,7 @@ export function registerBrowserSessionRoutes(
             operationId,
             actorSubjectId: grant.subjectId,
             controller: binding,
+            display: adopted.result?.display ?? null,
           }),
         };
       },

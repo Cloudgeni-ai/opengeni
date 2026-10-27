@@ -86,7 +86,7 @@ describe("console composer in a split desktop pane", () => {
         true,
       );
     }
-    await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
+    await page.screenshot({ path: `${root}/test-results/composer-pane-fixed.png` });
   });
 
   test("shared actions keep repositories, connectors, and secrets reachable", async () => {
@@ -166,7 +166,9 @@ describe("console composer in a split desktop pane", () => {
       await page.getByRole("button", { name: "More composer actions" }).click();
       await page.getByRole("menuitem", { name: /Repositories/ }).click();
       await page.getByRole("menu").waitFor({ state: "visible" });
-      await page.screenshot({ path: `${root}/new-session-picker-${viewport.width}.png` });
+      await page.screenshot({
+        path: `${root}/test-results/new-session-picker-${viewport.width}.png`,
+      });
       await page.keyboard.press("Escape");
     }
   }, 60_000);
@@ -198,7 +200,7 @@ describe("console composer in a split desktop pane", () => {
     await page.getByRole("menu").waitFor({ state: "hidden" });
     expect(await agentTab.count()).toBe(1);
     expect(await knowledge.inputValue()).toBe("off");
-    await page.screenshot({ path: `${root}/composer-settings-existing.png` });
+    await page.screenshot({ path: `${root}/test-results/composer-settings-existing.png` });
     await plus.click();
     await page.mouse.click(950, 20);
     await page.getByRole("menu").waitFor({ state: "hidden" });
@@ -226,7 +228,7 @@ describe("console composer in a split desktop pane", () => {
     expect(await menu.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(white);
     await page.getByLabel("Knowledge", { exact: true }).selectOption("off");
     await page.screenshot({
-      path: `${root}/composer-settings-new.png`,
+      path: `${root}/test-results/composer-settings-new.png`,
     });
     await page.getByRole("menuitem", { name: "Back", exact: true }).click();
     await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();

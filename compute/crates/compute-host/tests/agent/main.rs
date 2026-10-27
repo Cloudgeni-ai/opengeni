@@ -13,7 +13,7 @@ use std::time::Duration;
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
-    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -157,6 +157,12 @@ struct World {
     unreadable_cpu: AtomicBool,
     /// While set, no VM's traffic can be read.
     unreadable_io: AtomicBool,
+    /// Bytes, calls and dirtied pages every VM counts as written, as its
+    /// VMM's writes and discards to its disk; the tests that change a disk
+    /// file as its guest would add to them.
+    written: Mutex<Writes>,
+    /// While set, no VM's writes ever return; see [`Engine::settle_writes`].
+    unsettled: AtomicBool,
     /// While set, every pause moves a burst of data, as a VMM writing a
     /// snapshot does: work the host does, not the guest.
     transition_traffic: AtomicBool,
@@ -176,6 +182,9 @@ struct World {
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
+    /// While set, a guest asked to write its disks out answers only once
+    /// it is cleared, as one still trimming its disk.
+    syncs_held: AtomicBool,
     /// While set, a paused VM's guest takes no connection, as with a real
     /// VMM, whose guest's processors do not run while it is paused.
     paused_take_nothing: AtomicBool,
@@ -479,6 +488,12 @@ async fn guest(listener: UnixListener, state: GuestState) {
             }
             let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
+                if line == "sync" {
+                    state.world.syncs.fetch_add(1, Ordering::SeqCst);
+                    while state.world.syncs_held.load(Ordering::SeqCst) {
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
                 let Some(reply) = state.answer(&line, &mut flood) else {
                     break;
                 };
@@ -645,10 +660,8 @@ impl GuestState {
                 "ok".into()
             }
             ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
-            ("sync", _) => {
-                world.syncs.fetch_add(1, Ordering::Relaxed);
-                "synced".into()
-            }
+            // Counted, and held while the world says, as it is asked.
+            ("sync", _) => "synced".into(),
             (other, _) => format!("unknown {other}"),
         })
     }
@@ -1049,6 +1062,23 @@ impl Engine for Fake {
         }
         let streamed = vm.work.lock().unwrap().io.total();
         Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    fn writes(&self, _: &FakeVm) -> Result<Writes, EngineError> {
+        Ok(*self.world.written.lock().unwrap())
+    }
+
+    fn settle_writes(
+        &self,
+        _: &FakeVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let unsettled = self.world.unsettled.load(Ordering::SeqCst);
+        async move {
+            if unsettled {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {

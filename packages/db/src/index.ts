@@ -54962,7 +54962,7 @@ const LIST_AGENT_HELD_BROWSER_SESSIONS =
  * as the box release below; the API renews each one's hold on its controller.
  * Most recently used first, at most `limit`.
  *
- * 0999 creates the routine with its runtime EXECUTE withheld for one release
+ * 1002 creates the routine with its runtime EXECUTE withheld for one release
  * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
  * grants it, this lists nothing. The grant is checked in a separate statement:
  * EXECUTE is checked when a statement starts.
@@ -55014,7 +55014,7 @@ export async function listAgentHeldBrowserSessions(
  * waiting (an armed input wait) keeps it, page state and all, but never
  * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
  * browser's own controller keeps it by the same rule;
- * `list_idle_interaction_leases` (migration 0999) skips such boxes.
+ * `list_idle_interaction_leases` (migration 1002) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle

@@ -402,6 +402,34 @@ describe("migration 0362 managed browser session sets", () => {
     expect(await getManagedAuthSessionSetAuthorityState(client.db, reauthAuthority)).toBe("absent");
   });
 
+  test("an API clock ahead of the database still begins a login transaction", async () => {
+    if (!owned || !client) return;
+    const authority = `skewed-authority-${crypto.randomUUID()}`;
+    const transactionId = crypto.randomUUID();
+    const [clock] = await owned.admin<Array<{ now: Date }>>`select clock_timestamp() as now`;
+    const now = clock!.now;
+    // The API computes its ten-minute expiry from a clock one minute ahead.
+    const begun = await beginManagedAuthLoginTransaction(client.db, {
+      authorityHash: hex(authority),
+      csrfHash: hex(`csrf:${authority}`),
+      operationId: crypto.randomUUID(),
+      requestDigest: hex("begin-skewed-api-clock"),
+      expectedGeneration: "1",
+      expectedActorEpoch: "1",
+      transactionId,
+      transactionSecretHash: hex(`secret:${transactionId}`),
+      kind: "add",
+      targetSlotId: null,
+      returnIntentId: null,
+      returnPath: null,
+      expiresAt: new Date(now.getTime() + 11 * 60_000),
+    });
+    expect(begun).toMatchObject({ id: transactionId, kind: "add" });
+    const expiresAt = new Date(begun.expiresAt).getTime();
+    expect(expiresAt).toBeGreaterThan(now.getTime() + 9 * 60_000);
+    expect(expiresAt).toBeLessThanOrEqual(Date.now() + 10 * 60_000 + 5_000);
+  });
+
   test(
     "bounds pre-auth transactions across repeated and fresh authorities and purges expiry",
     withRateLimitClock(async (setClock) => {
