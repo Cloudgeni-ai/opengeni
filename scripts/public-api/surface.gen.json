@@ -37683,6 +37683,7 @@
       "McpCapabilityConnectInput": "type",
       "providerLabel": "value",
       "reconnectCandidate": "value",
+      "showsMcpServerLabel": "value",
       "useChatConnectionsAllowed": "value",
       "useConnect": "value",
       "useConnectSetupFlow": "value",

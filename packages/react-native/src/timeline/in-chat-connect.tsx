@@ -13,6 +13,7 @@ import {
   usePreparedMcpSetupAttempt,
   useChatConnectionsAllowed,
   useConnect,
+  showsMcpServerLabel,
   type ConnectAttempt,
   type ConnectAttemptHints,
   type ConnectController,
@@ -413,7 +414,7 @@ function CapabilityFrame({
           </View>
           {complete ? (
             <Icon name="check" size={18} color={c.accent} />
-          ) : (
+          ) : !typeLabel ? null : (
             <View
               style={{
                 borderRadius: theme.radius.full,
@@ -1141,7 +1142,7 @@ export function NativeMcpCapabilityCard({
     <CapabilityFrame
       name={title}
       subtitle={item?.providerDomain ?? ""}
-      typeLabel={t("sessionMcpCapabilityCard.mcpServer")}
+      typeLabel={showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : ""}
       description={item?.description || rationale}
       complete={flow.complete}
       note={t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")}
