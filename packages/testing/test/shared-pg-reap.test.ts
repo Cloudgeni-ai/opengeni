@@ -40,6 +40,7 @@ import {
   scrubScratchRoleGrants,
   templateSourceFiles,
   templateStampComment,
+  templatePruningEnabled,
 } from "../src/shared-pg";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -213,6 +214,14 @@ test("reaping errors are reported, never thrown", async () => {
   }
 });
 
+test("template pruning is opt-in", () => {
+  expect(templatePruningEnabled({})).toBe(false);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "" })).toBe(false);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "0" })).toBe(false);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: "1" })).toBe(true);
+  expect(templatePruningEnabled({ OPENGENI_TEST_PG_PRUNE_TEMPLATES: " TRUE " })).toBe(true);
+});
+
 // Against the real test PostgreSQL, confined to a unique name scope and a
 // made-up machine identity: every other reaper on a shared server sees these
 // owners as foreign (never provably dead), and this test's passes only look
@@ -324,6 +333,9 @@ describe("reaping a real cluster", () => {
           scopePrefix: sub,
           templatePrefix: `${sub}template_`,
           here,
+          // Opt in, so the pruning tests exercise it; tests that must not
+          // prune pass false.
+          pruneTemplates: true,
           ...overrides,
         }),
     };
@@ -531,6 +543,40 @@ describe("reaping a real cluster", () => {
       const stamp = parseTemplateStamp(row!.comment as string);
       expect(stamp?.by).toBe("reaper");
       expect(stamp?.lastUsedAt).toBeGreaterThanOrEqual(now);
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "leaves templates untouched unless pruning is asked for",
+    async () => {
+      if (!admin) return;
+      const { sub, templatePrefix } = subScope("u");
+      const stale = await createTemplate(
+        `${templatePrefix}${hex12()}`,
+        templateStampComment(Date.now() - 30 * DAY),
+      );
+      const unstamped = await createTemplate(`${templatePrefix}${hex12()}`);
+      // The library default, as the harness runs without
+      // OPENGENI_TEST_PG_PRUNE_TEMPLATES=1.
+      const result = await reapOrphanedTestDatabases({
+        adminUrl,
+        observationsPath: join(directory, "u.json"),
+        scopePrefix: sub,
+        templatePrefix,
+        here,
+      });
+      expect({ errors: result.errors, templatesDropped: result.templatesDropped }).toEqual({
+        errors: [],
+        templatesDropped: [],
+      });
+      expect(await exists(stale)).toBe(true);
+      expect(await exists(unstamped)).toBe(true);
+      // Not even stamped.
+      const [row] = await admin`
+        SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
+         WHERE datname = ${unstamped}`;
+      expect(row!.comment).toBeNull();
     },
     DB_TEST_TIMEOUT_MS,
   );

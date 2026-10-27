@@ -58,8 +58,8 @@ const execFileAsync = promisify(execFile);
 // A test process that is killed or crashes never drops its database, and the
 // server outlives every run, so orphans used to pile up until the disk filled.
 // Every database the harness creates now carries its owner (host, boot id, pid
-// namespace, pid, process start time) as its database comment, and every clone
-// stamps its template with a last-used time. At most once per REAP_INTERVAL_MS
+// namespace, pid, process start time) as its database comment. At most once
+// per REAP_INTERVAL_MS
 // per state directory, an acquisition (or the last holder's release) starts one
 // detached background reaper (`--reap` below, logic in
 // reapOrphanedTestDatabases) that drops, without FORCE:
@@ -68,10 +68,13 @@ const execFileAsync = promisify(execFile);
 //   - unowned ones (older checkouts) idle with no connections and no new
 //     client sessions across a 15-minute window of reaper passes, and ones whose
 //     owner it cannot check (another host or pid namespace) across 6 hours;
-//   - templates idle for 6 hours beyond the 10 most recently used, any
-//     template idle for 7 days, and templates only older checkouts use after
-//     2 days, a few per pass, never this checkout's own (a clone whose template
-//     vanished rebuilds it under the lock).
+//   - only with OPENGENI_TEST_PG_PRUNE_TEMPLATES=1 (off by default, so
+//     templates are otherwise left untouched): templates idle for 6 hours
+//     beyond the 10 most recently used, any template idle for 7 days, and
+//     templates only older checkouts use after 2 days, a few per pass, never
+//     this checkout's own. With it on, every clone also stamps its template
+//     with a last-used time. A clone whose template vanished rebuilds it under
+//     the lock either way.
 // A database with any other comment is kept: retainTestDatabase() marks one a
 // caller deliberately leaves behind. Reaping is best effort: it never blocks
 // or fails a test, and its notes go to `reaper.log` in the state directory.
@@ -936,7 +939,7 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
       try {
         await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`);
         await recordDatabaseOwner(root, dbName);
-        await stampTemplateUse(root, await templateDbName());
+        if (templatePruningEnabled()) await stampTemplateUse(root, await templateDbName());
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
@@ -1010,6 +1013,18 @@ function isMissingTemplateError(error: unknown): boolean {
 }
 
 const templateStampedAt = new Map<string, number>();
+
+/**
+ * Template pruning, and the last-use stamps it relies on, is opt-in:
+ * `OPENGENI_TEST_PG_PRUNE_TEMPLATES=1` (or `true`). Off by default, so the
+ * harness leaves existing templates untouched.
+ */
+export function templatePruningEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const setting = env.OPENGENI_TEST_PG_PRUNE_TEMPLATES?.trim().toLowerCase();
+  return setting === "1" || setting === "true";
+}
 
 /**
  * Refresh the template's last-used stamp (when it is over an hour old, checked
@@ -1125,6 +1140,7 @@ export async function reapSharedTestDatabases(
       : {}),
     adminUrl: ADMIN_URL,
     observationsPath: REAPER_OBSERVATIONS_FILE,
+    pruneTemplates: templatePruningEnabled(),
     protectedTemplates: [await templateDbName().catch(() => "")],
     // Never queue behind a long template build: skip pruning this pass instead.
     withTemplateLock: (fn) => withLock(fn, 30_000),
@@ -1536,7 +1552,9 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   instead of broken. Only `og_<label>_<12 hex>` names and unmarked
 //   template-named leftovers are considered; `postgres` and every other
 //   database are never candidates.
-// - Templates carry a last-used stamp written by each clone. A template idle
+// - Template pruning runs only when `pruneTemplates` is set (the harness sets
+//   it from OPENGENI_TEST_PG_PRUNE_TEMPLATES=1; off by default). Then
+//   templates carry a last-used stamp written by each clone. A template idle
 //   for `templateMinIdleMs` outside the `templateKeep` most recently used, or
 //   idle for `templateRetentionMs`, is pruned (outside the most recent ones
 //   after only `templatePressureIdleMs` once there are more than
@@ -1961,6 +1979,7 @@ export type ReapOptions = {
   protectedTemplates?: readonly string[];
   /** Run template pruning under the harness's container lock. */
   withTemplateLock?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /** Prune stale templates. Off unless `true` (see templatePruningEnabled). */
   pruneTemplates?: boolean;
   /** Classify and report without dropping or stamping anything. */
   dryRun?: boolean;
@@ -2193,7 +2212,7 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       result.errors.push(`observations: ${short(error)}`);
     }
 
-    if (options.pruneTemplates !== false && !options.dryRun) {
+    if (options.pruneTemplates === true && !options.dryRun) {
       await pruneStaleTemplates(sql, rows, {
         templatePrefix,
         protectedTemplates: new Set(options.protectedTemplates ?? []),

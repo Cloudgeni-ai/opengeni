@@ -760,10 +760,11 @@ roles and FORCE-RLS checks; it never starts or stops that external server.
 The harness also reaps databases that killed or crashed test runs left behind:
 a detached background pass, at most every five minutes, drops per-test
 `og_<label>_<12 hex>` databases whose recorded owner process is gone (or, for
-unowned ones, that stayed idle with no connections for 15 minutes) and migrated
-templates idle for 6 hours beyond the 10 most recently used (1 hour once there
-are more than 20 templates), never with FORCE
-and never failing a test. Call `retainTestDatabase` for a database you keep on
+unowned ones, that stayed idle with no connections for 15 minutes), never with
+FORCE and never failing a test. It leaves migrated templates alone unless
+`OPENGENI_TEST_PG_PRUNE_TEMPLATES=1`, which also prunes templates idle for 6
+hours beyond the 10 most recently used (1 hour once there are more than 20
+templates). Call `retainTestDatabase` for a database you keep on
 purpose. Scratch login roles a test creates on the shared cluster must be named
 `opengeni_bypass_<32 hex>` or `migration_<4 digits>_<32 hex>` and recorded with
 `recordTestRoleOwner`; the reaper revokes their grants and drops them (and
