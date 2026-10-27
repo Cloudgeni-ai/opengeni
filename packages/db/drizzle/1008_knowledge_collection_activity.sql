@@ -28,7 +28,9 @@ CREATE TABLE knowledge_collection_activity (
   PRIMARY KEY (account_id, entry_id),
   FOREIGN KEY (account_id, entry_id) REFERENCES knowledge_entries(account_id, id) ON DELETE CASCADE
 );
-CREATE INDEX knowledge_collection_activity_via_idx ON knowledge_collection_activity (account_id, via_entry_id);
+-- Led by the member, so it is never a cheaper-looking scan of a whole
+-- organization than the key when statistics underestimate an organization.
+CREATE INDEX knowledge_collection_activity_via_idx ON knowledge_collection_activity (via_entry_id, account_id);
 -- Organizations whose activity is complete ('built'), and those a write under
 -- an older snapshot may have left behind ('stale'). A marker is inserted, never
 -- updated or deleted, by such a write, so it holds whatever that snapshot saw.
@@ -173,8 +175,11 @@ BEGIN
         FROM (
           SELECT o.group_id FROM offered o
           UNION SELECT s.entry_id FROM changed c
-            CROSS JOIN LATERAL (SELECT s.entry_id FROM knowledge_collection_activity s
-              WHERE s.account_id=p_account AND s.via_entry_id=c.id OFFSET 0) s
+            -- By member only, the organization checked above the fence, so the
+            -- organization-led key never looks cheaper than the member index.
+            CROSS JOIN LATERAL (SELECT s.entry_id,s.account_id FROM knowledge_collection_activity s
+              WHERE s.via_entry_id=c.id OFFSET 0) s
+            WHERE s.account_id=p_account
           UNION SELECT r.id FROM recompute r) a
         CROSS JOIN LATERAL (SELECT g.id FROM knowledge_entries g WHERE g.account_id=p_account AND g.id=a.group_id OFFSET 0) g
         LEFT JOIN LATERAL (SELECT s.changed_at,s.via_entry_id FROM knowledge_collection_activity s
@@ -214,9 +219,10 @@ BEGIN
       ), dependent(id,depth,path) AS (
         SELECT r.id,0,ARRAY[r.id] FROM reset r
         UNION ALL SELECT s.entry_id,d.depth+1,d.path||s.entry_id FROM dependent d
-          CROSS JOIN LATERAL (SELECT s.entry_id FROM knowledge_collection_activity s
-            WHERE s.account_id=p_account AND s.via_entry_id=d.id OFFSET 0) s
-        WHERE NOT EXISTS(SELECT 1 FROM reset r WHERE r.id=s.entry_id) AND s.entry_id<>ALL(d.path)
+          CROSS JOIN LATERAL (SELECT s.entry_id,s.account_id FROM knowledge_collection_activity s
+            WHERE s.via_entry_id=d.id OFFSET 0) s
+        WHERE s.account_id=p_account AND NOT EXISTS(SELECT 1 FROM reset r WHERE r.id=s.entry_id)
+          AND s.entry_id<>ALL(d.path)
       ), ordered AS MATERIALIZED (
         SELECT d.id,d.depth,(SELECT s.changed_at FROM knowledge_collection_activity s
           WHERE s.account_id=p_account AND s.entry_id=d.id) AS changed_at
