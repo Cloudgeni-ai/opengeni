@@ -1,0 +1,1 @@
+0435_skill_chat_confirmation.sql

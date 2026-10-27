@@ -1,0 +1,1 @@
+0511_knowledge_visible_index_status.sql

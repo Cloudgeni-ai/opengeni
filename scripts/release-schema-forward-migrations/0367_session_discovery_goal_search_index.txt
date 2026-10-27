@@ -1,0 +1,1 @@
+0367_session_discovery_goal_search_index.sql

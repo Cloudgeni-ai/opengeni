@@ -1,0 +1,1 @@
+0359_insights_force_rls_read_capability.sql

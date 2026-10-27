@@ -1,0 +1,1 @@
+0605_insights_model_debit_period_index.sql

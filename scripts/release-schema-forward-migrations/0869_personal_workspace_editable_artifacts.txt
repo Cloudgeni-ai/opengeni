@@ -1,0 +1,1 @@
+0869_personal_workspace_editable_artifacts.sql

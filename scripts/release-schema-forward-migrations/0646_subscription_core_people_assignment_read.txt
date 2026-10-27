@@ -1,0 +1,1 @@
+0646_subscription_core_people_assignment_read.sql

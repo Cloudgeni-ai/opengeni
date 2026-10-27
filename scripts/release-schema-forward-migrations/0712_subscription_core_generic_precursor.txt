@@ -1,0 +1,1 @@
+0712_subscription_core_generic_precursor.sql

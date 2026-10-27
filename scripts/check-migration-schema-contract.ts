@@ -34,6 +34,10 @@ import {
   unreachableContractReferences,
   unregisteredMigrations,
 } from "./migration-schema-contract";
+import {
+  ForwardRegistrationError,
+  readForwardMigrationRegistrations,
+} from "./release-schema-forward-registrations";
 
 async function git(root: string, ...command: string[]) {
   const child = Bun.spawn(["git", ...command], { cwd: root, stdout: "pipe", stderr: "pipe" });
@@ -83,7 +87,9 @@ async function main(): Promise<void> {
   if (!base) throw new Error(`cannot read ${MIGRATIONS_DIR} at ${primary}`);
 
   const source = readContractSource(root);
-  const registration = parseContractRegistration(source);
+  const registration = parseContractRegistration(source, () =>
+    readForwardMigrationRegistrations(root),
+  );
   const head = listLedger(root);
   const violations = unregisteredMigrations(head, base, registration);
 
@@ -126,6 +132,7 @@ async function main(): Promise<void> {
     violations,
     declaredIdentifiers(source),
     registration.semanticLedger,
+    registration.forwardDirectory,
   )) {
     console.error(line);
   }
@@ -133,7 +140,7 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  if (error instanceof ContractParseError) {
+  if (error instanceof ContractParseError || error instanceof ForwardRegistrationError) {
     console.error(`[migration-schema-contract] ${error.message}`);
     process.exit(1);
   }

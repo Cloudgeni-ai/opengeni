@@ -111,6 +111,11 @@ async function fixtureRepo(): Promise<{ root: string; upstream: string }> {
   await mkdir(join(root, "scripts"), { recursive: true });
   await writeFile(join(root, "scripts/release-schema-contract.test.ts"), MINI_CONTRACT_TEST);
   await pinMiniContract(root);
+  await mkdir(join(root, "scripts/release-schema-forward-migrations"), { recursive: true });
+  await writeFile(
+    join(root, "scripts/release-schema-forward-migrations/0003_scheduled_authority.txt"),
+    "0003_scheduled_authority.sql\n",
+  );
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", "feature");
   // Main advances with a different 0003 and a companion test sharing the digits.
@@ -470,6 +475,42 @@ describe("migration ordinal helpers", () => {
     expect(widened.unrewrittenBare).toEqual([]);
   });
 
+  test("renames the release-schema forward registration with its migration", () => {
+    const plan = planRenumber({
+      from: name("0003_scheduled_authority.sql"),
+      toOrdinal: "0004",
+      files: new Map([
+        ["packages/db/drizzle/0003_scheduled_authority.sql", "select 3;\n"],
+        [
+          "scripts/release-schema-forward-migrations/0003_scheduled_authority.txt",
+          "0003_scheduled_authority.sql\n",
+        ],
+        [
+          "scripts/release-schema-forward-migrations/0003_company_brain.txt",
+          "0003_company_brain.sql\n",
+        ],
+      ]),
+      companionTests: [],
+    });
+    expect(plan.renames).toEqual([
+      {
+        from: "packages/db/drizzle/0003_scheduled_authority.sql",
+        to: "packages/db/drizzle/0004_scheduled_authority.sql",
+      },
+      {
+        from: "scripts/release-schema-forward-migrations/0003_scheduled_authority.txt",
+        to: "scripts/release-schema-forward-migrations/0004_scheduled_authority.txt",
+      },
+    ]);
+    expect(
+      plan.contents.get("scripts/release-schema-forward-migrations/0004_scheduled_authority.txt"),
+    ).toBe("0004_scheduled_authority.sql\n");
+    // Another migration's registration sharing the digits is untouched.
+    expect(
+      plan.contents.has("scripts/release-schema-forward-migrations/0003_company_brain.txt"),
+    ).toBe(false);
+  });
+
   test("only exact SHA-256 Expected/Received pairs count as re-pinnable mismatches", () => {
     const a = "a".repeat(64);
     const b = "b".repeat(64);
@@ -572,6 +613,16 @@ describe("migration ordinal CLIs", () => {
     expect(status).toMatch(
       /^R[ M] packages\/db\/drizzle\/0003_scheduled_authority\.sql -> packages\/db\/drizzle\/0004_scheduled_authority\.sql$/m,
     );
+    // The forward registration moves with the migration and names the new file.
+    expect(status).toMatch(
+      /^R[ M] scripts\/release-schema-forward-migrations\/0003_scheduled_authority\.txt -> scripts\/release-schema-forward-migrations\/0004_scheduled_authority\.txt$/m,
+    );
+    expect(
+      await readFile(
+        join(root, "scripts/release-schema-forward-migrations/0004_scheduled_authority.txt"),
+        "utf8",
+      ),
+    ).toBe("0004_scheduled_authority.sql\n");
 
     const after = await run(root, guard);
     expect(after.code).toBe(0);

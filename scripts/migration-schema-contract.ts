@@ -4,11 +4,16 @@
  * Forward registration excludes additions from the immutable governed
  * checkpoint. Complete-ledger metadata is checked independently against actual
  * SQL files, so new migrations need no count indicators or latest-name pins.
+ * The contract reads its forward registrations from one file per migration
+ * under `scripts/release-schema-forward-migrations/` (see
+ * `release-schema-forward-registrations.ts`), so independent migration pull
+ * requests add different files instead of editing one shared list.
  * The legacy three-site mode remains supported for historical contracts:
  *
- * 1. `appendedMigrationPaths` - the forward-migration list. Migrations named
- *    here are excluded from the governed host-export checkpoint input, so the
- *    pinned aggregate SHA-256 never moves.
+ * 1. `appendedMigrationPaths` - the forward migrations, either an inline list
+ *    (legacy) or the registration directory. Migrations named there are
+ *    excluded from the governed host-export checkpoint input, so the pinned
+ *    aggregate SHA-256 never moves.
  * 2. A presence probe over the COMPLETE ledger
  *    (`completeSourceContract.migrations.some((migration) => migration.path === ...)`),
  *    whose indicator feeds the pinned `fileCount`.
@@ -38,8 +43,13 @@ import { join } from "node:path";
 import { parseSync } from "oxc-parser";
 
 import { MIGRATIONS_DIR, RELEASE_CONTRACT_TEST } from "./migration-ordinals";
+import {
+  FORWARD_MIGRATIONS_DIR,
+  forwardRegistrationContent,
+  forwardRegistrationPath,
+} from "./release-schema-forward-registrations";
 
-export { MIGRATIONS_DIR, RELEASE_CONTRACT_TEST };
+export { FORWARD_MIGRATIONS_DIR, MIGRATIONS_DIR, RELEASE_CONTRACT_TEST };
 
 /**
  * The two pre-existing Company Brain entries live in a separate literal in the
@@ -50,6 +60,13 @@ const FORWARD_LIST_NAMES = ["companyBrainMigrationPaths", "appendedMigrationPath
 
 /** The list a newly added migration belongs in, named in guidance and error output. */
 export const CANONICAL_FORWARD_LIST = "appendedMigrationPaths";
+
+/**
+ * The module and loader through which the contract may read its forward
+ * registrations from the per-migration directory instead of an inline list.
+ */
+const FORWARD_REGISTRATION_MODULE = "./release-schema-forward-registrations";
+const FORWARD_REGISTRATION_LOADER = "readForwardMigrationRegistrations";
 
 const LADDER_NAME = "releaseSchemaContractHash";
 const COMPLETE_CONTRACT = "completeSourceContract";
@@ -90,7 +107,12 @@ export type ContractRegistration = {
   latestMigrationPins: string[];
   /** True only after executable, source-derived metadata assertions are verified. */
   semanticLedger?: true;
+  /** True when the contract reads forward registrations from `FORWARD_MIGRATIONS_DIR`. */
+  forwardDirectory?: true;
 };
+
+/** Lazily supplies the registration directory's migrations, only when the contract reads it. */
+export type ForwardRegistrationLoader = () => readonly string[];
 
 export type RegistrationViolation = {
   /** The migration this head adds. */
@@ -362,10 +384,38 @@ function visitAst(value: unknown, visitor: (node: AstNode) => void): void {
   }
 }
 
-/** Every migration the contract excludes from the governed checkpoint input. */
-export function parseForwardMigrations(source: string): string[] {
+/**
+ * Local names bound to the real forward-registration loader by a value import.
+ * Only a call through one of these reads the registration directory; any other
+ * call (a local look-alike, a type-only import) is not trusted as registration.
+ */
+function forwardRegistrationLoaderBindings(program: { body: unknown[] }): Set<string> {
+  const names = new Set<string>();
+  for (const value of program.body) {
+    const statement = astNode(value);
+    if (statement?.type !== "ImportDeclaration" || statement.importKind === "type") continue;
+    if (astNode(statement.source)?.value !== FORWARD_REGISTRATION_MODULE) continue;
+    for (const entry of statement.specifiers as unknown[]) {
+      const specifier = astNode(entry);
+      if (specifier?.type !== "ImportSpecifier" || specifier.importKind === "type") continue;
+      const imported = astNode(specifier.imported);
+      const importedName = imported?.type === "Identifier" ? imported.name : imported?.value;
+      if (importedName === FORWARD_REGISTRATION_LOADER) {
+        names.add(String(astNode(specifier.local)?.name));
+      }
+    }
+  }
+  return names;
+}
+
+function readForwardMigrations(
+  source: string,
+  loadRegistrations?: ForwardRegistrationLoader,
+): { forward: string[]; directory: boolean } {
   const program = parseContract(source).program;
+  const loaders = forwardRegistrationLoaderBindings(program);
   const forward: string[] = [];
+  let directory = false;
   for (const name of FORWARD_LIST_NAMES) {
     const declarations: AstNode[] = [];
     visitAst(program, (node) => {
@@ -383,9 +433,34 @@ export function parseForwardMigrations(source: string): string[] {
           ? astNode(callee.object)
           : undefined;
     }
+    // The directory form: `readForwardMigrationRegistrations()` (optionally
+    // filtered), called with no arguments so it reads this repository's own
+    // registration directory, which is what the guard reads too.
+    const callee = array?.type === "CallExpression" ? astNode(array.callee) : undefined;
+    if (
+      declarations.length === 1 &&
+      array?.type === "CallExpression" &&
+      callee?.type === "Identifier" &&
+      loaders.has(String(callee.name)) &&
+      (array.arguments as unknown[]).length === 0
+    ) {
+      if (!loadRegistrations) {
+        throw new ContractParseError(
+          `${RELEASE_CONTRACT_TEST} reads \`${name}\` from ${FORWARD_MIGRATIONS_DIR}; the guard must be given that directory's registrations.`,
+        );
+      }
+      directory = true;
+      for (const file of loadRegistrations()) {
+        if (!MIGRATION_FILE.test(file)) {
+          throw new ContractParseError(`nonliteral migration ${file} in ${FORWARD_MIGRATIONS_DIR}`);
+        }
+        if (!forward.includes(file)) forward.push(file);
+      }
+      continue;
+    }
     if (declarations.length !== 1 || array?.type !== "ArrayExpression") {
       throw new ContractParseError(
-        `${RELEASE_CONTRACT_TEST} must declare one executable \`const ${name} = [\` forward list; update scripts/migration-schema-contract.ts for an intentional equivalent refactor.`,
+        `${RELEASE_CONTRACT_TEST} must declare one executable \`const ${name} = [\` forward list or \`const ${name} = ${FORWARD_REGISTRATION_LOADER}()\`; update scripts/migration-schema-contract.ts for an intentional equivalent refactor.`,
       );
     }
     for (const value of array.elements as unknown[]) {
@@ -402,10 +477,18 @@ export function parseForwardMigrations(source: string): string[] {
   }
   if (forward.length === 0) {
     throw new ContractParseError(
-      `no migration names found in ${FORWARD_LIST_NAMES.join(" / ")} in ${RELEASE_CONTRACT_TEST}`,
+      `no migration names found in ${FORWARD_LIST_NAMES.join(" / ")} in ${RELEASE_CONTRACT_TEST} or ${FORWARD_MIGRATIONS_DIR}`,
     );
   }
-  return forward;
+  return { forward, directory };
+}
+
+/** Every migration the contract excludes from the governed checkpoint input. */
+export function parseForwardMigrations(
+  source: string,
+  loadRegistrations?: ForwardRegistrationLoader,
+): string[] {
+  return readForwardMigrations(source, loadRegistrations).forward;
 }
 
 /**
@@ -445,11 +528,22 @@ export function parseFilteredMembershipTests(source: string): string[] {
   return found;
 }
 
-/** Every registration site the contract declares, parsed from its source. */
-export function parseContractRegistration(source: string): ContractRegistration {
+/**
+ * Every registration site the contract declares, parsed from its source.
+ * `loadRegistrations` supplies the registration directory when the contract
+ * reads its forward migrations from there.
+ */
+export function parseContractRegistration(
+  source: string,
+  loadRegistrations?: ForwardRegistrationLoader,
+): ContractRegistration {
+  const forwardOf = () => {
+    const { forward, directory } = readForwardMigrations(source, loadRegistrations);
+    return directory ? { forward, forwardDirectory: true as const } : { forward };
+  };
   if (verifySemanticLedger(source)) {
     return {
-      forward: parseForwardMigrations(source),
+      ...forwardOf(),
       fileCountProbes: [],
       latestMigrationPins: [],
       semanticLedger: true,
@@ -486,7 +580,7 @@ export function parseContractRegistration(source: string): ContractRegistration 
         "The registration guard cannot locate the `latestMigration` pin.",
     );
   }
-  return { forward: parseForwardMigrations(source), fileCountProbes, latestMigrationPins };
+  return { ...forwardOf(), fileCountProbes, latestMigrationPins };
 }
 
 /**
@@ -690,6 +784,7 @@ export function registrationFixLines(
   violations: readonly RegistrationViolation[],
   taken: ReadonlySet<string> = new Set(),
   semanticLedger = false,
+  forwardDirectory = false,
 ): string[] {
   const lines: string[] = [];
   const names = new Map(
@@ -700,7 +795,22 @@ export function registrationFixLines(
     violations.filter((violation) => violation.missing.includes(site));
 
   const forward = missingAt("forward-list");
-  if (forward.length > 0) {
+  if (forward.length > 0 && forwardDirectory) {
+    lines.push(
+      `1. Register it with its own file under \`${FORWARD_MIGRATIONS_DIR}/\` (one file`,
+      "   per migration, so parallel migration pull requests never conflict):",
+      "",
+      ...forward.map((violation) =>
+        MIGRATION_FILE.test(violation.file)
+          ? `      printf '%s\\n' ${forwardRegistrationContent(violation.file).trim()} > ${forwardRegistrationPath(violation.file)}`
+          : `      ${violation.file}: rename it to the NNNN_slug.sql convention first; only such names can be registered`,
+      ),
+      "",
+      "   That keeps the migration out of the governed checkpoint input, so the",
+      "   pinned aggregate SHA-256 stays exactly as it is.",
+      "",
+    );
+  } else if (forward.length > 0) {
     lines.push(
       `1. Add to \`${CANONICAL_FORWARD_LIST}\`, at the end of that array, keeping the`,
       "   existing one-name-per-line shape:",

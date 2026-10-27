@@ -1,0 +1,1 @@
+0870_invitation_binding_seat_scope.sql

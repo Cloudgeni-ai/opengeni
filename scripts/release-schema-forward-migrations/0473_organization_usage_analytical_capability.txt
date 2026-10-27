@@ -1,0 +1,1 @@
+0473_organization_usage_analytical_capability.sql

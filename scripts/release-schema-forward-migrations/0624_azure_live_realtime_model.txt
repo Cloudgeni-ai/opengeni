@@ -1,0 +1,1 @@
+0624_azure_live_realtime_model.sql

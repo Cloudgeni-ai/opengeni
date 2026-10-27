@@ -17,6 +17,11 @@ import {
   unreachableContractReferences,
   unregisteredMigrations,
 } from "./migration-schema-contract";
+import {
+  FORWARD_MIGRATIONS_DIR,
+  forwardRegistrationContent,
+  forwardRegistrationPath,
+} from "./release-schema-forward-registrations";
 
 const scratch: string[] = [];
 afterEach(async () => {
@@ -137,6 +142,27 @@ test("checks complete ledger metadata against migration files", async () => {
 
 function registration(sites: Parameters<typeof miniContract>[0]): ContractRegistration {
   return parseContractRegistration(miniContract(sites));
+}
+
+/**
+ * The current contract shape: forward migrations are read from one
+ * registration file per migration through the shared loader, not an inline list.
+ */
+function directoryContract(
+  loader = 'import { readForwardMigrationRegistrations } from "./release-schema-forward-registrations";',
+  call = "readForwardMigrationRegistrations()",
+): string {
+  const source = semanticContract();
+  const literal = "    const appendedMigrationPaths = [\n    ].filter(";
+  if (!source.includes(literal)) throw new Error("mini contract shape changed");
+  return `${loader}\n${source.replace(literal, `    const appendedMigrationPaths = ${call}.filter(`)}`;
+}
+
+async function writeRegistrations(root: string, files: readonly string[]): Promise<void> {
+  await mkdir(join(root, FORWARD_MIGRATIONS_DIR), { recursive: true });
+  for (const file of files) {
+    await writeFile(join(root, forwardRegistrationPath(file)), forwardRegistrationContent(file));
+  }
 }
 
 /**
@@ -651,6 +677,97 @@ describe("semantic complete-ledger registration", () => {
   });
 });
 
+describe("directory forward registration", () => {
+  test("reads forward migrations from the registration directory", () => {
+    const parsed = parseContractRegistration(directoryContract(), () => ["0003_new.sql"]);
+    expect(parsed.forwardDirectory).toBe(true);
+    expect(parsed.semanticLedger).toBe(true);
+    expect(parsed.forward).toEqual(["0238_goal_persistence_policy.sql", "0003_new.sql"]);
+    expect(
+      unregisteredMigrations(
+        ["0001_first.sql", "0002_second.sql", "0003_new.sql", "0004_next.sql"],
+        { ref: "origin/main", files: ["0001_first.sql", "0002_second.sql"] },
+        parsed,
+      ),
+    ).toEqual([{ file: "0004_next.sql", missing: ["forward-list"], absentFrom: "origin/main" }]);
+    expect(parseForwardMigrations(directoryContract(), () => ["0003_new.sql"])).toContain(
+      "0003_new.sql",
+    );
+  });
+
+  test("an inline list never reads the directory", () => {
+    let read = false;
+    const parsed = parseContractRegistration(semanticContract(["0003_new.sql"]), () => {
+      read = true;
+      return ["0009_unrelated.sql"];
+    });
+    expect(read).toBe(false);
+    expect(parsed.forwardDirectory).toBeUndefined();
+    expect(parsed.forward).not.toContain("0009_unrelated.sql");
+  });
+
+  test("fails closed without the directory's registrations", () => {
+    expect(() => parseContractRegistration(directoryContract())).toThrow(ContractParseError);
+    expect(() => parseContractRegistration(directoryContract())).toThrow(FORWARD_MIGRATIONS_DIR);
+  });
+
+  test.each([
+    [
+      "a local look-alike loader",
+      "const readForwardMigrationRegistrations = () => [];",
+      "readForwardMigrationRegistrations()",
+    ],
+    [
+      "a type-only import",
+      'import type { readForwardMigrationRegistrations } from "./release-schema-forward-registrations";',
+      "readForwardMigrationRegistrations()",
+    ],
+    [
+      "another module",
+      'import { readForwardMigrationRegistrations } from "./elsewhere";',
+      "readForwardMigrationRegistrations()",
+    ],
+    [
+      "another directory",
+      'import { readForwardMigrationRegistrations } from "./release-schema-forward-registrations";',
+      'readForwardMigrationRegistrations("/tmp")',
+    ],
+  ])("does not trust %s as registration", (_, loader, call) => {
+    expect(() =>
+      parseContractRegistration(directoryContract(loader, call), () => ["0003_new.sql"]),
+    ).toThrow(ContractParseError);
+  });
+
+  test("accepts an aliased loader import", () => {
+    const parsed = parseContractRegistration(
+      directoryContract(
+        'import { readForwardMigrationRegistrations as registered } from "./release-schema-forward-registrations";',
+        "registered()",
+      ),
+      () => ["0003_new.sql"],
+    );
+    expect(parsed.forward).toContain("0003_new.sql");
+  });
+
+  test("the fix text adds one registration file instead of editing a shared list", () => {
+    const text = registrationFixLines(
+      [
+        { file: "0004_next.sql", missing: ["forward-list"], absentFrom: "origin/main" },
+        { file: "custom_probe.sql", missing: ["forward-list"], absentFrom: "origin/main" },
+      ],
+      new Set(),
+      true,
+      true,
+    ).join("\n");
+    expect(text).toContain(
+      `printf '%s\\n' 0004_next.sql > ${FORWARD_MIGRATIONS_DIR}/0004_next.txt`,
+    );
+    expect(text).toContain("custom_probe.sql: rename it to the NNNN_slug.sql convention first");
+    expect(text).not.toContain("appendedMigrationPaths`, at the end");
+    expect(text).toContain("Do NOT instead pin a fresh hash");
+  });
+});
+
 describe("check-migration-schema-contract CLI", () => {
   const guard = [
     "bun",
@@ -658,6 +775,34 @@ describe("check-migration-schema-contract CLI", () => {
     "--base",
     "origin/main",
   ];
+
+  test("directory registration: fails with the exact file to add, then passes", async () => {
+    const root = await fixtureRepo({
+      added: ["0003_new.sql", "0004_next.sql"],
+      sites: {},
+      source: directoryContract(),
+    });
+    await writeRegistrations(root, ["0003_new.sql"]);
+    const missing = await run(root, guard);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("- 0004_next.sql  (missing: forward-list)");
+    expect(missing.stderr).toContain(
+      `printf '%s\\n' 0004_next.sql > ${FORWARD_MIGRATIONS_DIR}/0004_next.txt`,
+    );
+    await writeRegistrations(root, ["0004_next.sql"]);
+    const registered = await run(root, guard);
+    expect(registered.stderr).toBe("");
+    expect(registered.code).toBe(0);
+  });
+
+  test("directory registration: a malformed registration fails closed", async () => {
+    const root = await fixtureRepo({ added: [], sites: {}, source: directoryContract() });
+    await writeRegistrations(root, ["0002_second.sql"]);
+    await writeFile(join(root, FORWARD_MIGRATIONS_DIR, "0003_new.txt"), "0004_next.sql\n");
+    const result = await run(root, guard);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("0003_new.txt must contain exactly 0003_new.sql");
+  });
 
   test("passes source-semantic metadata only when all additions are forward-listed", async () => {
     const root = await fixtureRepo({

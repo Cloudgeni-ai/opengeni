@@ -1,0 +1,1 @@
+0472_usage_events_workspace_recent_index.sql

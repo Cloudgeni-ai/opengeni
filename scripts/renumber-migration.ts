@@ -9,8 +9,10 @@
  * The typical case: your branch added `NNNN_x.sql`, main merged another
  * `NNNN_y.sql` first. `--next` picks the first ordinal free on both the local
  * ledger and the base ref, renames the SQL and its `migration-NNNN-*.test.ts`
- * companions, rewrites every reference (tracked and untracked text files),
- * re-pins the release schema contract hashes, and formats touched files.
+ * companions and its release-schema forward registration
+ * (`scripts/release-schema-forward-migrations/NNNN_x.txt`), rewrites every
+ * reference (tracked and untracked text files), re-pins the release schema
+ * contract hashes, and formats touched files.
  * Nothing is committed; review `git status`/`git diff` and commit yourself.
  *
  * Migration content is never modified except for its own bare ordinal mentions

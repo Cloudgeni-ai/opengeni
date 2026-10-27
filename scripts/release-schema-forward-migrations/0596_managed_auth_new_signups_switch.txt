@@ -1,0 +1,1 @@
+0596_managed_auth_new_signups_switch.sql

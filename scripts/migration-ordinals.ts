@@ -17,6 +17,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { FORWARD_MIGRATIONS_DIR } from "./release-schema-forward-registrations";
+
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 export const MIGRATION_TESTS_DIR = "packages/db/test";
 export const RELEASE_CONTRACT_TEST = "scripts/release-schema-contract.test.ts";
@@ -326,6 +328,12 @@ export function planRenumber(input: {
   const renames: RenumberRename[] = [
     { from: `${MIGRATIONS_DIR}/${input.from.file}`, to: `${MIGRATIONS_DIR}/${to.file}` },
   ];
+  // The release contract's forward registration is named after the migration;
+  // its text (the migration file name) is rewritten like any other reference.
+  const registration = `${FORWARD_MIGRATIONS_DIR}/${input.from.basename}.txt`;
+  if (input.files.has(registration)) {
+    renames.push({ from: registration, to: `${FORWARD_MIGRATIONS_DIR}/${to.basename}.txt` });
+  }
   const companionNames = input.companionTests.map((path) => basename(path));
   for (const path of input.companionTests) {
     const name = basename(path);

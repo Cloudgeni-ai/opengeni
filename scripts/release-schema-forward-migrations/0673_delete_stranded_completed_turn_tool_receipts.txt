@@ -1,0 +1,1 @@
+0673_delete_stranded_completed_turn_tool_receipts.sql

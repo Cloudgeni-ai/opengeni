@@ -1,0 +1,1 @@
+0788_session_events_command_output_client_index.sql

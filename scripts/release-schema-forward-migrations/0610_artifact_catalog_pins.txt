@@ -1,0 +1,1 @@
+0610_artifact_catalog_pins.sql

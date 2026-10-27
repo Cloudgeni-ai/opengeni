@@ -1,0 +1,1 @@
+0818_insights_usage_hourly_reader.sql

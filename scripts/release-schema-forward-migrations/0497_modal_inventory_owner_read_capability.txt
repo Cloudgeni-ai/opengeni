@@ -1,0 +1,1 @@
+0497_modal_inventory_owner_read_capability.sql
