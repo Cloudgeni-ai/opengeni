@@ -54,9 +54,9 @@ import {
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
+  connectOwnerStateFields,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -215,13 +215,10 @@ export async function startApiIntegrationProviderOAuth(
     input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
   );
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    ownership,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: input.personalOwnershipAllowed,
+    ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
+    ownership,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,

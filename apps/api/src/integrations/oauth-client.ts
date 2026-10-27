@@ -69,10 +69,10 @@ import { HTTPException } from "hono/http-exception";
 import { observeOAuthStart } from "../integration-connect-metrics";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
+  connectOwnerStateFields,
+  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
 import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
@@ -641,13 +641,10 @@ async function startMcpOAuthWithinDeadline(
   const fullState = createSignedState(requireIntegrationsStateSecret(settings), {
     ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    subjectId: context.subjectId,
-    ownership,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
+    ...connectOwnerStateFields(context, context.personalOwnershipAllowed),
+    ownership,
     ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(

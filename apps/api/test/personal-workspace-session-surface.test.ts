@@ -550,6 +550,7 @@ describe("managed-human session surface inside their own personal workspace", ()
       accountId: human.accountId,
       workspaceId: human.legacyWorkspaceId,
       subjectId: `api_key:${key.id}`,
+      personalOwnerVerified: false,
     };
     await client.db.transaction((tx) => requireConnectOwnerAuthority(tx, scope));
     const personal = await human.app.request(`${base}/attempts`, {

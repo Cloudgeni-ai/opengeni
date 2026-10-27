@@ -114,10 +114,10 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import { requestValidationError } from "../http/request-body";
 import {
+  connectOwnerStateFields,
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
-  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -236,7 +236,7 @@ export async function startGoogleDriveOAuth(
     ...(input.externalContinuation ? { externalContinuation: input.externalContinuation } : {}),
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
+    personalOwnerVerified: true,
     returnPath: GOOGLE_DRIVE_RETURN_PATH(input.workspaceId),
     capability: input.payload.capability,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
@@ -249,8 +249,16 @@ function googleDriveOAuthAuthorization(
 ): GoogleDriveOAuthStartResponse {
   const key = requireEnvironmentEncryption(settings);
   const verifier = randomBytes(48).toString("base64url");
-  const { externalContinuation, ...claims } = authority;
+  const {
+    externalContinuation,
+    accountId,
+    workspaceId,
+    subjectId,
+    personalOwnerVerified,
+    ...claims
+  } = authority;
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    ...connectOwnerStateFields({ accountId, workspaceId, subjectId }, personalOwnerVerified),
     ...claims,
     kind: GOOGLE_DRIVE_OAUTH_STATE_KIND,
     ...(externalContinuation

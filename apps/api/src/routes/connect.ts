@@ -2039,6 +2039,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   { ...deps, db: tx },
                   {
                     ...scope,
+                    personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
                     requestUrl: c.req.url,
                     connectAttemptId: id,
                     ...(input.reconnectAccountId ? { connectionId: input.reconnectAccountId } : {}),
@@ -2077,6 +2078,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                         { ...deps, db: tx },
                         {
                           ...scope,
+                          personalOwnershipAllowed:
+                            isPersonalConnectionOwnerPrincipal(authorization),
                           requestUrl: c.req.url,
                           connectAttemptId: id,
                           payload: input.reconnectAccountId
