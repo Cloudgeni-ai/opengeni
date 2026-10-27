@@ -59919,6 +59919,14 @@ export async function claimWorkspaceArchiveCapture(
      * request. Tar-style captures read files one by one from a
      * running box and keep both as blockers. */
     pointInTimeCapture?: boolean;
+    /** Draining only: the caller deletes a compute sandbox whose group ended
+     * without capturing it (`persistDrainSnapshot`'s `groupEndDiscard`). While
+     * this lease's group end still stands and no real rotation claimed it,
+     * nothing will be read from the box, so the claim may be taken around a
+     * crashed owner's orphaned request as a point-in-time capture is: the box
+     * is deleted next and the cold commit settles the request only after
+     * that. A rotation still captures, and keeps waiting for the request. */
+    groupEndDiscard?: boolean;
     /** Draining only: inside this window before a requested provider-deadline
      * rotation's deadline the save is mandatory. Requests still open on the
      * exact box are recorded in deadline_forced_admission_ids, captured
@@ -60088,6 +60096,15 @@ export async function claimWorkspaceArchiveCapture(
       if ((input.liveness === "draining" || idleCheckpoint) && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
       }
+      // Decided on the locked row, as the discard itself is re-checked under
+      // this lock before anything is deleted. The claim's own `teardown_claim`
+      // rotation, left by a released claim, is not a rotation of the box.
+      const discardsEndedGroup =
+        input.groupEndDiscard === true &&
+        input.liveness === "draining" &&
+        row.backend === "compute" &&
+        row.group_end_requested_at != null &&
+        (row.rotation_requested_at == null || row.rotation_reason === "teardown_claim");
       // Inventory is only discovery: a later rotation owns this box's final
       // checkpoint. Fence the idle child under the same lease lock, without
       // blocking a turn's mandatory rotation checkpoint.
@@ -60218,7 +60235,8 @@ export async function claimWorkspaceArchiveCapture(
               // a point-in-time capture may run around it: a warm one marks the
               // claim below, a drain terminates the box next. A file-by-file
               // tar read of the running box could publish torn state as complete.
-              input.pointInTimeCapture === true
+              // A drain that deletes an ended group's box reads nothing from it.
+              input.pointInTimeCapture === true || discardsEndedGroup
                 ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
                 : sql``
             }
