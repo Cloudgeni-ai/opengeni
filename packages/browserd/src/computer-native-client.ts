@@ -18,6 +18,7 @@ import {
   type ComputerBackendClipboard,
   type ComputerBackendErrorCode,
 } from "./computer-backend";
+import { isRecord } from "@opengeni/contracts/values";
 
 export const COMPUTER_NATIVE_PROTOCOL_VERSION = 3 as const;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -714,10 +715,6 @@ function boundedTimeout(value: number, label: string): number {
     throw new Error(`${label} is invalid`);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function asError(value: unknown): Error {

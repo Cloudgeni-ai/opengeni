@@ -1,5 +1,41 @@
 # @opengeni/vaults
 
+## 5.4.2
+
+### Minor Changes
+
+- 3cd4985: Passkeys kept in a connected password manager now work for agents. A Bitwarden or Vaultwarden login with a passkey, a Keeper login record with a passkey, or a Proton Pass login with a passkey shows `hasPasskey`, matches a `passkey` search, and signs in through the agent's managed browser like a hosted passkey. Only which items hold a passkey is mirrored (credential id, site, account name); the private key is read live from the provider when a browser needs it and is never stored. After a sign-in the signature counter is written back to Bitwarden and Keeper unless the vault is linked read-only; for Proton Pass, whose CLI cannot edit items, Opengeni keeps the count itself. Providers implement the new optional `readPasskeys` and `updatePasskeySignCount`, and `capabilities().passkeys` becomes a boolean. 1Password's SDK does not expose passkeys, so 1Password passkeys stay unusable. Items that need approval for each use are no longer loaded into a browser, hosted passkeys included.
+
+### Patch Changes
+
+- Updated dependencies [931325b]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [a8b429e]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [30b9cd2]
+  - @opengeni/contracts@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

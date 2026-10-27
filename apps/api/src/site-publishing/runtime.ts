@@ -63,6 +63,7 @@ import {
   SITE_VISITOR_ID,
   type SiteRuntimeViewer,
 } from "./viewer";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Site-runtime: the narrow API a Site gateway calls for one published Site
@@ -677,7 +678,7 @@ export async function settleSiteRuntimeSpend(
   } catch (error) {
     console.warn("[site-runtime] could not settle conversation spend", {
       siteId: host.site.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return null;
   }
@@ -862,7 +863,7 @@ export async function meterSiteRuntime(
     console.warn("[site-runtime] could not meter usage", {
       siteId: host.site.id,
       type: event.type,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }

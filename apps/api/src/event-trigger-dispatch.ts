@@ -24,6 +24,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Turns queued events into runs. Each pass claims automations whose inbox is
@@ -76,7 +77,7 @@ async function postThrottleNotice(
     // The automation page still shows that the guard is holding events.
     deps.observability?.warn("Automation throttle notice was not posted", {
       taskId: notice.taskId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -100,7 +101,7 @@ export async function dispatchDueEventTriggers(
             deps.db,
             occurrence.workspaceId,
             occurrence.id,
-            error instanceof Error ? error.message : String(error),
+            errorMessage(error),
           );
           deps.observability?.warn("Automation event run did not start; it will retry", {
             taskId: occurrence.taskId,
@@ -112,7 +113,7 @@ export async function dispatchDueEventTriggers(
     } catch (error) {
       deps.observability?.error("Automation event dispatch will retry", {
         taskId: due.taskId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -157,7 +158,7 @@ export function startEventTriggerDispatchPump(
     intervalMs,
     (error) =>
       deps.observability?.error("Automation event dispatch failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
   );
 }
@@ -189,7 +190,7 @@ export function startEventSubscriptionPump(
     intervalMs,
     (error) =>
       deps.observability?.error("Event subscription pass failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
   );
 }
@@ -216,7 +217,7 @@ export function startEventIntakePrunePump(
     intervalMs,
     (error) =>
       deps.observability?.error("Event intake retention pass failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
   );
 }

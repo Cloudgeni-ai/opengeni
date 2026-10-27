@@ -1,14 +1,8 @@
-import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./errors";
 import type { WorkspaceInteractionRevisionEvent } from "./interaction";
-import { parseSseStream } from "./sse";
-import {
-  jitteredDelay,
-  runBeforeLive,
-  type StreamSessionEventsOptions,
-  withStreamInactivityTimeout,
-} from "./stream";
+import { reconnectingCursorStream, type StreamSessionEventsOptions } from "./stream";
 import type { WorkspaceControlEvent } from "./types";
 import { parseWorkspaceControlCursor } from "./workspace-control-stream";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Transient hints have no replay cursor; every reconnection reconciles lists. */
 export type WorkspaceSessionListEvent = {
@@ -48,71 +42,30 @@ export async function* streamWorkspaceLiveEvents(
   transport: WorkspaceLiveStreamTransport,
   options: WorkspaceLiveStreamOptions = {},
 ): AsyncGenerator<WorkspaceLiveEvent, void, void> {
-  const signal = options.signal;
-  const reconnect = options.reconnect ?? true;
-  const baseDelayMs = options.reconnectDelayMs ?? 500;
-  const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
-  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
-  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
-  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
-  const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
-  let controlCursor = options.controlAfter ?? 0;
-  let interactionCursor = options.interactionAfter ?? 0;
-  let failures = 0;
-  let delayMs = baseDelayMs;
-  let everConnected = false;
-
-  for (;;) {
-    if (signal?.aborted) return;
-    options.onStateChange?.(everConnected || failures > 0 ? "reconnecting" : "connecting");
-    const cursorsAtOpen = `${controlCursor}:${interactionCursor}`;
-    try {
-      const body = await transport.openStream(controlCursor, interactionCursor, signal);
-      everConnected = true;
-      failures = 0;
-      delayMs = baseDelayMs;
-      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
-      options.onStateChange?.("live");
-      for await (const message of parseSseStream(
-        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
-      )) {
-        if (signal?.aborted) return;
-        const skippedThrough = parseWorkspaceControlCursor(message.data);
-        if (skippedThrough !== null) {
-          controlCursor = Math.max(controlCursor, skippedThrough);
-          continue;
-        }
-        const event = parseWorkspaceLiveEvent(message.data);
-        if (!event) continue;
-        if (event.type === "workspace.control.changed") {
-          if (event.sequence <= controlCursor) continue;
-          controlCursor = event.sequence;
-        } else if (event.type === "workspace.interaction.changed") {
-          if (event.sequence <= interactionCursor) continue;
-          interactionCursor = event.sequence;
-        }
-        yield event;
+  yield* reconnectingCursorStream<{ control: number; interaction: number }, WorkspaceLiveEvent>({
+    label: "workspace live stream",
+    options,
+    cursor: { control: options.controlAfter ?? 0, interaction: options.interactionAfter ?? 0 },
+    sameCursor: (a, b) => a.control === b.control && a.interaction === b.interaction,
+    open: (cursor, signal) => transport.openStream(cursor.control, cursor.interaction, signal),
+    read: (data, cursor) => {
+      const skippedThrough = parseWorkspaceControlCursor(data);
+      if (skippedThrough !== null) {
+        return { cursor: { ...cursor, control: Math.max(cursor.control, skippedThrough) } };
       }
-      if (!reconnect) return;
-      if (`${controlCursor}:${interactionCursor}` === cursorsAtOpen) {
-        await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
+      const event = parseWorkspaceLiveEvent(data);
+      if (!event) return null;
+      if (event.type === "workspace.control.changed") {
+        if (event.sequence <= cursor.control) return null;
+        return { cursor: { ...cursor, control: event.sequence }, event };
       }
-      continue;
-    } catch (error) {
-      if (signal?.aborted || isAbortError(error)) return;
-      if (!reconnect || !isRetryableStreamError(error)) throw error;
-      failures += 1;
-      if (failures > maxAttempts) {
-        throw new OpenGeniStreamError(
-          `workspace live stream gave up after ${maxAttempts} reconnect attempts: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      if (event.type === "workspace.interaction.changed") {
+        if (event.sequence <= cursor.interaction) return null;
+        return { cursor: { ...cursor, interaction: event.sequence }, event };
       }
-    }
-    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
-    delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
-  }
+      return { cursor, event };
+    },
+  });
 }
 
 export function parseWorkspaceLiveEvent(data: string): WorkspaceLiveEvent | null {
@@ -155,21 +108,4 @@ export function parseWorkspaceLiveEvent(data: string): WorkspaceLiveEvent | null
     return value as WorkspaceInteractionRevisionEvent;
   }
   return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
-  if (signal?.aborted || delayMs <= 0) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(done, delayMs);
-    function done() {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    }
-    signal?.addEventListener("abort", done, { once: true });
-  });
 }

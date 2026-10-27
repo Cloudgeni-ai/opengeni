@@ -19,6 +19,7 @@ import {
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { ScreenshotValidationError, validateRetainableSessionImage } from "./retained-screenshots";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 const GENERATED_IMAGE_MARKER = "generated_image";
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
@@ -382,7 +383,7 @@ export async function retainGeneratedImage(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     }).catch(() => undefined);
     throw error;
   }
@@ -711,10 +712,6 @@ function parseRunState(serialized: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export function retainedGeneratedImageFromArtifact(

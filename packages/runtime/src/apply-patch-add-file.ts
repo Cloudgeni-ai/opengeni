@@ -20,6 +20,7 @@
  * `canPrefixAddFileSection`). Every repair applies only to input the SDK
  * would reject, so patches it accepts today parse exactly as before.
  */
+import { isRecord } from "@opengeni/contracts/values";
 
 const BEGIN_PATCH = "*** Begin Patch";
 const END_PATCH = "*** End Patch";
@@ -169,10 +170,6 @@ export function withCodexAddFilePatch(patch: string): string {
     output.push(line);
   }
   return `${output.join("\n")}${trailingNewline ? "\n" : ""}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function withCodexAddFileOperation(operation: unknown): unknown {

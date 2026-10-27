@@ -1,4 +1,8 @@
+import { sha256Hex } from "@opengeni/contracts/values";
+
 import type { Presentation, PresentationElement } from "./presentation";
+
+export { sha256Hex };
 
 export async function presentationModelDigest(presentation: Presentation): Promise<string> {
   const imageDigests: Array<{ id: string; digest: string }> = [];
@@ -20,13 +24,6 @@ export async function presentationModelDigest(presentation: Presentation): Promi
     imageDigests,
   });
   return await sha256Hex(new TextEncoder().encode(JSON.stringify(normalized)));
-}
-
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
-  );
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function normalizeDigestValue(value: unknown): Promise<unknown> {

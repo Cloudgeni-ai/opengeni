@@ -29,6 +29,7 @@ import {
   sharedModalClient,
   withModalCreateBoundary,
 } from "./modal-shared-client";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The shared process-wide client is never closed by one create. */
 const SHARED_CLIENT_TRANSPORT: Pick<ModalClient, "close"> = { close() {} };
@@ -414,7 +415,7 @@ async function withModalProviderError<T>(
     return await run();
   } catch (error) {
     if (error instanceof ModalResumeUnavailableError) throw error;
-    const cause = error instanceof Error ? error.message : String(error);
+    const cause = errorMessage(error);
     throw Object.assign(
       new SandboxProviderError(
         `ModalSandboxClient failed to ${operation}${cause ? `: ${cause}` : ""}`,

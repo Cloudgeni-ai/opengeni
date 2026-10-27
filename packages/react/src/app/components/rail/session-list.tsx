@@ -271,6 +271,7 @@ import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory
 import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -1954,8 +1955,7 @@ export function SessionList() {
         await refreshSessionPages();
       } catch (attentionError) {
         toast.error("Couldn't update the session status.", {
-          description:
-            attentionError instanceof Error ? attentionError.message : String(attentionError),
+          description: errorMessage(attentionError),
         });
         await refreshSessionPages();
       }
@@ -2040,7 +2040,7 @@ export function SessionList() {
       } catch (archiveError) {
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: archiveError instanceof Error ? archiveError.message : String(archiveError),
+          description: errorMessage(archiveError),
         });
         await refreshSessionPages();
       } finally {
@@ -2117,7 +2117,7 @@ export function SessionList() {
       } catch (pinError) {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.error(nextPinned ? "Couldn't pin the Site." : "Couldn't unpin the Site.", {
-          description: pinError instanceof Error ? pinError.message : String(pinError),
+          description: errorMessage(pinError),
         });
       } finally {
         setSitePinOverrides((current) => {
@@ -2202,7 +2202,7 @@ export function SessionList() {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         setArchived(!archived);
         toast.error(archived ? "Couldn't archive the Site." : "Couldn't restore the Site.", {
-          description: archiveError instanceof Error ? archiveError.message : String(archiveError),
+          description: errorMessage(archiveError),
         });
       } finally {
         const remaining = (inFlight.get(origin.siteId) ?? 1) - 1;
@@ -2284,7 +2284,7 @@ export function SessionList() {
       return true;
     } catch (deleteError) {
       toast.error("Couldn't delete the chat.", {
-        description: deleteError instanceof Error ? deleteError.message : String(deleteError),
+        description: errorMessage(deleteError),
       });
       return false;
     }
