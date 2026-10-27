@@ -1,5 +1,30 @@
 # @opengeni/tool-gateway
 
+## 5.5.1
+
+### Patch Changes
+
+- f980186: Check serialized tool catalog sizes without allocating an extra UTF-8 byte buffer. Preserve the existing byte limits, validation and digests.
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [093b9e2]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [8382bdb]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [81502bb]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/observability@5.5.0
+
 ## 5.4.2
 
 ### Patch Changes

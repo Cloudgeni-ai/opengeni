@@ -1,5 +1,54 @@
 # @opengeni/react-native
 
+## 5.5.1
+
+### Minor Changes
+
+- e473f84: Products that embed meetings get the workspace's own choices without extra wiring, and a meetings-only phone app no longer gets call setup.
+
+  - The recorder on `MeetingsListPage` (web) and `MeetingsList` (React Native) starts with the live transcript on when the workspace's `recordings.liveTranscript` setting says so. `GET /v1/workspaces/:workspaceId/recording-models` now returns `liveTranscript`, and `useRecordingModels` returns it too (undefined until the server answers, or from an older server). A host's own `liveTranscriptDefault` still wins; before, a host that passed none always started with it off, and a phone app had no way to follow the setting at all.
+  - The Expo config plugin sets up calls only when asked: `["@opengeni/react-native", { "recording": true }]` now adds just the background recording setup, without the `voip` background mode, the `INStartCallIntent` activity or the generated Siri and Shortcuts intent. Add `call` to set up calls as well, or pass `"call": false` to leave them out of any entry. The plugin without options still sets up calls, as before.
+  - On phones, "No sound is reaching the microphone" no longer appears during ordinary pauses. It now shows only when a recording has delivered digital silence since it started or resumed, which is what a muted, blocked or broken microphone delivers; a microphone that has picked up any sound is working, however long the pause.
+
+### Patch Changes
+
+- c866336: Connecting a computer that isn't connected yet is now an obvious action in the in-chat Connected Machine card. The card ends with an **Another computer** row whose **Connect** opens the connect flow, instead of a small link under everything else, and no listed machine gets the primary button just because it is the only one online. Screen control and the Chrome extension rows show only for the machine this chat runs on, so steps about a machine the person may not mean no longer compete with choosing or connecting the right one. Without a host connect callback, the embedded card's **Connect another computer** opens in place as a disclosure that says the steps happen on the other computer.
+
+  On the web, the shared `ThisComputerCard` keeps **Connect another computer** as a secondary action beside a connected computer when the host supplied a connect path (`onConnect`, `downloads`, `openAppUrl` or `downloadUrl`). On the phone, `useNativeInChatConnect` accepts an optional `shareConversation` callback; with it, the computer offer explains that a computer connects from the computer itself and offers **Share link to this chat**.
+
+- a4b57e6: In-chat connection requests now read the same to the person and to the agent, and the sign-in window ends cleanly in embedded chats. When the person in the chat can't connect the requested integration from the card (their access doesn't allow it), `capability_authorization_request` now tells the agent so, instead of the generic "posted for confirmation" message, so it no longer asks them to use a card that can't help them. Results for people who can connect are unchanged. The card and the server share one rule for this decision (`inChatCapabilitySetup` in contracts), and the server applies it to the same access the person's chat has: what their sign-in could do when they sent the turn's message, or their latest message in that chat for a turn the platform started for them, such as a wake-up, a child's result or a goal continuation (an embed token narrows it, and their own workspace counts without a membership). Without such a message it falls back to their membership (`readTurnSenderAccess` in db). The console's chat card uses the same rule, so it no longer offers Connect to a member the agent was told can't connect.
+
+  In-chat connect cards also start sign-in with a new optional `finishInPopup: true` flag on `POST /v1/workspaces/:workspaceId/connect/attempts`. The provider's callback then lands on a small server page that closes the sign-in window (or tells the person they can close it) instead of loading a second copy of the host page in the popup. Without the flag the return URL behaves as before. Against an older server that rejects the unknown field, `ConnectController.begin` starts again without it, so sign-in keeps working and returns to the host page as before. Browser cards set it, because they sign in through a popup. Phone cards don't, because the system sign-in browser returns to the app.
+
+  Reviewed catalog integrations no longer carry an "MCP server" label on their connection cards and dialogs, on the web and on the phone. They read as the service itself, with its name and provider. Servers someone added by hand, and registry entries nobody reviewed, keep the label (`showsMcpServerLabel` in `@opengeni/react/in-chat-connect-model`).
+
+- Updated dependencies [fa7516a]
+- Updated dependencies [23fb6ef]
+- Updated dependencies [f23588a]
+- Updated dependencies [1600e2d]
+- Updated dependencies [c866336]
+- Updated dependencies [e555018]
+- Updated dependencies [22b129b]
+- Updated dependencies [9180cf8]
+- Updated dependencies [a4b57e6]
+- Updated dependencies [729329e]
+- Updated dependencies [2483f32]
+- Updated dependencies [e473f84]
+- Updated dependencies [4a86d4d]
+- Updated dependencies [220c431]
+- Updated dependencies [8382bdb]
+- Updated dependencies [1cc657b]
+- Updated dependencies [fbcc3cd]
+- Updated dependencies [52a0439]
+- Updated dependencies [b1673ab]
+- Updated dependencies [b56bf3f]
+- Updated dependencies [81502bb]
+- Updated dependencies [5ea8c5c]
+- Updated dependencies [9c8a5d5]
+  - @opengeni/sdk@5.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/react@5.5.0
+
 ## 5.4.2
 
 ### Minor Changes
