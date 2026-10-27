@@ -432,6 +432,7 @@ import {
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
   renderCompactionPromptInputForChat,
+  TURN_OPERATIONAL_NOTICE_PREFIX,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -922,7 +923,6 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
-  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
   RETAINED_REPLY_MAX_TOKENS,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -9710,7 +9710,7 @@ export async function restoreInterruptedRunState(
   });
 }
 
-export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
+export { TURN_OPERATIONAL_NOTICE_PREFIX };
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
