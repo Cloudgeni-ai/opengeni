@@ -19,6 +19,7 @@ import {
   UNRECOVERABLE_TEXT,
   type ToolReviewDetailsLoader,
 } from "./tool-action-review";
+import { DecisionActions } from "./decision-card";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ApprovalSurfaceMessages = {
@@ -136,9 +137,10 @@ export function ApprovalSurface({
       {approvals.length > 1 && (
         <nav
           aria-label={t("approvalSurface.actionsToReview")}
-          className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-og-xs text-og-fg-muted"
+          className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-og-xs text-og-fg-muted"
         >
-          <span className="font-medium text-og-status-waiting">
+          <span className="inline-flex items-center gap-1.5 font-medium text-og-fg">
+            <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
             {t("approvalSurface.lengthActionsAreWaitingFor", { length: approvals.length })}
           </span>
           <div className="flex items-center gap-1">
@@ -328,14 +330,14 @@ function ApprovalRequest({
         title={fallback.title}
         subtitle={fallback.accountLabel}
         footer={
-          <div className="ml-auto">
+          <DecisionActions>
             <DeclineButton
               busy={Boolean(actions.disabled || actions.submitting)}
               submitting={actions.submitting === "reject"}
               label={answer?.reject ?? messages.reject}
               onClick={actions.onReject}
             />
-          </div>
+          </DecisionActions>
         }
       >
         <p role="alert" className="m-0 text-og-sm text-og-fg">
@@ -362,14 +364,14 @@ function ApprovalRequest({
           subtitle={fallback.accountLabel}
           data-og-tool-review=""
           footer={
-            <div className="ml-auto">
+            <DecisionActions>
               <DeclineButton
                 busy={Boolean(actions.disabled || actions.submitting)}
                 submitting={actions.submitting === "reject"}
                 label={answer?.reject ?? messages.reject}
                 onClick={actions.onReject}
               />
-            </div>
+            </DecisionActions>
           }
         >
           <p className="m-0 text-og-sm text-og-fg">{UNRECOVERABLE_TEXT(t)}</p>
