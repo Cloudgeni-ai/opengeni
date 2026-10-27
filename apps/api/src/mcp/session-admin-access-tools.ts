@@ -14,10 +14,13 @@ import {
   findAppAction,
   type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
+import { ExternalIdentityReference } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "@opengeni/core";
 import {
+  findWorkspaceByExternalIdentity,
   listConfirmedAppActionChanges,
   resolveSessionAppActionAuthority,
+  withAccountRls,
   type Database,
   type SessionAppActionUnavailableReason,
 } from "@opengeni/db";
@@ -32,6 +35,7 @@ import {
   type OrganizationActionContext,
 } from "../organization-mcp";
 import {
+  contentFlowCheckFailure,
   withOtherWorkspaceContentFlow,
   type OtherWorkspaceContentFlow,
 } from "./workspace-content-flow";
@@ -363,10 +367,20 @@ export function registerSessionAdminAccessTools(input: {
 /** Query keys that only name or page through what a read returns, never this session's text. */
 const ID_OR_PAGING_QUERY_KEY =
   /^(?:[a-z]+Ids?|ids?|limit|cursor|before|after|offset|page|pageSize|order|direction)$/;
+/** A query value shaped like an id, a cursor or a page setting rather than free text. */
+const ID_OR_PAGING_QUERY_VALUE = /^[A-Za-z0-9._:=+/-]{1,200}$/;
+
+function idOrPagingQueryValue(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "boolean") return true;
+  if (typeof value === "string") return ID_OR_PAGING_QUERY_VALUE.test(value);
+  if (Array.isArray(value)) return value.length <= 100 && value.every(idOrPagingQueryValue);
+  return false;
+}
 
 /**
  * Whether the call only brings the other workspace's content here: a read
- * with no body whose query holds only ids and paging keys. Anything else
+ * with no body whose query holds only ids and paging values. Anything else
  * (a change, a search, a preview, a read that sends text) also carries this
  * session's content there.
  */
@@ -381,7 +395,9 @@ export function appActionContentFlow(
     body === null ||
     (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0);
   if (!emptyBody) return "both_ways";
-  return Object.keys(call.query ?? {}).every((key) => ID_OR_PAGING_QUERY_KEY.test(key))
+  return Object.entries(call.query ?? {}).every(
+    ([key, value]) => ID_OR_PAGING_QUERY_KEY.test(key) && idOrPagingQueryValue(value),
+  )
     ? "from_there"
     : "both_ways";
 }
@@ -404,15 +420,53 @@ export async function withAppActionContentFlow(
   run: () => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const entry = findAppAction(call.id);
+  if (!entry) return await run();
+  const here = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  if (entry.path.startsWith("/v1/workspaces/external/:")) {
+    // A workspace named by its external identity in this organization: an
+    // import carries this session's content there, so both ways.
+    let there: string | null;
+    try {
+      there = await externalIdentityWorkspaceId(db, grant.accountId, call.pathParameters);
+    } catch (error) {
+      return contentFlowCheckFailure(error);
+    }
+    if (!there) return await run();
+    return await withOtherWorkspaceContentFlow(
+      db,
+      { here, thereWorkspaceId: there, flow: "both_ways" },
+      run,
+    );
+  }
   const otherWorkspaceId = call.pathParameters["workspaceId"];
-  if (!entry?.path.includes(":workspaceId") || !otherWorkspaceId) return await run();
+  if (!entry.path.includes(":workspaceId") || !otherWorkspaceId) return await run();
   return await withOtherWorkspaceContentFlow(
     db,
-    {
-      here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      thereWorkspaceId: otherWorkspaceId,
-      flow: appActionContentFlow(entry, call),
-    },
+    { here, thereWorkspaceId: otherWorkspaceId, flow: appActionContentFlow(entry, call) },
     run,
   );
+}
+
+/**
+ * The workspace an external identity names in this organization, as the
+ * route resolves it; null when it names none (the route answers that).
+ */
+async function externalIdentityWorkspaceId(
+  db: Database,
+  accountId: string,
+  pathParameters: Record<string, string>,
+): Promise<string | null> {
+  const reference = ExternalIdentityReference.safeParse({
+    source: pathParameters["source"] ?? pathParameters["workspaceSource"],
+    externalId: pathParameters["externalId"] ?? pathParameters["workspaceExternalId"],
+  });
+  if (!reference.success) return null;
+  const workspace = await withAccountRls(db, accountId, (tx) =>
+    findWorkspaceByExternalIdentity(tx, {
+      accountId,
+      externalSource: reference.data.source,
+      externalId: reference.data.externalId,
+    }),
+  );
+  return workspace?.id ?? null;
 }

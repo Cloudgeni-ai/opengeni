@@ -1,8 +1,16 @@
-import { asc, eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
-import { type Database, rlsContextForWorkspace, WorkspaceNotFoundError } from "./database";
-import { isWorkspaceEuOnly } from "./organization-inference-residency";
-import * as schema from "./schema";
+import {
+  type Database,
+  rawRows,
+  rlsContextForWorkspace,
+  withRlsContext,
+  WorkspaceNotFoundError,
+} from "./database";
+import {
+  isWorkspaceEuOnly,
+  WorkspaceInferenceResidencyUnknownError,
+} from "./organization-inference-residency";
 
 /**
  * EU-only content stays in EU-only workspaces. Content from an EU-only
@@ -80,22 +88,36 @@ export async function assertWorkspaceContentExchangeAllowed(
 /**
  * For a step that can bring content from any workspace of an organization to
  * `target` (an organization-wide connection): allowed when `target` is
- * EU-only, or when no workspace of that organization is.
+ * EU-only, or when no workspace of that organization is. One read, with the
+ * same join `isWorkspaceEuOnly` uses (a per-workspace switch must change both);
+ * an organization whose workspaces can't be read fails closed.
  */
 export async function assertOrganizationContentFlowAllowed(
   db: Database,
   input: { sourceAccountId: string; target: WorkspaceContentFlowEnd },
 ): Promise<void> {
   if (await isWorkspaceEuOnly(db, input.target)) return;
-  const workspaces = await db
-    .select({ id: schema.workspaces.id })
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.accountId, input.sourceAccountId))
-    .orderBy(asc(schema.workspaces.id));
-  for (const { id } of workspaces) {
-    await assertWorkspaceContentFlowAllowed(db, {
-      source: { accountId: input.sourceAccountId, workspaceId: id },
-      target: input.target,
-    });
-  }
+  const [row] = await withRlsContext(
+    db,
+    { accountId: input.sourceAccountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{ scoped_account_id: string | null; workspaces: number; eu_only: boolean }>(
+        scopedDb,
+        sql`select nullif(current_setting('opengeni.account_id', true), '') as scoped_account_id,
+            count(workspace.id)::int as workspaces,
+            coalesce(bool_or(residency.eu_only is true), false) as eu_only
+          from workspaces workspace
+          left join organization_inference_residency residency
+            on residency.account_id = workspace.account_id
+          where workspace.account_id = ${input.sourceAccountId}::uuid`,
+      ),
+  );
+  if (
+    !row ||
+    row.workspaces < 1 ||
+    row.scoped_account_id?.toLowerCase() !== input.sourceAccountId.toLowerCase()
+  )
+    throw new WorkspaceInferenceResidencyUnknownError();
+  if (row.eu_only)
+    throw new WorkspaceContentFlowRefusedError(input.sourceAccountId, input.target.workspaceId);
 }

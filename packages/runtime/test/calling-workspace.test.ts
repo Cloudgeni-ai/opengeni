@@ -33,6 +33,12 @@ describe("calling-workspace header on remote MCP requests", () => {
       "https://opengeni.example/v1/mcp",
       "https://OPENGENI.example/v1/workspaces/w/mcp",
       "https://mcp.opengeni.example/v1/mcp",
+      // However the host is spelled.
+      "https://opengeni.example./v1/mcp",
+      "https://opengeni.example../v1/mcp",
+      "https://opengeni%2Eexample/v1/mcp",
+      "https://opengeni%2eexample./v1/mcp",
+      "https://opengeni.example:443/v1/mcp",
     ]) {
       const init = await withCallingWorkspaceProof(settings, caller, url, {
         headers: { authorization: "Bearer key", [OPENGENI_CALLING_WORKSPACE_HEADER]: "forged" },
@@ -50,12 +56,40 @@ describe("calling-workspace header on remote MCP requests", () => {
     expect(await verifyCallingWorkspaceProof(secret, header(fromRequest)!)).toEqual(caller);
   });
 
+  test("a request carrying an Opengeni key or MCP token is Opengeni, on any host", async () => {
+    const proxied = "https://proxy.example.com/v1/mcp";
+    for (const credential of [
+      "Bearer ogp_personalkey12345",
+      "Bearer ogk_organizationkey123",
+      "Bearer ogmcp_at_accesstoken12345",
+    ]) {
+      const init = await withCallingWorkspaceProof(settings, caller, proxied, {
+        headers: { authorization: credential },
+      });
+      expect(await verifyCallingWorkspaceProof(secret, header(init)!), credential).toEqual(caller);
+    }
+    const inQuery = await withCallingWorkspaceProof(
+      settings,
+      caller,
+      `${proxied}?key=ogk_organizationkey123`,
+      undefined,
+    );
+    expect(await verifyCallingWorkspaceProof(secret, header(inQuery)!)).toEqual(caller);
+    // A key it can't sign for sends nothing.
+    await expect(
+      withCallingWorkspaceProof(settings, {}, proxied, {
+        headers: { "x-api-key": "ogp_personalkey12345" },
+      }),
+    ).rejects.toBeInstanceOf(CallingWorkspaceProofUnavailableError);
+  });
+
   test("any other host never sees it", async () => {
-    const init = { headers: { authorization: "Bearer key" } };
+    const init = { headers: { authorization: "Bearer key", "x-note": "dogp_" } };
     for (const url of [
       "https://mcp.example.com/v1/mcp",
       "https://opengeni.example.evil.test/v1/mcp",
       "https://opengeni.example:8443/v1/mcp",
+      "https://notopengeni.example/v1/mcp",
     ]) {
       expect(await withCallingWorkspaceProof(settings, caller, url, init)).toBe(init);
     }

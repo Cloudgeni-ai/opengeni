@@ -22,6 +22,9 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { createSignedState } from "@opengeni/github";
+import { Hono, type Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 
 import { createApp } from "../src/app";
 import { regionRestrictedHttpError } from "../src/http/api-error";
@@ -36,9 +39,13 @@ import {
   type OtherWorkspaceSessionTool,
 } from "../src/mcp/session-other-workspace";
 import {
+  assertCallingWorkspaceMayReceive,
+  assertOAuthConsentContentFlowAllowed,
+  callingWorkspaceContentFlowGuard,
   contentFlowCheckFailure,
+  noteOrganizationMcpReach,
+  oauthRequestingWorkspace,
   REGION_RESTRICTED_TOOL_MESSAGE,
-  requireCallingWorkspaceContentFlow,
   withOtherWorkspaceContentFlow,
 } from "../src/mcp/workspace-content-flow";
 
@@ -275,7 +282,7 @@ describe("admin_action_call in another workspace", () => {
     return { result, ran };
   }
 
-  test("only a read that sends nothing but ids and paging keys just brings content here", () => {
+  test("only a read that sends nothing but ids and paging values just brings content here", () => {
     const flow = (id: string, input: { query?: Record<string, unknown>; body?: unknown }) =>
       appActionContentFlow(findAppAction(id)!, input);
     expect(appActionChangesState(findAppAction(read)!)).toBe(false);
@@ -284,7 +291,12 @@ describe("admin_action_call in another workspace", () => {
     expect(flow(read, { query: { limit: 5, cursor: "c", sessionId: "s" }, body: {} })).toBe(
       "from_there",
     );
+    expect(flow(read, { query: { limit: 5, ids: ["a1", "b2"], before: true } })).toBe("from_there");
     expect(flow(read, { query: { q: "our launch plan" } })).toBe("both_ways");
+    // An id or paging key whose value is free text carries it there.
+    expect(flow(read, { query: { sessionId: "our EU launch plan" } })).toBe("both_ways");
+    expect(flow(read, { query: { cursor: { text: "plan" } } })).toBe("both_ways");
+    expect(flow(read, { query: { limit: "x".repeat(201) } })).toBe("both_ways");
     expect(flow(readWithText, { body: { query: "our launch plan" } })).toBe("both_ways");
     expect(flow(change, {})).toBe("both_ways");
   });
@@ -338,61 +350,263 @@ describe("admin_action_call in another workspace", () => {
 
 describe("Opengeni's own MCP endpoints called from another workspace", () => {
   const secret = "workspace-content-flow-mcp-secret";
-  const settings = testSettings({ productAccessMode: "managed", delegationSecret: secret });
-  const request = async (calling?: WorkspaceContentFlowEnd | string) =>
-    new Request("http://opengeni.test/v1/mcp", {
-      method: "POST",
-      headers:
-        calling === undefined
-          ? {}
-          : {
-              [OPENGENI_CALLING_WORKSPACE_HEADER]:
-                typeof calling === "string"
-                  ? calling
-                  : await signCallingWorkspaceProof(secret, calling),
-            },
-    });
+  const stateSecret = "workspace-content-flow-mcp-state-secret";
+  const settings = testSettings({
+    productAccessMode: "managed",
+    delegationSecret: secret,
+    integrationsStateSecret: stateSecret,
+    publicBaseUrl: "https://opengeni.test",
+  });
 
-  test("EU-only content reaches only an EU-only calling workspace", async () => {
+  /** Every MCP endpoint behind the one guard, answering "the answer" once it has run. */
+  function endpoints(db: Database, organization?: string) {
+    const ran: string[] = [];
+    const app = new Hono();
+    app.use("/v1/*", callingWorkspaceContentFlowGuard({ db, settings }));
+    const answer = (c: Context) => {
+      ran.push(c.req.path);
+      return c.json({ answer: "EU-only content" });
+    };
+    app.all("/v1/mcp", (c) => {
+      if (organization) noteOrganizationMcpReach(c.req.raw, organization);
+      return answer(c);
+    });
+    app.all("/v1/workspaces/:workspaceId/mcp", answer);
+    app.all("/v1/workspaces/:workspaceId/mcp/denied", (c) => c.json({ error: "not found" }, 404));
+    app.all("/v1/workspaces/:workspaceId/mcp/*", answer);
+    app.all("/v1/workspaces/:workspaceId/sessions", answer);
+    app.onError((error, c) => {
+      const restricted = regionRestrictedHttpError(error);
+      if (restricted) return c.json({ code: restricted.code }, 422);
+      if (error instanceof HTTPException) return c.json({ message: error.message }, error.status);
+      return c.json({ message: "internal" }, 500);
+    });
+    const request = async (path: string, calling?: WorkspaceContentFlowEnd | string) =>
+      await app.request(path, {
+        method: "POST",
+        headers:
+          calling === undefined
+            ? {}
+            : {
+                [OPENGENI_CALLING_WORKSPACE_HEADER]:
+                  typeof calling === "string"
+                    ? calling
+                    : await signCallingWorkspaceProof(secret, calling),
+              },
+      });
+    return { request, ran };
+  }
+  const paths = (reached: WorkspaceContentFlowEnd) => [
+    `/v1/workspaces/${reached.workspaceId}/mcp`,
+    `/v1/workspaces/${reached.workspaceId}/mcp/files`,
+    `/v1/workspaces/${reached.workspaceId}/mcp/docs`,
+    // An endpoint added later is covered without changing the guard.
+    `/v1/workspaces/${reached.workspaceId}/mcp/anything-new`,
+    "/v1/mcp",
+  ];
+
+  test("EU-only content answers only an EU-only calling workspace, on every MCP endpoint", async () => {
     const eu = await workspace(true);
     const euElsewhere = await workspace(true);
     const other = await workspace(false);
-    const deps = { db: client.db, settings };
-    // A workspace, and every workspace of an organization.
+    const { request, ran } = endpoints(client.db, eu.accountId);
+    for (const path of paths(eu)) {
+      const refused = await request(path, other);
+      expect(refused.status, path).toBe(422);
+      expect(await refused.json()).toEqual({ code: "region_restricted" });
+      expect((await request(path, euElsewhere)).status, path).toBe(200);
+      expect((await request(path, eu)).status, path).toBe(200);
+    }
+    // The answer was withheld after the endpoint authorized and ran.
+    expect(ran.length).toBe(15);
+    // Content that isn't EU-only may go to an EU-only workspace.
+    const fromOther = endpoints(client.db, other.accountId);
+    for (const path of paths(other)) expect((await fromOther.request(path, eu)).status).toBe(200);
+  });
+
+  test("a request naming no workspace isn't a workspace agent; a bad proof runs nothing", async () => {
+    const eu = await workspace(true);
+    const { request, ran } = endpoints(client.db, eu.accountId);
+    for (const path of paths(eu)) expect((await request(path)).status, path).toBe(200);
+    ran.length = 0;
+    for (const proof of ["ogcw_forged.signature", "not-a-proof"]) {
+      for (const path of paths(eu)) expect((await request(path, proof)).status, path).toBe(403);
+    }
+    expect(ran).toEqual([]);
+    // Not an MCP endpoint: the header means nothing there.
+    expect((await request(`/v1/workspaces/${eu.workspaceId}/sessions`, "x")).status).toBe(200);
+  });
+
+  test("an endpoint's own refusal is passed on, never replaced by the setting", async () => {
+    const eu = await workspace(true);
+    const other = await workspace(false);
+    // Even when the setting can't be read: nothing was answered.
+    const { request } = endpoints(unreadableDb(), eu.accountId);
+    expect((await request(`/v1/workspaces/${eu.workspaceId}/mcp/denied`, other)).status).toBe(404);
+  });
+
+  test("the answer is withheld when the setting can't be read", async () => {
+    const eu = await workspace(true);
+    const other = await workspace(false);
+    for (const path of paths(other)) {
+      const response = await endpoints(unreadableDb(), other.accountId).request(path, eu);
+      expect(response.status, path).toBe(503);
+      expect(JSON.stringify(await response.json())).not.toContain("EU-only content");
+    }
+    // /v1/mcp that didn't say which organization it served.
+    expect((await endpoints(client.db).request("/v1/mcp", eu)).status).toBe(503);
+    // A workspace that doesn't exist.
+    const missing = { accountId: other.accountId, workspaceId: crypto.randomUUID() };
+    expect(
+      (await endpoints(client.db).request(`/v1/workspaces/${missing.workspaceId}/mcp`, eu)).status,
+    ).toBe(503);
+  });
+
+  test("the checks themselves: a workspace, and every workspace of an organization", async () => {
+    const eu = await workspace(true);
+    const other = await workspace(false);
     for (const reached of [{ workspaceId: eu.workspaceId }, { accountId: eu.accountId }]) {
       await expect(
-        requireCallingWorkspaceContentFlow(deps, await request(other), reached),
+        assertCallingWorkspaceMayReceive(client.db, reached, other),
       ).rejects.toBeInstanceOf(WorkspaceContentFlowRefusedError);
-      await requireCallingWorkspaceContentFlow(deps, await request(euElsewhere), reached);
-      await requireCallingWorkspaceContentFlow(deps, await request(eu), reached);
-    }
-    // Content that isn't EU-only may go to an EU-only workspace.
-    for (const reached of [{ workspaceId: other.workspaceId }, { accountId: other.accountId }]) {
-      await requireCallingWorkspaceContentFlow(deps, await request(eu), reached);
+      await assertCallingWorkspaceMayReceive(client.db, reached, eu);
     }
   });
 
-  test("a request naming no workspace isn't a workspace agent; a bad proof is refused", async () => {
-    const eu = await workspace(true);
-    const deps = { db: client.db, settings };
-    await requireCallingWorkspaceContentFlow(deps, await request(), { accountId: eu.accountId });
-    for (const proof of ["ogcw_forged.signature", "not-a-proof"]) {
-      await expect(
-        requireCallingWorkspaceContentFlow(deps, await request(proof), {
-          accountId: eu.accountId,
-        }),
-      ).rejects.toMatchObject({ status: 403 });
-    }
-  });
+  describe("MCP OAuth consent", () => {
+    const callback = "https://opengeni.test/v1/integrations/oauth/callback";
+    const stateFor = (end: WorkspaceContentFlowEnd) =>
+      createSignedState(stateSecret, {
+        kind: "mcp_oauth_reference",
+        id: crypto.randomUUID(),
+        accountId: end.accountId,
+        workspaceId: end.workspaceId,
+      });
+    const consent = (
+      db: Database,
+      reached: { workspaceId: string } | { accountId: string },
+      request: { redirectUri: string; state: string | null },
+    ) =>
+      assertOAuthConsentContentFlowAllowed(
+        { db, settings },
+        { request, requestUrl: "https://opengeni.test/oauth/authorize", reached },
+      );
 
-  test("refused when the setting can't be read", async () => {
-    const other = await workspace(false);
-    const deps = { db: unreadableDb(), settings };
-    for (const reached of [{ workspaceId: other.workspaceId }, { accountId: other.accountId }]) {
+    test("Opengeni's own client is named by its signed state", () => {
+      const other = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+      expect(
+        oauthRequestingWorkspace(
+          settings,
+          { redirectUri: callback, state: stateFor(other) },
+          "https://opengeni.test/oauth/authorize",
+        ),
+      ).toEqual(other);
+      // An outside client is not an Opengeni workspace.
+      expect(
+        oauthRequestingWorkspace(
+          settings,
+          { redirectUri: "http://127.0.0.1:33418/callback", state: "client-state" },
+          "https://opengeni.test/oauth/authorize",
+        ),
+      ).toBeNull();
+      // Opengeni's own callback, however spelled, without a state naming a workspace.
+      for (const redirectUri of [
+        callback,
+        "https://OPENGENI.test./v1/integrations/oauth/callback/",
+        "https://opengeni%2Etest/v1/integrations/oauth/callback",
+      ]) {
+        for (const state of [null, "client-state", createSignedState(stateSecret, {})]) {
+          expect(() =>
+            oauthRequestingWorkspace(
+              settings,
+              { redirectUri, state },
+              "https://opengeni.test/oauth/authorize",
+            ),
+          ).toThrow();
+        }
+      }
+    });
+
+    test("a grant to EU-only content is refused to a workspace that isn't EU-only", async () => {
+      const eu = await workspace(true);
+      const euElsewhere = await workspace(true);
+      const other = await workspace(false);
+      for (const reached of [{ workspaceId: eu.workspaceId }, { accountId: eu.accountId }]) {
+        await expect(
+          consent(client.db, reached, { redirectUri: callback, state: stateFor(other) }),
+        ).rejects.toBeInstanceOf(WorkspaceContentFlowRefusedError);
+        await consent(client.db, reached, { redirectUri: callback, state: stateFor(euElsewhere) });
+        // Outside clients the organization connects stay allowed.
+        await consent(client.db, reached, {
+          redirectUri: "http://127.0.0.1:33418/callback",
+          state: null,
+        });
+      }
+      await consent(
+        client.db,
+        { workspaceId: other.workspaceId },
+        {
+          redirectUri: callback,
+          state: stateFor(eu),
+        },
+      );
+      // A setting that can't be read refuses.
       await expect(
-        requireCallingWorkspaceContentFlow(deps, await request(other), reached),
+        consent(
+          unreadableDb(),
+          { workspaceId: other.workspaceId },
+          {
+            redirectUri: callback,
+            state: stateFor(eu),
+          },
+        ),
       ).rejects.toThrow("database unavailable");
-    }
+    });
+  });
+});
+
+describe("an import into a workspace named by its external identity", () => {
+  const importCall = (source: string, externalId: string) => ({
+    id: "POST /v1/workspaces/external/:source/:externalId/session-imports",
+    pathParameters: { source, externalId },
+    body: { title: "Our EU launch plan" },
+  });
+
+  test("resolves the workspace and checks the pair both ways, failing closed", async () => {
+    const here = await workspace(true);
+    const there = await sameOrganization(here);
+    const externalId = `crm-${crypto.randomUUID()}`;
+    await shared.admin`
+      update workspaces set external_source = 'crm', external_id = ${externalId}
+      where id = ${there.workspaceId}`;
+    const run = async (db: Database, input: ReturnType<typeof importCall>) => {
+      let ran = false;
+      const result = await withAppActionContentFlow(db, here, input, async () => {
+        ran = true;
+        return ok;
+      });
+      return { result, ran };
+    };
+    // EU-only to EU-only in one organization.
+    expect((await run(client.db, importCall("crm", externalId))).ran).toBe(true);
+    // No such workspace: its route answers.
+    expect((await run(client.db, importCall("crm", "unknown"))).ran).toBe(true);
+    // The workspace can't be resolved: nothing runs.
+    const unresolved = await run(unreadableDb(), importCall("crm", externalId));
+    expect(unresolved.ran).toBe(false);
+    expect(textOf(unresolved.result)).toContain("Nothing was run");
+    // The setting can't be read once the import returns: its answer is withheld.
+    const later = failingLater(client.db);
+    const withheld = await withAppActionContentFlow(
+      later.db,
+      here,
+      importCall("crm", externalId),
+      async () => {
+        later.fail();
+        return ok;
+      },
+    );
+    expect(textOf(withheld)).toContain("The answer isn't shown");
   });
 });
 

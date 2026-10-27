@@ -6,6 +6,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 
 import {
+  assertOrganizationContentFlowAllowed,
   assertWorkspaceContentExchangeAllowed,
   assertWorkspaceContentFlowAllowed,
   createDb,
@@ -174,4 +175,46 @@ test("a setting that can't be read refuses the move", async () => {
   );
   expect(failed).toBeInstanceOf(Error);
   expect(failed).not.toBeInstanceOf(WorkspaceContentFlowRefusedError);
+});
+
+test("an organization-wide reach: refused only when the organization has EU-only content", async () => {
+  const eu = await organization(true);
+  const euElsewhere = await organization(true);
+  const open = await organization(false);
+  const org = (source: { shared: WorkspaceContentFlowEnd }, target: WorkspaceContentFlowEnd) =>
+    assertOrganizationContentFlowAllowed(client.db, {
+      sourceAccountId: source.shared.accountId,
+      target,
+    });
+  expect(await refusal(org(eu, open.shared))).toMatchObject({
+    code: "region_restricted",
+    targetWorkspaceId: open.shared.workspaceId,
+  });
+  expect(await refusal(org(eu, open.personal))).toBeInstanceOf(WorkspaceContentFlowRefusedError);
+  await org(eu, euElsewhere.shared);
+  await org(eu, eu.personal);
+  await org(open, eu.shared);
+  await org(open, open.personal);
+});
+
+test("an organization-wide reach fails closed", async () => {
+  const eu = await organization(true);
+  const open = await organization(false);
+  // No such organization, or one that can't be read: never "not EU-only".
+  for (const check of [
+    () =>
+      assertOrganizationContentFlowAllowed(client.db, {
+        sourceAccountId: crypto.randomUUID(),
+        target: open.shared,
+      }),
+    () =>
+      assertOrganizationContentFlowAllowed(unreadableDb(), {
+        sourceAccountId: eu.shared.accountId,
+        target: open.shared,
+      }),
+  ]) {
+    const failed = await refusal(check());
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(WorkspaceContentFlowRefusedError);
+  }
 });

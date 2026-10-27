@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
 import {
@@ -3164,6 +3165,17 @@ async function createSessionForRequestInFileScope(
           await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
         )
       : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
+  if (hasOwnProperty(rawPayload, "mcpServers")) {
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    for (const server of payload.mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(db, {
+        target: { accountId: grant.accountId, workspaceId },
+        url: server.url,
+        headers: server.headers,
+      });
+    }
+  }
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,

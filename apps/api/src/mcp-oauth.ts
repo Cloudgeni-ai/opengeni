@@ -36,6 +36,8 @@ import {
   resolveMcpOAuthAccessToken,
   rotateMcpOAuthRefreshToken,
   setMcpOAuthRequestOrganizationAccess,
+  WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE,
+  WorkspaceContentFlowRefusedError,
   type McpOAuthAccess,
 } from "@opengeni/db";
 import {
@@ -54,6 +56,7 @@ import {
   requireWorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
+import { assertOAuthConsentContentFlowAllowed } from "./mcp/workspace-content-flow";
 
 const CLIENT_PREFIX = "ogmcp_client_";
 const REQUEST_PREFIX = "ogmcp_req_";
@@ -334,6 +337,18 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OAuth consent authority changed",
       });
     }
+    // Opengeni's own client in another workspace: EU-only content stays in
+    // EU-only workspaces.
+    try {
+      await assertOAuthConsentContentFlowAllowed(deps, {
+        request,
+        requestUrl: c.req.url,
+        reached: { workspaceId: grant.workspaceId },
+      });
+    } catch (error) {
+      if (!(error instanceof WorkspaceContentFlowRefusedError)) throw error;
+      return oauthAuthorizeBrowserError(c, WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE);
+    }
     if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
       const prepared = await prepareWorkspaceToolGateway(deps, authorization);
       try {
@@ -430,6 +445,13 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(403, { message: "a selected workspace is not available" });
       }
     }
+    // Opengeni's own client in another workspace: EU-only content stays in
+    // EU-only workspaces.
+    await assertOAuthConsentContentFlowAllowed(deps, {
+      request,
+      requestUrl: c.req.url,
+      reached: { accountId: organization.id },
+    });
     const bound = await setMcpOAuthRequestOrganizationAccess(deps.db, {
       requestHash: request.requestHash,
       subjectId: person.context.subjectId,

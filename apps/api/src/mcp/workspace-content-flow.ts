@@ -11,9 +11,13 @@ import {
   WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE,
   WorkspaceContentFlowRefusedError,
   workspaceContentFlowEnd,
+  WorkspaceInferenceResidencyUnknownError,
   type Database,
   type WorkspaceContentFlowEnd,
 } from "@opengeni/db";
+import { inspectSignedState } from "@opengeni/github";
+import { normalizedUrlHost, opengeniOwnHosts } from "@opengeni/runtime/calling-workspace";
+import type { MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 
 /* ----------------------------------------------------------------------------
@@ -30,8 +34,9 @@ import { HTTPException } from "hono/http-exception";
 
    An agent of one workspace calling Opengeni's own MCP endpoints as a remote
    MCP server sends a signed header naming its workspace (the runtime adds it
-   and sends nothing it can't sign). The endpoint refuses when content of the
-   workspace or organization it reaches may not go to that workspace.
+   and sends nothing it can't sign). One guard on every MCP endpoint withholds
+   the answer when content of the workspace or organization it reached may not
+   go to that workspace.
    -------------------------------------------------------------------------- */
 
 /**
@@ -115,34 +120,169 @@ export async function withOtherWorkspaceContentFlow(
   return (await otherWorkspaceContentRefusal(db, input, "after")) ?? result;
 }
 
+const ORGANIZATION_MCP_ENDPOINT = /^\/v1\/mcp\/?$/;
+const WORKSPACE_MCP_ENDPOINT = /^\/v1\/workspaces\/([^/]+)\/mcp(?:\/|$)/;
+const UNCHECKED_ENDPOINT =
+  "Nothing was shown: Opengeni couldn't confirm that content may go to the calling workspace. Retry.";
+
+/** What an Opengeni MCP endpoint reaches: one workspace, or every workspace of an organization. */
+export type McpEndpointReach = { workspaceId: string } | { accountId: string };
+
+/** Which organization `/v1/mcp` served, noted by its handler once the caller is authorized. */
+const organizationMcpReach = new WeakMap<Request, string>();
+
+export function noteOrganizationMcpReach(request: Request, accountId: string): void {
+  organizationMcpReach.set(request, accountId);
+}
+
 /**
- * For Opengeni's own MCP endpoints: when the request names the Opengeni
- * workspace calling (a remote MCP server added to it), refuse unless content
- * of what the request reaches may go to that workspace. A request without the
- * header doesn't come from a workspace agent. Call only after the caller is
- * authorized, so a refusal says nothing to anyone who can't already reach it.
+ * The Opengeni workspace calling, from its signed header: null when the
+ * request names none (it doesn't come from a workspace agent); 403 when the
+ * proof isn't one Opengeni signed. Reveals nothing about what it reaches.
  */
-export async function requireCallingWorkspaceContentFlow(
-  deps: { db: Database; settings: Settings },
+export async function callingWorkspaceOf(
+  settings: Settings,
   request: Request,
-  reached: { workspaceId: string } | { accountId: string },
-): Promise<void> {
+): Promise<WorkspaceContentFlowEnd | null> {
   const header = request.headers.get(OPENGENI_CALLING_WORKSPACE_HEADER);
-  if (header === null) return;
-  const secret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (header === null) return null;
+  const secret = resolveFirstPartyDelegationSecret(settings);
   const calling = secret ? await verifyCallingWorkspaceProof(secret, header) : null;
   if (!calling)
     throw new HTTPException(403, {
       message: "Nothing was run: Opengeni couldn't confirm which workspace is calling.",
     });
+  return calling;
+}
+
+/** Refuse unless content of what an MCP endpoint reached may go to the calling workspace. */
+export async function assertCallingWorkspaceMayReceive(
+  db: Database,
+  reached: McpEndpointReach,
+  calling: WorkspaceContentFlowEnd,
+): Promise<void> {
   if ("accountId" in reached) {
-    await assertOrganizationContentFlowAllowed(deps.db, {
+    await assertOrganizationContentFlowAllowed(db, {
       sourceAccountId: reached.accountId,
       target: calling,
     });
     return;
   }
-  const source = await workspaceContentFlowEnd(deps.db, reached.workspaceId);
-  if (!source) throw new HTTPException(404, { message: "workspace not found" });
-  await assertWorkspaceContentFlowAllowed(deps.db, { source, target: calling });
+  const source = await workspaceContentFlowEnd(db, reached.workspaceId);
+  if (!source) throw new WorkspaceInferenceResidencyUnknownError();
+  await assertWorkspaceContentFlowAllowed(db, { source, target: calling });
+}
+
+/**
+ * One guard on every Opengeni MCP endpoint (`/v1/mcp` and everything under
+ * `/v1/workspaces/:workspaceId/mcp`), so a new endpoint can't miss it. A
+ * request naming the Opengeni workspace calling (the runtime adds the header
+ * when a workspace agent calls Opengeni itself as a remote MCP server) gets an
+ * answer only when content of what it reached may go to that workspace.
+ *
+ * The check runs on the endpoint's answer, after the endpoint authorized the
+ * caller, so a refusal says nothing to anyone who can't already reach it.
+ * Content only leaves through that answer: whatever the call sent in is
+ * content of the calling workspace, which may go anywhere unless that
+ * workspace is EU-only, and then the reached one must be too for the answer.
+ * A failed check withholds the answer.
+ */
+export function callingWorkspaceContentFlowGuard(deps: {
+  db: Database;
+  settings: Settings;
+}): MiddlewareHandler {
+  return async (c, next) => {
+    const path = c.req.path;
+    const workspaceMatch = WORKSPACE_MCP_ENDPOINT.exec(path);
+    if (!workspaceMatch && !ORGANIZATION_MCP_ENDPOINT.test(path)) return await next();
+    const calling = await callingWorkspaceOf(deps.settings, c.req.raw);
+    if (!calling) return await next();
+    await next();
+    if (c.res.status >= 400) return;
+    try {
+      let reached: McpEndpointReach;
+      if (workspaceMatch) {
+        reached = { workspaceId: decodeURIComponent(workspaceMatch[1]!).toLowerCase() };
+        if (!UUID.test(reached.workspaceId)) throw new WorkspaceInferenceResidencyUnknownError();
+      } else {
+        const accountId = organizationMcpReach.get(c.req.raw);
+        if (!accountId) throw new WorkspaceInferenceResidencyUnknownError();
+        reached = { accountId };
+      }
+      await assertCallingWorkspaceMayReceive(deps.db, reached, calling);
+    } catch (error) {
+      // Drop the answer, and its own headers, before the error answers.
+      await c.res.body?.cancel().catch(() => undefined);
+      try {
+        for (const name of [...c.res.headers.keys()])
+          if (name !== "set-cookie") c.res.headers.delete(name);
+      } catch {
+        // Immutable headers: the error answer still replaces the body.
+      }
+      c.res = new Response(null, { status: 500 });
+      if (error instanceof WorkspaceContentFlowRefusedError) throw error;
+      throw new HTTPException(503, { message: UNCHECKED_ENDPOINT, cause: error });
+    }
+  };
+}
+
+const INTEGRATION_OAUTH_CALLBACK_PATH = "/v1/integrations/oauth/callback";
+
+/**
+ * The Opengeni workspace asking for an MCP OAuth grant to Opengeni itself, or
+ * null for a client outside Opengeni. Opengeni's own client sends this
+ * deployment's signed integration state, which names the workspace; a
+ * request back to Opengeni's own integration callback whose state doesn't
+ * name one throws, so consent can't go ahead unchecked.
+ */
+export function oauthRequestingWorkspace(
+  settings: Settings,
+  request: { redirectUri: string; state: string | null },
+  requestUrl: string,
+): WorkspaceContentFlowEnd | null {
+  const secret = settings.integrationsStateSecret?.trim();
+  const state = secret && request.state ? inspectSignedState(request.state, secret) : null;
+  if (state) {
+    const { accountId, workspaceId } = state as { accountId?: unknown; workspaceId?: unknown };
+    if (
+      typeof accountId === "string" &&
+      typeof workspaceId === "string" &&
+      UUID.test(accountId) &&
+      UUID.test(workspaceId)
+    )
+      return { accountId: accountId.toLowerCase(), workspaceId: workspaceId.toLowerCase() };
+    throw new WorkspaceInferenceResidencyUnknownError();
+  }
+  let redirect: URL;
+  try {
+    redirect = new URL(request.redirectUri);
+  } catch {
+    return null;
+  }
+  const ownHosts = opengeniOwnHosts(settings);
+  const requestHost = normalizedUrlHost(requestUrl);
+  if (requestHost) ownHosts.add(requestHost);
+  const host = normalizedUrlHost(request.redirectUri);
+  const path = decodeURIComponent(redirect.pathname).replace(/\/+$/, "");
+  if (host && ownHosts.has(host) && path === INTEGRATION_OAUTH_CALLBACK_PATH)
+    throw new WorkspaceInferenceResidencyUnknownError();
+  return null;
+}
+
+/**
+ * At MCP OAuth consent: refuse a grant to Opengeni's own client in a workspace
+ * that EU-only content of what the grant reaches may not go to. Outside
+ * clients the organization connects stay allowed.
+ */
+export async function assertOAuthConsentContentFlowAllowed(
+  deps: { db: Database; settings: Settings },
+  input: {
+    request: { redirectUri: string; state: string | null };
+    requestUrl: string;
+    reached: McpEndpointReach;
+  },
+): Promise<void> {
+  const requesting = oauthRequestingWorkspace(deps.settings, input.request, input.requestUrl);
+  if (!requesting) return;
+  await assertCallingWorkspaceMayReceive(deps.db, input.reached, requesting);
 }

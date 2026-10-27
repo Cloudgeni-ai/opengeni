@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -547,6 +548,13 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    await assertMcpCredentialContentFlowAllowed(input.db, {
+      target: { accountId: input.accountId, workspaceId: input.workspaceId },
+      url: item.endpointUrl,
+      headers,
+    });
     if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
     let serverInfo: unknown;
     installationMetadata = {

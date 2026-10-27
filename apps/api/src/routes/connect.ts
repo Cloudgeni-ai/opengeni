@@ -81,7 +81,7 @@ import {
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
-import { executeConnectOperation } from "@opengeni/core";
+import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
   startMcpOAuth,
@@ -1066,6 +1066,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const mcpUrl = destination.toString();
+      // An Opengeni API key reads its organization: EU-only content stays in
+      // EU-only workspaces.
+      await assertMcpCredentialContentFlowAllowed(deps.db, {
+        target: { accountId: actor.grant.accountId, workspaceId: actor.grant.workspaceId },
+        url: mcpUrl,
+        headers: credentialHeaders,
+      });
       return c.json(
         await executeConnectOperation({
           db: deps.db,

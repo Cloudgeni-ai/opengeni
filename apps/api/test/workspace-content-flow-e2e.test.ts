@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
 import {
+  MCP_OAUTH_SCOPE,
   OPENGENI_CALLING_WORKSPACE_HEADER,
   organizationAccessPresetPermissions,
   signCallingWorkspaceProof,
@@ -23,6 +25,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { createSignedState } from "@opengeni/github";
 import { sql } from "drizzle-orm";
 
 import { createApp } from "../src/app";
@@ -38,6 +41,7 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const origin = "http://opengeni.test";
 const delegationSecret = "workspace-content-flow-e2e-delegation-secret";
+const stateSecret = "workspace-content-flow-e2e-state-secret";
 const AGENT_PERMISSIONS: Permission[] = [
   "workspace:read",
   "sessions:create",
@@ -122,6 +126,9 @@ function dependencies(): ApiRouteDeps {
       productAccessMode: "managed",
       betterAuthSecret: "workspace-content-flow-e2e-secret-32b",
       delegationSecret,
+      integrationsStateSecret: stateSecret,
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      mcpOauthEnabled: true,
       publicBaseUrl: origin,
       sandboxBackend: "none",
       mcpServers: [
@@ -374,7 +381,12 @@ describe("EU-only content between workspaces, end to end", () => {
       await signCallingWorkspaceProof(delegationSecret, { accountId, workspaceId });
     const fromOther = await from(otherOrg, otherWorkspace);
     const fromResearch = await from(euOrg, research);
-    for (const path of ["/v1/mcp", `/v1/workspaces/${home}/mcp`]) {
+    for (const path of [
+      "/v1/mcp",
+      `/v1/workspaces/${home}/mcp`,
+      `/v1/workspaces/${home}/mcp/files`,
+      `/v1/workspaces/${home}/mcp/docs`,
+    ]) {
       const plain = await toolsList(path, euKey);
       expect(plain.status, `${path}: ${await plain.clone().text()}`).toBe(200);
       // A workspace that isn't EU-only never reads the EU-only organization.
@@ -388,5 +400,77 @@ describe("EU-only content between workspaces, end to end", () => {
     }
     // Content that isn't EU-only may go to an EU-only workspace.
     expect((await toolsList("/v1/mcp", otherKey, await from(euOrg, home))).status).toBe(200);
+
+    // A workspace that isn't EU-only can't store a key that reads the
+    // EU-only organization; an EU-only one can.
+    const sessionWithKey = async (workspaceId: string, key: string) =>
+      await app.request(`/v1/workspaces/${workspaceId}/sessions`, {
+        method: "POST",
+        headers: browser(cookie),
+        body: JSON.stringify({
+          initialMessage: "use the other organization",
+          model: "scripted-model",
+          mcpServers: [
+            {
+              id: "acme-eu",
+              url: "https://mcp-proxy.example.com/v1/mcp",
+              headers: { authorization: `Bearer ${key}` },
+            },
+          ],
+        }),
+      });
+    const storedRefused = await sessionWithKey(otherWorkspace, euKey);
+    expect(storedRefused.status, await storedRefused.clone().text()).toBe(422);
+    expect(await storedRefused.json()).toMatchObject({ error: { code: "region_restricted" } });
+    const storedAllowed = await sessionWithKey(home, otherKey);
+    expect(storedAllowed.status, await storedAllowed.clone().text()).toBe(202);
+
+    // MCP OAuth consent: Opengeni's own client in a workspace that isn't
+    // EU-only never gets a grant to the EU-only workspace.
+    const callback = "https://opengeni.test/v1/integrations/oauth/callback";
+    const registered = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Opengeni", redirect_uris: [callback] }),
+    });
+    expect(registered.status, await registered.clone().text()).toBe(201);
+    const clientId = ((await registered.json()) as { client_id: string }).client_id;
+    const consentFrom = async (calling: { accountId: string; workspaceId: string }) => {
+      const query = new URLSearchParams({
+        response_type: "code",
+        scope: MCP_OAUTH_SCOPE,
+        client_id: clientId,
+        redirect_uri: callback,
+        code_challenge: createHash("sha256").update("v".repeat(43)).digest("base64url"),
+        code_challenge_method: "S256",
+        resource: `${origin}/v1/workspaces/${home}/mcp`,
+        state: createSignedState(stateSecret, {
+          kind: "mcp_oauth_reference",
+          id: crypto.randomUUID(),
+          ...calling,
+        }),
+      });
+      const page = await app.request(`/oauth/authorize?${query}`, { headers: browser(cookie) });
+      expect(page.status, await page.clone().text()).toBe(200);
+      const requestToken = /ogmcp_req_[A-Za-z0-9_-]+/.exec(await page.text())?.[0];
+      if (!requestToken) throw new Error("consent page has no request");
+      return await app.request("/oauth/authorize", {
+        method: "POST",
+        headers: { ...browser(cookie), "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          request: requestToken,
+          decision: "approve",
+          workspace_id: home,
+        }).toString(),
+      });
+    };
+    const consentRefused = await consentFrom({ accountId: otherOrg, workspaceId: otherWorkspace });
+    expect(consentRefused.status).toBe(400);
+    const refusedPage = await consentRefused.text();
+    expect(refusedPage).toContain("Not supported in EU-only workspaces");
+    expect(refusedPage).not.toContain("code=");
+    const consentAllowed = await consentFrom({ accountId: euOrg, workspaceId: research });
+    expect(consentAllowed.status, await consentAllowed.clone().text()).toBe(200);
+    expect(await consentAllowed.text()).toContain("code=");
   }, 240_000);
 });
