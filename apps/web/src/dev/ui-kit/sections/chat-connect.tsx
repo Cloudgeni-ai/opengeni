@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
+import { ThisComputerCard } from "@opengeni/react/this-computer";
 import type { AuthNeededItem } from "@opengeni/react";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
@@ -247,6 +248,14 @@ export default function ChatConnectSection() {
                 <Card item={card.item} />
               </StateCell>
             ))}
+            <StateCell label="This computer (web, app not installed)" align="stretch">
+              <ThisComputerCard
+                rationale="Let me use your computer so I can open the spreadsheet in Excel."
+                productName="Opengeni"
+                machines={[]}
+                downloadUrl="#download"
+              />
+            </StateCell>
           </StatesGrid>
         ) : null}
       </KitSection>

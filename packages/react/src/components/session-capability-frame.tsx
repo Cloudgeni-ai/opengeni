@@ -11,9 +11,15 @@ export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
-  /** A short kind label beside the name; empty shows none. */
+  /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
   description: string;
+  /**
+   * The description is the agent's reason for asking: keep it to two lines so
+   * a long rationale never pushes the action down. State and guidance copy
+   * stays whole.
+   */
+  clampDescription?: boolean | undefined;
   skill: boolean;
   expanded: boolean;
   complete: boolean;
@@ -63,6 +69,7 @@ export function SessionCapabilityFrame({
   logo,
   typeLabel,
   description,
+  clampDescription = false,
   skill,
   expanded,
   complete,
@@ -92,9 +99,8 @@ export function SessionCapabilityFrame({
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        <span>{subtitle}</span>
+        {subtitle ? <span>{subtitle}</span> : null}
       </div>
-      {typeLabel ? <span className="og-session-capability-type">{typeLabel}</span> : null}
     </>
   );
   return (
@@ -121,7 +127,13 @@ export function SessionCapabilityFrame({
           </p>
         ) : (
           <>
-            <p className="og-session-capability-copy">{description}</p>
+            <p
+              className="og-session-capability-copy"
+              data-clamp={clampDescription ? "" : undefined}
+              title={clampDescription ? description : undefined}
+            >
+              {description}
+            </p>
             {inlineSetup ? (
               <div className="og-session-capability-setup">{inlineSetup}</div>
             ) : actionUnavailable ? (

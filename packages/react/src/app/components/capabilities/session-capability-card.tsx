@@ -248,7 +248,8 @@ function ScopedSessionCapabilityCard({
                 : ""
               : "API"
       }
-      description={catalogItem?.description || recommendation.rationale}
+      description={recommendation.rationale || catalogItem?.description || ""}
+      clampDescription={Boolean(recommendation.rationale)}
       skill={skill}
       expanded={expanded}
       complete={complete}

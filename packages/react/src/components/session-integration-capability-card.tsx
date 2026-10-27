@@ -119,6 +119,7 @@ function ScopedCard({
       logo={presentation.logo}
       typeLabel={t("sessionIntegrationCapabilityCard.integration")}
       description={rationale}
+      clampDescription
       skill={false}
       expanded={false}
       complete={availability.kind === "connected"}

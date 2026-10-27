@@ -130,7 +130,8 @@ function ScopedCard({
       typeLabel={
         dialogSubtitle ?? (showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : "")
       }
-      description={hostDescription || item?.description || rationale}
+      description={hostDescription || rationale || item?.description || ""}
+      clampDescription={!hostDescription && Boolean(rationale)}
       skill={false}
       expanded={flow.expanded}
       complete={flow.complete}
