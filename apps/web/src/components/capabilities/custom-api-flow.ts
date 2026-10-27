@@ -6,6 +6,7 @@ import type {
   ConnectionOwnership,
   CreateConnectionRequest,
 } from "@opengeni/react/app/types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type CustomApiProtocol = "auto" | "openapi" | "graphql";
 export type CustomApiAuthMethod = "bearer" | "basic" | "api_key";
@@ -277,7 +278,7 @@ export function customApiAuthenticationMayBeRequired(
   error: unknown,
 ): boolean {
   if (source.kind !== "graphql" && source.kind !== "auto") return false;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return /graphql|introspection|supported openapi document/i.test(message);
 }
 

@@ -38,6 +38,7 @@ import {
   notifyModelRequestCapture,
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -343,10 +344,6 @@ type FunctionCallItem = {
   providerData?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isFunctionTool(tool: Tool): tool is Tool & {
   type: "function";

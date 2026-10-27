@@ -5,6 +5,7 @@ import {
   parseBrowserProfileArtifactReceipt,
   type BrowserProfileArtifactReceipt,
 } from "./state-artifact";
+import { isRecord } from "@opengeni/contracts/values";
 
 const DEFAULT_MAX_ENTRIES = 10_000;
 const MAX_RECEIPT_BYTES = 1024 * 1024;
@@ -428,8 +429,4 @@ function requireSha256(value: unknown, label: string): string {
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be positive`);
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

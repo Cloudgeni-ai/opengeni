@@ -31,6 +31,7 @@ import {
   NO_WAKE_HEADER,
   responderWaitExhausted,
 } from "./control-replay";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -624,7 +625,7 @@ function isNoRespondersError(err: unknown): boolean {
   if (typeof code === "string" && code === NATS_NO_RESPONDERS_CODE) {
     return true;
   }
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   return /no responders|503/i.test(message);
 }
 
@@ -634,7 +635,7 @@ function isRequestTimeoutError(err: unknown): boolean {
   if (typeof code === "string" && /timeout/i.test(code)) {
     return true;
   }
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   return /timeout|timed out/i.test(message);
 }
 

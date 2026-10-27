@@ -27,6 +27,7 @@ import {
   type SandboxIdleCheckpointWorkflowInput,
   type SandboxLeaseSweepMaintenanceInput,
 } from "../sandbox-reaper-contract";
+import { errorMessage } from "@opengeni/contracts/values";
 
 function lifecycleTaskQueue(): string {
   return sandboxLifecycleTaskQueue(workflowInfo().taskQueue);
@@ -149,7 +150,7 @@ export async function sandboxIdleCheckpointWorkflow(
       workspaceId: input.target.workspaceId,
       sandboxGroupId: input.target.sandboxGroupId,
       leaseEpoch: input.target.leaseEpoch,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -178,7 +179,7 @@ export async function sandboxIdleCheckpointSweepWorkflow(): Promise<void> {
           workspaceId: target.workspaceId,
           sandboxGroupId: target.sandboxGroupId,
           leaseEpoch: target.leaseEpoch,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }),
@@ -198,7 +199,7 @@ export async function sandboxReaperMaintenanceWorkflow(
     // The next Schedule tick starts another singleton after this run closes.
     // Drain children were already made durable before this workflow was started.
     log.warn("sandbox reaper maintenance deferred to a later sweep", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -245,7 +246,7 @@ export async function sandboxReaperWorkflowV2(): Promise<void> {
           sandboxGroupId: target.sandboxGroupId,
           leaseEpoch: target.leaseEpoch,
           instanceId: target.instanceId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
         return "failed" as const;
       }
@@ -272,7 +273,7 @@ export async function sandboxReaperWorkflowV2(): Promise<void> {
     // Every drain child is already durable and this inventory workflow still
     // completes, so the next Schedule tick can retry maintenance independently.
     log.warn("sandbox reaper maintenance child start deferred to next sweep", {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }

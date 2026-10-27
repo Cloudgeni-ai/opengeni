@@ -40,6 +40,7 @@ import {
   type VendoredLogoEntry,
   type VendoredLogoManifest,
 } from "./catalog-vendored-logos";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
@@ -235,7 +236,7 @@ export function resolveLogoObjectStorage(
     console.warn(
       JSON.stringify({
         warning: "object_storage_unavailable",
-        detail: error instanceof Error ? error.message : String(error),
+        detail: errorMessage(error),
       }),
     );
     return null;
@@ -860,7 +861,7 @@ async function putLogoObject(
   } catch (error) {
     return {
       ok: false,
-      reason: `logo_store_failed:${error instanceof Error ? error.message : String(error)}`,
+      reason: `logo_store_failed:${errorMessage(error)}`,
     };
   }
 }

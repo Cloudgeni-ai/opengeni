@@ -88,6 +88,7 @@ import {
   siteSqlSchemaEntries,
   siteSqlSchemaStatements,
 } from "./format";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Site SQL: optional per-Site Cloudflare storage. One SQLite Durable Object
@@ -501,7 +502,7 @@ async function meter(
       siteId: resolved.scope.siteId,
       rowsRead: usage.rowsRead,
       rowsWritten: usage.rowsWritten,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   if (platform) await afterSitePlatformUsage(deps, workspace, platform);
@@ -1573,7 +1574,7 @@ export async function siteSqlSitesOfWorkspace(
   } catch (error) {
     console.warn("[site-sql] could not list a workspace's Site databases before deleting it", {
       workspaceId: scope.workspaceId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return [];
   }
@@ -1622,7 +1623,7 @@ export async function dropSiteSqlDatabases(
         result.dropped.push(siteId);
       } catch (error) {
         result.failed.push(siteId);
-        errors[siteId] = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+        errors[siteId] = errorMessage(error).slice(0, 200);
       }
     }
   };

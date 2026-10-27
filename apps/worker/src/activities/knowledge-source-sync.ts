@@ -130,6 +130,7 @@ import {
   type GoogleDriveChangesPage,
   type GoogleDriveSyncBudget,
 } from "./google-drive-changes";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // Carries exact-attempt liveness into every physical request, including provider retries.
 const sourceRequestAuthority = new AsyncLocalStorage<() => Promise<unknown>>();
@@ -3376,7 +3377,7 @@ function numberValue(value: unknown): number | undefined {
 }
 
 function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+  return errorMessage(error).slice(0, 1000);
 }
 
 function entryMetadataHash(entry: KnowledgeSyncEntry): string {

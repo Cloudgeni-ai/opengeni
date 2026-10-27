@@ -27,6 +27,7 @@ import { z } from "zod";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
    Personal API keys: keys that act as the person who created them. A script
@@ -174,11 +175,4 @@ function generatePersonalApiKeyToken(): string {
   return `${PERSONAL_API_KEY_TOKEN_PREFIX}${Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("")}`;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

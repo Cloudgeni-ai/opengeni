@@ -43,6 +43,7 @@ import {
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type RequiredServices = Pick<
   TestServices,
@@ -225,7 +226,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             session.id,
           );
           throw new Error(
-            `${error instanceof Error ? error.message : String(error)}; ` +
+            `${errorMessage(error)}; ` +
               `queue=${JSON.stringify({
                 version: diagnosticQueue?.version,
                 stopping: diagnosticQueue?.stoppingPreviousAttempt,

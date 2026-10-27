@@ -17,6 +17,7 @@ import type { McpEventsFetch } from "./mcp-event-source-client";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import { postTriggerNotices } from "./trigger-notices";
 import { workspaceFeed } from "./workspace-source";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Reads the sources whose events Opengeni takes from the app's own change
@@ -139,7 +140,7 @@ async function handleReadFailure(
   error: unknown,
   now: Date,
 ): Promise<void> {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const finish = (nextActionAt: Date) =>
     finishEventSourceFeedStep(deps.db, source.workspaceId, source.id, {
       nextActionAt,
@@ -185,7 +186,7 @@ export async function pumpDueEventSourceFeeds(
       } catch (error) {
         deps.observability?.error("Event source feed read crashed; it will retry", {
           sourceId: next.sourceId,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       }
     }

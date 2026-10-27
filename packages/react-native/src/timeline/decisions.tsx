@@ -51,6 +51,7 @@ import {
 import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
    Decision surfaces: the web HumanInputSurface/HumanInputForm (waiting tone,
@@ -269,7 +270,7 @@ function HumanInputForm({
       await onSubmit(response);
       clearSecrets();
     } catch (cause) {
-      setSubmitError(cause instanceof Error ? cause.message : String(cause));
+      setSubmitError(errorMessage(cause));
     } finally {
       setInFlight(false);
     }

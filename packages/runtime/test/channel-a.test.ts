@@ -56,6 +56,7 @@ import {
   executeSynchronousCommand,
   type SynchronousCommandPage,
 } from "../src/sandbox/synchronous-command";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const NUL = String.fromCharCode(0);
 
@@ -3058,7 +3059,7 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
       // skip the live-open assertion (the capability gate above still proves the
       // shape). On the real docker/Modal images the bridge is present, so the e2e
       // PTY path is exercised there.
-      const msg = error instanceof Error ? error.message : String(error);
+      const msg = errorMessage(error);
       expect(msg).toMatch(/PTY|python/i);
       return;
     }
