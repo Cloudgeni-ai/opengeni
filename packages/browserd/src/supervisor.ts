@@ -296,6 +296,10 @@ export type BrowserSupervisorSession = BrowserSessionReference & {
   observation: BrowserObservation;
   /** Returned only by the create that launched the browser. */
   notice?: string;
+  /** How this headed managed browser shows on the machine as launched: in a
+   * native window, or offscreen with none. Absent for headless, remote and
+   * attached browsers. */
+  display?: "window" | "offscreen";
 };
 
 export type BrowserStateCaptureInput = BrowserSessionReference & {
@@ -311,6 +315,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
   readonly networkNotice?: string | null;
+  readonly display?: "window" | "offscreen" | null;
   /** The load error of the page start() kept on the browser's error page. */
   readonly startLoadError?: string | null;
   start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
@@ -1338,6 +1343,7 @@ export class BrowserSupervisor {
       await this.recordWorkingAuthority(active, options);
       return {
         ...binding(active),
+        ...displayOf(active),
         observation: await this.currentObservation(active),
       };
     }
@@ -1348,6 +1354,7 @@ export class BrowserSupervisor {
       await this.recordWorkingAuthority(runtime, options);
       return {
         ...binding(runtime),
+        ...displayOf(runtime),
         observation: await this.currentObservation(runtime),
       };
     }
@@ -1395,11 +1402,13 @@ export class BrowserSupervisor {
           ? `initialUrl did not load (${loadError}); the tab shows the browser's error page.`
           : null,
         runtime.driver.networkNotice,
+        runtime.driver.display === "offscreen" ? offscreenBrowserNotice(process.platform) : null,
       ]
         .filter((line): line is string => Boolean(line))
         .join(" ");
       return {
         ...binding(runtime),
+        ...displayOf(runtime),
         observation,
         ...(notice ? { notice } : {}),
       };
@@ -4055,6 +4064,24 @@ function binding(runtime: Runtime): BrowserSessionReference {
     browserSessionId: runtime.options.browserSessionId,
     controllerGeneration: runtime.options.controllerGeneration,
   };
+}
+
+/** The display the running browser was launched with, for the caller to
+ * report instead of inferring it from the requested mode. */
+function displayOf(runtime: Runtime): { display?: "window" | "offscreen" } {
+  const display = runtime.driver.display;
+  return display ? { display } : {};
+}
+
+/** One short line for the agent when a headed browser was launched offscreen
+ * (the session line already says it has no window): what a person at the
+ * machine can see, and what to use for a step only they can do. On macOS a
+ * managed browser is offscreen so it never takes over the person's screen; on
+ * Linux only when there is no display. */
+export function offscreenBrowserNotice(platform: NodeJS.Platform): string {
+  return platform === "darwin"
+    ? "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId."
+    : "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.";
 }
 
 /** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target

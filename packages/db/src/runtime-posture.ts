@@ -52,7 +52,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
  * control worker's content-free queued-turn hold summary (0988) and the API's
- * inventory of browsers an agent session holds (0999). Each is
+ * inventory of browsers an agent session holds (1002). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -82,7 +82,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
- * 0999 withholds the held-browser inventory; until it is granted, the API
+ * 1002 withholds the held-browser inventory; until it is granted, the API
  * renews no browser holds.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [

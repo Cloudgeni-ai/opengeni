@@ -285,7 +285,7 @@ export function useIntegrationCapabilityConnect({
     try {
       reserved = windowHost.current.reserve();
     } catch {
-      setError(t("sessionIntegrationCapabilityCard.couldNotStart"));
+      setError(t("connectWindowHost.allowPopups"));
       return;
     }
     setBusy(true);
@@ -300,6 +300,9 @@ export function useIntegrationCapabilityConnect({
         providerId: definitionId,
         ownership: "personal",
         returnUrl,
+        // A browser popup ends on a page that closes itself instead of
+        // loading this page a second time; a phone returns to the app.
+        ...(windowHost.current.finishInPopup ? { finishInPopup: true as const } : {}),
         idempotencyKey: crypto.randomUUID(),
         ...(existing?.connectionId ? { reconnectAccountId: existing.connectionId } : {}),
         // A new account gets a fresh instance the server names after the
