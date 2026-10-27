@@ -162,10 +162,13 @@ async function kept(f: Fixture) {
     FROM knowledge_collection_activity WHERE account_id=${f.accountId} ORDER BY entry_id`;
   return rows.map((row) => `${row.id}=${row.at}`);
 }
+async function states(f: Fixture) {
+  const rows =
+    await shared.admin`SELECT state FROM knowledge_collection_activity_accounts WHERE account_id=${f.accountId} ORDER BY state`;
+  return rows.map((row) => String(row.state));
+}
 async function expectKeptMatchesRebuild(f: Fixture) {
-  const [built] =
-    await shared.admin`SELECT count(*)::int AS n FROM knowledge_collection_activity_accounts WHERE account_id=${f.accountId}`;
-  expect(built!.n).toBe(1);
+  expect(await states(f)).toEqual(["built"]);
   const actual = await kept(f);
   const rebuilt = await shared.admin
     .begin(async (tx) => {
@@ -182,7 +185,12 @@ async function expectKeptMatchesRebuild(f: Fixture) {
   expect(actual).toEqual(rebuilt);
 }
 
-type Row = { id: string; score: number; orderedAt?: string; revision: { title: string } };
+type Row = {
+  id: string;
+  score: number;
+  orderedAt?: string;
+  revision: { title: string; number: number };
+};
 
 /** Every page of a list as the restricted application role would read it. */
 async function readAll(
@@ -206,7 +214,11 @@ async function readAll(
     found.push(...page.slice(0, limit));
     if (page.length <= limit) break;
     const last = page[limit - 1]!;
-    after = { afterId: last.id, afterScore: last.score, afterOrderedAt: last.orderedAt ?? null };
+    // History pages by revision number, lists by keyset.
+    after =
+      request.operation === "history"
+        ? { beforeRevision: last.revision.number }
+        : { afterId: last.id, afterScore: last.score, afterOrderedAt: last.orderedAt ?? null };
   }
   await tx`RESET ROLE`;
   return found;
@@ -249,10 +261,13 @@ async function expectAllReadsMatch(f: Fixture, groups: string[]) {
     await expectParity(f, reader, { view: "archived" });
   }
   for (const group of groups.slice(0, 3)) await expectParity(f, readers[0]!, { groupId: group });
+  // History has one row per revision; an order key must not change it.
+  for (const group of groups.slice(0, 2))
+    await expectParity(f, readers[0]!, { operation: "history", entryId: group }, 3);
 }
 
 test("random changes keep activity equal to a rebuild and reads equal to the walk", async () => {
-  for (const seed of [6217, 80_458, 1008]) {
+  for (const seed of [6217, 80_458, 1008, 6412, 4_242, 77, 31_337, 2026]) {
     const next = random(seed);
     const pick = <T>(items: T[]) => items[Math.floor(next() * items.length)]!;
     const at = clock();
@@ -456,13 +471,83 @@ test("unbuilt organizations walk, and their next write builds them", async () =>
     await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
     await revise(f, root, { kind: "group", groupIds: [], at: at(), outcome: "published" }, tx);
   });
-  const [built] =
-    await shared.admin`SELECT count(*)::int AS n FROM knowledge_collection_activity_accounts WHERE account_id=${f.accountId}`;
-  expect(built!.n).toBe(0);
+  expect(await states(f)).toEqual(["built", "stale"]);
   await expectParity(f, reader, { rootOnly: true });
   await create(f, { kind: "note", title: "Rebuilt", groupIds: [root], at: at() });
   await expectKeptMatchesRebuild(f);
   await expectAllReadsMatch(f, [root]);
+}, 180_000);
+
+test("a write under a snapshot older than the build leaves the organization stale", async () => {
+  const at = clock();
+  const f = await fixture();
+  const root = await create(f, { kind: "group", title: "Root", at: at() });
+  const other = await create(f, { kind: "group", title: "Other", at: at() });
+  const member = await create(f, { kind: "note", title: "Member", groupIds: [root], at: at() });
+  await shared.admin`DELETE FROM knowledge_collection_activity_accounts WHERE account_id=${f.accountId}`;
+  await shared.admin`DELETE FROM knowledge_collection_activity WHERE account_id=${f.accountId}`;
+  const older = await shared.admin.reserve();
+  try {
+    // The repeatable-read writer takes its snapshot while the organization is unbuilt.
+    await older.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    await older`SELECT count(*) FROM knowledge_entries WHERE account_id=${f.accountId}`;
+    // An ordinary write builds the organization and commits.
+    await create(f, { kind: "note", title: "In Other", groupIds: [other], at: at() });
+    expect(await states(f)).toEqual(["built"]);
+    // The older snapshot cannot see that build; its newer change into Root
+    // must still stop reads from trusting the kept times.
+    await revise(
+      f,
+      member,
+      { kind: "note", groupIds: [root], at: at(), outcome: "published" },
+      older,
+    );
+    await older.unsafe("COMMIT");
+  } finally {
+    older.release();
+  }
+  expect(await states(f)).toEqual(["built", "stale"]);
+  const reader = actor(f.subjectId, true);
+  const titles = (await expectParity(f, reader, { rootOnly: true })).map(
+    (row) => row.revision.title,
+  );
+  expect(titles).toEqual(["Root", "Other"]);
+  // The next ordinary write rebuilds it.
+  await create(f, { kind: "note", title: "Later", groupIds: [other], at: at() });
+  await expectKeptMatchesRebuild(f);
+  await expectAllReadsMatch(f, [root, other]);
+}, 180_000);
+
+test("a membership cycle forgets a change that left it", async () => {
+  const at = clock();
+  const f = await fixture();
+  const a = await create(f, { kind: "group", title: "A", at: at() });
+  const b = await create(f, { kind: "group", title: "B", groupIds: [a], at: at() });
+  await shared.admin.begin((tx) =>
+    revise(f, a, { kind: "group", groupIds: [b], at: at(), outcome: "published" }, tx),
+  );
+  const x = await create(f, { kind: "note", title: "X", groupIds: [a], at: at() });
+  await expectKeptMatchesRebuild(f);
+  // X was the newest change in both A and B; once archived, neither keeps it.
+  await shared.admin`UPDATE knowledge_entries SET archived=true WHERE id=${x}`;
+  await expectKeptMatchesRebuild(f);
+  const [stuck] =
+    await shared.admin`SELECT count(*)::int AS n FROM knowledge_collection_activity WHERE account_id=${f.accountId}
+      AND changed_at>=(SELECT created_at FROM knowledge_entry_revisions WHERE entry_id=${x})`;
+  expect(stuck!.n).toBe(0);
+  await expectAllReadsMatch(f, [a, b]);
+  // A deeper cycle losing its newest member through a membership change.
+  const c = await create(f, { kind: "group", title: "C", groupIds: [b], at: at() });
+  const y = await create(f, { kind: "note", title: "Y", groupIds: [c], at: at() });
+  await shared.admin.begin((tx) =>
+    revise(f, a, { kind: "group", groupIds: [c], at: at(true), outcome: "published" }, tx),
+  );
+  await expectKeptMatchesRebuild(f);
+  await shared.admin.begin((tx) =>
+    revise(f, y, { kind: "note", groupIds: [], at: at(), outcome: "published" }, tx),
+  );
+  await expectKeptMatchesRebuild(f);
+  await expectAllReadsMatch(f, [a, b, c]);
 }, 180_000);
 
 test("concurrent writes through the real writer keep activity exact", async () => {

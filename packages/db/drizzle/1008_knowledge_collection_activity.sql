@@ -29,10 +29,16 @@ CREATE TABLE knowledge_collection_activity (
   FOREIGN KEY (account_id, entry_id) REFERENCES knowledge_entries(account_id, id) ON DELETE CASCADE
 );
 CREATE INDEX knowledge_collection_activity_via_idx ON knowledge_collection_activity (account_id, via_entry_id);
--- Organizations whose activity is complete. Reads walk for any other.
+-- Organizations whose activity is complete ('built'), and those a write under
+-- an older snapshot may have left behind ('stale'). A marker is inserted, never
+-- updated or deleted, by such a write, so it holds whatever that snapshot saw.
+-- Reads walk unless an organization is built and not stale; the next ordinary
+-- write rebuilds it.
 CREATE TABLE knowledge_collection_activity_accounts (
-  account_id uuid PRIMARY KEY REFERENCES managed_accounts(id) ON DELETE CASCADE,
-  built_at timestamptz NOT NULL DEFAULT clock_timestamp()
+  account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
+  state text NOT NULL CHECK (state IN ('built','stale')),
+  marked_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (account_id, state)
 );
 
 DO $tables$
@@ -58,6 +64,7 @@ CREATE FUNCTION knowledge_collection_activity_rebuild(p_account uuid) RETURNS vo
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE raised integer; rounds integer:=0;
 BEGIN
+  DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account;
   DELETE FROM knowledge_collection_activity WHERE account_id=p_account;
   INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
   SELECT DISTINCT ON (l.target_entry_id) p_account,l.target_entry_id,coalesce(d.created_at,r.created_at),e.id
@@ -89,17 +96,21 @@ BEGIN
     GET DIAGNOSTICS raised=ROW_COUNT;
     EXIT WHEN raised=0;
   END LOOP;
-  INSERT INTO knowledge_collection_activity_accounts(account_id) VALUES(p_account) ON CONFLICT DO NOTHING;
+  INSERT INTO knowledge_collection_activity_accounts(account_id,state) VALUES(p_account,'built') ON CONFLICT DO NOTHING;
 END $$;
 
 -- Bring the kept activity up to date after p_changed entries changed (their
 -- publication, archive state, decisions or membership), and fully recompute
 -- p_recompute collections. A collection takes a changed member's new offer when
--- it is newer; it is recomputed from all its direct members when the member it
--- recorded changed and now offers less. Changes then move to parent collections.
+-- it is newer. When the member it recorded changed and now offers less, that
+-- collection and every collection whose kept time came through it are forgotten
+-- and recomputed from their direct members, raising within that set until it
+-- is stable, so a membership cycle cannot keep a time that no longer exists.
+-- Changes then move to parent collections.
 CREATE FUNCTION knowledge_collection_activity_refresh(p_account uuid, p_changed uuid[], p_recompute uuid[], p_build boolean)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE changed_ids uuid[]:=p_changed; recompute_ids uuid[]:=coalesce(p_recompute,'{}'); steps integer:=0;
+  reset_ids uuid[]; reset_previous timestamptz[]; raised integer;
   tenant text:=current_setting('opengeni.account_id',true);
 BEGIN
   IF p_account IS NULL OR coalesce(cardinality(changed_ids),0)+cardinality(recompute_ids)=0 THEN RETURN; END IF;
@@ -110,17 +121,19 @@ BEGIN
   PERFORM set_config('opengeni.account_id',p_account::text,true);
   IF current_setting('transaction_isolation')<>'read committed' THEN
     -- An older snapshot can miss a concurrent change: walk until a rebuild.
-    DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account;
-  ELSIF NOT EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts WHERE account_id=p_account) THEN
+    INSERT INTO knowledge_collection_activity_accounts(account_id,state) VALUES(p_account,'stale')
+      ON CONFLICT DO NOTHING;
+  ELSIF NOT EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='built')
+    OR EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='stale') THEN
     IF p_build AND EXISTS(SELECT 1 FROM managed_accounts WHERE id=p_account) THEN
       PERFORM knowledge_collection_activity_rebuild(p_account);
     END IF;
   ELSE
     changed_ids:=coalesce(changed_ids,'{}');
-    WHILE cardinality(changed_ids)+cardinality(recompute_ids)>0 LOOP
+    <<maintain>> WHILE cardinality(changed_ids)+cardinality(recompute_ids)>0 LOOP
       steps:=steps+cardinality(changed_ids)+cardinality(recompute_ids);
       IF steps>100000 THEN
-        DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account;
+        DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='built';
         EXIT;
       END IF;
       -- Sets are joined, never scanned per row, so a bulk change stays linear.
@@ -142,11 +155,11 @@ BEGIN
         LEFT JOIN knowledge_collection_activity s ON s.account_id=e.account_id AND s.entry_id=e.id
       ), affected AS MATERIALIZED (
         -- Collections a change can move, with their kept time. Keep it when its
-        -- member did not change; rescan all members when it was recomputed, or
-        -- when its member changed and no longer offers as much.
+        -- member did not change; reset it when it was recomputed, or when its
+        -- member changed and no longer offers as much.
         SELECT a.group_id,s.changed_at,s.via_entry_id,
           rc.id IS NULL AND vc.id IS NULL AS keep,
-          rc.id IS NOT NULL OR (vc.id IS NOT NULL AND coalesce(ov.changed_at<s.changed_at,true)) AS rescan
+          rc.id IS NOT NULL OR (vc.id IS NOT NULL AND coalesce(ov.changed_at<s.changed_at,true)) AS reset
         FROM (
           SELECT o.group_id FROM offered o
           UNION SELECT s.entry_id FROM changed c
@@ -159,39 +172,81 @@ BEGIN
         LEFT JOIN (SELECT o.group_id,o.member_id,max(o.changed_at) AS changed_at FROM offered o GROUP BY 1,2) ov
           ON ov.group_id=a.group_id AND ov.member_id=s.via_entry_id
       ), candidates AS (
+        -- The others only gain: their kept time, or a changed member's offer.
         SELECT a.group_id,a.changed_at,a.via_entry_id AS via,0 AS preference FROM affected a
         WHERE a.keep AND a.changed_at IS NOT NULL
         UNION ALL SELECT o.group_id,o.changed_at,o.member_id,CASE WHEN o.member_id=a.via_entry_id THEN 0 ELSE 1 END
-        FROM affected a JOIN offered o ON o.group_id=a.group_id
-        UNION ALL SELECT a.group_id,
-          greatest(coalesce(d.created_at,r.created_at),CASE WHEN r.body->>'kind'='group' THEN s.changed_at END),
-          e.id,CASE WHEN e.id=a.via_entry_id THEN 0 ELSE 1 END
-        FROM affected a
-        JOIN knowledge_entry_links l ON l.account_id=p_account AND l.target_entry_id=a.group_id AND l.relation='group'
+        FROM affected a JOIN offered o ON o.group_id=a.group_id WHERE NOT a.reset
+      ), computed AS MATERIALIZED (
+        -- The newest offer wins; on a tie the recorded member stays.
+        SELECT a.group_id,a.changed_at AS previous,best.changed_at,best.via FROM affected a
+        JOIN (SELECT DISTINCT ON (c.group_id) c.group_id,c.changed_at,c.via FROM candidates c
+          ORDER BY c.group_id,c.changed_at DESC,c.preference,c.via) best ON best.group_id=a.group_id
+        WHERE NOT a.reset
+      ), written AS (
+        INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
+        SELECT p_account,c.group_id,c.changed_at,c.via FROM computed c
+        ON CONFLICT (account_id,entry_id) DO UPDATE SET changed_at=excluded.changed_at,via_entry_id=excluded.via_entry_id
+        WHERE (knowledge_collection_activity.changed_at,knowledge_collection_activity.via_entry_id)
+          IS DISTINCT FROM (excluded.changed_at,excluded.via_entry_id)
+      ) SELECT coalesce((SELECT array_agg(c.group_id) FROM computed c WHERE c.changed_at IS DISTINCT FROM c.previous),'{}'),
+          coalesce((SELECT array_agg(a.group_id) FROM affected a WHERE a.reset),'{}')
+        INTO changed_ids,reset_ids;
+      recompute_ids:='{}';
+      CONTINUE WHEN cardinality(reset_ids)=0;
+      -- Forget each reset collection and every collection whose kept time came
+      -- through it, then recompute them from their direct members.
+      WITH RECURSIVE dependent(id) AS (
+        SELECT c.id FROM unnest(reset_ids) AS c(id)
+        UNION SELECT s.entry_id FROM dependent d
+          JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.via_entry_id=d.id
+      ) SELECT array_agg(d.id),array_agg(s.changed_at) INTO reset_ids,reset_previous
+      FROM dependent d LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=d.id;
+      steps:=steps+cardinality(reset_ids);
+      DELETE FROM knowledge_collection_activity t USING unnest(reset_ids) AS c(id)
+      WHERE t.account_id=p_account AND t.entry_id=c.id;
+      INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
+      SELECT DISTINCT ON (m.group_id) p_account,m.group_id,m.changed_at,m.via FROM (
+        SELECT c.id AS group_id,e.id AS via,
+          greatest(coalesce(d.created_at,r.created_at),CASE WHEN r.body->>'kind'='group' THEN s.changed_at END) AS changed_at
+        FROM unnest(reset_ids) AS c(id)
+        JOIN knowledge_entries g ON g.account_id=p_account AND g.id=c.id
+        JOIN knowledge_entry_links l ON l.account_id=p_account AND l.target_entry_id=c.id AND l.relation='group'
         JOIN knowledge_entries e ON e.account_id=l.account_id AND e.id=l.entry_id
           AND e.published_revision_id=l.revision_id AND NOT e.archived
         JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id AND r.id=l.revision_id
         LEFT JOIN LATERAL (SELECT v.created_at FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
           AND v.entry_id=e.id AND v.revision_id=r.id ORDER BY v.version DESC LIMIT 1) d ON true
         LEFT JOIN knowledge_collection_activity s ON s.account_id=e.account_id AND s.entry_id=e.id
-        WHERE a.rescan
-      ), computed AS MATERIALIZED (
-        -- The newest offer wins; on a tie the recorded member stays.
-        SELECT a.group_id,a.changed_at AS previous,best.changed_at,best.via FROM affected a
-        LEFT JOIN (SELECT DISTINCT ON (c.group_id) c.group_id,c.changed_at,c.via FROM candidates c
-          ORDER BY c.group_id,c.changed_at DESC,c.preference,c.via) best ON best.group_id=a.group_id
-      ), removed AS (
-        DELETE FROM knowledge_collection_activity t USING computed c
-        WHERE t.account_id=p_account AND t.entry_id=c.group_id AND c.changed_at IS NULL
-      ), written AS (
-        INSERT INTO knowledge_collection_activity(account_id,entry_id,changed_at,via_entry_id)
-        SELECT p_account,c.group_id,c.changed_at,c.via FROM computed c WHERE c.changed_at IS NOT NULL
-        ON CONFLICT (account_id,entry_id) DO UPDATE SET changed_at=excluded.changed_at,via_entry_id=excluded.via_entry_id
-        WHERE (knowledge_collection_activity.changed_at,knowledge_collection_activity.via_entry_id)
-          IS DISTINCT FROM (excluded.changed_at,excluded.via_entry_id)
-      ) SELECT coalesce(array_agg(c.group_id),'{}') INTO changed_ids FROM computed c
-        WHERE c.changed_at IS DISTINCT FROM c.previous;
-      recompute_ids:='{}';
+      ) m ORDER BY m.group_id,m.changed_at DESC,m.via;
+      -- Raise within the set until stable; cycles converge.
+      LOOP
+        WITH offered AS (
+          SELECT DISTINCT ON (l.target_entry_id) l.target_entry_id AS group_id,s.changed_at,e.id AS via
+          FROM unnest(reset_ids) AS m(id)
+          JOIN knowledge_entries e ON e.account_id=p_account AND e.id=m.id AND NOT e.archived
+          JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id
+            AND r.id=e.published_revision_id AND r.body->>'kind'='group'
+          JOIN knowledge_entry_links l ON l.revision_id=e.published_revision_id AND l.account_id=e.account_id
+            AND l.entry_id=e.id AND l.relation='group'
+          JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=e.id
+          ORDER BY l.target_entry_id,s.changed_at DESC,e.id
+        ) UPDATE knowledge_collection_activity t SET changed_at=o.changed_at,via_entry_id=o.via
+          FROM offered o JOIN unnest(reset_ids) AS c(id) ON c.id=o.group_id
+          WHERE t.account_id=p_account AND t.entry_id=o.group_id AND o.changed_at>t.changed_at;
+        GET DIAGNOSTICS raised=ROW_COUNT;
+        EXIT WHEN raised=0;
+        steps:=steps+raised;
+        IF steps>100000 THEN
+          DELETE FROM knowledge_collection_activity_accounts WHERE account_id=p_account AND state='built';
+          EXIT maintain;
+        END IF;
+      END LOOP;
+      -- Reset collections whose time moved change their parents in turn.
+      SELECT changed_ids||coalesce(array_agg(c.id),'{}') INTO changed_ids
+      FROM unnest(reset_ids,reset_previous) AS c(id,previous)
+      LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=c.id
+      WHERE s.changed_at IS DISTINCT FROM c.previous;
     END LOOP;
   END IF;
   PERFORM set_config('opengeni.account_id',coalesce(tenant,''),true);
@@ -291,9 +346,11 @@ BEGIN
     SELECT g.id AS group_id,s.changed_at,s.changed_at>coalesce(g.decided_at,g.revision_created_at) AS newer
     FROM candidates g
     LEFT JOIN knowledge_collection_activity s ON s.account_id=p_account AND s.entry_id=g.id
+    -- Lists only: they have one row per entry (history has one per revision).
     WHERE p_request->>'order'='updated' AND coalesce(p_request->>'query','')='' AND NOT pending
-      AND g.body->>'kind'='group'
-      AND EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts b WHERE b.account_id=p_account)
+      AND operation='list' AND g.body->>'kind'='group'
+      AND EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts b WHERE b.account_id=p_account AND b.state='built')
+      AND NOT EXISTS(SELECT 1 FROM knowledge_collection_activity_accounts b WHERE b.account_id=p_account AND b.state='stale')
   ), activity_chain AS MATERIALIZED (
     WITH RECURSIVE chain(group_id,target,node,depth,witness_id,witness_revision) AS (
       SELECT a.group_id,a.changed_at,a.group_id,0,NULL::uuid,NULL::uuid FROM activity_start a WHERE a.newer
