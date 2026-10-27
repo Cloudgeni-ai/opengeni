@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`8bd11ecda75cd0a4efb749d3b302a93a107187cf`: upstream `cua-driver-rs-v0.37.0`
+`eea36fb5d616492ea68cd574222c7554b58823b9`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -20,6 +20,9 @@ woke a 25 ms poll up to 150 ms late on a busy Mac), and a batch of background
 presses on one window makes that window key once instead of before every press.
 A press that puts the caret in a text field reports a confirmed effect when the
 field then holds the keyboard focus, instead of an unconfirmed click.
+It also carries the macOS follow-ups of `cu-macos-followups` (`03323b47`) and,
+on top, Return pressing the default button of a background window or sheet
+(`cu-sheet-default-button`).
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
@@ -54,6 +57,15 @@ focus instead of being refused as `window_not_key`; an Open or Save panel
 (`open-panel`, `save-panel`) drops keys posted to a background app, so keys
 stay refused there and its controls take accessibility actions. A sheet on
 another window of the app is neither read nor given keys through this window.
+Return (or Enter) without modifiers, addressed to a window of a background
+app, presses the default button of that window or of its sheet through
+accessibility: AppKit looks for the default button's key equivalent through
+the app's key window, which is nil while the app is not active, so a posted
+Return reaches the sheet and does nothing. It is posted as before when the app
+is active, a menu of the app is open, the focus is in a text area, or the
+window has no enabled default button. The press is confirmed when the window
+holding the button leaves the app's focus. Escape needs nothing of the kind:
+it reaches the cancel button through the window's cancel operation.
 Finding the window a sheet belongs to is bounded by the window read's own
 deadline; a lookup cut short adds no sheet.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
@@ -264,7 +276,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8bd11ecda75cd0a4efb749d3b302a93a107187cf/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/eea36fb5d616492ea68cd574222c7554b58823b9/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
