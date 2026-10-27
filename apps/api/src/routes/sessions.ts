@@ -4904,6 +4904,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
+            // terminal:attach (required above) is the interactive grant: the
+            // token may type into the PTY, independent of desktop control.
+            terminalInput: hasPermission(grant.permissions, "terminal:attach"),
             // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
@@ -4957,6 +4960,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
+              terminalInput: hasPermission(grant.permissions, "terminal:attach"),
               lease,
             });
           }
