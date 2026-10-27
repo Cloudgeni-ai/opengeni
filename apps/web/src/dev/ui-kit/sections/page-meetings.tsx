@@ -15,6 +15,7 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 import {
   createMeetingsFixture,
+  ELSEWHERE_RECORDING_ID,
   FAILED_RECORDING_ID,
   LIVE_LINES,
   LIVE_RECORDING_ID,
@@ -244,7 +245,8 @@ export default function PageMeetingsSection() {
   }, [mode, startedAt, store, audio, preview, background]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
   // records, or elsewhere while it is idle. ?open=failed opens the one whose
-  // transcript failed, ?open=transcribing the long one still transcribing.
+  // transcript failed, ?open=transcribing the long one still transcribing,
+  // ?open=elsewhere the viewer's own Only me meeting stored in Sales.
   const [openId, setOpenId] = useState(
     initial.get("open") === "live"
       ? LIVE_RECORDING_ID
@@ -252,7 +254,9 @@ export default function PageMeetingsSection() {
         ? FAILED_RECORDING_ID
         : initial.get("open") === "transcribing"
           ? TRANSCRIBING_RECORDING_ID
-          : fixture.readyId,
+          : initial.get("open") === "elsewhere"
+            ? ELSEWHERE_RECORDING_ID
+            : fixture.readyId,
   );
 
   return (
@@ -341,8 +345,6 @@ export default function PageMeetingsSection() {
                   setOpenId(id);
                   setView("meeting");
                 }}
-                meetingHrefIn={(workspaceId, id) => `#meeting-${workspaceId}-${id}`}
-                onOpenIn={() => {}}
               />
             ) : (
               <MeetingDetailPage

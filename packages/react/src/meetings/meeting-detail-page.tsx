@@ -819,8 +819,11 @@ function MeetingDetailPageForRecording({
     refreshKey: transcriptVersionId ?? null,
     enabled: Boolean(transcriptVersionId),
   });
-  const people = useRecordingPeople(override);
-  const models = useRecordingModels(override);
+  // A person's own Only me meeting from another workspace of the organization
+  // keeps its people and transcribers in the workspace that stores it.
+  const home = { ...override, workspaceId: recording?.workspaceId ?? workspaceId };
+  const people = useRecordingPeople(home);
+  const models = useRecordingModels(home);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
   const online = useOnline();
@@ -1363,11 +1366,16 @@ function MeetingDetailPageForRecording({
           {!owner && recording.visibility === "workspace"
             ? msg("meetings.detailPage.sharedWithTheWorkspace")
             : null}
+          {recording.sourceWorkspace
+            ? msg("meetings.detailPage.onlyMeRecordedIn", {
+                workspace: recording.sourceWorkspace.name,
+              })
+            : null}
         </DetailMeta>
       }
       actions={
         <>
-          {owner ? (
+          {owner && !recording.sourceWorkspace ? (
             <VisibilityMenu
               visibility={recording.visibility}
               onChange={(visibility) =>

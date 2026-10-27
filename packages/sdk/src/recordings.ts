@@ -32,7 +32,6 @@ import type {
   ListRecordingNotesResponse,
   ListRecordingPeopleResponse,
   ListRecordingsResponse,
-  ListOwnRecordingsResponse,
   ListRecordingTranscriptVersionsResponse,
   Recording,
   RecordingLiveSession,
@@ -138,32 +137,6 @@ export class OpenGeniRecordingsClient {
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings`,
       request,
-    );
-  }
-
-  /**
-   * The signed-in person's own Only me meetings in their other workspaces,
-   * newest first, each with the workspace it is in and opens in. Only a
-   * person may ask (not a key, service or agent); nobody else's recordings
-   * and no shared ones are listed.
-   */
-  async listOwnRecordings(
-    options: {
-      /** Leave this workspace out, usually the one the list is shown in. */
-      excludeWorkspaceId?: string;
-      limit?: number;
-      signal?: AbortSignal;
-    } = {},
-  ): Promise<ListOwnRecordingsResponse> {
-    return await this.client.requestJson<ListOwnRecordingsResponse>(
-      "GET",
-      "/v1/recordings/own",
-      undefined,
-      {
-        ...(options.excludeWorkspaceId ? { excludeWorkspaceId: options.excludeWorkspaceId } : {}),
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-      },
-      options.signal ? { signal: options.signal } : {},
     );
   }
 

@@ -621,6 +621,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -633,25 +638,6 @@ export const ListRecordingsResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type ListRecordingsResponse = z.infer<typeof ListRecordingsResponse>;
-
-/**
- * The person's own Only me meetings in their other workspaces, newest first,
- * for the Meetings page of the one they're in (`GET /v1/recordings/own`).
- * Each stays in, and opens in, the workspace it was recorded in; nobody
- * else's recordings and no shared ones are listed.
- */
-export const ListOwnRecordingsResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    recordings: z.array(
-      z.object({
-        workspaceId: z.string(),
-        workspaceName: z.string(),
-        recording: Recording,
-      }),
-    ),
-  }),
-);
-export type ListOwnRecordingsResponse = z.infer<typeof ListOwnRecordingsResponse>;
 
 export const FinalizeRecordingResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ recording: Recording, transcript: RecordingTranscriptVersion }),

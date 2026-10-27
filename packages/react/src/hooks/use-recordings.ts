@@ -1,6 +1,5 @@
 import type {
   CreateRecordingPersonRequest,
-  ListOwnRecordingsResponse,
   ListRecordingModelsResponse,
   Recording,
   RecordingLiveSegment,
@@ -45,7 +44,6 @@ const CAPTURING_POLL_MS = 10_000;
 export type RecordingsClientLike = Pick<
   OpenGeniRecordingsClient,
   | "listRecordings"
-  | "listOwnRecordings"
   | "createRecording"
   | "getRecording"
   | "updateRecording"
@@ -594,50 +592,6 @@ export function useRecordings(options: UseRecordingsOptions = {}): UseRecordings
 export type UseRecordingOptions = RecordingsClientOverride & {
   enabled?: boolean;
 };
-
-export type OwnRecordingElsewhere = ListOwnRecordingsResponse["recordings"][number];
-
-export type UseOwnRecordingsElsewhereResult = {
-  /** Newest first; each opens in the workspace it was recorded in. */
-  recordings: OwnRecordingElsewhere[];
-  loading: boolean;
-  error: Error | null;
-  refresh: () => Promise<void>;
-};
-
-const NO_OWN_RECORDINGS: ListOwnRecordingsResponse = { recordings: [] };
-
-/**
- * The signed-in person's own Only me recordings from their other workspaces.
- * They stay in, and open in, the workspace they were recorded in. Empty when
- * the client cannot list them (an older host proxy or server).
- */
-export function useOwnRecordingsElsewhere(
-  options: RecordingsClientOverride & { limit?: number; enabled?: boolean } = {},
-): UseOwnRecordingsElsewhereResult {
-  const { client, workspaceId } = useEmbeddedRecordings(options, [], "useOwnRecordingsElsewhere");
-  const { limit } = options;
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      if (typeof (client as Partial<RecordingsClientLike>).listOwnRecordings !== "function") {
-        return NO_OWN_RECORDINGS;
-      }
-      return await client.listOwnRecordings({
-        excludeWorkspaceId: workspaceId,
-        ...(limit ? { limit } : {}),
-        ...(signal ? { signal } : {}),
-      });
-    },
-    [client, workspaceId, limit],
-  );
-  const state = usePolledValue(load, { enabled: options.enabled });
-  return {
-    recordings: state.data?.recordings ?? NO_OWN_RECORDINGS.recordings,
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
-  };
-}
 
 export type UseRecordingResult = {
   recording: Recording | null;

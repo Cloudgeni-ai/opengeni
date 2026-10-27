@@ -536,6 +536,152 @@ export async function listRecordings(
   });
 }
 
+/**
+ * A person's other workspaces in this organization, which may hold their own
+ * Only me meetings. Within an organization those meetings are the person's:
+ * every workspace of it they belong to shows them, until they leave the
+ * workspace a meeting is stored in or the organization. Never another
+ * organization's workspaces.
+ */
+export async function ownRecordingWorkspaces(
+  db: Database,
+  input: RecordingActor & { accountId: string },
+): Promise<{ id: string; name: string }[]> {
+  if (!input.subjectId.trim() || !input.accountId) return [];
+  return await db
+    .select({ id: schema.workspaces.id, name: schema.workspaces.name })
+    .from(schema.workspaceMemberships)
+    .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
+    .where(
+      and(
+        eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        eq(schema.workspaceMemberships.accountId, input.accountId),
+        eq(schema.workspaces.accountId, input.accountId),
+        ne(schema.workspaces.id, input.workspaceId),
+      ),
+    )
+    .orderBy(asc(schema.workspaces.createdAt))
+    .limit(100);
+}
+
+/** Whether this workspace has the recording and the person may see it. */
+export async function recordingVisible(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.recordings.id })
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
+/**
+ * The other workspace of this organization that stores the person's own Only
+ * me meeting with this id, so it opens in place here; null when it is not one
+ * (not theirs, shared, a dictation, being deleted, or in another organization).
+ */
+export async function ownRecordingHome(
+  db: Database,
+  input: RecordingActor & { accountId: string; recordingId: string },
+): Promise<{ id: string; name: string } | null> {
+  const workspaces = await ownRecordingWorkspaces(db, input);
+  const found = await Promise.all(
+    workspaces.map(
+      async (workspace) =>
+        await withWorkspaceSubjectRls(db, workspace.id, input.subjectId, async (tx) => {
+          const [row] = await tx
+            .select({ id: schema.recordings.id })
+            .from(schema.recordings)
+            .where(
+              and(
+                eq(schema.recordings.workspaceId, workspace.id),
+                eq(schema.recordings.id, input.recordingId),
+                eq(schema.recordings.ownerSubjectId, input.subjectId),
+                eq(schema.recordings.visibility, "user_private"),
+                eq(schema.recordings.purpose, "meeting"),
+                ne(schema.recordings.state, "deleting"),
+              ),
+            )
+            .limit(1);
+          return row ? workspace : null;
+        }),
+    ),
+  );
+  return found.find((workspace) => workspace !== null) ?? null;
+}
+
+/**
+ * The meetings this workspace lists for the person: its own, plus the
+ * person's own Only me meetings stored in their other workspaces of the same
+ * organization, newest first across them. `sourceWorkspaces` names the other
+ * workspaces the page's meetings come from.
+ */
+export async function listRecordingsWithOwnElsewhere(
+  db: Database,
+  input: ListRecordingsInput & { accountId: string },
+): Promise<{
+  recordings: Recording[];
+  nextBefore: { startedAt: string; id: string } | null;
+  sourceWorkspaces: Map<string, string>;
+}> {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  const meetings = (input.purpose ?? "meeting") === "meeting" && !input.ownPrivateOnly;
+  const [here, elsewhere] = await Promise.all([
+    listRecordings(db, { ...input, limit }),
+    meetings ? ownRecordingWorkspaces(db, input) : Promise.resolve([]),
+  ]);
+  if (elsewhere.length === 0) return { ...here, sourceWorkspaces: new Map() };
+  const pages = await Promise.all(
+    elsewhere.map(
+      async (workspace) =>
+        await listRecordings(db, {
+          ...input,
+          workspaceId: workspace.id,
+          ownPrivateOnly: true,
+          limit,
+        }),
+    ),
+  );
+  const merged = [here, ...pages]
+    .flatMap((page) => page.recordings)
+    .sort((a, b) =>
+      // The database's order: start time, then id, both newest first.
+      a.startedAt === b.startedAt
+        ? a.id < b.id
+          ? 1
+          : a.id > b.id
+            ? -1
+            : 0
+        : Date.parse(b.startedAt) - Date.parse(a.startedAt),
+    );
+  const recordings = merged.slice(0, limit);
+  const more =
+    merged.length > limit ||
+    here.nextBefore !== null ||
+    pages.some((page) => page.nextBefore !== null);
+  const last = recordings.at(-1);
+  const names = new Map(elsewhere.map((workspace) => [workspace.id, workspace.name]));
+  const sourceWorkspaces = new Map<string, string>();
+  for (const recording of recordings) {
+    const name = names.get(recording.workspaceId);
+    if (name !== undefined) sourceWorkspaces.set(recording.workspaceId, name);
+  }
+  return {
+    recordings,
+    nextBefore: more && last ? { startedAt: last.startedAt, id: last.id } : null,
+    sourceWorkspaces,
+  };
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 /** An ILIKE pattern that finds `text` anywhere, with its wildcards taken literally. */

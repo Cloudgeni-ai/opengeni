@@ -31,7 +31,8 @@ const {
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
 } = await import("./recorder-context");
-const { createMeetingsFixture, FAILED_RECORDING_ID } = await import("../testing/meetings-fixture");
+const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
+  await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -146,62 +147,52 @@ describe("Meetings list", () => {
     }
   });
 
-  test("a host that can't open other workspaces lists only this one's meetings", async () => {
+  test("the person's own Only me meetings from other workspaces are listed here and open in place", async () => {
     const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const opened: string[] = [];
     const view = await render(
       <MeetingsListPage
         workspaceId={fixture.workspaceId}
         recordings={fixture.client}
         meetingHref={(id) => `/meetings/${id}`}
-        onOpen={() => undefined}
+        onOpen={(id) => opened.push(id)}
       />,
     );
     try {
-      await settle();
-      // Without a way to open another workspace's meeting, the page lists only its own.
-      expect(view.container.textContent).not.toContain("From other workspaces");
+      await waitForText(view.container, "Pipeline review");
+      const text = view.container.textContent ?? "";
+      // In the normal list, not a separate section, labelled with where they are stored.
+      expect(text).not.toContain("From other workspaces");
+      expect(text).toContain("Only me, recorded in Sales");
+      const row = [...view.container.querySelectorAll<HTMLAnchorElement>("a[href]")].find(
+        (element) => element.textContent?.includes("Pipeline review"),
+      )!;
+      expect(row.getAttribute("href")).toBe(`/meetings/${ELSEWHERE_RECORDING_ID}`);
+      await act(async () => {
+        row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      expect(opened).toEqual([ELSEWHERE_RECORDING_ID]);
     } finally {
       await view.unmount();
     }
   });
 
-  test("the person's own Only me meetings from other workspaces open in their workspace", async () => {
+  test("an Only me meeting from another workspace opens here, says where it lives and can't be shared here", async () => {
     const fixture = createMeetingsFixture({ otherWorkspaces: true });
-    const opened: [string, string][] = [];
     const view = await render(
-      <MeetingsListPage
+      <MeetingDetailPage
         workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
         recordings={fixture.client}
-        meetingHref={(id) => `/meetings/${id}`}
-        onOpen={() => undefined}
-        meetingHrefIn={(workspaceId, id) => `/workspaces/${workspaceId}/meetings/${id}`}
-        onOpenIn={(workspaceId, id) => opened.push([workspaceId, id])}
+        onBack={() => {}}
       />,
     );
     try {
-      await waitForText(view.container, "From other workspaces");
-      const text = view.container.textContent ?? "";
-      expect(text).toContain("Only you see these. Each opens in the workspace it was recorded in.");
-      expect(text).toContain("Pipeline review");
-      expect(text).toContain("Sales");
-      const section = [...view.container.querySelectorAll("section")].find((element) =>
-        element.textContent?.includes("From other workspaces"),
-      )!;
-      const rows = [...section.querySelectorAll<HTMLAnchorElement>("a[href]")];
-      expect(rows.map((row) => row.getAttribute("href"))).toEqual([
-        "/workspaces/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e/meetings/3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b",
-        "/workspaces/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e/meetings/4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
-      ]);
-      // They are managed where they were recorded: no delete here.
-      expect(section.querySelector('[aria-label^="More actions"]')).toBeNull();
-      await act(async () => {
-        rows[0]!.dispatchEvent(
-          new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
-        );
-      });
-      expect(opened).toEqual([
-        ["b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b"],
-      ]);
+      await waitForText(view.container, "recorded in Sales");
+      expect(view.container.textContent).toContain("Only me · recorded in Sales");
+      // Sharing it with a workspace happens where it is stored.
+      expect(view.container.querySelector('[aria-label^="Who can see this"]')).toBeNull();
     } finally {
       await view.unmount();
     }

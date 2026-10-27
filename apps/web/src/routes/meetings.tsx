@@ -38,15 +38,6 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
             params: { workspaceId, recordingId },
           })
         }
-        // The person's own Only me meetings from their other workspaces open
-        // in the workspace they were recorded in.
-        meetingHrefIn={meetingPath}
-        onOpenIn={(homeWorkspaceId, recordingId) =>
-          void navigate({
-            to: "/workspaces/$workspaceId/meetings/$recordingId",
-            params: { workspaceId: homeWorkspaceId, recordingId },
-          })
-        }
       />
     </ContentPage>
   );

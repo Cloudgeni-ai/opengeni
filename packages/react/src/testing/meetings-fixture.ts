@@ -19,6 +19,8 @@ import type { RecordingsClientLike } from "../recordings";
 const WORKSPACE = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 const ME = "user:ingrid";
 const SALES_WORKSPACE = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+/** The viewer's own Only me meeting stored in the Sales workspace. */
+export const ELSEWHERE_RECORDING_ID = "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b";
 const NOW = Date.now();
 const minutes = (count: number) => count * 60_000;
 const iso = (offset: number) => new Date(NOW - offset).toISOString();
@@ -569,33 +571,29 @@ export function createMeetingsFixture(
       ],
     ],
   ]);
-  const elsewhere = options.otherWorkspaces
-    ? [
-        recording(
-          "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b",
-          "Pipeline review",
-          minutes(60 * 3),
-          1_864_000,
-          {
-            workspaceId: SALES_WORKSPACE,
-          },
-        ),
-        recording(
-          "4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
-          "Forecast with Lea",
-          minutes(60 * 26),
-          3_104_000,
-          {
-            workspaceId: SALES_WORKSPACE,
-          },
-        ),
-      ].map((entry) => ({ workspaceId: SALES_WORKSPACE, workspaceName: "Sales", recording: entry }))
-    : [];
-  const client = {
-    listOwnRecordings: async (request: { excludeWorkspaceId?: string } = {}) =>
-      await delay({
-        recordings: elsewhere.filter((entry) => entry.workspaceId !== request.excludeWorkspaceId),
+  // The viewer's own Only me meetings stored in another workspace of the
+  // organization appear in this workspace's list, labelled with where they live.
+  if (options.otherWorkspaces && options.state !== "empty") {
+    const sales = { id: SALES_WORKSPACE, name: "Sales" };
+    recordings = [
+      ...recordings,
+      recording(ELSEWHERE_RECORDING_ID, "Pipeline review", minutes(60 * 3), 1_864_000, {
+        workspaceId: SALES_WORKSPACE,
+        sourceWorkspace: sales,
       }),
+      recording(
+        "4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
+        "Forecast with Lea",
+        minutes(60 * 26),
+        3_104_000,
+        {
+          workspaceId: SALES_WORKSPACE,
+          sourceWorkspace: sales,
+        },
+      ),
+    ].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
+  const client = {
     listRecordings: async (
       _workspaceId: string,
       request: { query?: string; externalRef?: string } = {},

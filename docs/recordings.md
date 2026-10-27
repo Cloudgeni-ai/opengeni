@@ -18,16 +18,20 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
-A recording stays in, and belongs to, the workspace it was recorded in: its
-agents, data residency and access rules are that workspace's. So a person
-can still find their meetings from anywhere, `GET /v1/recordings/own`
-lists the signed-in person's own Only me meetings across the workspaces they
-can still read sessions in, newest first, each with its `workspaceId` and
-`workspaceName` (`excludeWorkspaceId` leaves out the one you are in;
-`limit` is at most 50). Only a person may ask, never a key, a service or an
-agent, and nobody else's recordings and no shared ones are listed. The
-Meetings page shows them under **From other workspaces** when the host
-passes `meetingHrefIn` and `onOpenIn`; each opens in its own workspace.
+A recording is stored in the workspace it was recorded in, and a shared one
+stays there. A person's own Only me meetings are theirs across their
+organization: every workspace of the same organization they belong to lists
+them in `GET …/recordings` (and agents acting for them find them with
+`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). They open in place: every
+`…/recordings/:recordingId` route reads and changes them in the storing
+workspace, as the person, so transcript, notes, speakers and re-runs work from
+any of those workspaces, and the React Meetings pages label them with where
+they were recorded. Sharing one (`visibility: "workspace"`) is done in the
+storing workspace and returns 409 elsewhere. Nobody else's Only me meetings
+and no shared ones cross workspaces, nothing crosses organizations, and a
+person who leaves the storing workspace or the organization no longer sees
+them elsewhere.
 
 ## Language
 

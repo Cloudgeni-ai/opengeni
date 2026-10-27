@@ -8,7 +8,6 @@ import {
   CreateRecordingUploadsRequest,
   RecordingCapturePurpose,
   FinalizeRecordingRequest,
-  ListOwnRecordingsResponse,
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceVoiceInputEnabled,
@@ -30,9 +29,7 @@ import {
 import {
   estimateRecordingTranscriptionCostMicros,
   findRecordingTranscriptionModel,
-  inboxSubjectForContext,
   RecordingTranscriptionError,
-  requireAccessContext,
   requireAccessGrant,
   TranscriptionBillingRefusedError,
   type ApiRouteDeps,
@@ -54,9 +51,10 @@ import {
   listRecordingLiveSegments,
   listRecordingNotes,
   listRecordingPeople,
-  listRecordings,
+  listRecordingsWithOwnElsewhere,
+  ownRecordingHome,
+  recordingVisible,
   listRecordingTranscriptVersions,
-  listWorkspacesForSubject,
   markRecordingChunksUploaded,
   markRecordingDeleting,
   recordAuditEvent,
@@ -152,16 +150,44 @@ export function registerRecordingRoutes(
   const registry = deployment.registry;
   const base = "/v1/workspaces/:workspaceId/recordings";
 
+  /**
+   * Who is asking, in which workspace. On a meeting's own routes that is the
+   * workspace storing it: the person's own Only me meeting from another
+   * workspace of the same organization opens in place in every workspace of it
+   * they belong to, so it is read and changed where it is stored, as them.
+   */
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
-    return {
+    const actor = {
       workspaceId,
       subjectId: grant.subjectId,
       accountId: grant.accountId,
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
+      /** The workspace the request came through, when the meeting is stored in another. */
+      sourceWorkspace: null as { id: string; name: string } | null,
     };
+    const recordingId = c.req.param("recordingId");
+    if (
+      recordingId &&
+      z.string().uuid().safeParse(recordingId).success &&
+      !(await recordingVisible(db, { ...actor, recordingId }))
+    ) {
+      const home = await ownRecordingHome(db, { ...actor, recordingId });
+      if (home) return { ...actor, workspaceId: home.id, sourceWorkspace: home };
+    }
+    return actor;
+  }
+
+  /** A meeting as the workspace the request came through shows it. */
+  function shownHere<T extends Recording>(
+    recording: T,
+    actor: { sourceWorkspace: { id: string; name: string } | null },
+  ): T {
+    return actor.sourceWorkspace
+      ? { ...recording, sourceWorkspace: actor.sourceWorkspace }
+      : recording;
   }
 
   /**
@@ -500,79 +526,30 @@ export function registerRecordingRoutes(
       if (Number.isNaN(parsed.getTime())) throw invalid(`${name} must be a date and time`);
       return parsed;
     };
-    return c.json(
-      await listRecordings(db, {
-        workspaceId: actor.workspaceId,
-        subjectId: actor.subjectId,
-        query: query || undefined,
-        person: person || undefined,
-        startedFrom: instant("startedFrom"),
-        startedTo: instant("startedTo"),
-        externalRef: externalRef || undefined,
-        purpose: purpose.data,
-        before,
-        limit: Number.isFinite(limit) ? limit : 50,
+    // With the person's own Only me meetings from their other workspaces of
+    // this organization, each saying where it is stored.
+    const page = await listRecordingsWithOwnElsewhere(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      query: query || undefined,
+      person: person || undefined,
+      startedFrom: instant("startedFrom"),
+      startedTo: instant("startedTo"),
+      externalRef: externalRef || undefined,
+      purpose: purpose.data,
+      before,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    return c.json({
+      recordings: page.recordings.map((recording) => {
+        const name = page.sourceWorkspaces.get(recording.workspaceId);
+        return name === undefined
+          ? recording
+          : { ...recording, sourceWorkspace: { id: recording.workspaceId, name } };
       }),
-    );
-  });
-
-  /**
-   * The person's own Only me meetings in their other workspaces, so the
-   * Meetings page of any workspace can list them under "From other
-   * workspaces". Each is read in its own workspace, under the person's grant
-   * there, and stays there: only a signed-in person asks this (not a key,
-   * service or agent), and nobody else's or shared recordings are listed.
-   */
-  app.get("/v1/recordings/own", async (c) => {
-    const context = await requireAccessContext(c, deps);
-    const subjectId = inboxSubjectForContext(context);
-    if (!subjectId) {
-      throw new ApiHttpError(403, {
-        code: "forbidden",
-        message: "Only a signed-in person can list their own recordings across workspaces.",
-        retryable: false,
-      });
-    }
-    const excluded = c.req.query("excludeWorkspaceId") ?? null;
-    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 20) || 20, 1), 50);
-    const workspaces = new Map<string, string>();
-    for (const workspace of await listWorkspacesForSubject(db, subjectId)) {
-      workspaces.set(workspace.id, workspace.name);
-    }
-    for (const grant of context.workspaceGrants) {
-      if (grant.workspaceId && !workspaces.has(grant.workspaceId)) {
-        const workspace = await getWorkspace(db, grant.workspaceId);
-        if (workspace) workspaces.set(workspace.id, workspace.name);
-      }
-    }
-    const found = await Promise.all(
-      [...workspaces].map(async ([workspaceId, workspaceName]) => {
-        if (workspaceId === excluded) return [];
-        // Access can change after a recording was made: read only where the
-        // person still reads sessions, as themselves.
-        const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read").catch(
-          () => null,
-        );
-        if (!grant || grant.subjectId !== subjectId) return [];
-        const { recordings } = await listRecordings(db, {
-          workspaceId,
-          subjectId,
-          ownPrivateOnly: true,
-          limit,
-        });
-        return recordings.map((recording) => ({ workspaceId, workspaceName, recording }));
-      }),
-    );
-    const recordings = found
-      .flat()
-      .sort(
-        (a, b) =>
-          b.recording.startedAt.localeCompare(a.recording.startedAt) ||
-          b.recording.id.localeCompare(a.recording.id),
-      )
-      .slice(0, limit);
-    c.header("cache-control", "private, no-store");
-    return c.json(ListOwnRecordingsResponse.parse({ recordings }));
+      nextBefore: page.nextBefore,
+    });
   });
 
   app.post(base, async (c) => {
@@ -672,7 +649,10 @@ export function registerRecordingRoutes(
   app.get(`${base}/:recordingId`, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     return c.json(
-      await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+      shownHere(
+        await guard(() => getRecording(db, { ...actor, recordingId: recordingIdParam(c) })),
+        actor,
+      ),
     );
   });
 
@@ -680,7 +660,18 @@ export function registerRecordingRoutes(
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, UpdateRecordingRequest);
-    return c.json(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })));
+    // Sharing shares with the workspace that stores the meeting, so it is
+    // done there, where everyone it is shared with sees it.
+    if (actor.sourceWorkspace && body.visibility !== undefined && body.visibility !== "private") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "Share this meeting from the workspace it was recorded in.",
+        retryable: false,
+      });
+    }
+    return c.json(
+      shownHere(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })), actor),
+    );
   });
 
   app.delete(`${base}/:recordingId`, async (c) => {

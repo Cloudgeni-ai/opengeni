@@ -1685,17 +1685,6 @@
       ]
     },
     {
-      "method": "GET",
-      "path": "/v1/recordings/own",
-      "sdk": [
-        "OpenGeniRecordingsClient.listOwnRecordings"
-      ],
-      "request": [],
-      "response": [
-        "ListOwnRecordingsResponse"
-      ]
-    },
-    {
       "method": "POST",
       "path": "/v1/site-auth/authorize",
       "sdk": [
@@ -20477,19 +20466,6 @@
         "$.webhooks[]": "ref(OrganizationWebhook)"
       }
     },
-    "ListOwnRecordingsResponse": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.recordings": "array!",
-        "$.recordings[]": "object",
-        "$.recordings[].recording": "ref(Recording)!",
-        "$.recordings[].workspaceId": "string!",
-        "$.recordings[].workspaceName": "string!"
-      }
-    },
     "ListPersonalApiKeysResponse": {
       "io": [
         "output"
@@ -24044,6 +24020,9 @@
         "$.metadata{}": "unknown",
         "$.ownerSubjectId": "string!",
         "$.purpose": "ref(RecordingPurpose)!",
+        "$.sourceWorkspace": "object? null",
+        "$.sourceWorkspace.id": "string!",
+        "$.sourceWorkspace.name": "string!",
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
@@ -38139,7 +38118,6 @@
       "meetingTitle": "value",
       "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
-      "OwnRecordingElsewhere": "type",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",
@@ -38155,8 +38133,6 @@
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
       "UseLiveTranscriptResult": "type",
-      "useOwnRecordingsElsewhere": "value",
-      "UseOwnRecordingsElsewhereResult": "type",
       "useRecorder": "value",
       "UseRecorderOptions": "type",
       "UseRecorderResult": "type",
@@ -38609,6 +38585,7 @@
     },
     "@opengeni/react/testing/meetings": {
       "createMeetingsFixture": "value",
+      "ELSEWHERE_RECORDING_ID": "value",
       "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
@@ -42106,7 +42083,6 @@
       "getRecording",
       "getRecordingTrackAudio",
       "getRecordingTranscript",
-      "listOwnRecordings",
       "listRecordingLiveSegments",
       "listRecordingModels",
       "listRecordingNotes",
@@ -54960,9 +54936,6 @@
       ],
       "getRecordingTranscript": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"after\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"limit\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptPage\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
-      ],
-      "listOwnRecordings": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"excludeWorkspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"limit\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListOwnRecordingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listRecordingLiveSegments": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"after\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListRecordingLiveSegmentsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
