@@ -268,6 +268,9 @@ export type DesktopDictationOutput = "paste" | "copy" | "pasteAndCopy";
 /** Press once to start and again to stop, or hold the shortcut while speaking. */
 export type DesktopDictationMode = "toggle" | "hold";
 
+/** An ordinary key combination, in Electron's accelerator syntax ("Control+Shift+2"). */
+export type DesktopDictationKeys = { kind: "accelerator"; accelerator: string };
+
 export interface DesktopDictationSettings {
   /** Off until the person turns it on. */
   enabled: boolean;
@@ -275,7 +278,22 @@ export interface DesktopDictationSettings {
   profiles: DesktopDictationProfile[];
   output: DesktopDictationOutput;
   mode: DesktopDictationMode;
+  /**
+   * Names and words to listen for, such as people's and products' names: at
+   * most 100, each up to 50 characters. Absent from apps that don't offer it.
+   */
+  vocabulary?: string[];
+  /**
+   * Transcribes the last dictation again and types it: one that failed, or
+   * else the newest one kept on this computer. Null: none.
+   */
+  retryShortcut?: DesktopDictationKeys | null;
+  /** Throws away the dictation under way, as Escape does. Null: none. */
+  cancelShortcut?: DesktopDictationKeys | null;
 }
+
+/** A shortcut that acts on dictations rather than starting one. */
+export type DesktopDictationAction = "retry" | "cancel";
 
 /** The system permissions dictation needs, where the system asks for them. */
 export type DesktopDictationPermissionId = "accessibility";
@@ -315,15 +333,44 @@ export interface DesktopDictationStatus {
   permissions: { id: DesktopDictationPermissionId; granted: boolean }[];
   /** Each shortcut that is on but could not be set up (another app owns it). */
   shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[];
+  /** The retry or cancel shortcut, when it is on but could not be set up. */
+  actionShortcutErrors?: {
+    action: DesktopDictationAction;
+    problem: DesktopDictationShortcutProblem;
+  }[];
   /** Whether text can be typed into other apps here; otherwise it is only copied. */
   paste: { available: boolean; blocker: DesktopDictationPasteBlocker | null };
   /** A signed-in page is ready to record; dictation waits for one. */
   ready: boolean;
 }
 
+/** A dictation's speech, kept on this computer beside its text. */
+export interface DesktopDictationAudio {
+  /** As recorded, such as "audio/webm;codecs=opus". */
+  mimeType: string;
+  bytes: Uint8Array;
+  durationMilliseconds: number;
+}
+
 /** What the app asks the page that records to do. */
 export type DesktopDictationRequest =
-  | { kind: "start"; dictationId: string; profileId: string; language: string | null }
+  | {
+      kind: "start";
+      dictationId: string;
+      profileId: string;
+      language: string | null;
+      /** Names and words to listen for; absent from apps that don't offer it. */
+      vocabulary?: string[];
+    }
+  /** Transcribe speech kept on this computer as a new dictation, and report it as one. */
+  | {
+      kind: "transcribe";
+      dictationId: string;
+      profileId: string;
+      language: string | null;
+      vocabulary: string[];
+      audio: DesktopDictationAudio;
+    }
   | { kind: "stop"; dictationId: string }
   /**
    * Stop without typing anything. A start of a few seconds is deleted; longer
@@ -346,7 +393,13 @@ export type DesktopDictationReport =
       level: number | null;
     }
   | { dictationId: string; phase: "transcribing" }
-  | { dictationId: string; phase: "done"; text: string }
+  | {
+      dictationId: string;
+      phase: "done";
+      text: string;
+      /** The speech that was recorded, for the app to keep with the text. */
+      audio?: DesktopDictationAudio;
+    }
   | {
       dictationId: string;
       phase: "failed";
@@ -366,6 +419,8 @@ export interface DesktopDictationHistoryEntry {
   at: string;
   profileName: string;
   language: string | null;
+  /** Its speech is kept too, to play or transcribe again; absent or null when it isn't. */
+  audio?: { mimeType: string; durationMilliseconds: number } | null;
 }
 
 /**
@@ -380,6 +435,14 @@ export interface DesktopDictation {
   requestPermission(id: DesktopDictationPermissionId): Promise<void>;
   history(): Promise<DesktopDictationHistoryEntry[]>;
   clearHistory(): Promise<void>;
+  /** A kept dictation's speech, to play; null once it is gone. Absent from apps that don't keep it. */
+  historyAudio?(id: string): Promise<DesktopDictationAudio | null>;
+  /**
+   * Transcribe a kept dictation's speech again, with the shortcut's current
+   * language and vocabulary; the new text replaces the old in the history.
+   * The dictation window shows how it goes.
+   */
+  transcribeAgain?(id: string): Promise<void>;
   /**
    * Record for the shortcuts. Only the newest listener receives requests;
    * until one listens, a shortcut shows that dictation isn't ready.
@@ -710,6 +773,8 @@ export const DESKTOP_IPC = {
   dictationRequestPermission: "og:dictation:request-permission",
   dictationHistory: "og:dictation:history",
   dictationClearHistory: "og:dictation:clear-history",
+  dictationHistoryAudio: "og:dictation:history-audio",
+  dictationTranscribeAgain: "og:dictation:transcribe-again",
   /** The page starts (true) or stops (false) recording for the shortcuts. */
   dictationListen: "og:dictation:listen",
   dictationRequest: "og:dictation:request",
