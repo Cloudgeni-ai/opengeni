@@ -516,6 +516,28 @@ describe("Opengeni's own MCP endpoints called from another workspace", () => {
     );
     expect(forgetful.status).toBe(503);
     expect(JSON.stringify(await forgetful.json())).not.toContain("EU-only content");
+    // An endpoint the guard never saw, given a request naming a calling
+    // workspace: refused before it runs. Without the header it is an outside
+    // caller, unchanged.
+    const unguarded = (headers: Record<string, string>) =>
+      new Request("https://opengeni.test/v1/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" }),
+      });
+    const unchecked = await requireCallingWorkspaceContentExchange(
+      client.db,
+      unguarded({ [OPENGENI_CALLING_WORKSPACE_HEADER]: "ogcw_anything" }),
+      { accountId: other.accountId },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(unchecked).toBeInstanceOf(HTTPException);
+    expect((unchecked as HTTPException).status).toBe(503);
+    await requireCallingWorkspaceContentExchange(client.db, unguarded({}), {
+      accountId: other.accountId,
+    });
     // A workspace that doesn't exist.
     const missing = crypto.randomUUID();
     expect((await endpoints(client.db).request(`/v1/workspaces/${missing}/mcp`, eu)).status).toBe(

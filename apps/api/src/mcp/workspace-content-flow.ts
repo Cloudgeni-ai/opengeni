@@ -244,7 +244,13 @@ export async function requireCallingWorkspaceContentExchange(
   reached: McpEndpointReach,
 ): Promise<void> {
   const state = callingWorkspaceRequests.get(request);
-  if (!state) return;
+  if (!state) {
+    // A request naming a calling workspace that the guard never saw (an
+    // endpoint mounted outside it, or a rebuilt request): nothing was checked.
+    if (request.headers.has(OPENGENI_CALLING_WORKSPACE_HEADER))
+      throw new HTTPException(503, { message: UNCHECKED_CALL });
+    return;
+  }
   state.reached = reached;
   if (!state.carriesContent) return;
   try {

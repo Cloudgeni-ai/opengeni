@@ -110,8 +110,10 @@ workspace, and Opengeni's own MCP endpoints added to a workspace as a remote
 MCP server, are refused with `422 region_restricted` otherwise, and fail
 closed. EU-only covers Opengeni's own inference and content moving between
 Opengeni workspaces. It does not cover outside agents an organization connects
-itself (organization MCP clients, API keys, desktop clients): handing an
-organization's API key to an agent anywhere, including inside another
-Opengeni workspace's sandbox or behind a relay, counts as connecting an
-outside agent and stays allowed. Details and enforcement points are in
+itself (organization MCP clients, API keys, desktop clients): an
+organization's API key handed to an agent and used directly, including inside
+another Opengeni workspace's sandbox or behind a relay, counts as connecting an
+outside agent and stays allowed. Saving that key as an MCP credential in a
+workspace is checked both ways and refused when either side's EU-only content
+may not reach the other. Details and enforcement points are in
 [organization-tenancy.md](organization-tenancy.md).
