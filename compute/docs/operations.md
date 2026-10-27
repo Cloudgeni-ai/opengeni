@@ -1129,6 +1129,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   to start the nested profile without a pool. On cgroup v2 without the
   `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
   its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent
