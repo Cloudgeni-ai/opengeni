@@ -4814,6 +4814,9 @@
 :where(.og-root).pl-16,:where(.og-root) .pl-16 {
     padding-left: calc(var(--spacing) * 16);
   }
+:where(.og-root).pl-20,:where(.og-root) .pl-20 {
+    padding-left: calc(var(--spacing) * 20);
+  }
 :where(.og-root).pl-\[18px\],:where(.og-root) .pl-\[18px\] {
     padding-left: 18px;
   }
