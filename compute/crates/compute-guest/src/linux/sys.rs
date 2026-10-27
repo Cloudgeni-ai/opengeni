@@ -73,8 +73,12 @@ const KEPT_ON_REMOUNT: [(libc::c_ulong, libc::c_ulong); 8] = [
     (libc::ST_SYNCHRONOUS, libc::MS_SYNCHRONOUS),
     (libc::ST_NOATIME, libc::MS_NOATIME),
     (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-    (libc::ST_RELATIME, libc::MS_RELATIME),
+    (ST_RELATIME, libc::MS_RELATIME),
 ];
+
+/// Linux's `ST_RELATIME`, which the libc crate gives glibc's targets but
+/// not musl's, which the guest is built for.
+const ST_RELATIME: libc::c_ulong = 4096;
 
 /// Whether the root file system is mounted read-only.
 pub fn root_read_only() -> io::Result<bool> {
