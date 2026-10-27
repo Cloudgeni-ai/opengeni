@@ -25,6 +25,7 @@ import {
   isConsistentGitHubBindingProof,
 } from "./github-installation-proof";
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
+import { connectOwnerStateFields } from "../connection-ownership";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -46,7 +47,7 @@ export function isGitHubAppConnectState(deps: ApiRouteDeps, raw: string | undefi
   return !!raw && readSignedState(raw, deps.githubStateSecret)?.kind === "github_app_connect";
 }
 
-type GitHubConnectScope = ConnectActorScope & { personalOwnerVerified?: boolean };
+type GitHubConnectScope = ConnectActorScope & { personalOwnerVerified: boolean };
 function callbackAuthority(scope: GitHubConnectScope): ConnectOperationAuthorization {
   return async (tx, _attempt, origin) => {
     const actor = { ...scope, ...(origin ? { externalContinuation: origin } : {}) };
@@ -68,10 +69,7 @@ export function githubAppConnectNavigation(
     throw new HTTPException(503, { message: "GitHub App is not configured" });
   const state = createSignedState(deps.githubStateSecret, {
     kind: "github_app_connect",
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    subjectId: scope.subjectId,
-    personalOwnerVerified: scope.personalOwnerVerified === true,
+    ...connectOwnerStateFields(scope, scope.personalOwnerVerified),
     connectAttemptId: attemptId,
     phase,
     providerId: "github-app",

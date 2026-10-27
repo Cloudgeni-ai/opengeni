@@ -165,6 +165,7 @@ import {
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
+  personalOwnerVerifiedInState,
   requireLegacyOAuthActor,
   requireProviderConsentInBrowser,
 } from "../connection-ownership";
@@ -196,6 +197,7 @@ type OpenGeniSlackInstallState = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  personalOwnerVerified: boolean;
   returnPath: string;
   connectionId?: string;
   connectionVersion?: number;
@@ -510,6 +512,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
+              personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
               requestUrl: c.req.url,
               ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
             },
@@ -776,6 +779,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
+          personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
           payload,
         }),
@@ -1796,6 +1800,9 @@ function readOpenGeniSlackInstallState(
     accountId,
     workspaceId,
     subjectId,
+    // Absent on a state minted before the claim existed, which therefore keeps
+    // failing closed in a Personal workspace.
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     returnPath,
     ...(typeof payload.connectAttemptId === "string"
       ? { connectAttemptId: payload.connectAttemptId }
