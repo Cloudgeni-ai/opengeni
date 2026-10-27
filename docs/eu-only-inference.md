@@ -267,7 +267,8 @@ configured stays where it was. Existing lists carry the same code: model
 availability `reason: "region_restricted"` (client config and the workspace
 model catalog), realtime catalog `unavailableCode`, recording models
 `unavailableReason` (an entry keeps only the capabilities its region allows;
-with none left it stays listed, switched off), video funding options `unavailableCode` (beside the
+with none left it stays listed, switched off; `liveTranscript` is false when
+every live route is refused, so recorders don't start one), video funding options `unavailableCode` (beside the
 "Not supported in EU" `unavailableReason`), and agent capabilities `code`
 (beside `reason`). Agents are not offered tools that are switched off, and the
 session's effective tools omit them.
