@@ -181,7 +181,11 @@ choice is closed. `set_value` chooses a Chromium `<select>`'s option by
 type-ahead also while the browser is the front app with the select in another
 of its windows, instead of opening the menu, which ordered that window above
 the one in front. A background pixel click on the option a closed `<select>`
-shows is refused like one on the select. On a native combo box, `set_value`
+shows is refused like one on the select. None of these refusals applies when
+the window is already the front window (its app is active and it is that app's
+topmost window), where the menu brings nothing forward, or to an ARIA menu
+button (`aria-haspopup`): Chromium gives it the same role, but it lists no
+options and its menu is drawn in the page. On a native combo box, `set_value`
 confirms the new value (`AXConfirm`, as Return does), so the app takes it as
 chosen; Opengeni shows such a box as a `combobox` that takes `set_value`.
 The walk asks an element once more when its one-request read times out with

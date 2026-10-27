@@ -4863,7 +4863,7 @@ describe("CUA desktop boundary", () => {
             code: "unsupported",
             dispatched: true,
             message:
-              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring its window in front of the person's window, so nothing was sent. Choose an option with set_value on its ref and the option's text; to open the menu itself, bring this window to the front with focus on its target, then invoke it again",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
