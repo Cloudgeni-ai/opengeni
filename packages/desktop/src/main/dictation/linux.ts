@@ -65,7 +65,9 @@ export class LinuxDictation implements DictationPlatform {
 
   async pasteSupport(): Promise<{ available: boolean; reason: string | null }> {
     const found = this.tool();
-    return found.tool ? { available: true, reason: null } : { available: false, reason: found.reason };
+    return found.tool
+      ? { available: true, reason: null }
+      : { available: false, reason: found.reason };
   }
 
   preparePaste(): DictationPaste {

@@ -5,7 +5,11 @@
 import { BrowserWindow, screen } from "electron";
 
 import type { DictationHudView } from "./index";
-import { DICTATION_HUD_ACTIONS, type DictationHudAction, type DictationHudState } from "./hud-state";
+import {
+  DICTATION_HUD_ACTIONS,
+  type DictationHudAction,
+  type DictationHudState,
+} from "./hud-state";
 import { DICTATION_HUD_HTML } from "./hud-page";
 
 const HEIGHT = 64;

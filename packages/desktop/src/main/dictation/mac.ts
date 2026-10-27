@@ -62,7 +62,11 @@ export function macKeyWatchArgument(watches: readonly DictationModifierWatch[]):
 /** One line from the watcher, or null for anything else. */
 export function parseKeyLine(
   line: string,
-): { kind: "ready" } | { kind: "down"; id: string } | { kind: "up"; id: string; clean: boolean } | null {
+):
+  | { kind: "ready" }
+  | { kind: "down"; id: string }
+  | { kind: "up"; id: string; clean: boolean }
+  | null {
   const trimmed = line.trim();
   if (trimmed === "ready") return { kind: "ready" };
   const down = /^down (\S+)$/u.exec(trimmed);
@@ -186,9 +190,13 @@ export class MacDictation implements DictationPlatform {
   }
 
   private async accessibility(action: "check" | "request-accessibility"): Promise<boolean> {
-    const result = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", MAC_PERMISSIONS_SCRIPT, action], {
-      timeoutMs: PERMISSION_HELPER_TIMEOUT_MS,
-    });
+    const result = await this.run(
+      OSASCRIPT,
+      ["-l", "JavaScript", "-e", MAC_PERMISSIONS_SCRIPT, action],
+      {
+        timeoutMs: PERMISSION_HELPER_TIMEOUT_MS,
+      },
+    );
     const value = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
     return value.accessibility === true;
   }

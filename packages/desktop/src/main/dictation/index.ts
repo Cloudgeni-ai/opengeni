@@ -378,7 +378,12 @@ export class Dictation {
     };
     this.registerEscape();
     this.show({ kind: "starting", label: this.label(profile) });
-    this.send({ kind: "start", dictationId: id, profileId: profile.id, language: profile.language });
+    this.send({
+      kind: "start",
+      dictationId: id,
+      profileId: profile.id,
+      language: profile.language,
+    });
   }
 
   /** Stop listening and transcribe. */
@@ -461,7 +466,9 @@ export class Dictation {
     const clipboard = this.deps.clipboard;
     if (output === "copy" || !paste) {
       paste?.cancel();
-      await clipboard.writeText(text).catch((caught: unknown) => this.deps.log?.("dictation copy failed", caught));
+      await clipboard
+        .writeText(text)
+        .catch((caught: unknown) => this.deps.log?.("dictation copy failed", caught));
       if (output === "copy") {
         this.notice("success", "Copied.");
         return;
@@ -476,8 +483,7 @@ export class Dictation {
       );
       return;
     }
-    const previous =
-      output === "paste" ? await clipboard.snapshot().catch(() => null) : null;
+    const previous = output === "paste" ? await clipboard.snapshot().catch(() => null) : null;
     try {
       await clipboard.writeText(text);
       await paste.paste();
@@ -496,7 +502,9 @@ export class Dictation {
         void clipboard
           .readText()
           .then((current) => (current === text ? clipboard.restore(previous) : undefined))
-          .catch((caught: unknown) => this.deps.log?.("dictation clipboard restore failed", caught));
+          .catch((caught: unknown) =>
+            this.deps.log?.("dictation clipboard restore failed", caught),
+          );
       }, DICTATION_CLIPBOARD_RESTORE_MS);
     }
   }

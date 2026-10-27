@@ -303,7 +303,10 @@ export interface DesktopDictationStatus {
 export type DesktopDictationRequest =
   | { kind: "start"; dictationId: string; profileId: string; language: string | null }
   | { kind: "stop"; dictationId: string }
-  /** Throw the dictation away. */
+  /**
+   * Stop without typing anything. A start of a few seconds is deleted; longer
+   * speech stays saved, as the composer's Escape keeps it, for the composer to offer.
+   */
   | { kind: "cancel"; dictationId: string }
   /** Let a failed dictation go without deleting it: the composer offers it later. */
   | { kind: "dismiss"; dictationId: string }

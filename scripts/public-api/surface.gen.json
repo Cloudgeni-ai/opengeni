@@ -37693,6 +37693,21 @@
       "UseDesktopStreamOptions": "type",
       "UseDesktopStreamResult": "type"
     },
+    "@opengeni/react/desktop-dictation": {
+      "acceleratorFromKey": "value",
+      "DesktopDictationClient": "type",
+      "DesktopDictationHost": "value",
+      "DesktopDictationHostProps": "type",
+      "DesktopDictationSettings": "value",
+      "DesktopDictationSettingsProps": "type",
+      "desktopShortcutLabel": "value",
+      "dictationErrorMessage": "value",
+      "modifierName": "value",
+      "profileName": "value",
+      "sameDesktopShortcut": "value",
+      "useDesktopDictation": "value",
+      "UseDesktopDictationResult": "type"
+    },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",
       "PierreDiffsLoader": "type",

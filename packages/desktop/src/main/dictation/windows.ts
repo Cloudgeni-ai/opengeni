@@ -37,7 +37,15 @@ export class WindowsDictation implements DictationPlatform {
   preparePaste(): DictationPaste {
     const child = this.spawnProcess(
       "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PASTE_SCRIPT],
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        PASTE_SCRIPT,
+      ],
       { stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
     );
     return helperPaste(child, (stdout) => {

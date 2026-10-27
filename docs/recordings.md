@@ -718,6 +718,56 @@ sends one request, as before.
 Dictation recordings replace the older `transcription-recordings` routes,
 which are deprecated and kept for older clients until their sunset.
 
+### Dictation from anywhere (desktop)
+
+In the desktop app, a shortcut dictates into whatever app has the cursor:
+press it, speak, press it again (or hold it while speaking), and the text is
+typed there. Each dictation is an ordinary dictation recording of the
+signed-in person, so it is kept the same way: a failed transcription offers
+Retry, and a dismissed or cancelled one (after the first few seconds) stays
+saved for the composer to offer. The pieces:
+
+- The main process (`@opengeni/desktop/dictation`) owns the shortcuts, a
+  small window at the bottom of the screen that shows the dictation's
+  progress, and where the text goes. It types the text by pasting it and
+  then puts the person's clipboard back, or only copies it. Several
+  shortcuts can each have their own language (one for English, one for
+  Norwegian); most people keep the one, which detects the language. On macOS
+  a shortcut can be modifier keys alone (Control and Fn by default) and
+  typing needs Accessibility. On Windows it pastes with PowerShell; on Linux
+  with xdotool (X11), wtype or ydotool (Wayland), and only copies without
+  them. Recent text is kept on the computer to copy again.
+- `DesktopDictationHost` (`@opengeni/react/desktop-dictation`), mounted once
+  on the signed-in pages, records and transcribes when the app asks, with
+  `useVoiceInput`. When no page is open, the app opens one in the background
+  and starts once it listens.
+- `DesktopDictationSettings` is the stock settings UI, or build your own on
+  `useDesktopDictation()`.
+
+An Electron app other than Opengeni's wires it like system audio:
+
+```ts
+// Main process
+import { createDesktopDictation, handleDictationIpc } from "@opengeni/desktop/dictation";
+
+const dictation = createDesktopDictation({
+  productName: "Example",
+  dataDir: app.getPath("userData"),
+  reveal: () => showMainWindow(),
+  wake: () => openMainWindowInBackground(), // optional
+});
+handleDictationIpc({ ipcMain, dictation, allow: (event) => assertYourWebApp(event) });
+dictation.start();
+app.on("will-quit", () => dictation.stop());
+
+// Preload of the web app's window
+import { exposeDictation } from "@opengeni/desktop/preload/dictation";
+exposeDictation(); // defines window.opengeniDictation
+
+// Web app, on the signed-in pages
+<DesktopDictationHost client={client} workspaceId={workspaceId} />
+```
+
 ## Deletion
 
 `DELETE …/recordings/:recordingId` hides the recording at once; the worker

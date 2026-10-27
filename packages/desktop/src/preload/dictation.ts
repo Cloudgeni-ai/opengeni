@@ -19,9 +19,12 @@ import {
 export function dictationBridge(ipc: IpcRenderer = ipcRenderer): DesktopDictation {
   // Requests go to the page's newest listener; the app knows whether one listens.
   let requestListener: ((request: DesktopDictationRequest) => void) | null = null;
-  ipc.on(DESKTOP_IPC.dictationRequest, (_event: IpcRendererEvent, request: DesktopDictationRequest) => {
-    requestListener?.(request);
-  });
+  ipc.on(
+    DESKTOP_IPC.dictationRequest,
+    (_event: IpcRendererEvent, request: DesktopDictationRequest) => {
+      requestListener?.(request);
+    },
+  );
   return {
     status: () => ipc.invoke(DESKTOP_IPC.dictationStatus) as Promise<DesktopDictationStatus>,
     update: (settings) =>
