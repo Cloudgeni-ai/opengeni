@@ -858,7 +858,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * are not on the Mac's screen. macOS keeps listing them while the screen
    * is locked or another user's session is on it, but reads of them come
    * back empty and input never reaches them. The full check runs a native
-   * helper; the quick one only notices another user owning the console. */
+   * helper that reads whose session is on the console; the quick one only
+   * notices that this user does not own the console device, which is when
+   * another session may be on screen. */
   private async assertOnScreen(full: boolean): Promise<void> {
     if (!this.macWindows || (!full && !consoleHeldByAnotherUser())) return;
     // A check that cannot run never blocks the computer.
@@ -3024,9 +3026,11 @@ const CONSOLE_UNAVAILABLE: Record<Exclude<MacConsoleState, "available">, string>
     "Another user's session is on this Mac's screen, so nothing in this user's session can be read or clicked. Ask a person to switch back to this user, then try again.",
 };
 
-/** Whether another user owns the console: at the login window root does,
- * and the full check decides that case too. Microseconds, unlike the full
- * check. */
+/** Whether another user owns the console device: the user who last logged in
+ * at the console, or root at the login window. That is also the case while
+ * this session is on screen and a second user is logged in in the background,
+ * so it only says when the full check must decide (about 6 ms for the helper
+ * there). Microseconds, unlike the full check. */
 function consoleHeldByAnotherUser(): boolean {
   try {
     return statSync("/dev/console").uid !== process.getuid?.();
