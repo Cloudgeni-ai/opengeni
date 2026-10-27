@@ -44,7 +44,9 @@ import {
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const DAY = 24 * 60 * 60_000;
 // Creating and dropping databases is slow on a busy shared server.
-const DB_TEST_TIMEOUT_MS = 120_000;
+// Creating and dropping databases waits on checkpoints, which can take
+// minutes on a loaded shared machine.
+const DB_TEST_TIMEOUT_MS = 300_000;
 
 function hex12(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -244,7 +246,7 @@ describe("reaping a real cluster", () => {
     adminUrl = url.toString();
     admin = postgres(adminUrl, { max: 4, onnotice: () => undefined });
     directory = await mkdtemp(join(tmpdir(), "og-reap-"));
-  }, 120_000);
+  }, 300_000);
 
   afterAll(async () => {
     try {
@@ -578,6 +580,11 @@ describe("reaping a real cluster", () => {
       } finally {
         await outsideSql.end();
       }
+      // So is one with a grant on a shared object, such as a database.
+      const deadShared = await createRole(databaseOwnerComment(deadOwner));
+      await admin.unsafe(
+        `GRANT CONNECT ON DATABASE ${quoteIdent(kept)} TO ${quoteIdent(deadShared)}`,
+      );
       // Memberships in both directions, like `grant opengeni_app to <bypass>`.
       const group = `${sub}group`;
       const member = `${sub}member`;
@@ -608,9 +615,12 @@ describe("reaping a real cluster", () => {
         await holder`SELECT 1`;
         const clock = { now: () => Date.now(), pruneTemplates: false, rolePrefix };
         const first = await reap(clock);
-        expect(first.errors).toEqual([
-          `${deadOutside}: has privileges outside test databases (${outside})`,
-        ]);
+        expect([...first.errors].sort()).toEqual(
+          [
+            `${deadOutside}: has privileges outside test databases (${outside})`,
+            `${deadShared}: has privileges outside test databases (shared objects)`,
+          ].sort(),
+        );
         expect(first.rolesDropped).toEqual([dead]);
         expect(await roleExists(dead)).toBe(false);
         const memberships = await admin`
@@ -630,7 +640,15 @@ describe("reaping a real cluster", () => {
         expect(early.rolesDropped).toEqual([]);
         const later = await reap({ ...clock, now: () => Date.now() + 61 * 60_000 });
         expect(later.rolesDropped).toEqual([unowned]);
-        for (const name of [connected, live, foreign, annotated, offScheme, deadOutside]) {
+        for (const name of [
+          connected,
+          live,
+          foreign,
+          annotated,
+          offScheme,
+          deadOutside,
+          deadShared,
+        ]) {
           expect(await roleExists(name)).toBe(true);
         }
         const [outsideGrant] = await admin<{ n: number }[]>`

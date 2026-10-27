@@ -2283,15 +2283,24 @@ async function revokeScratchRoleEverywhere(
   },
 ): Promise<boolean> {
   const databases = await sql<
-    { datname: string; datistemplate: boolean; datallowconn: boolean; owns: boolean }[]
+    {
+      datname: string | null;
+      datistemplate: boolean | null;
+      datallowconn: boolean | null;
+      owns: boolean;
+    }[]
   >`
     SELECT d.datname, d.datistemplate, d.datallowconn, bool_or(s.deptype = 'o') AS owns
       FROM pg_shdepend s
-      JOIN pg_database d ON d.oid = s.dbid
+      LEFT JOIN pg_database d ON d.oid = s.dbid
      WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = ${role.oid}::oid
      GROUP BY d.datname, d.datistemplate, d.datallowconn
      ORDER BY d.datname`;
-  const owned = databases.filter((database) => database.owns).map((database) => database.datname);
+  // A null name is a dependency on a shared object (a database, tablespace
+  // or the role catalog itself), which is outside the test databases too.
+  const owned = databases
+    .filter((database) => database.owns)
+    .map((database) => database.datname ?? "shared objects");
   if (owned.length > 0) {
     context.result.errors.push(`${role.rolname}: owns objects in ${owned.slice(0, 3).join(", ")}`);
     return false;
@@ -2299,7 +2308,7 @@ async function revokeScratchRoleEverywhere(
   // Only ever connect to the harness's own databases: never `postgres`,
   // `template1` or anything else on a shared or developer cluster.
   const foreign = databases
-    .map((database) => database.datname)
+    .map((database) => database.datname ?? "shared objects")
     .filter(
       (name) =>
         !isPerTestDatabaseName(name, context.scopePrefix, context.templatePrefix) &&
