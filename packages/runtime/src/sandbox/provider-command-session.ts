@@ -23,7 +23,7 @@ export type ProviderCommandOutput = {
 export type ProviderCommandPersistence = {
   rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
-  reserveInput(byteLength?: number): Promise<number>;
+  reserveInput(byteLength: number): Promise<number>;
   recordSupervisionReceipt?(receipt: CommandSupervisionReceipt): Promise<void>;
   loadSupervisionReceipt?(): Promise<CommandSupervisionReceipt | null>;
   requestCancellation?(reason: "provider_deadline" | "explicit_stop"): Promise<void>;

@@ -32,7 +32,7 @@ export function retainedProviderCommandPersistence(
       requestRetainedProcessCancellation(db, scope, reason),
     cancellationRequested: () => retainedProcessCancellationRequested(db, scope),
     load: () => getRetainedProviderCommand(db, scope),
-    reserveInput: (byteLength?: number) => reserveRetainedProviderInput(db, scope, byteLength),
+    reserveInput: (byteLength: number) => reserveRetainedProviderInput(db, scope, byteLength),
     captureRouterPage: async (page: RetainedRouterOutputPage) => {
       const result = await captureRetainedRouterOutput(db, scope, page);
       // A committed capture is authoritative even if live fanout fails.
@@ -266,12 +266,12 @@ export async function captureRetainedRouterOutput(
   });
 }
 
-/** Reserve a strictly increasing provider stdin index before dispatch. An
- * ambiguous send consumes its index and is never silently replayed. */
+/** Reserve the next stdin byte range before dispatch and return its starting
+ * offset. An ambiguous send consumes its range and is never silently replayed. */
 export async function reserveRetainedProviderInput(
   db: Database,
   scope: ProcessScope,
-  byteLength?: number,
+  byteLength: number,
 ): Promise<number> {
   return withRlsContext(db, scope, async (tx) => {
     const [row] = await tx
@@ -284,16 +284,15 @@ export async function reserveRetainedProviderInput(
       throw new Error("Active retained provider command is unavailable");
     if (row.cancellationRequestedAt || row.supervisionReceipt)
       throw new Error("Retained command input is closed");
-    const router = row.providerCommand.kind === "modal-router-v1";
-    if (router && (!Number.isSafeInteger(byteLength) || byteLength! <= 0))
+    if (!Number.isSafeInteger(byteLength) || byteLength <= 0)
       throw new Error("Byte-offset stdin requires a positive byte reservation");
-    const index = row.providerCommandInputIndex + (router ? byteLength! : 1);
-    if (!Number.isSafeInteger(index)) throw new Error("Provider stdin sequence exhausted");
+    const next = row.providerCommandInputIndex + byteLength;
+    if (!Number.isSafeInteger(next)) throw new Error("Provider stdin sequence exhausted");
     await tx
       .update(schema.sandboxRetainedProcesses)
-      .set({ providerCommandInputIndex: index })
+      .set({ providerCommandInputIndex: next })
       .where(processWhere(scope));
-    return router ? row.providerCommandInputIndex : index;
+    return row.providerCommandInputIndex;
   });
 }
 

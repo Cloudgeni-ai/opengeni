@@ -1246,9 +1246,11 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(await getRetainedProviderCommand(db, scope)).toEqual(original);
     expect(
       (
-        await Promise.all(Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope)))
+        await Promise.all(
+          Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope, 2)),
+        )
       ).sort(),
-    ).toEqual([1, 2, 3, 4, 5]);
+    ).toEqual([0, 2, 4, 6, 8]);
     expect(
       await getRetainedProviderCommand(db, { ...scope, sessionId: crypto.randomUUID() }),
     ).toBeNull();
