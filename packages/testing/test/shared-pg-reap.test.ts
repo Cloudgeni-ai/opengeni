@@ -792,14 +792,26 @@ describe("reaping a real cluster", () => {
       expect(owner?.host.endsWith(`#${scope}`)).toBe(true);
 
       // The next acquisition starts the background reaper, which drops it.
+      // It stays alive until its reaper exits: `bun test --no-orphans` (as in
+      // `test:unit`) kills a detached grandchild as soon as its parent exits.
       const next = Bun.spawn(
         [
           process.execPath,
           "--no-env-file",
           "-e",
           `const { acquireBlankTestDatabase } = await import("@opengeni/testing/shared-pg");
+             const { readdir, readFile } = await import("node:fs/promises");
+             const { join } = await import("node:path");
              const db = await acquireBlankTestDatabase("reap-next");
-             await db.release();`,
+             await db.release();
+             const state = ${JSON.stringify(state)};
+             const dir = join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-")));
+             const { pid } = JSON.parse(await readFile(join(dir, "reaper.json"), "utf8"));
+             const deadline = Date.now() + 120_000;
+             while (pid > 0 && Date.now() < deadline) {
+               try { process.kill(pid, 0); } catch { break; }
+               await Bun.sleep(250);
+             }`,
         ],
         {
           cwd: root,
