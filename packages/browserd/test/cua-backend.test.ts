@@ -4544,13 +4544,15 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
-        // A later step's lookup found its window closed by an earlier one, so
-        // its element will never appear: it fails at once with the same line.
+        // A later step named by role and name found its window closed by an
+        // earlier one while waiting for its element, which will never appear:
+        // it fails at once with the same line.
         {
           reply: step(1, {
-            phase: "find",
+            phase: "wait_for",
             code: "window_not_on_screen",
-            message: "window 1 is closed or not on screen, so nothing in it can be found",
+            message:
+              'menuitem "Minimize" is shown, enabled did not hold: window 1 is closed or not on screen, so nothing in it can be found',
           }),
           expected: {
             code: "invalid_action",
