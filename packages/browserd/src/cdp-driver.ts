@@ -144,9 +144,13 @@ const TRANSFER_UPLOAD_FILES_FUNCTION = `function (parts, files) {
     transfer.items.add(new File(chunks, file.name, { type: file.type, lastModified: file.lastModified }));
   });
   this.files = transfer.files;
+  // Counted before the page hears of them: a change handler that clears the
+  // input once it has read the files (so the same file can be picked again)
+  // still received them.
+  const kept = this.files.length;
   this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
   this.dispatchEvent(new Event('change', { bubbles: true }));
-  return this.files.length;
+  return kept;
 }`;
 // Chrome derives an uploaded file's type from its extension; mirror the
 // common ones so pages that check File.type accept the transferred file.
@@ -5927,15 +5931,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser locator is not a checkable control",
           );
         }
-        if (current !== action.checked)
-          await this.clickNode(
+        if (current === action.checked) return;
+        await this.clickNode(
+          state,
+          node.backendDOMNodeId,
+          "left",
+          1,
+          node.frameId ?? state.frame.id,
+        );
+        // A page may show the new state a little after the click (a
+        // framework's next render, a switch that saves first). A control it
+        // replaced cannot be read again, and is not reported.
+        const deadline = Date.now() + CHECK_SETTLE_MS;
+        for (;;) {
+          const shown = await this.callOnNode(
             state,
             node.backendDOMNodeId,
-            "left",
-            1,
-            node.frameId ?? state.frame.id,
-          );
-        return;
+            CHECKED_FUNCTION,
+            [],
+          ).catch(() => action.checked);
+          if (shown === action.checked || typeof shown !== "boolean") return;
+          if (Date.now() >= deadline) break;
+          await delay(50);
+        }
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `the control was clicked but does not show ${action.checked ? "checked" : "unchecked"}; look at it before clicking it again`,
+        );
       }
       case "scroll": {
         // A located scroll moves the nearest box that can scroll that way, as a
@@ -7029,6 +7051,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     count: 1 | 2,
     frameId?: string,
   ): Promise<void> {
+    // A control the page draws through its label (a checkbox that takes no
+    // pointer input under a styled box) is clicked where a person clicks it:
+    // on the label, which activates the control.
+    backendDOMNodeId =
+      (await this.relatedNode(state, backendDOMNodeId, POINTER_LABEL_FUNCTION, [])) ??
+      backendDOMNodeId;
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
@@ -8056,6 +8084,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     label: string,
   ): Promise<number | null> {
+    return await this.relatedNode(state, backendDOMNodeId, POPUP_OPTION_FUNCTION, [
+      { value: label },
+    ]);
+  }
+
+  /** The element a function run on a node returns, as a node ID, or null when
+   * it returns none. */
+  private async relatedNode(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    functionDeclaration: string,
+    args: Array<{ value: unknown }>,
+  ): Promise<number | null> {
     if (backendDOMNodeId === null) return null;
     const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
       backendNodeId: backendDOMNodeId,
@@ -8073,8 +8114,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Runtime.callFunctionOn",
         {
           objectId: resolved.object.objectId,
-          functionDeclaration: POPUP_OPTION_FUNCTION,
-          arguments: [{ value: label }],
+          functionDeclaration,
+          arguments: args,
           returnByValue: false,
         },
         { potentialEffect: false },
@@ -10869,8 +10910,31 @@ const VISIBLE_FUNCTION = `function() {
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
+/** Whether a checkable control is checked, or null for anything else: a
+ * native checkbox or radio, a label's own control, or an element with an ARIA
+ * checkable role, whose "mixed" state counts as unchecked. */
 const CHECKED_FUNCTION = `function() {
-  return typeof this.checked === "boolean" ? this.checked : null;
+  const element = this instanceof HTMLLabelElement && this.control ? this.control : this;
+  if (typeof element.checked === "boolean") return element.checked;
+  if (!(element instanceof Element)) return null;
+  const role = (element.getAttribute("role") || "").trim().split(/\\s+/)[0];
+  if (!["checkbox", "switch", "radio", "menuitemcheckbox", "menuitemradio"].includes(role)) return null;
+  return element.getAttribute("aria-checked") === "true";
+}`;
+
+/** How long a check waits for its control to show the new state. */
+const CHECK_SETTLE_MS = 1_000;
+
+/** The label to click for a form control that takes no pointer input itself
+ * (pointer-events: none) but is labelled by one that shows and does, or null.
+ * A disabled control keeps its refusal. */
+const POINTER_LABEL_FUNCTION = `function() {
+  if (!(this instanceof HTMLElement) || !this.labels || this.labels.length === 0) return null;
+  if (this.matches(":disabled") || getComputedStyle(this).pointerEvents !== "none") return null;
+  for (const label of this.labels) {
+    if (label.getClientRects().length > 0 && getComputedStyle(label).pointerEvents !== "none") return label;
+  }
+  return null;
 }`;
 
 /** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
