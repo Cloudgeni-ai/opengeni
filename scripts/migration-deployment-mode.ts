@@ -6,7 +6,7 @@
  * them mid-rollout, so contract-phase DDL must name the release that stopped
  * using it.
  *
- * Shipped migrations are frozen by the release schema-contract hash ladder and
+ * Shipped migrations are immutable (the migration-immutability guard) and
  * are exempt: only ordinals at or above `GOVERNED_FROM_ORDINAL` are checked.
  *
  * Guide: docs/migrations-expand-contract.md

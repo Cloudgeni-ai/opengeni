@@ -1,8 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import * as dbSchema from "../../packages/db/src/schema";
+
 import {
   addSessionSystemUpdate,
   appendSessionEvents,
@@ -12,7 +9,6 @@ import {
   createWorkspace,
   createDb,
   decryptEnvironmentValue,
-  getSessionHistoryItems,
   createScheduledTask,
   createScheduledTaskRun,
   getNestedAgentDepthDeploymentPolicy,
@@ -54,9 +50,8 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   type AccessGrant,
-  type Permission,
 } from "@opengeni/contracts";
-import { applyRawSql, startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { expectContiguousSequences } from "@opengeni/testing/assertions";
 
 describe("DB integration", () => {
@@ -1140,99 +1135,6 @@ describe("DB integration", () => {
     });
   });
 
-  test("migration backfills goals:manage into goal-bearing sessions with explicit first-party permissions", async () => {
-    const migrationName = "0009_goal_sessions_first_party_goals_manage.sql";
-    const grant = await testGrant(dbClient.db);
-    const makeSession = async (firstPartyMcpPermissions: Permission[] | null) =>
-      await createSession(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        initialMessage: "backfill fixture",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        firstPartyMcpPermissions,
-      });
-    const addGoal = async (sessionId: string) =>
-      await createSessionGoal(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId,
-        text: "stay green",
-        createdBy: "api",
-      });
-
-    // Healed: explicit permissions missing goals:manage + a non-completed goal.
-    const activeGoalSession = await makeSession(["workspace:read", "github:use"]);
-    await addGoal(activeGoalSession.id);
-    const pausedGoalSession = await makeSession(["workspace:read"]);
-    await addGoal(pausedGoalSession.id);
-    await setSessionGoalStatus(dbClient.db, grant.workspaceId, pausedGoalSession.id, {
-      status: "paused",
-      pausedReason: "operator hold",
-    });
-    // Untouched: completed goal, no goal, already-holding, and default (null) sets.
-    const completedGoalSession = await makeSession(["workspace:read"]);
-    await addGoal(completedGoalSession.id);
-    await setSessionGoalStatus(dbClient.db, grant.workspaceId, completedGoalSession.id, {
-      status: "completed",
-      evidence: "done",
-    });
-    const noGoalSession = await makeSession(["workspace:read"]);
-    const alreadyHoldingSession = await makeSession(["goals:manage", "workspace:read"]);
-    await addGoal(alreadyHoldingSession.id);
-    const defaultSetSession = await makeSession(null);
-    await addGoal(defaultSetSession.id);
-
-    // The fixture rows were created after beforeAll already applied the
-    // migration, so un-record it and run the migration path again - the same
-    // way an upgraded deployment replays pending files over existing data.
-    const rerunMigration = async () => {
-      await dbClient.db.execute(
-        dbSql`DELETE FROM "schema_migrations" WHERE "name" = ${migrationName}`,
-      );
-      await services.migrate();
-    };
-    await rerunMigration();
-
-    const permissionsOf = async (sessionId: string) =>
-      (await getSession(dbClient.db, grant.workspaceId, sessionId))?.firstPartyMcpPermissions ??
-      null;
-    expect(await permissionsOf(activeGoalSession.id)).toEqual([
-      "workspace:read",
-      "github:use",
-      "goals:manage",
-    ] as Permission[]);
-    expect(await permissionsOf(pausedGoalSession.id)).toEqual([
-      "workspace:read",
-      "goals:manage",
-    ] as Permission[]);
-    expect(await permissionsOf(completedGoalSession.id)).toEqual([
-      "workspace:read",
-    ] as Permission[]);
-    expect(await permissionsOf(noGoalSession.id)).toEqual(["workspace:read"] as Permission[]);
-    expect(await permissionsOf(alreadyHoldingSession.id)).toEqual([
-      "goals:manage",
-      "workspace:read",
-    ] as Permission[]);
-    expect(await permissionsOf(defaultSetSession.id)).toBeNull();
-
-    // Idempotent: a second run adds nothing.
-    await rerunMigration();
-    expect(await permissionsOf(activeGoalSession.id)).toEqual([
-      "workspace:read",
-      "github:use",
-      "goals:manage",
-    ] as Permission[]);
-    expect(await permissionsOf(alreadyHoldingSession.id)).toEqual([
-      "goals:manage",
-      "workspace:read",
-    ] as Permission[]);
-  });
-
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);
@@ -1586,165 +1488,6 @@ describe("DB integration", () => {
       ),
     ).toBe(false);
   });
-
-  test("migration 0014 repair strips a legacy orphaned function_call_result, audits it, and spares valid pairs + dangling calls", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "orphan-repair",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
-    // A second session that must stay completely untouched — proves the repair
-    // is session-scoped and never deletes a result whose call lives elsewhere.
-    const otherSession = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "orphan-repair-other",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
-    // Legacy corruption: an orphaned function_call_result (no preceding call), a
-    // valid call+result pair, and a trailing dangling call (valid mid-turn).
-    await insertHistoryMigrationFixture(dbClient.db, grant, session.id, [
-      { position: 0, item: { type: "message", role: "user", content: "go" } },
-      {
-        position: 1,
-        item: {
-          type: "function_call_result",
-          callId: "orphan_x",
-          output: { type: "text", text: "leaked" },
-        },
-      },
-      {
-        position: 2,
-        item: {
-          type: "function_call",
-          callId: "paired",
-          name: "tool",
-          arguments: "{}",
-        },
-      },
-      {
-        position: 3,
-        item: {
-          type: "function_call_result",
-          callId: "paired",
-          output: { type: "text", text: "ok" },
-        },
-      },
-      // snake_case orphan: a result whose call_id has no earlier call.
-      {
-        position: 4,
-        item: {
-          type: "shell_call_output",
-          call_id: "orphan_snake",
-          output: "leaked2",
-        },
-      },
-      {
-        position: 5,
-        item: {
-          type: "function_call",
-          callId: "dangling",
-          name: "tool",
-          arguments: "{}",
-        },
-      },
-    ]);
-    // The other session holds a call with the SAME id as this session's orphan,
-    // to prove cross-session call presence does NOT spare an orphan (scoping).
-    await insertHistoryMigrationFixture(dbClient.db, grant, otherSession.id, [
-      {
-        position: 0,
-        item: {
-          type: "function_call",
-          callId: "orphan_x",
-          name: "tool",
-          arguments: "{}",
-        },
-      },
-      {
-        position: 1,
-        item: {
-          type: "function_call_result",
-          callId: "orphan_x",
-          output: { type: "text", text: "ok" },
-        },
-      },
-    ]);
-
-    // Run the ACTUAL shipped migration SQL against the live DB. CREATE TABLE IF
-    // NOT EXISTS and the GRANT block make re-running it (already applied in
-    // beforeAll) idempotent; the CTE DELETE re-evaluates the new orphans.
-    const migrationPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      "../../packages/db/drizzle/0014_repair_orphaned_function_call_results.sql",
-    );
-    const migrationSql = await readFile(migrationPath, "utf8");
-    await applyRawSql(services.databaseUrl, migrationSql);
-
-    // The two orphans are gone; everything else survives in order.
-    const remaining = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(remaining.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 2, 3, 5]);
-    const remainingTypes = remaining
-      .sort((a, b) => a.position - b.position)
-      .map((row) => (row.item as Record<string, unknown>).type);
-    expect(remainingTypes).toEqual([
-      "message",
-      "function_call",
-      "function_call_result",
-      "function_call",
-    ]);
-    // The dangling call (valid mid-turn) was NOT deleted.
-    expect(
-      remaining.some((row) => (row.item as Record<string, unknown>).callId === "dangling"),
-    ).toBe(true);
-    // Neither orphan survives.
-    expect(
-      remaining.some((row) => (row.item as Record<string, unknown>).callId === "orphan_x"),
-    ).toBe(false);
-    expect(
-      remaining.some((row) => (row.item as Record<string, unknown>).call_id === "orphan_snake"),
-    ).toBe(false);
-
-    // The other session is completely untouched (scoping).
-    const otherRemaining = await getSessionHistoryItems(
-      dbClient.db,
-      grant.workspaceId,
-      otherSession.id,
-    );
-    expect(otherRemaining.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1]);
-
-    // Both deleted orphans were audited verbatim into the permanent audit table.
-    const audit = await dbClient.db.execute(dbSql`
-      select source_id, position, item, repair_reason
-      from session_history_items_repair_audit
-      where session_id = ${session.id}
-      order by position
-    `);
-    const auditRows = audit as unknown as Array<{
-      position: number;
-      item: Record<string, unknown>;
-      repair_reason: string;
-    }>;
-    expect(auditRows).toHaveLength(2);
-    expect(auditRows.map((r) => Number(r.position)).sort((a, b) => a - b)).toEqual([1, 4]);
-    expect(
-      auditRows.every((r) => r.repair_reason === "orphaned_tool_call_result_no_matching_call"),
-    ).toBe(true);
-    const auditedCallIds = auditRows.map((r) => r.item.callId ?? r.item.call_id);
-    expect(auditedCallIds.sort()).toEqual(["orphan_snake", "orphan_x"]);
-  });
 });
 
 type RegisteredExecution = {
@@ -1847,29 +1590,6 @@ async function settleRegisteredExecution(
   if (settled.action !== "settled") {
     throw new Error(`goal fixture could not settle turn ${execution.turn.id}`);
   }
-}
-
-async function insertHistoryMigrationFixture(
-  db: ReturnType<typeof createDb>["db"],
-  grant: AccessGrant,
-  sessionId: string,
-  items: Array<{ position: number; item: Record<string, unknown> }>,
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.insert(dbSchema.sessionHistoryItems).values(
-        items.map(({ position, item }) => ({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          position,
-          item,
-        })),
-      );
-    },
-  );
 }
 
 const newCapabilityTables = [

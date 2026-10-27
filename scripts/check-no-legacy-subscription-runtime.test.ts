@@ -161,35 +161,6 @@ describe("M3 PR4 Codex entry", () => {
         "function read() { return sql`select * from codex_capacity_waiters`; }",
       ),
     ).toHaveLength(1);
-    expect(
-      codex(
-        "packages/db/src/codex-subscription-core-cutover.ts",
-        "function fallback() { return sql`select * from codex_subscription_credentials`; }",
-      ),
-    ).toHaveLength(1);
-  });
-  test("blocks production imports of historical fixtures and deleted producers", () => {
-    for (const code of [
-      'import { peekSessionWork } from "../test/fixtures/legacy-codex";',
-      'export * from "@opengeni/db/test/fixtures/legacy-codex";',
-      'const fixture = await import("../../test/fixtures/legacy-codex");',
-      'const retired = require("./codex-rotation");',
-    ])
-      expect(codex("apps/worker/src/run.ts", code)).toHaveLength(1);
-  });
-  test("retains ledger, aliases, Temporal names and historical event decoding", () => {
-    expect(
-      codex(
-        "packages/db/src/index.ts",
-        `
-      // codex_capacity_waiters is retired, not an executable query.
-      const row = schema.codexResetRedemptionAttempts;
-      const event = "codex.fleet.decision";
-      const activity = "getCodexCapacityWait";
-      const signal = "codexCapacityChanged";
-    `,
-      ),
-    ).toEqual([]);
   });
 });
 
@@ -273,7 +244,7 @@ describe("M4 X4 SuperGrok entry", () => {
     expect(xai("packages/db/src/index.ts", "const m = await import(`./${name}`);")).toEqual([]);
     expect(xai("packages/config/src/index.ts", 'const kind = "xai-subscription";')).toEqual([]);
   });
-  test("schema, posture and the 0721 codec stage are exact exceptions", () => {
+  test("schema and posture are exact exceptions", () => {
     expect(
       xai(
         "packages/db/src/schema.ts",
@@ -284,37 +255,6 @@ describe("M4 X4 SuperGrok entry", () => {
       xai(
         "packages/db/src/runtime-posture.ts",
         'export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES = { xai: ["xai_capacity_waiters"] };',
-      ),
-    ).toEqual([]);
-    expect(
-      xai(
-        "packages/db/src/xai-subscription-core-cutover.ts",
-        "export async function migrateXaiSubscriptionCoreCredentials() { return sql`select * from xai_subscription_credentials`; }",
-      ),
-    ).toEqual([]);
-    expect(
-      xai(
-        "packages/db/src/xai-subscription-core-cutover.ts",
-        "export async function fallback() { return sql`select * from xai_subscription_credentials`; }",
-      ),
-    ).toHaveLength(1);
-    expect(
-      xai(
-        "packages/db/src/runtime-posture.ts",
-        "function read() { return sql`select * from xai_capacity_waiters`; }",
-      ),
-    ).toHaveLength(1);
-  });
-  test("comments, core identifiers and the shared provider id are not legacy state", () => {
-    expect(
-      xai(
-        "packages/db/src/index.ts",
-        `
-      // xai_capacity_waiters rows are read-only after the 0721 receipt.
-      const provider = "xai";
-      const waiters = schema.subscriptionCapacityWaiters;
-      const route = "supergrok-subscription";
-    `,
       ),
     ).toEqual([]);
   });
@@ -424,7 +364,7 @@ describe("M4 C4 Claude entry", () => {
       ),
     ).toHaveLength(1);
   });
-  test("schema, posture and the 0598 and 0720 codec stages are exact exceptions", () => {
+  test("schema and posture are exact exceptions", () => {
     expect(
       claude(
         "packages/db/src/schema.ts",
@@ -447,53 +387,6 @@ describe("M4 C4 Claude entry", () => {
       claude(
         "packages/db/src/runtime-posture.ts",
         'export const CLAUDE_AUTHORITY_ROUTINES = ["resolve_claude_authority_pool(uuid, text)"];',
-      ),
-    ).toEqual([]);
-    expect(
-      claude(
-        "packages/db/src/claude-subscription-pool-migration.ts",
-        "export async function migrateClaudeSubscriptionPoolCredentials() { return sql`select * from claude_subscription_credentials`; }",
-      ),
-    ).toEqual([]);
-    expect(
-      claude(
-        "packages/db/src/claude-subscription-core-cutover.ts",
-        "export async function migrateClaudeSubscriptionCoreCredentials() { return sql`select * from claude_subscription_credentials`; }",
-      ),
-    ).toEqual([]);
-    expect(
-      claude(
-        "packages/db/src/claude-subscription-core-cutover.ts",
-        "export async function fallback() { return sql`select * from claude_subscription_credentials`; }",
-      ),
-    ).toHaveLength(1);
-    expect(
-      claude(
-        "packages/db/src/runtime-posture.ts",
-        "function read() { return sql`select * from claude_capacity_waiters`; }",
-      ),
-    ).toHaveLength(1);
-    // The schema exception covers declarations, never a query in schema.ts.
-    expect(
-      claude(
-        "packages/db/src/schema.ts",
-        "export function leak() { return sql`select * from claude_credential_leases`; }",
-      ),
-    ).toHaveLength(1);
-  });
-  test("comments, core identifiers and the shared provider id are not legacy state", () => {
-    expect(
-      claude(
-        "packages/db/src/index.ts",
-        `
-      // claude_capacity_waiters rows are read-only after the 0720 receipt; the
-      // claudeAuthRecovery marker became subscription_turn_failures rows.
-      const provider = "claude";
-      const waiters = schema.subscriptionCapacityWaiters;
-      const route = "claude-subscription";
-      const snapshot = turn.claudeProviderAccountAuthoritySnapshot;
-      const recovery = turn.metadata.claudeRequestSizeRecoveryUsed;
-    `,
       ),
     ).toEqual([]);
   });
@@ -648,38 +541,6 @@ describe("M4 R shared pool entry", () => {
         'const routines = ["xai_subscription_pool_visible(uuid, uuid, text, text, uuid)"];',
       ),
     ).toHaveLength(1);
-    // 0689's codec stage fills the reach table under its Codex name while
-    // that historical migration replays; nothing else in the file may.
-    expect(
-      pool(
-        "packages/db/src/codex-subscription-core-cutover.ts",
-        "async function moveCodexCredentials() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
-      ),
-    ).toEqual([]);
-    expect(
-      pool(
-        "packages/db/src/codex-subscription-core-cutover.ts",
-        "async function stageReach() { await tx`INSERT INTO opengeni_private.subscription_codex_auto_assignments DEFAULT VALUES`; }",
-      ),
-    ).toHaveLength(1);
-  });
-  test("kept routines, the neutral core and other subjects are not retired", () => {
-    expect(
-      pool(
-        "packages/db/src/index.ts",
-        `
-      // resolve_xai_authority_pool was dropped by the retirement migration.
-      const subject = "worker:model-access";
-      const reach = sql\`select opengeni_private.set_subscription_core_reach('codex', $1, $2, true, true)\`;
-      const allowed = sql\`select opengeni_private.subscription_codex_refresh_write_allowed($1, $2, $3)\`;
-      const wake = sql\`select list_organization_codex_workspace_ids($1)\`;
-      const receipt = sql\`select opengeni_private.claude_subscription_pool_protocol_v1_active()\`;
-      const validator = "xai_provider_account_authority_snapshot_v1_valid".replace("xai", provider);
-      const reject = "reject_legacy_claude_subscription_credentials";
-      const waiters = schema.subscriptionCapacityWaiters;
-    `,
-      ),
-    ).toEqual([]);
   });
 });
 

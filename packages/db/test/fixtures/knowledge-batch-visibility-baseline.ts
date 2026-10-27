@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
+import { historicalKnowledgeSql } from "./knowledge-historical";
 
 /** Capture the real pre-batch reader in a rolled-back disposable-fixture repair. */
 export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appUrl: string) {
-  const unified = await readFile(new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url), "utf8");
+  const unified = await historicalKnowledgeSql("knowledge_entry_read");
   const start = unified.indexOf("CREATE FUNCTION knowledge_entry_read(");
   const end = unified.indexOf("\nEND $$;", start);
   if (start < 0 || end < 0) throw new Error("Original Knowledge reader missing");
@@ -17,13 +17,9 @@ export async function installPreBatchKnowledgeBaseline(admin: postgres.Sql, appU
       await tx.unsafe(unified.slice(start, end + "\nEND $$;".length).replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
       // Replay only the discovery reader rewrite, not its historical drain or
       // unrelated source-writer changes, in this rolled-back fixture repair.
-      const discovery = await readFile(new URL("../../drizzle/0469_knowledge_source_discovery.sql", import.meta.url), "utf8");
-      const discoveryStart = discovery.indexOf("DO $migration$");
-      const discoveryEnd = discovery.indexOf("  definition := pg_get_functiondef('knowledge_validate_source(", discoveryStart);
-      if (discoveryStart < 0 || discoveryEnd < 0) throw new Error("Historical discovery reader rewrite missing");
-      await tx.unsafe(`${discovery.slice(discoveryStart, discoveryEnd)}\nEND $migration$;`);
-      await tx.unsafe(await readFile(new URL("../../drizzle/0640_knowledge_entry_created_since.sql", import.meta.url), "utf8"));
-      await tx.unsafe(await readFile(new URL("../../drizzle/0878_keyed_knowledge_visibility.sql", import.meta.url), "utf8"));
+      await tx.unsafe(await historicalKnowledgeSql("knowledge_source_discovery_reader"));
+      await tx.unsafe(await historicalKnowledgeSql("knowledge_entry_created_since"));
+      await tx.unsafe(await historicalKnowledgeSql("keyed_knowledge_visibility"));
       for (const [name, signature] of [
         ["knowledge_revision_visible", "uuid,uuid,uuid,boolean"],
         ["knowledge_entry_visible_body", "uuid,jsonb,boolean"],

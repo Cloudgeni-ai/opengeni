@@ -109,7 +109,7 @@ describe("Azure Speech recordings", () => {
     expect(spec.audioFormats).toEqual(["flac", "wav", "mp3"]);
     const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/flac", fileName: "t.flac" };
     const result = await provider.transcribe(
-      { audio, model: spec.model, language: "no", diarize: true, keyterms: ["Vatra"] },
+      { audio, model: spec.model, language: "no", diarize: true, keyterms: ["Acme"] },
       { accessToken: "token-1" },
     );
     expect(result.words).toHaveLength(5);
@@ -125,7 +125,7 @@ describe("Azure Speech recordings", () => {
         modelOptions: { timestamps: "word" },
       },
       locales: ["nb"],
-      phraseList: { phrases: ["Vatra"] },
+      phraseList: { phrases: ["Acme"] },
     });
     expect(calls[0]!.file.name).toBe("t.flac");
     expect(calls[1]!.headers.get("ocp-apim-subscription-key")).toBe("key-1");

@@ -167,14 +167,5 @@ export const LEGACY_XAI_RUNTIME: LegacySubscriptionRetirement = {
       reason:
         "Declarative deployed-schema RLS and privilege inventory, not provider decision queries.",
     },
-    "packages/db/src/xai-subscription-core-cutover.ts": {
-      declarations: [
-        "migrateXaiSubscriptionCoreCredentials",
-        "moveXaiCredentials",
-        "moveXaiCredentialRows",
-      ],
-      reason:
-        "SuperGrok cutover codec stage: decodes the legacy rows before the atomic scrub and receipt; never a request fallback.",
-    },
   },
 };
