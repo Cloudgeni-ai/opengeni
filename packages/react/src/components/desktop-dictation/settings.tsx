@@ -7,10 +7,12 @@ import {
   type DesktopDictationHistoryEntry,
   type DesktopDictationModifier,
   type DesktopDictationOutput,
+  type DesktopDictationPasteBlocker,
   type DesktopDictationPermissionId,
   type DesktopDictationProfile,
   type DesktopDictationSettings,
   type DesktopDictationShortcut,
+  type DesktopDictationShortcutProblem,
   type DesktopDictationStatus,
   type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
@@ -32,7 +34,7 @@ import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from ".
 const PROFILES_MAX = 8;
 const DETECT = "auto";
 const CUSTOM = "custom";
-/** Modifier keys held together that make a good shortcut on a Mac, Quedo's first. */
+/** Modifier keys held together that make a good shortcut on a Mac, the usual one first. */
 const CHORDS: DesktopDictationModifier[][] = [
   ["control", "fn"],
   ["option", "fn"],
@@ -280,8 +282,10 @@ export function DesktopDictationSettings({
                   recording={recordingFor === profile.id}
                   error={
                     (keysError?.profileId === profile.id ? keysError.message : null) ??
-                    status.shortcutErrors.find((item) => item.profileId === profile.id)?.message ??
-                    null
+                    shortcutProblemMessage(
+                      status.shortcutErrors.find((item) => item.profileId === profile.id)?.problem,
+                      t,
+                    )
                   }
                   languageOptions={languageOptions(profile.language)}
                   onRecord={(recording) => {
@@ -344,9 +348,7 @@ export function DesktopDictationSettings({
                 description={
                   status.paste.available
                     ? t("desktopDictation.settings.outputDescription")
-                    : t("desktopDictation.settings.pasteUnavailable", {
-                        reason: status.paste.reason ?? "",
-                      })
+                    : pasteBlockedMessage(status.paste.blocker, t)
                 }
                 controlWidth="select"
                 control={
@@ -657,4 +659,39 @@ function newProfileId(profiles: DesktopDictationProfile[]): string {
 /** What a shortcut is called: its language, or "Any language" when it detects one. */
 export function profileName(language: string | null, t: OpenGeniText): string {
   return language ? languageName(language, t.locale) : t("desktopDictation.settings.anyLanguage");
+}
+
+function shortcutProblemMessage(
+  problem: DesktopDictationShortcutProblem | undefined,
+  t: OpenGeniText,
+): string | null {
+  switch (problem) {
+    case "taken":
+      return t("desktopDictation.settings.shortcutTaken");
+    case "unsupported":
+      return t("desktopDictation.settings.shortcutUnsupported");
+    case "stopped":
+      return t("desktopDictation.settings.shortcutStopped");
+    case "failed":
+      return t("desktopDictation.settings.shortcutFailed");
+    default:
+      return null;
+  }
+}
+
+/** Why the text is copied instead of typed, and what would change that. */
+function pasteBlockedMessage(
+  blocker: DesktopDictationPasteBlocker | null,
+  t: OpenGeniText,
+): string {
+  switch (blocker) {
+    case "accessibility":
+      return t("desktopDictation.settings.pasteAccessibility");
+    case "xdotool":
+      return t("desktopDictation.settings.pasteXdotool");
+    case "wtype":
+      return t("desktopDictation.settings.pasteWtype");
+    default:
+      return t("desktopDictation.settings.pasteUnsupported");
+  }
 }

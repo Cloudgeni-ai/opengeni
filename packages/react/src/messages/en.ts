@@ -1595,11 +1595,26 @@ export const englishMessages = {
   "desktopDictation.settings.pairHold": "Hold both keys while you speak, and let go to finish.",
   "desktopDictation.settings.pairToggle":
     "Press both keys together, left and right, to start. Press them again to finish.",
-  "desktopDictation.settings.pasteUnavailable": "{reason} The text is copied instead.",
+  "desktopDictation.settings.pasteAccessibility":
+    "Allow Accessibility so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteUnsupported":
+    "This computer can't type into other apps, so the text is copied.",
+  "desktopDictation.settings.pasteWtype":
+    "Install wtype or ydotool so {product} can type into other apps. Until then, the text is copied.",
+  "desktopDictation.settings.pasteXdotool":
+    "Install xdotool so {product} can type into other apps. Until then, the text is copied.",
   "desktopDictation.settings.recordKeys": "Press the key combination now. Esc cancels.",
   "desktopDictation.settings.remove": "Remove shortcut",
   "desktopDictation.settings.saveFailed": "Couldn't save the change. Try again.",
+  "desktopDictation.settings.shortcutFailed":
+    "The shortcut couldn't be set up. Turn dictation off and on again.",
   "desktopDictation.settings.shortcutLabel": "Shortcut",
+  "desktopDictation.settings.shortcutStopped":
+    "The shortcut stopped working. Turn dictation off and on again.",
+  "desktopDictation.settings.shortcutTaken":
+    "That key combination is taken or not allowed. Choose another.",
+  "desktopDictation.settings.shortcutUnsupported":
+    "This computer can't use those keys alone. Choose a key combination.",
   "desktopDictation.settings.title": "Dictation",
   "desktopDictation.settings.toggleLabel": "Dictate from anywhere",
   "desktopDictation.settings.toggleOff": "Off. Turn on to dictate into any app with a shortcut.",

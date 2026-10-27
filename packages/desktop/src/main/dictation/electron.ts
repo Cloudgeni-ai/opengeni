@@ -11,6 +11,7 @@ import { MacDictation } from "./mac";
 import type { DictationPlatform } from "./platform";
 import { DictationSettingsStore } from "./settings";
 import { WindowsDictation } from "./windows";
+import { ENGLISH_DICTATION_WORDS, type DictationWords } from "./words";
 
 /** Each clipboard entry as its formats, read in full so it can be written back. */
 type ClipboardSnapshot = Record<string, Blob | Electron.ClipboardBookmark>[];
@@ -41,6 +42,12 @@ export function electronClipboard(): DictationClipboard<ClipboardSnapshot> {
 export interface CreateDesktopDictationOptions {
   /** The app's name, as people know it ("Open Acme to dictate"). */
   productName: string;
+  /**
+   * What dictation says outside the page (the window at the bottom of the
+   * screen), in the app's language; read each time, so it follows a change.
+   * English by default.
+   */
+  words?: () => DictationWords;
   /** Where the settings and recent dictations are kept: `app.getPath("userData")`. */
   dataDir: string;
   /** Bring the app's window to the front. */
@@ -61,6 +68,7 @@ export interface CreateDesktopDictationOptions {
  */
 export function createDesktopDictation(options: CreateDesktopDictationOptions): Dictation {
   const store = new DictationSettingsStore(options.dataDir, process.platform);
+  const words = options.words ?? (() => ENGLISH_DICTATION_WORDS);
   let dictation: Dictation | null = null;
   const platform =
     options.platform !== undefined
@@ -83,8 +91,9 @@ export function createDesktopDictation(options: CreateDesktopDictationOptions): 
     store,
     globalShortcut,
     clipboard: electronClipboard(),
-    hud: new DictationHud(),
+    hud: new DictationHud(process.platform, words),
     productName: options.productName,
+    words,
     reveal: options.reveal,
     ...(options.chooseTarget ? { chooseTarget: options.chooseTarget } : {}),
     ...(options.wake ? { wake: options.wake } : {}),

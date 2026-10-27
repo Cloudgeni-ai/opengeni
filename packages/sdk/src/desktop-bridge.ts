@@ -280,6 +280,28 @@ export interface DesktopDictationSettings {
 /** The system permissions dictation needs, where the system asks for them. */
 export type DesktopDictationPermissionId = "accessibility";
 
+/** Why text can't be typed into other apps on this computer, so it is only copied. */
+export type DesktopDictationPasteBlocker =
+  /** macOS: Accessibility isn't allowed for the app. */
+  | "accessibility"
+  /** Linux on X11: xdotool isn't installed. */
+  | "xdotool"
+  /** Linux on Wayland: neither wtype nor ydotool is installed. */
+  | "wtype"
+  /** This system has no way to. */
+  | "unsupported";
+
+/** Why a shortcut that is on doesn't work. */
+export type DesktopDictationShortcutProblem =
+  /** Another app owns the key combination, or the system refuses it. */
+  | "taken"
+  /** This computer can't watch those keys on their own. */
+  | "unsupported"
+  /** It stopped working; turning dictation off and on again sets it up again. */
+  | "stopped"
+  /** It couldn't be set up. */
+  | "failed";
+
 export interface DesktopDictationStatus {
   settings: DesktopDictationSettings;
   /** Dictation works in this app on this computer. */
@@ -292,9 +314,9 @@ export interface DesktopDictationStatus {
   /** Where the system asks (macOS): whether each permission is allowed. */
   permissions: { id: DesktopDictationPermissionId; granted: boolean }[];
   /** Each shortcut that is on but could not be set up (another app owns it). */
-  shortcutErrors: { profileId: string; message: string }[];
+  shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[];
   /** Whether text can be typed into other apps here; otherwise it is only copied. */
-  paste: { available: boolean; reason: string | null };
+  paste: { available: boolean; blocker: DesktopDictationPasteBlocker | null };
   /** A signed-in page is ready to record; dictation waits for one. */
   ready: boolean;
 }

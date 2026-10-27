@@ -8,12 +8,17 @@ import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 import type { DesktopDictationPermissionId } from "../../contract";
-import { DictationPasteError, type DictationPaste, type DictationPlatform } from "./platform";
+import {
+  DictationPasteError,
+  type DictationPaste,
+  type DictationPasteSupport,
+  type DictationPlatform,
+} from "./platform";
 
 /** How the text is pasted on this desktop, or why it can't be. */
 export type LinuxPasteTool =
   | { tool: "xdotool" | "wtype" | "ydotool"; path: string }
-  | { tool: null; reason: string };
+  | { tool: null; blocker: "xdotool" | "wtype" };
 
 export function findOnPath(name: string, path = process.env.PATH ?? ""): string | null {
   for (const directory of path.split(delimiter)) {
@@ -34,12 +39,8 @@ export function linuxPasteTool(
     const path = find(tool);
     if (path) return { tool, path };
   }
-  return {
-    tool: null,
-    reason: wayland
-      ? "Install wtype or ydotool so dictation can type into other apps. Until then, the text is copied."
-      : "Install xdotool so dictation can type into other apps. Until then, the text is copied.",
-  };
+  // What to install: the X11 tool, or the Wayland ones.
+  return { tool: null, blocker: wayland ? "wtype" : "xdotool" };
 }
 
 /** The paste tool's arguments: Control-V, with any held modifiers let go. */
@@ -63,11 +64,11 @@ export class LinuxDictation implements DictationPlatform {
 
   async requestPermission(): Promise<void> {}
 
-  async pasteSupport(): Promise<{ available: boolean; reason: string | null }> {
+  async pasteSupport(): Promise<DictationPasteSupport> {
     const found = this.tool();
     return found.tool
-      ? { available: true, reason: null }
-      : { available: false, reason: found.reason };
+      ? { available: true, blocker: null }
+      : { available: false, blocker: found.blocker };
   }
 
   preparePaste(): DictationPaste {
@@ -76,11 +77,11 @@ export class LinuxDictation implements DictationPlatform {
         new Promise<void>((resolve, reject) => {
           const found = this.tool();
           if (!found.tool) {
-            reject(new DictationPasteError(found.reason));
+            reject(new DictationPasteError(found.blocker));
             return;
           }
           execFile(found.path, linuxPasteArguments(found.tool), { timeout: 5_000 }, (error) => {
-            if (error) reject(new DictationPasteError("Couldn't paste the text."));
+            if (error) reject(new DictationPasteError());
             else resolve();
           });
         }),

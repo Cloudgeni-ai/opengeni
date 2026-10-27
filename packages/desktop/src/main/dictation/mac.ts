@@ -17,6 +17,7 @@ import {
   type DictationModifierEvents,
   type DictationModifierWatch,
   type DictationPaste,
+  type DictationPasteSupport,
   type DictationPlatform,
 } from "./platform";
 
@@ -117,14 +118,11 @@ export class MacDictation implements DictationPlatform {
     this.watchForGrant(id);
   }
 
-  async pasteSupport(): Promise<{ available: boolean; reason: string | null }> {
+  async pasteSupport(): Promise<DictationPasteSupport> {
     const granted = await this.accessibility("check").catch(() => false);
     return granted
-      ? { available: true, reason: null }
-      : {
-          available: false,
-          reason: "Allow Accessibility so dictation can type into other apps.",
-        };
+      ? { available: true, blocker: null }
+      : { available: false, blocker: "accessibility" };
   }
 
   preparePaste(): DictationPaste {
@@ -132,13 +130,8 @@ export class MacDictation implements DictationPlatform {
       stdio: ["pipe", "pipe", "ignore"],
     });
     return helperPaste(child, (stdout) => {
-      if (stdout.includes('"accessibility"')) {
-        throw new DictationPasteError(
-          "Allow Accessibility so dictation can type into other apps.",
-          "accessibility",
-        );
-      }
-      if (!stdout.includes('"ok":true')) throw new DictationPasteError("Couldn't paste the text.");
+      if (stdout.includes('"accessibility"')) throw new DictationPasteError("accessibility");
+      if (!stdout.includes('"ok":true')) throw new DictationPasteError();
     });
   }
 
@@ -248,14 +241,14 @@ export function helperPaste(
   let used = false;
   return {
     paste: async () => {
-      if (used) throw new DictationPasteError("Couldn't paste the text.");
+      if (used) throw new DictationPasteError();
       used = true;
       const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
       try {
         child.stdin?.end("paste\n");
         await exited;
       } catch {
-        throw new DictationPasteError("Couldn't paste the text.");
+        throw new DictationPasteError();
       } finally {
         clearTimeout(timer);
       }

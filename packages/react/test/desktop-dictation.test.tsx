@@ -52,7 +52,12 @@ const SETTINGS: DesktopDictationSettings = {
 
 /** The app's side of dictation: what it asks the page, and what the page reports. */
 function fakeApp(
-  options: { settings?: Partial<DesktopDictationSettings>; accessibility?: boolean } = {},
+  options: {
+    settings?: Partial<DesktopDictationSettings>;
+    accessibility?: boolean;
+    shortcutErrors?: DesktopDictationStatus["shortcutErrors"];
+    paste?: DesktopDictationStatus["paste"];
+  } = {},
 ) {
   const reports: DesktopDictationReport[] = [];
   const updates: Partial<DesktopDictationSettings>[] = [];
@@ -67,8 +72,8 @@ function fakeApp(
     modifierPairs: ["command", "option", "control", "shift"],
     modifierChords: true,
     permissions: [{ id: "accessibility", granted: options.accessibility ?? false }],
-    shortcutErrors: [],
-    paste: { available: true, reason: null },
+    shortcutErrors: options.shortcutErrors ?? [],
+    paste: options.paste ?? { available: true, blocker: null },
     ready: listener !== null,
   });
   const dictation: DesktopDictation = {
@@ -344,6 +349,19 @@ describe("DesktopDictationSettings", () => {
     mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
     await waitFor(() => mounted!.container.textContent?.includes("Recent dictations") ?? false);
     expect(mounted.container.textContent).toContain("Remember the milk");
+  });
+
+  test("says in the page's words why a shortcut or typing doesn't work", async () => {
+    const app = fakeApp({
+      settings: { enabled: true },
+      shortcutErrors: [{ profileId: "default", problem: "taken" }],
+      paste: { available: false, blocker: "xdotool" },
+    });
+    mounted = await renderComponent(<DictationSettingsView dictation={app.dictation} />);
+    await waitFor(() => mounted!.container.textContent?.includes("Shortcut") ?? false);
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("That key combination is taken or not allowed. Choose another.");
+    expect(text).toContain("Install xdotool so");
   });
 
   test("renders nothing outside an app that offers dictation", async () => {

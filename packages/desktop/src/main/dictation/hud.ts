@@ -11,6 +11,7 @@ import {
   type DictationHudState,
 } from "./hud-state";
 import { DICTATION_HUD_HTML } from "./hud-page";
+import { ENGLISH_DICTATION_WORDS, type DictationWords } from "./words";
 
 const HEIGHT = 64;
 const MIN_WIDTH = 120;
@@ -34,7 +35,11 @@ export class DictationHud implements DictationHudView {
   /** The display the pill stays on while it is showing. */
   private displayId: number | null = null;
 
-  constructor(private readonly platform: NodeJS.Platform = process.platform) {}
+  constructor(
+    private readonly platform: NodeJS.Platform = process.platform,
+    /** The pill's words, in the app's language. */
+    private readonly words: () => DictationWords = () => ENGLISH_DICTATION_WORDS,
+  ) {}
 
   onAction(listener: (action: DictationHudAction) => void): void {
     this.listener = listener;
@@ -78,7 +83,7 @@ export class DictationHud implements DictationHudView {
       alwaysOnTop: true,
       acceptFirstMouse: true,
       ...(this.platform === "darwin" ? { type: "panel" as const } : {}),
-      title: "Dictation",
+      title: this.words().title,
       webPreferences: {
         sandbox: true,
         contextIsolation: true,
@@ -117,8 +122,19 @@ export class DictationHud implements DictationHudView {
     const window = this.ensure();
     await this.loaded;
     if (this.state !== state || window.isDestroyed()) return;
+    const words = this.words();
+    const labels = {
+      starting: words.starting,
+      transcribing: words.transcribing,
+      finish: words.finish,
+      cancel: words.cancel,
+      close: words.close,
+      retry: words.retry,
+      allow: words.allow,
+      open: words.open,
+    };
     const measured = (await window.webContents.executeJavaScript(
-      `render(${JSON.stringify(state)})`,
+      `render(${JSON.stringify(state)}, ${JSON.stringify(labels)})`,
     )) as unknown;
     if (this.state !== state || window.isDestroyed()) return;
     const width = Math.min(

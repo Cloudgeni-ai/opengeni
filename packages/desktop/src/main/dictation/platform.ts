@@ -10,6 +10,7 @@
 
 import type {
   DesktopAppShotModifier,
+  DesktopDictationPasteBlocker,
   DesktopDictationPermissionId,
   DesktopDictationShortcut,
   DesktopPlatform,
@@ -44,12 +45,17 @@ export interface DictationPaste {
 
 export class DictationPasteError extends Error {
   constructor(
-    message: string,
-    /** The permission that would let it paste, where the system asks for one. */
-    readonly permission?: DesktopDictationPermissionId,
+    /** What would let it paste; null when it failed for another reason. */
+    readonly blocker: DesktopDictationPasteBlocker | null = null,
   ) {
-    super(message);
+    super(blocker ? `Can't paste here (${blocker}).` : "Couldn't paste the text.");
   }
+}
+
+/** Whether text can be pasted into other apps, and if not, what's missing. */
+export interface DictationPasteSupport {
+  available: boolean;
+  blocker: DesktopDictationPasteBlocker | null;
 }
 
 export interface DictationPlatform {
@@ -62,8 +68,8 @@ export interface DictationPlatform {
   permissions(): Promise<{ id: DesktopDictationPermissionId; granted: boolean }[]>;
   /** The system prompt, or the place in the system's settings to allow it. */
   requestPermission(id: DesktopDictationPermissionId): Promise<void>;
-  /** Whether text can be pasted into other apps here, and if not, why in a sentence. */
-  pasteSupport(): Promise<{ available: boolean; reason: string | null }>;
+  /** Whether text can be pasted into other apps here, and if not, what's missing. */
+  pasteSupport(): Promise<DictationPasteSupport>;
   /** Get ready to paste; the paste itself follows once the text is on the clipboard. */
   preparePaste(): DictationPaste;
   /**

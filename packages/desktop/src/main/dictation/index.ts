@@ -17,6 +17,7 @@ import {
   type DesktopDictationReport,
   type DesktopDictationRequest,
   type DesktopDictationSettings,
+  type DesktopDictationShortcutProblem,
   type DesktopDictationStatus,
 } from "../../contract";
 import type { DictationHudAction, DictationHudState } from "./hud-state";
@@ -27,6 +28,7 @@ import {
   type DictationPlatform,
 } from "./platform";
 import { mergeDictationSettings } from "./settings";
+import { ENGLISH_DICTATION_WORDS, fillDictationWords, type DictationWords } from "./words";
 
 export {
   DICTATION_HISTORY_MAX,
@@ -99,8 +101,10 @@ export interface DictationDeps {
   };
   clipboard: DictationClipboard;
   hud: DictationHudView;
-  /** The app's name, for "Open Acme to dictate". */
+  /** The app's name, for "Open Acme and sign in to dictate". */
   productName: string;
+  /** What dictation says outside the page, in the app's language. English by default. */
+  words?: () => DictationWords;
   /** Bring the app's window to the front. */
   reveal(): void;
   /**
@@ -136,7 +140,7 @@ interface Active {
 
 export class Dictation {
   private settings: DesktopDictationSettings;
-  private shortcutErrors: { profileId: string; message: string }[] = [];
+  private shortcutErrors: { profileId: string; problem: DesktopDictationShortcutProblem }[] = [];
   private accelerators: string[] = [];
   private stopWatching: (() => void) | null = null;
   /** Each settings change; a slower earlier setup that finishes late is undone. */
@@ -189,8 +193,8 @@ export class Dictation {
       permissions: platform ? await platform.permissions().catch(() => []) : [],
       shortcutErrors: this.settings.enabled ? [...this.shortcutErrors] : [],
       paste: platform
-        ? await platform.pasteSupport().catch(() => ({ available: false, reason: null }))
-        : { available: false, reason: null },
+        ? await platform.pasteSupport().catch(() => ({ available: false, blocker: null }))
+        : { available: false, blocker: "unsupported" as const },
       ready: this.liveTargets().length > 0,
     };
   }
@@ -227,7 +231,7 @@ export class Dictation {
     if (index >= 0) this.targets.splice(index, 1);
     if (listening) this.targets.push(target);
     else if (this.active?.target === target && this.active.phase !== "failed") {
-      this.fail("Dictation stopped because the page closed. Try again.", false);
+      this.fail(this.words().pageClosed, false);
     }
     if (listening && this.waiting && !this.active) {
       const { profileId } = this.waiting;
@@ -328,7 +332,7 @@ export class Dictation {
     if (!target) {
       const wake = this.deps.wake;
       if (!wake || hold) {
-        this.notice("info", `Open ${this.deps.productName} and sign in to dictate.`, ["open"]);
+        this.notice("info", this.fill(this.words().signIn), ["open"]);
         return;
       }
       // Open a page in the background, and start once it is ready to record.
@@ -338,7 +342,7 @@ export class Dictation {
         timer: setTimeout(() => {
           this.waiting = null;
           if (!this.active) {
-            this.notice("info", `Open ${this.deps.productName} and sign in to dictate.`, ["open"]);
+            this.notice("info", this.fill(this.words().signIn), ["open"]);
           }
         }, DICTATION_START_TIMEOUT_MS),
       };
@@ -372,7 +376,7 @@ export class Dictation {
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.phase === "starting") {
           this.send({ kind: "cancel", dictationId: id });
-          this.fail(`${this.deps.productName} didn't start recording. Try again.`, false);
+          this.fail(this.fill(this.words().noStart), false);
         }
       }, DICTATION_START_TIMEOUT_MS),
     };
@@ -451,7 +455,7 @@ export class Dictation {
     this.finish();
     if (!text) {
       paste?.cancel();
-      this.notice("info", "Didn't catch any speech.");
+      this.notice("info", this.words().noSpeech);
       return;
     }
     this.deps.store.remember({
@@ -470,16 +474,15 @@ export class Dictation {
         .writeText(text)
         .catch((caught: unknown) => this.deps.log?.("dictation copy failed", caught));
       if (output === "copy") {
-        this.notice("success", "Copied.");
+        this.notice("success", this.words().copiedOnly);
         return;
       }
-      const support = await this.deps.platform
-        ?.pasteSupport()
-        .catch(() => ({ available: false, reason: null }));
+      const support = await this.deps.platform?.pasteSupport().catch(() => null);
+      const blocker = support?.blocker ?? "unsupported";
       this.notice(
         "error",
-        `Copied. ${support?.reason ?? "This computer can't type into other apps."}`,
-        this.deps.platform?.platform === "macos" ? ["allow"] : [],
+        this.copiedBecause(this.words().pasteBlocked[blocker]),
+        blocker === "accessibility" ? ["allow"] : [],
       );
       return;
     }
@@ -489,9 +492,13 @@ export class Dictation {
       await paste.paste();
     } catch (caught) {
       this.deps.log?.("dictation paste failed", caught);
-      const permission = caught instanceof DictationPasteError ? caught.permission : undefined;
-      const reason = caught instanceof Error ? caught.message : "Couldn't paste the text.";
-      this.notice("error", `Copied. ${reason}`, permission ? ["allow"] : []);
+      const blocker = caught instanceof DictationPasteError ? caught.blocker : null;
+      const words = this.words();
+      this.notice(
+        "error",
+        this.copiedBecause(blocker ? words.pasteBlocked[blocker] : words.pasteFailed),
+        blocker === "accessibility" ? ["allow"] : [],
+      );
       return;
     }
     this.show({ kind: "hidden" });
@@ -617,6 +624,20 @@ export class Dictation {
     return this.settings.profiles.length > 1 ? profile.name : null;
   }
 
+  private words(): DictationWords {
+    return this.deps.words?.() ?? ENGLISH_DICTATION_WORDS;
+  }
+
+  /** The app's name in a sentence. */
+  private fill(template: string): string {
+    return fillDictationWords(template, { product: this.deps.productName });
+  }
+
+  /** The text is on the clipboard because it couldn't be typed. */
+  private copiedBecause(reason: string): string {
+    return fillDictationWords(this.words().copied, { reason });
+  }
+
   private target(): DictationTarget | undefined {
     const live = this.liveTargets();
     return this.deps.chooseTarget?.(live) ?? live.at(-1);
@@ -691,7 +712,7 @@ export class Dictation {
         else {
           this.shortcutErrors.push({
             profileId: profile.id,
-            message: "That key combination is taken or not allowed. Choose another.",
+            problem: "taken",
           });
         }
         continue;
@@ -704,7 +725,7 @@ export class Dictation {
       if (!supported) {
         this.shortcutErrors.push({
           profileId: profile.id,
-          message: "This computer can't use those keys alone. Choose a key combination.",
+          problem: "unsupported",
         });
         continue;
       }
@@ -725,7 +746,7 @@ export class Dictation {
           this.shortcutErrors.push(
             ...watches.map((watch) => ({
               profileId: watch.id,
-              message: "The shortcut stopped working. Turn dictation off and on again.",
+              problem: "stopped" as const,
             })),
           );
           this.changed();
@@ -742,7 +763,7 @@ export class Dictation {
       this.shortcutErrors.push(
         ...watches.map((watch) => ({
           profileId: watch.id,
-          message: "The shortcut couldn't be set up. Turn dictation off and on again.",
+          problem: "failed" as const,
         })),
       );
     }

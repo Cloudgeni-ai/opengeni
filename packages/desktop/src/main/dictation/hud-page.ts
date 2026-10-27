@@ -72,7 +72,9 @@ const ICONS = {
   error: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.8v3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="11.2" r="0.95" fill="currentColor"/></svg>',
   info: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 7.4v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="4.9" r="0.95" fill="currentColor"/></svg>',
 };
-const NAMES = { retry: "Try again", allow: "Allow", open: "Open" };
+const BUTTONS = ["retry", "allow", "open"];
+// Set by every render, in the app's language.
+let words = {};
 let kind = null;
 let ticking = null;
 let startedAt = 0;
@@ -92,7 +94,7 @@ function iconButton(name, icon, title) {
   return button;
 }
 function textButton(name, primary) {
-  const button = el("button", primary ? "primary" : "", NAMES[name]);
+  const button = el("button", primary ? "primary" : "", words[name]);
   button.addEventListener("click", () => act(name));
   return button;
 }
@@ -108,7 +110,8 @@ function setLevel(level) {
   });
 }
 function width() { return Math.ceil(pill.getBoundingClientRect().width) + 24; }
-function render(state) {
+function render(state, labels) {
+  if (labels) words = labels;
   // A level update while recording changes only the bars.
   if (state.kind === "recording" && kind === "recording") {
     startedAt = state.startedAt;
@@ -121,9 +124,9 @@ function render(state) {
   pill.textContent = "";
   pill.className = "";
   if (state.kind === "starting") {
-    pill.append(el("span", "dot idle"), el("span", "", "Starting…"));
+    pill.append(el("span", "dot idle"), el("span", "", words.starting));
     if (state.label) pill.append(el("span", "label", state.label));
-    pill.append(iconButton("cancel", "close", "Cancel (Esc)"));
+    pill.append(iconButton("cancel", "close", words.cancel));
   } else if (state.kind === "recording") {
     startedAt = state.startedAt;
     const bars = el("span", "bars");
@@ -132,23 +135,23 @@ function render(state) {
     pill.append(el("span", "dot live"), bars, time);
     if (state.label) pill.append(el("span", "label", state.label));
     const actions = el("span", "actions");
-    if (!state.hold) actions.append(iconButton("stop", "stop", "Finish and type it"));
-    actions.append(iconButton("cancel", "close", "Cancel (Esc)"));
+    if (!state.hold) actions.append(iconButton("stop", "stop", words.finish));
+    actions.append(iconButton("cancel", "close", words.cancel));
     pill.append(actions);
     setLevel(state.level);
     ticking = setInterval(() => { time.textContent = elapsed(); }, 250);
   } else if (state.kind === "transcribing") {
-    pill.append(el("span", "spinner"), el("span", "", "Transcribing…"));
+    pill.append(el("span", "spinner"), el("span", "", words.transcribing));
     if (state.label) pill.append(el("span", "label", state.label));
-    pill.append(iconButton("cancel", "close", "Cancel (Esc)"));
+    pill.append(iconButton("cancel", "close", words.cancel));
   } else if (state.kind === "notice") {
     const glyph = el("span", "glyph " + state.tone);
     glyph.innerHTML = ICONS[state.tone];
     pill.append(glyph, el("span", "message", state.message));
-    const buttons = state.actions.filter((name) => NAMES[name]);
+    const buttons = state.actions.filter((name) => BUTTONS.includes(name));
     const actions = el("span", "actions");
     buttons.forEach((name, index) => actions.append(textButton(name, index === 0)));
-    if (state.actions.includes("dismiss")) actions.append(iconButton("dismiss", "close", "Close"));
+    if (state.actions.includes("dismiss")) actions.append(iconButton("dismiss", "close", words.close));
     if (actions.childElementCount > 0) pill.append(actions);
     else pill.className = "plain";
   }

@@ -10,6 +10,7 @@
 // from `@opengeni/react/desktop-dictation`.
 
 export * from "./index";
+export { ENGLISH_DICTATION_WORDS, fillDictationWords, type DictationWords } from "./words";
 export { DictationHud, hudAction } from "./hud";
 export { handleDictationIpc, parseDictationReport } from "./ipc";
 export { createDesktopDictation, electronClipboard } from "./electron";

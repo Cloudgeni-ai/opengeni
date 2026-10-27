@@ -7,7 +7,12 @@ import { spawn } from "node:child_process";
 
 import type { DesktopDictationPermissionId } from "../../contract";
 import { helperPaste } from "./mac";
-import { DictationPasteError, type DictationPaste, type DictationPlatform } from "./platform";
+import {
+  DictationPasteError,
+  type DictationPaste,
+  type DictationPasteSupport,
+  type DictationPlatform,
+} from "./platform";
 
 const PASTE_SCRIPT = [
   "Add-Type -AssemblyName System.Windows.Forms",
@@ -30,8 +35,8 @@ export class WindowsDictation implements DictationPlatform {
 
   async requestPermission(): Promise<void> {}
 
-  async pasteSupport(): Promise<{ available: boolean; reason: string | null }> {
-    return { available: true, reason: null };
+  async pasteSupport(): Promise<DictationPasteSupport> {
+    return { available: true, blocker: null };
   }
 
   preparePaste(): DictationPaste {
@@ -49,7 +54,7 @@ export class WindowsDictation implements DictationPlatform {
       { stdio: ["pipe", "pipe", "ignore"], windowsHide: true },
     );
     return helperPaste(child, (stdout) => {
-      if (!stdout.includes('"ok":true')) throw new DictationPasteError("Couldn't paste the text.");
+      if (!stdout.includes('"ok":true')) throw new DictationPasteError();
     });
   }
 }

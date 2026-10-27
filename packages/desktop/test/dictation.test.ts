@@ -30,6 +30,7 @@ import {
 import { parseDictationReport } from "../src/main/dictation/ipc";
 import { linuxPasteArguments, linuxPasteTool } from "../src/main/dictation/linux";
 import { macKeyWatchArgument, parseKeyLine } from "../src/main/dictation/mac";
+import { ENGLISH_DICTATION_WORDS, type DictationWords } from "../src/main/dictation/words";
 
 // Imports are hoisted: the window module loads Electron, so it waits for the mock.
 const { hudAction } = await import("../src/main/dictation/hud");
@@ -42,6 +43,7 @@ function harness(
     settings?: Partial<DesktopDictationSettings>;
     wake?: boolean;
     platform?: Partial<DictationPlatform>;
+    words?: DictationWords;
   } = {},
 ) {
   let settings: DesktopDictationSettings = {
@@ -104,7 +106,7 @@ function harness(
     modifierChords: true,
     permissions: async () => [{ id: "accessibility", granted: true }],
     requestPermission: async () => undefined,
-    pasteSupport: async () => ({ available: true, reason: null }),
+    pasteSupport: async () => ({ available: true, blocker: null }),
     preparePaste: () => {
       paste.prepared += 1;
       return {
@@ -149,6 +151,7 @@ function harness(
       revealed += 1;
     },
     ...(options.wake ? { wake: () => void (woken += 1) } : {}),
+    ...(options.words ? { words: () => options.words! } : {}),
     createId: () => `d${++ids}`,
   });
   return {
@@ -328,6 +331,42 @@ describe("dictation", () => {
     h.dictation.stop();
   });
 
+  test("an app in another language gives its own words", async () => {
+    const words: DictationWords = {
+      ...ENGLISH_DICTATION_WORDS,
+      signIn: "Åpne {product} og logg inn for å diktere.",
+      copied: "Kopiert. {reason}",
+      pasteBlocked: {
+        ...ENGLISH_DICTATION_WORDS.pasteBlocked,
+        accessibility: "Slå på Tilgjengelighet.",
+      },
+    };
+    const h = harness({ words });
+    h.dictation.start();
+    await tick();
+    tap(h.keys);
+    expect(h.last()).toMatchObject({ message: "Åpne Opengeni og logg inn for å diktere." });
+    h.hudAction("dismiss");
+    h.paste.fail = new DictationPasteError("accessibility");
+    h.dictation.listen(h.target, true);
+    tap(h.keys);
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "recording",
+      startedAt: 1,
+      level: 0.5,
+    });
+    tap(h.keys);
+    h.dictation.report(h.target, { dictationId: "d1", phase: "done", text: "Hei" });
+    await wait(10);
+    expect(h.last()).toMatchObject({
+      tone: "error",
+      message: "Kopiert. Slå på Tilgjengelighet.",
+      actions: ["allow", "dismiss"],
+    });
+    h.dictation.stop();
+  });
+
   test("a failure that kept the speech offers Retry; Dismiss keeps it for the composer", async () => {
     const h = harness();
     h.dictation.start();
@@ -384,10 +423,7 @@ describe("dictation", () => {
 
   test("a paste the system refused leaves the text copied and offers to allow it", async () => {
     const h = harness();
-    h.paste.fail = new DictationPasteError(
-      "Allow Accessibility to type into other apps.",
-      "accessibility",
-    );
+    h.paste.fail = new DictationPasteError("accessibility");
     h.dictation.start();
     await tick();
     h.dictation.listen(h.target, true);
@@ -405,7 +441,7 @@ describe("dictation", () => {
     expect(h.last()).toEqual({
       kind: "notice",
       tone: "error",
-      message: "Copied. Allow Accessibility to type into other apps.",
+      message: "Copied. Allow Accessibility so dictation can type into other apps.",
       actions: ["allow", "dismiss"],
     });
     h.dictation.stop();
@@ -527,12 +563,7 @@ describe("dictation", () => {
     h.dictation.start();
     await tick();
     const status = await h.dictation.status();
-    expect(status.shortcutErrors).toEqual([
-      {
-        profileId: "default",
-        message: "That key combination is taken or not allowed. Choose another.",
-      },
-    ]);
+    expect(status.shortcutErrors).toEqual([{ profileId: "default", problem: "taken" }]);
     h.dictation.stop();
   });
 
@@ -670,8 +701,14 @@ describe("dictation platforms", () => {
       tool: "ydotool",
       path: "/usr/bin/ydotool",
     });
-    const none = linuxPasteTool({ XDG_SESSION_TYPE: "x11" }, found([]));
-    expect(none.tool).toBeNull();
+    expect(linuxPasteTool({ XDG_SESSION_TYPE: "x11" }, found([]))).toEqual({
+      tool: null,
+      blocker: "xdotool",
+    });
+    expect(linuxPasteTool({ WAYLAND_DISPLAY: "wayland-0" }, found([]))).toEqual({
+      tool: null,
+      blocker: "wtype",
+    });
     expect(linuxPasteArguments("xdotool")).toEqual(["key", "--clearmodifiers", "ctrl+v"]);
   });
 

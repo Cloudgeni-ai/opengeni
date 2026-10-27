@@ -748,13 +748,19 @@ An Electron app other than Opengeni's wires it like system audio:
 
 ```ts
 // Main process
-import { createDesktopDictation, handleDictationIpc } from "@opengeni/desktop/dictation";
+import {
+  createDesktopDictation,
+  ENGLISH_DICTATION_WORDS,
+  handleDictationIpc,
+} from "@opengeni/desktop/dictation";
 
 const dictation = createDesktopDictation({
   productName: "Example",
   dataDir: app.getPath("userData"),
   reveal: () => showMainWindow(),
   wake: () => openMainWindowInBackground(), // optional
+  // optional: the small window's words in the app's language (English by default)
+  words: () => ({ ...ENGLISH_DICTATION_WORDS, transcribing: "Transkriberer…" }),
 });
 handleDictationIpc({ ipcMain, dictation, allow: (event) => assertYourWebApp(event) });
 dictation.start();
@@ -767,6 +773,11 @@ exposeDictation(); // defines window.opengeniDictation
 // Web app, on the signed-in pages
 <DesktopDictationHost client={client} workspaceId={workspaceId} />
 ```
+
+The settings page (`DesktopDictationSettings`) and the host's failure messages
+use the `desktopDictation.*` keys of the React messages, so a translated
+catalog covers them. The app's status names problems by code
+(`shortcutErrors[].problem`, `paste.blocker`) for the page to put in words.
 
 ## Deletion
 
