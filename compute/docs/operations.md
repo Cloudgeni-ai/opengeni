@@ -171,11 +171,17 @@ enabling it changes no session's backend.
    to the release's OCI images, normally the Opengeni sandbox and desktop
    images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
    the deployment. When a release names an OCI image no stored image was
-   built from, the service has a live host build it (a few minutes, one
-   at a time per host; the host's log says `built and stored a sandbox
-   image`), records it, and new creates of that name start from it; until
-   then they start from the image the name had before. Existing sandboxes
-   keep theirs. A host builds into its state directory's `prepare/`
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from

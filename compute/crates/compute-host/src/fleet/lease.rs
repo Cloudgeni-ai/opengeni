@@ -60,6 +60,8 @@ pub(crate) struct Renewer {
     /// The name the fleet gives the image this host's sandboxes start
     /// from.
     pub(crate) image: String,
+    /// The digest of the guest programs the host builds images with.
+    pub(crate) guest: Option<String>,
 }
 
 /// The renewer's state while it runs.
@@ -123,9 +125,7 @@ impl Running {
                 host: renewer.host.unwrap_or_default(),
                 epoch: epoch.0,
                 seq: renewal.seq,
-                capacity: status
-                    .as_ref()
-                    .map(|status| capacity(status, &renewer.image)),
+                capacity: status.as_ref().map(|status| capacity(status, renewer)),
             };
             self.post(RENEW_PATH, &body, timeout, renewal, Answer::Renewed);
             return Ok(());
@@ -177,7 +177,7 @@ impl Running {
                 host: renewer.host,
                 attempt: renewal.attempt,
                 info,
-                capacity: capacity(&status, &renewer.image),
+                capacity: capacity(&status, renewer),
                 held: status
                     .sandboxes
                     .iter()
@@ -345,7 +345,7 @@ impl Running {
         let Ok(status) = handle.status().await else {
             return;
         };
-        let capacity = capacity(&status, &renewer.image);
+        let capacity = capacity(&status, renewer);
         if self.reported.as_ref() == Some(&capacity) {
             return;
         }
@@ -372,8 +372,9 @@ impl Running {
 }
 
 /// What the host can take on, from its status; its ready clones all start
-/// from `image`.
-fn capacity(status: &HostStatus, image: &str) -> Capacity {
+/// from `renewer`'s image, and it builds images with `renewer`'s guest
+/// programs.
+fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
@@ -389,7 +390,7 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
             .iter()
             .filter(|template| template.ready > 0)
             .map(|template| ReadyClones {
-                image: image.to_owned(),
+                image: renewer.image.clone(),
                 vcpus: u32::from(template.vcpus),
                 memory_mib: template.memory_mib,
                 count: template.ready,
@@ -397,6 +398,7 @@ fn capacity(status: &HostStatus, image: &str) -> Capacity {
             .collect(),
         awake: status.capacity.as_ref().map_or(0, |held| held.awake),
         sandboxes: u32::try_from(status.sandboxes.len()).unwrap_or(u32::MAX),
+        guest: renewer.guest.clone(),
     }
 }
 
