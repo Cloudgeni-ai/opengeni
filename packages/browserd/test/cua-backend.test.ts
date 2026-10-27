@@ -4544,6 +4544,22 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
+        // A later step's lookup found its window closed by an earlier one, so
+        // its element will never appear: it fails at once with the same line.
+        {
+          reply: step(1, {
+            phase: "find",
+            code: "window_not_on_screen",
+            message: "window 1 is closed or not on screen, so nothing in it can be found",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
         // Pointer or key input to an element of a bubble the window shows was
         // refused before anything was sent: say what reaches it.
         {

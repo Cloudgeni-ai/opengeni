@@ -1333,7 +1333,7 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
-    if (cuaCode === "off_space_or_ax_unresolved")
+    if (cuaCode === "off_space_or_ax_unresolved" || cuaCode === "window_not_on_screen")
       return new ComputerBackendError(
         code,
         "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
