@@ -123,7 +123,8 @@ literally.
 - Names match case-insensitively after Unicode NFC normalisation and trimming.
 - References are at most 300 characters. Text that starts like a reference but
   does not parse fails the call with `invalid_reference`; it is never passed
-  through.
+  through. Hand-off tools (below) are the exception: they resolve nothing, so
+  they keep such text as written.
 - A tool call resolves all of its references or none. On any failure nothing is
   dispatched and the tool returns a typed error naming the references, never
   values. A missing secret's error includes a ready `request_human_input` call
@@ -157,9 +158,10 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
-| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. |
-| Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
-| Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
+| MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
+| Opengeni's hand-off tools: sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, Skills, artifacts, Sites data, notifications, and every Opengeni tool not named in the next row | Never resolved. The tool receives the reference text and stores or forwards it; the session, scheduled run or goal continuation that receives it resolves it only when it executes something (a shell command, `run_on`, browser typing, a connector call), under its own vault policy. A missing or malformed reference does not fail the call, and `secretfile` stays text. An escaped reference (`\{{secret:Item}}`) still arrives as `{{secret:Item}}`, so escaping here is optional. Opengeni tools added later are hand-off tools by default. Opengeni's built-in tools that send text to outside systems (Slack bot messages, X, Reddit and social replies, Fiken contacts and invoices, `web_fetch` URLs) are hand-off tools too: the recipient gets the reference text, never the value. |
+| Opengeni tools that need a value | Only `excel_run` (runs code in the person's open workbook) and `admin_action_call` when the call fills a request field the action marks as a credential, such as a password manager's API key or an MCP server's headers: only that field resolves, and the rest of the body (a chat's first message, a note) stays reference text. Creating or updating a vault item resolves its body, which the vault keeps. Other `admin_action_call` calls, including actions that return a secret and `tools/invoke`, are hand-off. These resolve like connectors. The `secret_*` tools take references as names and never resolve them. The list and the reason for each entry live in `secretArgumentMode` (`packages/runtime/src/secret-argument-resolution.ts`). |
+| Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. Hand-off tools keep reference text for Sites too. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
 | Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. A login in a connected password manager that holds a passkey (Bitwarden, Vaultwarden, Keeper, Proton Pass) shows `hasPasskey`, matches a `passkey` search and signs in the same way; its key is read live from the provider and never stored. See [external vaults](external-vaults.md). |
 
@@ -167,6 +169,31 @@ Exec caps: 256 KiB of env per command and 100 KiB per value. Larger or binary
 values return `too_large` or `binary_value` with a `secretfile` hint.
 OpenSandbox has no file writer, so commands with references fail there with an
 unsupported-routing error.
+
+Hand-off tools exist because an agent once wrote an unescaped reference into
+`session_create` (26 October 2026): the tool received the value and stored it
+in the child's first message, while the caller's own journal kept only the
+reference. Now a reference reaches another session, a schedule, a goal, a note,
+Knowledge or an artifact only as text, and a backslash escape is no longer
+needed to keep it that way. The receiving work resolves it with its own
+principal and vault policy: a child's policy is never wider than its parent's
+(the effective set is intersected with every ancestor at each resolution), and
+a scheduled run uses the schedule's owner and policy. A message or Steer sent
+into a turn that another person started resolves later under that turn's
+person, exactly as if it had been typed in that chat. Inside a shell command or
+a script, including `ogtool call`, the escape is still needed: the command or
+file write puts the value in before any tool runs. With the `secrets`
+capability off for an agent, nothing resolves in that agent's tool calls and
+text passes unchanged, backslash included. A tool call nested in
+`admin_action_call` (`tools/invoke`, `tools/calls`) is resolved by the app
+under the person's own access, not the session's task vault or vault policy;
+it needs full access, which already acts as the person.
+
+Stored content is otherwise kept exact. The 5 August 2026 decision against
+heuristic redaction still holds. Two exceptions were approved on 26 October
+2026 and are planned, not yet implemented: masking known secret values before
+storage and before the model sees them, and masking narrow, high-precision
+secret-shaped strings in tool output.
 
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
