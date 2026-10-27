@@ -144,6 +144,7 @@ import {
   listBrowserCapacitySuspendCandidates,
   BrowserCapacitySuspendClaimRejectedError,
   type BrowserCapacitySuspendClaim,
+  listAgentHeldBrowserSessions,
   listBrowserSessions,
   listAttachedBrowserDevices,
   interactionControllerGone,
@@ -170,6 +171,7 @@ import {
   readActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
   recordAuditEvent,
+  type AgentHeldBrowserSession,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -325,11 +327,53 @@ type BrowserPlacement = {
   attachedDeviceWorkspaceId?: string;
 };
 
+/**
+ * How long one renewal holds a browser. The renewal pump (`index.ts`) runs
+ * every `BROWSER_HOLD_RENEWAL_INTERVAL_MS`, well inside it, so a held browser
+ * stays held across a missed pass, and a browser whose session stopped is
+ * released at most this long plus the normal idle time later.
+ */
+export const BROWSER_HOLD_RENEWAL_MS = 5 * 60_000;
+
+/** How often the API renews the holds of the browsers agent sessions hold. */
+export const BROWSER_HOLD_RENEWAL_INTERVAL_MS = 2 * 60_000;
+
+/** At most this many browsers are renewed per pass, most recently used first. */
+const BROWSER_HOLD_RENEWAL_LIMIT = 500;
+
+/** Renewals sent at once. */
+const BROWSER_HOLD_RENEWAL_CONCURRENCY = 8;
+
+/** How long one renewal may take to reach its controller. */
+const BROWSER_HOLD_REQUEST_TIMEOUT_MS = 30_000;
+
+/** What one renewal pass did. */
+export type BrowserHoldRenewal = {
+  /** Browsers agent sessions hold right now. */
+  listed: number;
+  /** Of those, the browsers whose controllers hold them. */
+  held: number;
+};
+
+/**
+ * Whom a renewal reaches a browser's controller as. It has no request grant:
+ * the control plane sends it, as the person who most recently started a turn
+ * of the session holding the browser (null when no person did), with that
+ * person's own access to their machines and attached browsers. A hold only
+ * keeps what already runs, so this is the `browser.hold` operation's
+ * explicit exception (see `ChannelAOperation`).
+ */
+type BrowserHoldCaller = {
+  hold: "browser.hold";
+  accountId: string;
+  subjectId: string | null;
+};
+
 export function registerBrowserSessionRoutes(
   app: Hono,
   deps: ApiRouteDeps,
   options: { interactionSecrets?: InteractionSecretsPort | null } = {},
-): void {
+): { renewBrowserHolds: () => Promise<BrowserHoldRenewal> } {
   const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
@@ -3962,7 +4006,8 @@ export function registerBrowserSessionRoutes(
 
   async function withBrowserPlacement<T>(
     sourceSession: Session,
-    grant: AccessGrant,
+    /** A request's grant, or a renewal reaching the controller as a person. */
+    caller: AccessGrant | (BrowserHoldCaller & { subjectId: string }),
     expectedPlacement: InteractionPlacement | null,
     /** An existing session's attached profile workspace, which pins the
      *  profile copy its controller check uses. */
@@ -3976,7 +4021,14 @@ export function registerBrowserSessionRoutes(
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
       // Personal machines are controlled only for their owner, as everywhere else.
-      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
+      const viewer =
+        "hold" in caller
+          ? {
+              accountId: caller.accountId,
+              workspaceId: sourceSession.workspaceId,
+              subjectId: caller.subjectId,
+            }
+          : await attachedBrowserViewer(deps, caller, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
@@ -4064,18 +4116,19 @@ export function registerBrowserSessionRoutes(
       operation === "browser.read" ||
       operation === "browser.action" ||
       operation === "browser.control" ||
-      operation === "browser.attach"
+      operation === "browser.attach" ||
+      operation === "browser.hold"
         ? withChannelARead
         : withChannelA;
     try {
       return await runWithChannelA(
         channelServices,
         {
-          accountId: grant.accountId,
+          accountId: caller.accountId,
           workspaceId: sourceSession.workspaceId,
           session: sourceSession,
-          subjectId: grant.subjectId,
-          grant,
+          subjectId: caller.subjectId,
+          grant: "hold" in caller ? undefined : caller,
           waitSignal,
           operation,
           retryControllerTransport: operation === "browser.read" || operation === "browser.action",
@@ -4133,8 +4186,11 @@ export function registerBrowserSessionRoutes(
                   message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
                 });
               }
+              if ("hold" in caller) {
+                throw new BrowserSessionStateError("BrowserSession source placement changed");
+              }
               return await throwBrowserSourcePlacementChanged(
-                grant,
+                caller,
                 sourceSession.id,
                 expectedPlacement.sandboxId,
               );
@@ -5265,6 +5321,120 @@ export function registerBrowserSessionRoutes(
       record.controllerHostSandboxGroupId,
     );
   }
+
+  /**
+   * Renews the hold on every browser an agent session holds right now (see
+   * `listAgentHeldBrowserSessions`): each controller keeps its browser
+   * running, page state and all, at least until `BROWSER_HOLD_RENEWAL_MS`
+   * from now (capped by the controller at `BROWSER_WAIT_HOLD_MAX_MS` after
+   * the browser's last use). Stateless: every pass asks the database which
+   * browsers are held, so a later turn that never touches the browser is held
+   * again, and once the session neither works nor waits the renewals stop and
+   * the hold lapses. Holds only extend, so overlapping passes (one per API
+   * process) cannot shorten one. Advisory and best effort: it never launches,
+   * recovers or counts as a use of a browser, never starts a sandbox, and a
+   * browser it cannot reach keeps its plain idle release.
+   */
+  async function renewBrowserHolds(): Promise<BrowserHoldRenewal> {
+    const browsers = await listAgentHeldBrowserSessions(deps.db, {
+      limit: BROWSER_HOLD_RENEWAL_LIMIT,
+    });
+    const until = new Date(Date.now() + BROWSER_HOLD_RENEWAL_MS);
+    const renewal: BrowserHoldRenewal = { listed: browsers.length, held: 0 };
+    let next = 0;
+    const renewNext = async (): Promise<void> => {
+      for (let browser = browsers[next++]; browser; browser = browsers[next++]) {
+        if (await sendBrowserHold(browser, until)) renewal.held += 1;
+      }
+    };
+    await Promise.all(Array.from({ length: BROWSER_HOLD_RENEWAL_CONCURRENCY }, renewNext));
+    return renewal;
+  }
+
+  /** One browser's renewal; whether its controller holds it. Failures are
+   * logged, never thrown. */
+  async function sendBrowserHold(browser: AgentHeldBrowserSession, until: Date): Promise<boolean> {
+    try {
+      return await holdBrowser(
+        {
+          hold: "browser.hold",
+          accountId: browser.accountId,
+          subjectId: browser.routeSubjectId,
+        },
+        browser.workspaceId,
+        browser.browserSessionId,
+        until,
+      );
+    } catch (error) {
+      console.warn("browser.hold_failed", {
+        workspaceId: browser.workspaceId,
+        browserSessionId: browser.browserSessionId,
+        failure: interactionFailure(error),
+      });
+      return false;
+    }
+  }
+
+  async function holdBrowser(
+    caller: BrowserHoldCaller,
+    workspaceId: string,
+    browserSessionId: string,
+    until: Date,
+  ): Promise<boolean> {
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: caller.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const binding = record.session.controller;
+    if (record.session.lifecycle !== "active" || !binding) return false;
+    const signal = AbortSignal.timeout(BROWSER_HOLD_REQUEST_TIMEOUT_MS);
+    const hold = async (placement: BrowserPlacement): Promise<boolean> =>
+      // Never touches the browser's own last use: the cap counts from it.
+      await connectController(deps, caller, record, placement).holdForWait(
+        { browserSessionId, controllerGeneration: binding.controllerGeneration },
+        until,
+      );
+    const cached = await cachedBrowserPlacement(record);
+    if (cached) return await hold(cached);
+    // Every other route reaches the controller as a person: with none, the
+    // browser keeps its plain idle release.
+    if (caller.subjectId === null) return false;
+    const placement = record.session.placement;
+    if (placement.kind === "sandbox_group" || placement.kind === "external_provider") {
+      // Only a box that is already running: a hold never starts one.
+      const sandboxGroupId = record.controllerHostSandboxGroupId;
+      const lease = sandboxGroupId
+        ? await readLease(deps.db, record.session.workspaceId, sandboxGroupId)
+        : null;
+      if (
+        !lease ||
+        (lease.liveness !== "warm" && lease.liveness !== "draining") ||
+        lease.instanceId !== binding.placementInstanceId
+      ) {
+        return false;
+      }
+    }
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== placement.sandboxId
+    ) {
+      return false;
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      { ...caller, subjectId: caller.subjectId },
+      placement,
+      record.deviceWorkspaceId,
+      binding.placementInstanceId,
+      "browser.hold",
+      signal,
+      hold,
+    );
+  }
+
+  return { renewBrowserHolds };
 }
 
 function sourcePlacementChangedApiError(interactionResource: "browser_session"): ApiHttpError {
@@ -5969,7 +6139,7 @@ async function provisionController(
 
 function connectController(
   deps: ApiRouteDeps,
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId">,
   record: BrowserSessionControlRecord,
   placement: BrowserPlacement,
 ): BrowserControlClient {

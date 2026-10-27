@@ -17,6 +17,10 @@ export type DetachedBrowserRecord = {
   /** When a request last reached the browser before it was handed off
    * (milliseconds since the epoch on the supervisor clock). */
   lastUsedAt: number;
+  /** The deadline of a deliberate wait by the browser's agent session that
+   * keeps it past the idle release time (see `waitHoldEnds`), if any. Older
+   * controllers ignore it and stop the browser by `lastUsedAt` alone. */
+  waitHoldUntil?: number;
   process: OwnedManagedBrowserProcess;
 };
 
@@ -71,6 +75,23 @@ export async function readDetachedBrowserRecords(
   return records;
 }
 
+/** The record a session directory holds for `browserSessionId`, or null when
+ * it has none or it cannot be read. */
+export async function readDetachedBrowserRecord(
+  sessionDirectory: string,
+  browserSessionId: string,
+): Promise<DetachedBrowserRecord | null> {
+  let text: string;
+  try {
+    text = await readFile(detachedBrowserRecordPath(sessionDirectory), "utf8");
+  } catch {
+    return null;
+  }
+  if (text.length > MAX_RECORD_BYTES) return null;
+  const record = parseDetachedBrowserRecord(text);
+  return record?.browserSessionId === browserSessionId ? record : null;
+}
+
 function parseDetachedBrowserRecord(text: string): DetachedBrowserRecord | null {
   let value: unknown;
   try {
@@ -100,6 +121,9 @@ function parseDetachedBrowserRecord(text: string): DetachedBrowserRecord | null 
     version: 1,
     browserSessionId: record.browserSessionId,
     lastUsedAt: record.lastUsedAt,
+    ...(typeof record.waitHoldUntil === "number" && Number.isFinite(record.waitHoldUntil)
+      ? { waitHoldUntil: record.waitHoldUntil }
+      : {}),
     process: {
       pid: owned.pid,
       birth: owned.birth,

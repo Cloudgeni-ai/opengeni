@@ -341,6 +341,29 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
     });
   });
 
+  test("an agent's deliberate wait keeps its hold on Chrome until the wait's deadline", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(2);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const tab = created.observation.target.id;
+      expect(await supervisor.holdForWait(session, { until: clock.now + 30 * MINUTE })).toBe(true);
+      clock.now += 29 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(chrome.attached.has(tab)).toBe(true);
+      // The wait's turn gets the normal 10 idle minutes after it.
+      clock.now += 11 * MINUTE - 1;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      clock.now += 1;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      expect(chrome.attached.has(tab)).toBe(false);
+    });
+  });
+
   test("a session waiting on a JavaScript dialog keeps Chrome until the dialog is answered", async () => {
     await withChrome(async ({ chrome, clock, open }) => {
       const supervisor = await open();

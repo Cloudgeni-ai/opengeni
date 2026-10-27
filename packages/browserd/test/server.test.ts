@@ -1501,6 +1501,71 @@ describe("BrowserControlServer", () => {
     });
   });
 
+  test("a wait hold is admin-only, exact-generation and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`;
+      const until = new Date(Date.now() + 30 * 60_000).toISOString();
+      const hold = async (token: string, body: unknown) =>
+        await request(server, path, { method: "POST", token, body });
+      // Nothing is running yet: the hold never launches a browser.
+      const before = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect(before.status).toBe(200);
+      expect((await json(before)).data).toEqual({ held: false });
+      await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(
+        (await hold(controlToken, { controllerGeneration: reference.controllerGeneration, until }))
+          .status,
+      ).toBe(401);
+      const held = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until,
+      });
+      expect((await json(held)).data).toEqual({ held: true });
+      const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
+      expect((await json(stale)).data).toEqual({ held: false });
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
+        controllerGeneration: reference.controllerGeneration,
+        until: new Date().toISOString(),
+      });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            endsWaitUntil: until,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until: "tomorrow",
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await hold(adminToken, {
+            controllerGeneration: reference.controllerGeneration,
+            until,
+            extra: true,
+          })
+        ).status,
+      ).toBe(400);
+    });
+  });
+
   test("keeps encrypted state capture behind exact admin authority and replays its receipt", async () => {
     let uploads = 0;
     await withServer(

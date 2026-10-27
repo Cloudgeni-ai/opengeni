@@ -592,6 +592,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
       // 0988's queued-turn hold summary reads only tables this schema has.
       "runtime definer summarize_queued_turns_by_hold() is missing or ambiguous",
+      // 1002's held-browser inventory reads only tables this schema has.
+      "runtime definer list_agent_held_browser_sessions(integer, bigint) is missing or ambiguous",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });
