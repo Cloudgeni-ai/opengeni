@@ -152,6 +152,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       open
       aria-label={props.title}
       data-artifact-fullscreen={focused || undefined}
+      data-window-layer={focused || undefined}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
