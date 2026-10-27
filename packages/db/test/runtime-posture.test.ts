@@ -1864,6 +1864,9 @@ describe("runtime database posture evaluator", () => {
           // 0998 managed-auth passkeys: one auth table without RLS whose
           // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
           (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
+          // 1032 Knowledge collection activity: FORCE RLS, reached only
+          // through the Knowledge owner's routines; no runtime DML.
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2012,6 +2015,7 @@ describe("runtime database posture evaluator", () => {
           3 +
           1 + // 0725 organization privacy preferences.
           2 + // 0890 model fact reconciliation progress and candidates.
+          2 + // 1032 Knowledge collection activity.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -2026,6 +2030,7 @@ describe("runtime database posture evaluator", () => {
           3 +
           1 + // 0725 organization privacy preferences.
           2 + // 0890 model fact reconciliation progress and candidates.
+          2 + // 1032 Knowledge collection activity.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +

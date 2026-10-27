@@ -43,6 +43,8 @@ export const MIGRATIONS_DIR = "packages/db/drizzle";
 const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
   // 0995 statement 3: patch organization_membership_command_0263's role change.
   "1b890ad9397f53351e98d62dc8e9973732a3a28596c7fd6ff627632705ee6cf8",
+  // 1032 statement 17: patch knowledge_entry_read to use kept collection activity.
+  "1a71acab125baec541ce1c3dd514cda222d8c761b90adec97b0797e582ebea01",
 ]);
 
 export type BackfillFinding = {
