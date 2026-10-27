@@ -529,7 +529,11 @@ function uploadFailureText(
 ): string {
   if (!failure) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
   if (transcriptNeedsCredits(failure.code)) return transcriptErrorText(failure.code, msg);
-  return msg("meetings.recorderPanel.uploadFailedMessage", { message: failure.message });
+  // The notice's title already says the upload failed; the server's reason
+  // reads as the first sentence of its text.
+  const reason = failure.message.trim();
+  if (!reason) return msg("meetings.detailPage.theAudioCouldnTBeUploaded");
+  return /[.!?]$/.test(reason) ? reason : `${reason}.`;
 }
 
 function PhaseNotice({

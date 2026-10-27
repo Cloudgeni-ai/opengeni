@@ -252,6 +252,10 @@ export function createMeetingsFixture(
     liveTranscript?: boolean;
     /** The viewer also has Only me meetings in another workspace, "Sales". */
     otherWorkspaces?: boolean;
+    /** Every model is the deployment's, charged in credits: none transcribes without them. */
+    creditsOnly?: boolean;
+    /** The organization's ChatGPT subscription also transcribes meetings, at no credit cost. */
+    subscription?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -471,8 +475,49 @@ export function createMeetingsFixture(
     dictationDefault: null,
     pinned: false,
   };
+  const offered = options.pinned ? pinnedModels : unpinnedModels;
   const models: ListRecordingModelsResponse = {
-    ...(options.pinned ? pinnedModels : unpinnedModels),
+    ...offered,
+    ...(options.subscription
+      ? {
+          models: [
+            ...offered.models,
+            {
+              providerId: "codex-subscription",
+              providerName: "ChatGPT",
+              model: "chatgpt-dictation",
+              name: "ChatGPT dictation",
+              available: true,
+              funding: "workspace_subscription" as const,
+              usdPerHour: null,
+              capabilities: {
+                batch: true,
+                live: false,
+                diarization: false,
+                liveDiarization: false,
+                multichannel: false,
+                maxSpeakers: null,
+                wordTimestamps: false,
+                languages: [],
+                languageDetection: true,
+                keyterms: false,
+                speakerLibrary: false,
+                maxDurationSeconds: null,
+                maxFileBytes: null,
+              },
+            },
+          ],
+        }
+      : {}),
+    ...(options.creditsOnly
+      ? {
+          models: offered.models.map((entry) => ({
+            ...entry,
+            funding: "deployment" as const,
+            usdPerHour: entry.usdPerHour ?? 0.4,
+          })),
+        }
+      : {}),
     ...(options.language !== undefined ? { language: options.language } : {}),
     ...(options.liveTranscript !== undefined ? { liveTranscript: options.liveTranscript } : {}),
   };

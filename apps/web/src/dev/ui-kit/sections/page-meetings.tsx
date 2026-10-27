@@ -21,6 +21,8 @@ import {
 } from "@opengeni/react/testing/meetings";
 
 type View = "list" | "meeting" | "settings";
+/** The fixture's 31-minute meeting still being transcribed. */
+const TRANSCRIBING_RECORDING_ID = "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
 /** An earlier meeting this device still holds audio of, while the recorder is idle. */
@@ -186,29 +188,51 @@ export default function PageMeetingsSection() {
   );
   // ?models=pinned previews a deployment that pins one speech-to-text model.
   const pinned = initial.get("models") === "pinned";
+  // ?models=credits: every model is charged in credits, so a refusal's fix is adding them.
+  const creditsOnly = initial.get("models") === "credits";
+  // ?models=subscription adds the organization's ChatGPT subscription.
+  const subscription = initial.get("models") === "subscription";
   // ?failure=missing_provider_key makes the failed meeting's transcript fail
   // for a provider that isn't connected, instead of a used-up provider account.
   const failure = initial.get("failure");
   // ?elsewhere=off hides the viewer's Only me meetings from another workspace.
   const otherWorkspaces = initial.get("elsewhere") !== "off";
+  // ?upload=elsewhere: the meeting in progress has no live preview, so its
+  // audio is only on the device that recorded it.
+  const elsewhereAudio = initial.get("upload") === "elsewhere";
   const fixture = useMemo(() => {
-    const base = createMeetingsFixture({ state: data, pinned, otherWorkspaces });
-    if (!failure) return base;
+    const base = createMeetingsFixture({
+      state: data,
+      pinned,
+      otherWorkspaces,
+      creditsOnly,
+      subscription,
+    });
+    if (!failure && !elsewhereAudio) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
-      return recording.transcript && id === FAILED_RECORDING_ID
+      if (elsewhereAudio && id === LIVE_RECORDING_ID) {
+        // No live preview: nothing here shows it is still being recorded.
+        return {
+          ...recording,
+          tracks: recording.tracks.map((track) => ({ ...track, live: null })),
+        };
+      }
+      return failure && recording.transcript && id === FAILED_RECORDING_ID
         ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure, otherWorkspaces]);
+  }, [data, pinned, failure, otherWorkspaces, creditsOnly, subscription, elsewhereAudio]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
   const audio = initial.get("audio") === "desktop" ? "desktop" : "display";
   // ?upload=uploading|failed: this device still holds the meeting in
   // progress's audio, uploading it in the background or refused for good.
-  const background = (initial.get("upload") as BackgroundUpload | null) ?? "none";
+  const uploadParam = initial.get("upload");
+  const background: BackgroundUpload =
+    uploadParam === "uploading" || uploadParam === "failed" ? uploadParam : "none";
   useEffect(() => {
     store.set(fakeRecorder(mode, startedAt, audio, preview, background));
     if (mode !== "recording") return;
@@ -220,13 +244,15 @@ export default function PageMeetingsSection() {
   }, [mode, startedAt, store, audio, preview, background]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
   // records, or elsewhere while it is idle. ?open=failed opens the one whose
-  // transcript failed.
+  // transcript failed, ?open=transcribing the long one still transcribing.
   const [openId, setOpenId] = useState(
     initial.get("open") === "live"
       ? LIVE_RECORDING_ID
       : initial.get("open") === "failed"
         ? FAILED_RECORDING_ID
-        : fixture.readyId,
+        : initial.get("open") === "transcribing"
+          ? TRANSCRIBING_RECORDING_ID
+          : fixture.readyId,
   );
 
   return (
@@ -327,6 +353,8 @@ export default function PageMeetingsSection() {
                 viewerName="Ingrid Solberg"
                 voiceRecognition={settings.voiceprints === true}
                 onOpenSettings={() => setView("settings")}
+                onOpenBilling={() => toast("Opens the organization's billing")}
+                onConnectModels={() => toast("Opens the workspace's models")}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
                 onOpenChat={() => toast("Opens the chat that wrote the notes")}
