@@ -33,6 +33,10 @@
       "types": "./src/main/system-audio.ts",
       "default": "./src/main/system-audio.ts"
     },
+    "./dictation": {
+      "types": "./src/main/dictation/public.ts",
+      "default": "./src/main/dictation/public.ts"
+    },
     "./preload": {
       "types": "./src/preload/content.ts",
       "default": "./src/preload/content.ts"
@@ -44,6 +48,10 @@
     "./preload/system-audio": {
       "types": "./src/preload/system-audio.ts",
       "default": "./src/preload/system-audio.ts"
+    },
+    "./preload/dictation": {
+      "types": "./src/preload/dictation.ts",
+      "default": "./src/preload/dictation.ts"
     }
   },
   "publishConfig": {

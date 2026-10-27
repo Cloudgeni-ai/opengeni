@@ -62,6 +62,12 @@ export type UseVoiceInputOptions = {
    * consent prompt. Resolving false (or throwing) keeps the microphone off.
    */
   beforeStart?: (() => boolean | Promise<boolean>) | undefined;
+  /**
+   * Offer dictations an earlier page, tab or device left in this workspace
+   * (default). Off for a host that dictates somewhere else, such as the
+   * desktop app's dictation from anywhere: the composer offers them instead.
+   */
+  recover?: boolean | undefined;
   /** A recordings client, such as a host proxy. Built from `client` otherwise. */
   recordings?: Partial<VoiceInputRecordingsClient> | undefined;
   /** How this device records; the browser's by default. */
@@ -114,6 +120,11 @@ export type UseVoiceInputResult = {
   cancel: () => void;
   /** Intentionally delete the current dictation. */
   discard: () => Promise<void>;
+  /**
+   * Let go of the current dictation without deleting it: a recording stops
+   * and uploads, and a held one stays saved for the next composer to offer.
+   */
+  release: () => void;
 };
 
 export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 1_000;
@@ -341,7 +352,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     async (generation: number): Promise<void> => {
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
-      if (!client || !latest.current.durable) return;
+      if (!client || !latest.current.durable || latest.current.recover === false) return;
       // Dictations a closed page or crashed app left on this device: finish
       // uploading them here.
       const resumed = await uploader()
@@ -817,6 +828,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     await take(dictation, dictation.text, generation);
   }, [insertText, settleIdle, take]);
 
+  const release = useCallback(() => {
+    generationRef.current += 1;
+    // Capture ends; the upload finishes in the background, as on a workspace change.
+    void recorderRef.current?.stop().catch(() => undefined);
+    void oneShotRef.current?.stop().catch(() => undefined);
+    oneShotText.current = null;
+    settleIdle();
+  }, [settleIdle]);
+
   // A transcript that arrived while a send held the composer goes in once it is free.
   useEffect(() => {
     const dictation = dictationRef.current;
@@ -904,6 +924,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     insertSavedTranscript,
     cancel,
     discard,
+    release,
   };
 }
 
