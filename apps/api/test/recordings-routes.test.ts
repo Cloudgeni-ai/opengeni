@@ -655,6 +655,68 @@ describe("recording routes", () => {
     ).toBe(400);
   });
 
+  test("an app's own user with computer audio is named by the app; Opengeni's name stays first", async () => {
+    const scope = await fixture();
+    const tracks = [
+      { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+      { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+    ];
+    const peopleFor = async (subjectId: string) =>
+      (
+        (await scope.owner.call("GET", "/recording-people")).body.people as {
+          displayName: string;
+          memberSubjectId: string | null;
+        }[]
+      ).filter((person) => person.memberSubjectId === subjectId);
+    // A microphone alone may hear a whole room, so it names no one.
+    expect(
+      (
+        await scope.other.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [tracks[0]],
+          ownerName: "Per Hansen",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await peopleFor(scope.other.subjectId)).toEqual([]);
+    // Beside computer audio the microphone is theirs: Opengeni has no name
+    // for the app's user, so the app's is used.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "  Ola Nordmann ",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await peopleFor(scope.owner.subjectId)).toMatchObject([
+      { displayName: "Ola Nordmann", memberSubjectId: scope.owner.subjectId },
+    ]);
+    // Once they are in the directory, a later name changes nothing there.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "Someone Else",
+        })
+      ).status,
+    ).toBe(201);
+    expect((await peopleFor(scope.owner.subjectId)).map((person) => person.displayName)).toEqual([
+      "Ola Nordmann",
+    ]);
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "x".repeat(201),
+        })
+      ).status,
+    ).toBe(400);
+  });
+
   test("a deployment's own Azure Speech account is available to every workspace and is the default", async () => {
     const scope = await fixture({
       settings: {

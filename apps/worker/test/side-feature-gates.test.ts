@@ -120,6 +120,28 @@ describe("image and video generation under EU-only inference", () => {
     expect(image.executed).toEqual([]);
     expect(video.executed).toEqual([]);
   });
+
+  test("video read from the live funding policy: offered only while a video route may run", async () => {
+    const reads: string[] = [];
+    const livePolicy = async () => {
+      reads.push("policy");
+      return videoGenerationRoute("supergrok_subscription");
+    };
+    const video = videoOption();
+    const gated = gateVideoGenerationOption(open, livePolicy, video.option);
+    await gated.videoGeneration!.execute({} as never, { toolCallId: "v3" });
+    expect(video.executed).toEqual(["v3"]);
+    // Every video route is code-owned and not EU, so none is offered under EU.
+    expect(gateVideoGenerationOption(eu, livePolicy, videoOption().option)).toEqual({});
+    // Built before the run turned EU: the route the policy names is checked first.
+    await withInferenceResidency(eu, async () => {
+      await expect(
+        gated.videoGeneration!.execute({} as never, { toolCallId: "v4" }),
+      ).rejects.toBeInstanceOf(InferenceRegionRestrictedError);
+    });
+    expect(video.executed).toEqual(["v3"]);
+    expect(reads).toEqual(["policy", "policy"]);
+  });
 });
 
 describe("web search failover under EU-only inference", () => {

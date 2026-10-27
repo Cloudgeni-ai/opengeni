@@ -338,13 +338,20 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
   };
 }
 
-/** The shared access checks that take the permission a route needs as their last argument. */
-const ACCESS_GATES = new Set([
-  "requireAccessGrant",
-  "requireAccessGrantAuthorization",
-  "requireFreshAccessGrant",
-  "requireMachineAccessGrant",
-]);
+/**
+ * The shared access checks, with the permission each requires, or null for
+ * the ones that take it as their last argument (`await requireAccessGrant(c,
+ * deps, workspaceId, "sessions:read")`). Workspace settings need
+ * workspace:admin; only a Personal workspace's own named owner gets in
+ * without it, and nobody acting through another product is that owner.
+ */
+const ACCESS_GATES: Readonly<Record<string, string | null>> = {
+  requireAccessGrant: null,
+  requireAccessGrantAuthorization: null,
+  requireFreshAccessGrant: null,
+  requireMachineAccessGrant: null,
+  requireWorkspaceSettingsGrant: "workspace:admin",
+};
 
 /**
  * Timing wrappers a route may run its access check inside (`await
@@ -382,20 +389,21 @@ export const ACCESS_GATE_OPERATIONS: Readonly<
   },
 };
 
-/** The permission an access-check call names: a shared gate's last argument, or a helper operation's. */
+/** The permission an access-check call names: a shared gate's own or last argument, or a helper operation's. */
 function gateCallPermission(call: AstNode): string | null {
   const name = calleeName(call) ?? "";
   const args = call.arguments as AstNode[];
+  const gate = Object.hasOwn(ACCESS_GATES, name) ? ACCESS_GATES[name] : undefined;
   const last = args.at(-1);
   const literal = last?.type === "Literal" && typeof last.value === "string" ? last.value : null;
-  if (literal === null) return null;
   const operations = ACCESS_GATE_OPERATIONS[name];
-  const permission = ACCESS_GATES.has(name)
-    ? literal
-    : operations && args.length === 3 && Object.hasOwn(operations, literal)
-      ? operations[literal]!
-      : null;
-  return permission !== null && contracts.Permission.safeParse(permission).success
+  const permission =
+    gate !== undefined
+      ? (gate ?? literal)
+      : operations && literal !== null && args.length === 3 && Object.hasOwn(operations, literal)
+        ? operations[literal]!
+        : null;
+  return permission != null && contracts.Permission.safeParse(permission).success
     ? permission
     : null;
 }
@@ -403,7 +411,7 @@ function gateCallPermission(call: AstNode): string | null {
 function isGateCall(call: AstNode): boolean {
   const name = calleeName(call) ?? "";
   return (
-    ACCESS_GATES.has(name) ||
+    Object.hasOwn(ACCESS_GATES, name) ||
     (Object.hasOwn(ACCESS_GATE_OPERATIONS, name) && (call.arguments as AstNode[]).length === 3)
   );
 }

@@ -63,19 +63,38 @@ export function gateImageGenerationOption(
   };
 }
 
+const VIDEO_GENERATION_ROUTES = [
+  "video_generation.ai_gateway",
+  "video_generation.supergrok_subscription",
+] as const satisfies readonly CodeOwnedSideFeatureRouteId[];
+
+/**
+ * The video tools, offered only when the call's route may run. `route` is the
+ * route, or reads it from the workspace's live funding policy at each call;
+ * then the tools are offered when any video route may run, and each call
+ * checks the route its policy names before the provider is called.
+ */
 export function gateVideoGenerationOption(
   settings: SideFeatureResidencySettings,
-  route: CodeOwnedSideFeatureRouteId,
+  route: CodeOwnedSideFeatureRouteId | (() => Promise<CodeOwnedSideFeatureRouteId>),
   option: Pick<BuildAgentOptions, "videoGeneration">,
 ): Pick<BuildAgentOptions, "videoGeneration"> {
   const videoGeneration = option.videoGeneration;
   if (!videoGeneration) return option;
-  if (!sideFeatureRouteRunnable(settings, route)) return {};
+  const offered =
+    typeof route === "string"
+      ? sideFeatureRouteRunnable(settings, route)
+      : VIDEO_GENERATION_ROUTES.some((candidate) => sideFeatureRouteRunnable(settings, candidate));
+  if (!offered) return {};
   return {
     videoGeneration: {
       capabilities: videoGeneration.capabilities,
       execute: async (input, context) => {
-        assertSideFeatureRoute(settings, route, "video_generation");
+        assertSideFeatureRoute(
+          settings,
+          typeof route === "string" ? route : await route(),
+          "video_generation",
+        );
         return await videoGeneration.execute(input, context);
       },
     },

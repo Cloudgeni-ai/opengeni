@@ -24,10 +24,20 @@ type View = "list" | "meeting" | "settings";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
 
-/** The live preview as the recorder holds it: four lines heard, one still being heard. */
+/**
+ * The live preview as the recorder holds it: four lines heard, one still
+ * being heard, and the microphone's echo of a line from the call (no
+ * headphones), which the preview leaves out.
+ */
 function fakeLive(preview: LivePreview): MeetingRecorder["live"] {
   if (preview === "off") return null;
-  const heard = preview === "unavailable" ? [] : LIVE_LINES.slice(0, 4);
+  const heard: (typeof LIVE_LINES)[number][] =
+    preview === "unavailable"
+      ? []
+      : [
+          ...LIVE_LINES.slice(0, 4),
+          [0, 13.3, "The build went out last night, the error rate is flat."],
+        ];
   return [0, 1].map((trackNumber) => ({
     trackNumber,
     state:
@@ -105,7 +115,8 @@ function fakeRecorder(
         }
       : null,
     error: mode === "denied" ? { code: "microphone_denied", message: "Permission denied" } : null,
-    live: live ? fakeLive(preview) : null,
+    // Stopped, the recorder still holds what it heard until the transcript is ready.
+    live: held ? fakeLive(preview) : null,
     supported: true,
     systemAudioSupported: true,
     systemAudioKind: audio,
