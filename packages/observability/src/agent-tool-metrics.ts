@@ -60,6 +60,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   call_user: "session",
   set_other_session_title: "session",
   bot_template_save: "session",
+  bot_suggest: "session",
   sessions_list: "session",
   sandboxes_list: "machine",
   sandbox_attach: "machine",

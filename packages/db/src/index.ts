@@ -286,7 +286,12 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
-import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
+import {
+  SessionAvatar as SessionAvatarSchema,
+  type SessionAvatar,
+  type SessionBotSuggestion,
+} from "@opengeni/contracts";
+import { storedSessionBotSuggestion } from "./bot-templates";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 import {
@@ -73346,6 +73351,12 @@ export async function updateSessionTitleWithEvent(
 }
 
 /** A stored avatar, or null for one this version cannot read. */
+/** The stored bot suggestion as an optional session field (absent when none). */
+function optionalBotSuggestion(value: unknown): { botSuggestion?: SessionBotSuggestion } {
+  const suggestion = storedSessionBotSuggestion(value);
+  return suggestion ? { botSuggestion: suggestion } : {};
+}
+
 export function storedSessionAvatar(value: unknown): SessionAvatar | null {
   if (value === null || value === undefined) return null;
   const parsed = SessionAvatarSchema.safeParse(value);
@@ -94181,6 +94192,7 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
+    ...optionalBotSuggestion(row.botSuggestion),
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),
