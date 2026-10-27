@@ -94,7 +94,6 @@ bun test packages/db/test/tool-name-event-pages.test.ts
 bun test packages/db/test/session-event-slices.test.ts
 OPENGENI_BENCH_TOOL_NAME_PAGES=1 bun test packages/db/test/tool-name-event-pages.test.ts
 bun scripts/operator/bench-tool-name-pages.ts <exact-base-commit>
-bun scripts/operator/bench-tool-name-index-cost.ts
 ```
 
 The first suite captures the actual generated metadata SQL and checks restricted
