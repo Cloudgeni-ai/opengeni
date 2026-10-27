@@ -38710,6 +38710,7 @@
       "isPreparingWork": "value",
       "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
+      "mergeHumanInputFormMessages": "value",
       "namedAgentTitle": "value",
       "normalizeConnectorDomain": "value",
       "noticeDisplayText": "value",
