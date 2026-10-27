@@ -2108,6 +2108,9 @@ export const BrowserObservation = /* @__PURE__ */ defineSchema(() =>
       diagnostics: InteractionDiagnosticSummary,
       dialog: BrowserDialog.nullable(),
       observedAt: primitives.string.datetime({ offset: true }),
+      /** A plain line about what happened to this tab that its page cannot
+       * show, for example that a browser relaunch reloaded it. Given once. */
+      notice: z.string().min(1).max(1_024).optional(),
     })
     .strict(),
 );

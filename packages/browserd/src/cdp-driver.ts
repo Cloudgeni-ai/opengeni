@@ -767,6 +767,49 @@ export type GoneBrowserTarget =
 
 const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
 
+/** Why a relaunched browser stopped, as a clause: "this browser was stopped
+ * after going unused for 10 minutes and relaunched on its next call". */
+function relaunchText(relaunch: { reason: BrowserRelaunchReason; idleReleaseMinutes?: number }) {
+  const minutes = relaunch.idleReleaseMinutes;
+  return relaunch.reason === "idle_release"
+    ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+    : relaunch.reason === "controller_restart"
+      ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+      : relaunch.reason === "browser_lost"
+        ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+        : "this browser restarted to save its profile state";
+}
+
+/** A tab a relaunched browser reopened under its earlier ID: its page loaded
+ * again, so whatever the page held only in memory is gone. */
+export type ReloadedBrowserTab = { reason: BrowserRelaunchReason; idleReleaseMinutes?: number };
+
+const RELOADED_PAGE =
+  "so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone";
+
+/** Actions chosen without looking at the page's content, which a reload
+ * does not make wrong. */
+const PAGE_INDEPENDENT_ACTIONS: ReadonlySet<BrowserAction["type"]> = new Set([
+  "navigate",
+  "history",
+  "activate",
+  "viewport",
+  "permission",
+  "wait",
+]);
+
+/** The observation notice for a tab a relaunch reloaded. */
+export function reloadedTabNotice(reloaded: ReloadedBrowserTab): string {
+  const why = relaunchText(reloaded);
+  return `${why.charAt(0).toUpperCase()}${why.slice(1)}, ${RELOADED_PAGE}.`;
+}
+
+/** The refusal of an action on a tab a relaunch reloaded before anyone saw it
+ * again: the action was chosen for the page as it was. */
+export function reloadedTabRefusal(reloaded: ReloadedBrowserTab): string {
+  return `Nothing was done: ${relaunchText(reloaded)}, ${RELOADED_PAGE}. Observe the tab and continue from what it shows.`;
+}
+
 /** The answer for a tab ID that names no open tab: why it is gone when the
  * driver knows, and how to carry on. Always starts "browser target does not
  * exist", which callers match. */
@@ -780,16 +823,7 @@ export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string
       : "by its page, or by a person or agent using this browser";
     return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
   }
-  const minutes = gone.idleReleaseMinutes;
-  const why =
-    gone.reason === "idle_release"
-      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
-      : gone.reason === "controller_restart"
-        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
-        : gone.reason === "browser_lost"
-          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
-          : "this browser restarted to save its profile state";
-  return `browser target does not exist: ${why}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
+  return `browser target does not exist: ${relaunchText(gone)}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
 }
 
 function hasBrowserEmulation(
@@ -839,6 +873,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Tabs that vanished while this driver knew them, or that a relaunch
    * replaced, most recent last: a later call naming one learns why. */
   private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a relaunch reopened under their earlier IDs whose reload no result
+   * has reported yet, by tab ID. The next observation of one says so; an
+   * action on one before that is refused. */
+  private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
   /** The tab an earlier runtime of this session was using; start continues
@@ -2255,9 +2293,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const targetId = this.browserTargetIdOf(command.targetId);
     const observation = await this.withTarget(targetId, async (state, info) => {
       effects = { state, before: state.actionEffectCount };
+      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
+      // An action on the page's content was chosen for the page as it was
+      // before a relaunch reloaded it, unseen since: it could act on an empty
+      // form or a dialog that is gone. Actions that do not depend on the
+      // page run, and the observation they return says it reloaded.
+      if (actions.some((action) => !PAGE_INDEPENDENT_ACTIONS.has(action.type))) {
+        const reloaded = this.takeReloadedTab(state.targetId);
+        if (reloaded) {
+          throw new InteractionDefiniteDriverError("target_stale", reloadedTabRefusal(reloaded));
+        }
+      }
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
-      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
       if (state.dialog && actions[0]?.type !== "handle_dialog") {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -8958,11 +9006,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
+    this.reloadedTabs.delete(tabId);
     this.goneTargets.delete(tabId);
     this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
       this.goneTargets.delete(this.goneTargets.keys().next().value!);
     }
+  }
+
+  /** Whether a relaunch reloaded this tab and no result has said so yet;
+   * the caller reports it, so later results do not repeat it. */
+  private takeReloadedTab(targetId: string): ReloadedBrowserTab | null {
+    return this.takeReloadedTabId(this.tabIdOf(targetId));
+  }
+
+  private takeReloadedTabId(tabId: string): ReloadedBrowserTab | null {
+    const reloaded = this.reloadedTabs.get(tabId) ?? null;
+    this.reloadedTabs.delete(tabId);
+    return reloaded;
+  }
+
+  /** The notice for a result about this tab that reaches the caller, when a
+   * relaunch reloaded its page and nothing has said so yet; said once. */
+  takeReloadedTabNotice(tabId: string): string | null {
+    const reloaded = this.takeReloadedTabId(tabId);
+    return reloaded ? reloadedTabNotice(reloaded) : null;
   }
 
   /**
@@ -8996,15 +9064,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The browser this driver runs replaced an earlier one and reopened its
    * tabs. Each reopened tab keeps its earlier ID; a call naming an earlier tab
-   * that no reopened tab shows learns why it is gone. */
+   * that no reopened tab shows learns why it is gone, and the first result
+   * about a reopened tab says that its page reloaded. */
   noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
     this.adoptTabIds(
       relaunched.tabs.flatMap((tab) =>
         tab.replacementId ? [{ tabId: tab.targetId, browserTargetId: tab.replacementId }] : [],
       ),
     );
+    const reloaded: ReloadedBrowserTab = {
+      reason: relaunched.reason,
+      ...(relaunched.idleReleaseMinutes !== undefined
+        ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+        : {}),
+    };
     for (const tab of relaunched.tabs) {
-      if (this.browserIdsByTabId.has(tab.targetId)) continue;
+      if (this.browserIdsByTabId.has(tab.targetId)) {
+        // Reopened under its earlier ID: the same page, loaded again.
+        if (this.browserIdsByTabId.get(tab.targetId) === tab.replacementId) {
+          this.reloadedTabs.set(tab.targetId, reloaded);
+        }
+        continue;
+      }
       this.rememberGoneTarget(tab.targetId, {
         kind: "relaunched",
         reason: relaunched.reason,

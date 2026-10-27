@@ -255,6 +255,7 @@ const CompactBrowserObservation = z
     diagnostics: InteractionDiagnosticSummary.optional(),
     dialog: BrowserDialog.optional(),
     screenshot: RetainedArtifactReferenceSchema.optional(),
+    notice: z.string().min(1).max(1_024).optional(),
     agentView: BrowserAgentView,
   })
   .strict();
@@ -5364,6 +5365,7 @@ function projectBrowserObservation(
     ...(hasDiagnostics ? { diagnostics } : {}),
     ...(observation.dialog ? { dialog: observation.dialog } : {}),
     ...(observation.screenshot ? { screenshot: observation.screenshot } : {}),
+    ...(observation.notice ? { notice: observation.notice } : {}),
     agentView: {
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
@@ -5560,6 +5562,7 @@ function fullObservationText(observation: z.infer<typeof BrowserObservation>): s
       diagnostics: observation.diagnostics,
       dialog: observation.dialog,
       screenshot: observation.screenshot ?? undefined,
+      notice: observation.notice,
       agentView: {
         sourceKind: semantic?.kind ?? "none",
         nodes: flattenBrowserNodes(roots).map(({ node, depth }) => ({

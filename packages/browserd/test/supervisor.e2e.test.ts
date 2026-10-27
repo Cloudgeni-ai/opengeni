@@ -412,6 +412,156 @@ recoveryE2e(
 );
 
 recoveryE2e(
+  "a relaunch that reloaded a tab says so once, and an action chosen before that does not run",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-reloaded-tab-e2e-");
+    const rootDirectory = join(directory, "state");
+    // A page that keeps what was typed only in memory, and counts its loads.
+    let loads = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        loads += 1;
+        const path = new URL(request.url).pathname;
+        return new Response(
+          `<!doctype html><title>Draft ${path}</title><label>Message <textarea placeholder="Message"></textarea></label><button onclick="document.title='sent ' + document.querySelector('textarea').value">Send</button>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: process.env.DISPLAY !== undefined,
+      initialUrl: `http://127.0.0.1:${server.port}/acted`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    const command = async (
+      targetId: string,
+      action: BrowserActionCommand["action"],
+    ): Promise<BrowserActionCommand> => {
+      const state = await supervisor.targetState(options, targetId);
+      return {
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: state.controllerGeneration,
+        targetId,
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: state.documentGeneration,
+        expectedFrameId: state.frameId,
+        actor: { kind: "system", subjectId: "native-e2e" },
+        action,
+      };
+    };
+    const message = { kind: "placeholder", text: "Message" } as const;
+    const typed = async (targetId: string) => {
+      const { semantic } = await supervisor.observe(options, targetId);
+      return flatten(semantic?.kind === "snapshot" ? semantic.roots : []).find(
+        (node) => node.role === "textbox",
+      )?.value;
+    };
+    const reloaded =
+      "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    let relaunchedPid: number | undefined;
+    try {
+      const acted = (await supervisor.createSession(options)).observation.target.id;
+      const observed = (
+        await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/observed`)
+      ).target.id;
+      const navigated = (
+        await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/navigated`)
+      ).target.id;
+      for (const tab of [acted, observed, navigated]) {
+        const receipt = await supervisor.action(
+          await command(tab, { type: "fill", locator: message, value: "half-written" }),
+        );
+        expect(receipt.error).toBeNull();
+      }
+      expect(await typed(acted)).toBe("half-written");
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      const reopened = (await supervisor.listTargets(options)).map((target) => target.id);
+      expect(reopened).toEqual(expect.arrayContaining([acted, observed, navigated]));
+
+      // An action chosen for the page as it was: nothing reaches the page.
+      const loadsBefore = loads;
+      const refused = await supervisor.action(
+        await command(acted, { type: "press", key: "Enter" }),
+      );
+      expect(refused.state).toBe("failed");
+      expect(refused.error).toMatchObject({
+        code: "target_stale",
+        message: `Nothing was done: ${reloaded.charAt(0).toLowerCase()}${reloaded.slice(1, -1)}. Observe the tab and continue from what it shows.`,
+      });
+      const after = await supervisor.observe(options, acted);
+      expect(after.notice).toBeUndefined();
+      expect(after.target.title).toBe("Draft /acted");
+      expect(loads).toBe(loadsBefore);
+
+      // Observed first: it says the page reloaded, once, and the page is
+      // as the reload left it; an action chosen from there runs.
+      const first = await supervisor.observe(options, observed);
+      expect(first.notice).toBe(reloaded);
+      expect((await supervisor.observe(options, observed)).notice).toBeUndefined();
+      expect(await typed(observed)).toBeFalsy();
+      const sent = await supervisor.action(
+        await command(observed, { type: "fill", locator: message, value: "again" }),
+      );
+      expect(sent.error).toBeNull();
+      expect(await typed(observed)).toBe("again");
+
+      // An action that does not depend on the page runs, and its receipt
+      // carries the notice.
+      const moved = await supervisor.action(
+        await command(navigated, {
+          type: "navigate",
+          url: `http://127.0.0.1:${server.port}/elsewhere`,
+        }),
+      );
+      expect(moved.error).toBeNull();
+      expect(moved.observation?.notice).toBe(reloaded);
+      expect((await supervisor.observe(options, navigated)).notice).toBeUndefined();
+
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
   "tabs showing the same page never take each other's IDs when the browser relaunches",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-duplicate-tabs-e2e-");

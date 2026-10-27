@@ -376,6 +376,10 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * reopened tab keeps its earlier ID, and calls naming an earlier tab that
    * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** The plain notice that a relaunch reloaded this tab's page, for the
+   * first result about it that reaches the caller; null when there is none
+   * or it was already given. */
+  takeReloadedTabNotice?(tabId: string): string | null;
   /** Give open tabs the IDs callers already hold for them (an earlier
    * controller on the same browser gave them those IDs). */
   adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
@@ -1345,7 +1349,11 @@ export class BrowserSupervisor {
       return {
         ...binding(active),
         ...displayOf(active),
-        observation: await this.currentObservation(active),
+        observation: this.reported(
+          active,
+          await this.currentObservation(active),
+          !options.recoverExistingWorkingDirectory,
+        ),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
@@ -1356,7 +1364,11 @@ export class BrowserSupervisor {
       return {
         ...binding(runtime),
         ...displayOf(runtime),
-        observation: await this.currentObservation(runtime),
+        observation: this.reported(
+          runtime,
+          await this.currentObservation(runtime),
+          !options.recoverExistingWorkingDirectory,
+        ),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
@@ -1392,7 +1404,11 @@ export class BrowserSupervisor {
         runtime.waitHoldUntil = detachedHold;
       }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      const observation = this.reported(
+        runtime,
+        runtime.creationObservation ?? (await this.currentObservation(runtime)),
+        !options.recoverExistingWorkingDirectory,
+      );
       runtime.creationObservation = null;
       // The browser opened even if its first page did not load; say why in
       // plain words rather than leave the caller to infer it from the
@@ -1568,7 +1584,7 @@ export class BrowserSupervisor {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return observation;
+    return this.reported(runtime, observation);
   }
 
   async targetState(
@@ -1605,10 +1621,10 @@ export class BrowserSupervisor {
     });
     // Logged as the agent sent it: secret references are not resolved here.
     this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
-    const receipt = await this.presented(
-      runtime,
-      async () => await runtime.controller.run(command),
-    );
+    const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
+    const receipt = ran.observation
+      ? { ...ran, observation: this.reported(runtime, ran.observation) }
+      : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
       await this.recoverIfUnavailable(runtime).catch(() => false);
@@ -3095,6 +3111,18 @@ export class BrowserSupervisor {
 
   private rememberObservation(runtime: Runtime, observation: BrowserObservation): void {
     this.rememberTarget(runtime, observation.target);
+  }
+
+  /** An observation that reaches the caller says, once, that a relaunch
+   * reloaded its tab's page. One the caller does not see (the browser a
+   * recovery relaunched) leaves that for the next one it does. */
+  private reported(
+    runtime: Runtime,
+    observation: BrowserObservation,
+    reaches = true,
+  ): BrowserObservation {
+    const notice = reaches ? runtime.driver.takeReloadedTabNotice?.(observation.target.id) : null;
+    return notice ? { ...observation, notice } : observation;
   }
 
   private rememberTarget(runtime: Runtime, target: BrowserTarget): void {

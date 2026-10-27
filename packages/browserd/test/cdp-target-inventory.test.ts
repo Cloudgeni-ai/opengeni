@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { InteractionOutcomeUnknownDriverError } from "@opengeni/interaction";
+import {
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import { AgentBrowserDriver, CdpTransportError, type BrowserCdpConnection } from "../src";
 import { goneBrowserTargetMessage } from "../src/cdp-driver";
 import type { OwnedTabsState } from "../src/attached-tab-ledger";
@@ -225,6 +228,65 @@ test("tabs a relaunched browser reopened keep their IDs; a tab that did not reop
     expect(fixture.driver.adoptedTabIds()).toEqual([]);
   } finally {
     await fixture.driver.detach();
+  }
+});
+
+test("a tab a relaunch reopened says once that its page reloaded, and an action chosen before that does not run", async () => {
+  const reopened = {
+    tabs: [{ targetId: "old-prior", replacementId: "prior" }],
+  };
+  // Reported first: the first result that reaches the caller says the page
+  // reloaded, once; reading the tab does not use it up.
+  const observing = inventoryFixture();
+  try {
+    observing.driver.noteRelaunchedTabs({
+      reason: "idle_release",
+      idleReleaseMinutes: 10,
+      ...reopened,
+    });
+    await observing.driver.targetState("old-prior");
+    expect((await observing.driver.observe("old-prior")).target.id).toBe("old-prior");
+    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBe(
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
+    );
+    expect(observing.driver.takeReloadedTabNotice("old-prior")).toBeNull();
+  } finally {
+    await observing.driver.detach();
+  }
+  // Acted on first: the action was chosen for the page before the reload,
+  // so it does not run, and its refusal is the one report of the reload.
+  const acting = inventoryFixture();
+  try {
+    acting.driver.noteRelaunchedTabs({ reason: "controller_restart", ...reopened });
+    const state = await acting.driver.targetState("old-prior");
+    const sent = acting.calls.length;
+    const refusal = await acting.driver
+      .dispatch({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId: state.browserSessionId,
+        controllerGeneration: state.controllerGeneration,
+        targetId: "old-prior",
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: state.documentGeneration,
+        expectedFrameId: state.frameId,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        action: { type: "press", key: "Enter" },
+      })
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(InteractionDefiniteDriverError);
+    expect(refusal).toMatchObject({
+      code: "target_stale",
+      message:
+        "Nothing was done: this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone. Observe the tab and continue from what it shows.",
+    });
+    // Only the tab list was read; nothing reached the page.
+    expect(acting.calls.slice(sent).filter((call) => call.method !== "Target.getTargets")).toEqual(
+      [],
+    );
+    expect(acting.driver.takeReloadedTabNotice("old-prior")).toBeNull();
+  } finally {
+    await acting.driver.detach();
   }
 });
 

@@ -3697,6 +3697,54 @@ describe("interaction attempt tools", () => {
     expect(observed.content.at(-1)).toEqual({ type: "text", text: note });
   });
 
+  test("a notice that a relaunch reloaded the tab reaches the model in every view", async () => {
+    const target = browserTarget();
+    const notice =
+      "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+    const observation = { ...browserObservation(target), notice };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) =>
+          browserReceipt(value.operationId, observation),
+        observeBrowserTarget: async () => observation,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act", "browser_observe"],
+      permissions: ["sessions:control", "sessions:read"],
+    });
+    const tool = (name: string) =>
+      definitions.find((definition) => definition.modelName === `interaction__${name}`)!;
+    const text = (result: { content: readonly { type: string; text?: string }[] }) =>
+      result.content.flatMap((part) => (part.type === "text" && part.text ? [part.text] : []));
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    for (const view of ["compact", "full"] as const) {
+      const observed = await tool("browser_observe").execute(
+        { browserSessionId, targetId: target.id, view },
+        context(),
+      );
+      expect(observed.isError).toBeFalsy();
+      expect(observed.structuredContent).toMatchObject({ notice });
+      const lines = text(observed).join("\n").split("\n");
+      expect(lines[lines.findIndex((line) => line.startsWith(`Tab ${target.id}`)) + 1]).toBe(
+        notice,
+      );
+    }
+    const acted = await tool("browser_act").execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.com/next" },
+      },
+      context(),
+    );
+    expect(acted.isError).toBeFalsy();
+    expect(text(acted).join("\n")).toContain(notice);
+  });
+
   test("an upload by workspace path publishes each file once per operation and dispatches File IDs", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);

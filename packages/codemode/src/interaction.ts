@@ -254,6 +254,7 @@ export type CodemodeBrowserAgentObservation = Readonly<{
   diagnostics?: BrowserObservation["diagnostics"];
   dialog?: NonNullable<BrowserObservation["dialog"]>;
   screenshot?: NonNullable<BrowserObservation["screenshot"]>;
+  notice?: string;
   agentView: CodemodeBrowserAgentView;
 }>;
 
