@@ -101,3 +101,17 @@ Declaration example (a registry provider in the deployment catalog):
   "models": [{ "id": "azure-eu/gpt-eu", "upstreamModelId": "gpt-eu" }]
 }
 ```
+
+## Content between workspaces
+
+Content from an EU-only workspace reaches another Opengeni workspace only when
+that workspace is EU-only too: agents reading or messaging chats in another
+workspace, and Opengeni's own MCP endpoints added to a workspace as a remote
+MCP server, are refused with `422 region_restricted` otherwise, and fail
+closed. EU-only covers Opengeni's own inference and content moving between
+Opengeni workspaces. It does not cover outside agents an organization connects
+itself (organization MCP clients, API keys, desktop clients): handing an
+organization's API key to an agent anywhere, including inside another
+Opengeni workspace's sandbox or behind a relay, counts as connecting an
+outside agent and stays allowed. Details and enforcement points are in
+[organization-tenancy.md](organization-tenancy.md).
