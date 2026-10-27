@@ -20,6 +20,7 @@ In-process: `startFakeLoginServer({ port, iframePort, accounts })` from `@openge
 | `/email-code` | Sends a 6-digit code to the fake mailbox. |
 | `/otp-split` | Password, then six single-digit boxes that accept only `keydown`. Inserted or pasted text is discarded. |
 | `/passkey/register`, `/passkey/login` | WebAuthn with a real verifier: signature, rpId hash, UP and UV flags, and the sign-counter rule (`counter_regression`). |
+| `/passkey/autofill` | An identifier page that asks for a passkey through autofill (conditional mediation) as soon as it loads, beside a username field, as large identity providers do. |
 | `/popup-login` | Opens a FakeID login popup on the cross-origin server, which posts a token back to the opener. |
 | `/captcha-iframe` | Login form gated by an "I'm not a robot" widget in a cross-origin iframe, with a distorted 5-character canvas challenge. |
 

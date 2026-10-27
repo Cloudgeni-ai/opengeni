@@ -2342,8 +2342,10 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       "1005_signup_use_case_current.sql",
       "1004_signup_use_case_everyday.sql",
+      "1003_active_browser_last_used_index.sql",
       "1002_browser_wait_hold.sql",
       "1001_browser_session_display.sql",
+      "0999_knowledge_recent_first.sql",
       "0998_managed_auth_passkeys.sql",
       "0996_personal_machine_reconnect_elsewhere.sql",
       "0995_membership_same_role_keeps_authority.sql",

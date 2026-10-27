@@ -79,6 +79,9 @@ export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
   );
 }
 
+/** The billing routes' 403 when the caller lacks billing:manage (requireSelectedAccount). */
+const BILLING_MANAGE_MISSING = "missing permission: billing:manage";
+
 /** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
 const EXTERNAL_PERSON_REFUSED_HINT =
   "This isn't available to this person here. Tell them plainly, without pointing them to a page.";
@@ -358,16 +361,35 @@ export function describeAction(entry: ActionCatalogEntry) {
 export async function callOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
+  options: {
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+    /**
+     * A fixed refusal shown instead of the route's own 403 when that 403 is a
+     * missing billing:manage permission, for the caller's surface. Other 403s
+     * keep the route's answer.
+     */
+    billingForbidden?: string | undefined;
+  } = {},
 ): Promise<CallToolResult> {
   const outcome = await runOrganizationAction(context, input);
-  return "refused" in outcome
-    ? outcome.refused
-    : await toolResult(
-        outcome.response,
-        outcome.entry,
-        input.query,
-        outcome.externalPerson === true,
-      );
+  // Refusals decided before any request, including everything someone who
+  // uses Opengeni through another product can't reach, come first and are
+  // never reworded here.
+  if ("refused" in outcome) return outcome.refused;
+  if (
+    options.billingForbidden &&
+    outcome.externalPerson !== true &&
+    outcome.response.status === 403 &&
+    (await outcome.response.clone().text()).includes(BILLING_MANAGE_MISSING)
+  ) {
+    await outcome.response.body?.cancel();
+    return failure(options.billingForbidden);
+  }
+  return await toolResult(outcome.response, outcome.entry, input.query, {
+    externalPerson: outcome.externalPerson === true,
+    note: options.note,
+  });
 }
 
 /**
@@ -475,7 +497,12 @@ async function toolResult(
   response: Response,
   entry: ActionCatalogEntry,
   query: z.infer<typeof OrganizationActionCallInput>["query"],
-  externalPerson: boolean,
+  options: {
+    /** The caller uses Opengeni through another product: no app page to send them to. */
+    externalPerson: boolean;
+    /** A fixed note added to a successful result, for the caller's surface. */
+    note?: string | undefined;
+  },
 ): Promise<CallToolResult> {
   const status = response.status;
   const location = response.headers.get("location");
@@ -512,7 +539,7 @@ async function toolResult(
     if (truncated && !trimmed)
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
-  if ((status === 401 || status === 403) && externalPerson) {
+  if ((status === 401 || status === 403) && options.externalPerson) {
     result.hint = EXTERNAL_PERSON_REFUSED_HINT;
   } else if (
     (status === 401 || status === 403) &&
@@ -520,6 +547,7 @@ async function toolResult(
   ) {
     result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
   }
+  if (options.note && status < 400) result.note = options.note;
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
     ...(status >= 400 ? { isError: true } : {}),

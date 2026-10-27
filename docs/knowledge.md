@@ -286,11 +286,23 @@ proposals await review. That link opens the Review tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 
-The Library shows a flat list or a **By collection** layout: one section per
-top-level collection (no visible parent in the selected scope) listing its
-sub-collections first, as rows that open their own page, then its direct
-entries, and finally the entries not in a collection. A nested collection
-therefore appears once, inside its parent. Rows open the entry's or collection's
+The Library's one **Entries | Collections** control switches between a flat list
+of entries and a flat list of top-level collections (no visible parent in the
+selected scope). Every list without search text shows the most recently updated
+first. An entry's change time is the latest decision on the revision the list
+shows (publication, proposal or rejection), so approving a proposal moves it
+up while a pending or rejected proposal never moves the published Library.
+Archiving keeps the published revision, so the Archived view orders by that
+too. A collection's is the newest of its own and that of any non-archived entry or
+sub-collection below it that the reader can see in the selected scope; the walk
+descends through sub-collections by membership. Collection rows show that date.
+Search keeps relevance order, with each row's own change breaking ties; an
+**Added** window orders by creation time, the date it filters on. Review groups
+and the Review queue also list the newest proposal first. Collections hides the
+Type filter, keeping its value for Entries; search and the other filters find
+nested collections too. Uploads and old Files links open Entries filtered to
+files.
+Rows open the entry's or collection's
 own page with its content and evidence. A collection page lists its
 sub-collections as their own group before its entries, and every entry or
 collection page shows the path of parent collections (first parent at each
@@ -301,10 +313,16 @@ remain discoverable regardless of their parents. Only collections and files carr
 an icon; other kinds are named in the row's meta line ("Decision · updated 3
 days ago").
 
-The section list uses `kind: "group"` with `rootOnly`, and the loose list
-`rootOnly`, both before server pagination; each collection pages its direct
-sub-collections (`groupId` with `kind: "group"`) and its direct members using
-`groupId`. A parent outside the selected scope,
+`knowledge_entry_read` orders a list by `order` (`updated` by default from the
+API, `created` with `createdSince`) and pages with a keyset on score, that
+order's timestamp and id; it returns the timestamp as `lastChangedAt`. Callers
+that send no `order` keep the old score and id order, and a cursor without an
+order key continues in that order. Like any recency sort, a row whose change
+time moves between pages can appear twice; the web list skips repeats. The
+Collections view uses
+`kind: "group"` with `rootOnly` before server pagination; each collection pages
+its direct sub-collections (`groupId` with `kind: "group"`) and its direct
+members using `groupId`, both newest first. A parent outside the selected scope,
 archived parent, or inaccessible parent does not hide an accessible child from
 the root. Published and outstanding pending membership edges are checked for
 cycles under the publication lock, including at approval and restoration.

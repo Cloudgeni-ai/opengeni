@@ -246,6 +246,11 @@ jobs:
             /lab/base.ext4
             /lab/ci-artifacts.txt
           key: compute-lab-${{ hashFiles('compute/lab/host-setup.sh', 'compute/deploy/host/pins.env') }}
+      - name: Cache the guest build's pinned downloads (Go, bash source)
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/compute-guest
+          key: compute-guest-tools-${{ hashFiles('compute/guest/build.sh') }}
       - name: Huge pages for the nested profile
         run: |
           # Half the runner's memory, in 2 MiB pages: the lab step runs its

@@ -74,6 +74,8 @@ pub fn run() -> ! {
     system::network(args.network.as_ref());
     if let Some(sandbox) = &args.sandbox {
         system::boot_identity(sandbox);
+    } else {
+        system::boot_unowned();
     }
     let image: ImageConfig = fs::read(config::CONFIG_PATH)
         .ok()

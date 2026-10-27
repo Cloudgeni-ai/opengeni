@@ -136,6 +136,10 @@ export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
 export {
+  PaymentPageActivityProvider,
+  type PaymentPageActivity,
+} from "./timeline/payment-page-activity";
+export {
   LearningRefusalActionsProvider,
   type LearningRefusalActions,
 } from "./timeline/learning-refusal-row";
