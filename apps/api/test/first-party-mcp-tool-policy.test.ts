@@ -1721,6 +1721,18 @@ describe("app-action tools", () => {
           name,
         ).toContain("workspaceId");
       }
+      // The credential profile tools stay findable for credential setup
+      // without crowding out unrelated chat and workspace searches.
+      for (const query of [
+        "give every command GH_TOKEN from a saved secret",
+        "credential profile environment variables",
+      ]) {
+        const names = index.rank(query, 8).map((tool) => tool.name);
+        expect(names, query).toContain("opengeni__secret_profile_set");
+      }
+      expect(index.rank("show the credential profile", 8).map((tool) => tool.name)).toContain(
+        "opengeni__secret_profile_get",
+      );
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

@@ -208,7 +208,7 @@ export function registerSecretTools(
     "secret_profile_get",
     {
       description:
-        "Show the credential profile: environment variables (such as GH_TOKEN or AZURE_CLIENT_SECRET) that Opengeni fills from saved secrets in every command you run, without putting them in the command. scope session (default) shows this chat's own additions and the full list your commands receive (workspace entries plus this chat and the chats that started it); scope workspace shows the workspace profile. Shows names and references, never values.",
+        "Show the credential profile: environment variables (such as GH_TOKEN or AZURE_CLIENT_SECRET) that Opengeni fills from saved secrets in every command you run, without putting them in the command. scope session (default) lists this conversation's own additions and every variable your commands receive, including inherited ones; scope workspace lists the shared profile. Names and references only, never values.",
       inputSchema: SecretProfileGetInput.shape,
     },
     (input) =>
