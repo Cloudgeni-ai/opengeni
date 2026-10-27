@@ -54,7 +54,6 @@ mod handover;
 mod instance_lock;
 mod inventory;
 mod job;
-mod legacy;
 mod log_file;
 mod metrics;
 mod ops;
