@@ -8577,6 +8577,14 @@ function displayTitleFromMeta(tool: object): string | undefined {
   return typeof title === "string" && title.trim() ? title.trim().slice(0, 256) : undefined;
 }
 
+/** True for an API integration operation, whose arguments are one HTTP request. */
+function apiOperationFromMeta(tool: object): boolean {
+  const meta = (tool as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+  const key = (meta as Record<string, unknown>)["opengeni/operationKey"];
+  return typeof key === "string" && key.trim() !== "";
+}
+
 /** Read only already-prepared display facts; never trigger deferred connections
  * merely to render an unrelated intrinsic tool event. */
 export function mcpToolDisplayMetadata(
@@ -8946,6 +8954,8 @@ export class PrefixedMcpServer implements MCPServer {
    * the model never sees them.
    */
   private readonly displayTitles = new Map<string, string>();
+  /** Unprefixed names of API integration operations; their cards read the request's fields. */
+  private readonly apiOperations = new Set<string>();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9172,7 +9182,11 @@ export class PrefixedMcpServer implements MCPServer {
     const extra =
       typeof bridge.reviewContext === "function" ? await bridge.reviewContext(toolName, args) : {};
     const title = this.displayTitles.get(toolName);
-    return title ? { title, ...extra } : extra;
+    return {
+      ...(title ? { title } : {}),
+      ...(this.apiOperations.has(toolName) ? { kind: "api" as const } : {}),
+      ...extra,
+    };
   }
 
   /** True when the wrapped local bridge supplies its own model-visible result copy. */
@@ -9226,6 +9240,7 @@ export class PrefixedMcpServer implements MCPServer {
           this.originalToolNames.set(name, tool.name);
           const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
           if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
+          if (apiOperationFromMeta(tool)) this.apiOperations.add(tool.name);
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
             ...(tool.title ? { title: tool.title } : metaTitle ? { title: metaTitle } : {}),

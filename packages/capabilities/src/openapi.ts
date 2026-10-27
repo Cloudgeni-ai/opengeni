@@ -318,7 +318,10 @@ export class OpenApiMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
-            ...displayTitleMeta(tool.operationKey),
+            ...displayTitleMeta(tool.operationKey, {
+              method: this.options.revision.bindings[tool.id]?.method,
+              serverUrl: this.options.revision.bindings[tool.id]?.serverUrl,
+            }),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,

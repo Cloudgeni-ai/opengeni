@@ -373,19 +373,21 @@ const APP_ACTION_REVIEW_TOOL = "admin_action_call";
 // (recipients, rich text, date and time, named places) as one plain value.
 // The exact structure stays one click away in Details.
 const API_ENVELOPE_KEYS = new Set(["path", "query", "header", "cookie", "body", "contentType"]);
+// In the order a person checks them: who, what, when, where, the text, then
+// the rest of the addressing.
 const API_LEADING_LABELS: Readonly<Record<string, string>> = {
   toRecipients: "To",
+  subject: "Subject",
+  start: "Starts",
+  end: "Ends",
+  location: "Location",
+  body: "Message",
+  comment: "Message",
   ccRecipients: "Cc",
   bccRecipients: "Bcc",
   from: "From",
   replyTo: "Reply to",
-  subject: "Subject",
-  body: "Message",
-  comment: "Message",
   attendees: "Attendees",
-  start: "Starts",
-  end: "Ends",
-  location: "Location",
 };
 const API_FIELD_ORDER = Object.keys(API_LEADING_LABELS);
 /** Longer than other previews: the text of a message is what a person checks. */
@@ -426,22 +428,89 @@ function apiEnvelopeEntries(args: Record<string, unknown>): ApiEntry[] | null {
     : args.body === undefined
       ? []
       : [{ key: "content", value: args.body, path: "/body", parameter: false }];
-  const entries = [...body, ...children("path", true), ...children("query", true)];
+  const entries = [
+    ...body,
+    ...children("path", true),
+    ...children("query", true),
+    ...(args.contentType === undefined
+      ? []
+      : [{ key: "contentType", value: args.contentType, path: "/contentType", parameter: true }]),
+  ];
   return entries.every((entry) => entry.path.length <= 1024) ? entries : null;
 }
 
+const HTML_ENTITIES: Readonly<Record<string, string>> = {
+  nbsp: " ",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  amp: "&",
+  mdash: "—",
+  ndash: "–",
+  hellip: "…",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“",
+  bull: "•",
+  middot: "·",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+  euro: "€",
+  pound: "£",
+  shy: "",
+  zwnj: "",
+  zwj: "",
+};
+
+function decodeEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (entity, name: string) => {
+    if (name.startsWith("#")) {
+      const code =
+        name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+      return Number.isInteger(code) &&
+        code > 0 &&
+        code <= 0x10ffff &&
+        (code < 0xd800 || code > 0xdfff)
+        ? String.fromCodePoint(code)
+        : entity;
+    }
+    return HTML_ENTITIES[name.toLowerCase()] ?? entity;
+  });
+}
+
+const stripTags = (html: string) => html.replace(/<[^>]*>/g, "");
+
+/**
+ * The text a person reads in an HTML message. A link whose target differs from
+ * its text shows both, "our portal (https://pay.example.net)", because where a
+ * link goes is what a person checks before sending.
+ */
 function plainText(content: string, contentType: unknown): string {
   if (typeof contentType !== "string" || contentType.toLowerCase() !== "html") return content;
-  return content
-    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
-    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&")
+  return decodeEntities(
+    content
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<(head|title|script|style)\b[\s\S]*?<\/\1\s*>/gi, "")
+      .replace(
+        /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
+        (_match, double?: string, single?: string, bare?: string, inner = "") => {
+          const text = stripTags(inner);
+          const target = decodeEntities((double ?? single ?? bare ?? "").trim()).replace(
+            /^mailto:/i,
+            "",
+          );
+          const shown = decodeEntities(text).trim();
+          if (!target || target.startsWith("#") || shown === target) return text;
+          return shown ? `${text} (${target.replace(/[<>]/g, "")})` : target.replace(/[<>]/g, "");
+        },
+      )
+      .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+      .replace(/<[^>]*>/g, ""),
+  )
+    .replace(/\u00a0/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -459,7 +528,25 @@ function recipientText(value: unknown): string | undefined {
   const name = [inner.name, inner.displayName].find(
     (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
   );
-  return name && name !== address ? `${name} <${address}>` : address;
+  const text = name && name !== address ? `${name} <${address}>` : address;
+  // A meeting attendee says when coming is optional.
+  return typeof value.type === "string" && value.type.toLowerCase() === "optional"
+    ? `${text} (optional)`
+    : text;
+}
+
+/** "2026-10-28 10:00 (Europe/Oslo)": seconds only when they matter. */
+function dateTimeText(dateTime: string, timeZone: unknown): string {
+  const parsed =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i.exec(
+      dateTime.trim(),
+    );
+  const text = parsed
+    ? `${parsed[1]} ${parsed[2]}:${parsed[3]}${parsed[4] && parsed[4] !== "00" ? `:${parsed[4]}` : ""}${
+        parsed[5] ? (parsed[5].toUpperCase() === "Z" ? " UTC" : ` ${parsed[5]}`) : ""
+      }`
+    : dateTime;
+  return typeof timeZone === "string" && timeZone.trim() ? `${text} (${timeZone.trim()})` : text;
 }
 
 /** One plain reading of a structured value, or undefined to fall back to its size. */
@@ -467,7 +554,14 @@ function apiValueText(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     if (value.length === 0) return undefined;
     const recipients = value.map(recipientText);
-    return recipients.every((entry) => entry !== undefined) ? recipients.join(", ") : undefined;
+    if (recipients.every((entry) => entry !== undefined)) return recipients.join(", ");
+    // Attachments and other named items read as their names.
+    const names = value.map((item) =>
+      plainObject(item) && typeof item.name === "string" && item.name.trim()
+        ? item.name.trim()
+        : undefined,
+    );
+    return names.every((entry) => entry !== undefined) ? names.join(", ") : undefined;
   }
   if (!plainObject(value)) return undefined;
   const recipient = recipientText(value);
@@ -482,9 +576,7 @@ function apiValueText(value: unknown): string | undefined {
     typeof value.dateTime === "string" &&
     keys.every((key) => ["dateTime", "timeZone"].includes(key))
   )
-    return typeof value.timeZone === "string" && value.timeZone
-      ? `${value.dateTime.replace("T", " ").replace(/:00(\.0+)?$/, "")} (${value.timeZone})`
-      : value.dateTime.replace("T", " ").replace(/:00(\.0+)?$/, "");
+    return dateTimeText(value.dateTime, value.timeZone);
   if (typeof value.displayName === "string" && value.displayName.trim()) return value.displayName;
   return undefined;
 }
@@ -493,7 +585,9 @@ function apiEnvelopeReviewFields(
   args: Record<string, unknown>,
   context: ToolReviewContext | undefined,
 ): { fields: ToolActionReview["fields"]; moreFields: number } | null {
-  if (context?.protectedFields?.includes("*")) return null;
+  // Only an API integration's arguments are an HTTP request; another tool's
+  // `body` or `query` argument means what that tool says it means.
+  if (context?.kind !== "api" || context.protectedFields?.includes("*")) return null;
   const entries = apiEnvelopeEntries(args);
   if (!entries) return null;
   const rank = (entry: ApiEntry) => {

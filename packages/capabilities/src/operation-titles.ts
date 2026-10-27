@@ -10,9 +10,9 @@
  */
 
 /** Reviewed phrasing for everyday Microsoft 365 actions, matched on the operation id's tail. */
-const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
+const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   // Outlook mail. Creating a message in Graph saves a draft; nothing is sent.
-  [/^(me|users)\.(mailFolders\.)?CreateMessages$/, "Save a draft email"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?CreateMessages$/, "Save a draft email"],
   [/^(me|users)\.sendMail$/, "Send an email"],
   [/\.messages\.message\.send$/, "Send a draft email"],
   [/\.messages\.message\.reply$/, "Reply to an email"],
@@ -24,12 +24,15 @@ const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.messages\.message\.move$/, "Move an email"],
   [/\.messages\.message\.copy$/, "Copy an email"],
   [/\.messages\.message\.permanentDelete$/, "Permanently delete an email"],
-  [/^(me|users)\.(mailFolders\.)?ListMessages$/, "Read emails"],
-  [/^(me|users)\.(mailFolders\.)?GetMessages$/, "Read an email"],
-  [/^(me|users)\.(mailFolders\.)?GetMessagesContent$/, "Download an email"],
-  [/^(me|users)\.(mailFolders\.)?UpdateMessages$/, "Update an email"],
-  [/^(me|users)\.(mailFolders\.)?DeleteMessages$/, "Delete an email"],
+  [/\.messages\.delta$/, "Read changes to emails"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?ListMessages$/, "Read emails"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?GetMessages$/, "Read an email"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?GetMessagesContent$/, "Download an email"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?UpdateMessages$/, "Update an email"],
+  [/^(me|users)\.(mailFolders\.(childFolders\.)*)?DeleteMessages$/, "Delete an email"],
   [/^(me|users)\.ListMailFolders$/, "Read mail folders"],
+  [/\.mailFolder\.permanentDelete$/, "Permanently delete a mail folder"],
+  [/\.mailFolders\.delta$/, "Read changes to mail folders"],
   // Outlook calendar, under /me/events, /me/calendar and /me/calendars.
   [/(^|\.)CreateEvents$/, "Create a calendar event"],
   [/(^|\.)UpdateEvents$/, "Update a calendar event"],
@@ -41,6 +44,9 @@ const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.event\.decline$/, "Decline an invitation"],
   [/\.event\.cancel$/, "Cancel a meeting"],
   [/\.event\.forward$/, "Forward an invitation"],
+  [/\.event\.permanentDelete$/, "Permanently delete a calendar event"],
+  [/\.(events|calendarView)\.delta$/, "Read changes to calendar events"],
+  [/(^|\.)calendar\.permanentDelete$/, "Permanently delete a calendar"],
   [/(^|\.)findMeetingTimes$/, "Find meeting times"],
   [/(^|\.)getSchedule$/, "Check availability"],
   // Outlook contacts.
@@ -49,11 +55,13 @@ const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
   [/(^|\.)DeleteContacts$/, "Delete a contact"],
   [/(^|\.)GetContacts$/, "Read a contact"],
   [/(^|\.)ListContacts$/, "Read contacts"],
+  [/\.contact\.permanentDelete$/, "Permanently delete a contact"],
+  [/\.contacts\.delta$/, "Read changes to contacts"],
   [/(^|\.)ListPeople$/, "Find people"],
-  // OneDrive and SharePoint files.
+  // OneDrive and SharePoint files. An item is a file or a folder.
   [/^drives\.CreateItems$/, "Create a file or folder"],
-  [/^drives\.UpdateItems$/, "Update a file"],
-  [/^drives\.DeleteItems$/, "Delete a file"],
+  [/^drives\.UpdateItems$/, "Update a file or folder"],
+  [/^drives\.DeleteItems$/, "Delete a file or folder"],
   [/^drives\.GetItems$/, "Read file details"],
   [/^drives\.GetItemsContent$/, "Download a file"],
   [/^drives\.DeleteItemsContent$/, "Delete a file's content"],
@@ -65,7 +73,9 @@ const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.driveItem\.restore$/, "Restore a file"],
   [/\.driveItem\.checkin$/, "Check in a file"],
   [/\.driveItem\.checkout$/, "Check out a file"],
+  [/\.driveItem\.permanentDelete$/, "Permanently delete a file or folder"],
   [/\.(drive|driveItem)\.search$/, "Search files"],
+  [/\.(drive|root|driveItem)\.delta$/, "Read changes to files"],
   // Teams.
   [/^chats\.CreateMessages$/, "Send a chat message"],
   [/^chats\.ListMessages$/, "Read chat messages"],
@@ -74,6 +84,32 @@ const REVIEWED_OPERATION_TITLES: readonly (readonly [RegExp, string])[] = [
   [/^teams\.channels\.messages\.CreateReplies$/, "Reply in a channel thread"],
   [/^teams\.channels\.messages\.ListReplies$/, "Read thread replies"],
 ];
+
+/** Microsoft Graph in its public and national clouds. */
+const GRAPH_HOSTS = new Set([
+  "graph.microsoft.com",
+  "graph.microsoft.us",
+  "dod-graph.microsoft.us",
+  "graph.microsoft.de",
+  "microsoftgraph.chinacloudapi.cn",
+]);
+
+function graphHost(serverUrl: string | undefined): boolean {
+  if (!serverUrl) return false;
+  try {
+    return GRAPH_HOSTS.has(new URL(serverUrl).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** What the title can know about the operation besides its id. */
+export type OperationTitleContext = {
+  /** The HTTP method, for OpenAPI operations. */
+  readonly method?: string | undefined;
+  /** The server the operation is called on, for OpenAPI operations. */
+  readonly serverUrl?: string | undefined;
+};
 
 const CRUD_VERBS: Readonly<Record<string, readonly [string, "one" | "many"]>> = {
   list: ["Read", "many"],
@@ -112,25 +148,56 @@ function sentence(parts: readonly string[]): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+// "for repo", "by id": an object that starts here names its parent first.
+const PREPOSITION = /^(for|by|in|on|from|to|with|of|at|under|into)$/;
+// "last seven days" counts a span; its noun stays plural.
+const COUNTING =
+  /^(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|last|next|previous|recent|first)$/;
+// A read whose first word is one of these already says what it does.
+const READ_VERB =
+  /^(read|search|find|check|count|download|export|fetch|lookup|query|preview|validate|resolve|list|get)$/;
+
+/** Action phrases whose meaning needs the thing they act on. */
+const SUBJECT_ACTIONS: Readonly<Record<string, (subject: string) => string>> = {
+  "permanent delete": (subject) => `Permanently delete ${subject}`,
+  delta: (subject) => `Read changes to ${subject}`,
+};
+
+/** The object with its last word singular, unless it counts a span. */
+function singularObject(object: readonly string[]): string[] {
+  if (object.length === 0 || object.slice(0, -1).some((word) => COUNTING.test(word)))
+    return [...object];
+  return [...object.slice(0, -1), singular(object.at(-1)!)];
+}
+
 /** Tool `_meta` key for the display title. Hosts read it; models never see `_meta`. */
 export const DISPLAY_TITLE_META_KEY = "opengeni/displayTitle";
 
 /** The `_meta` entry carrying an operation's display title, when one can be derived. */
-export function displayTitleMeta(operationKey: string): Record<string, string> {
-  const title = integrationOperationDisplayTitle(operationKey);
+export function displayTitleMeta(
+  operationKey: string,
+  context: OperationTitleContext = {},
+): Record<string, string> {
+  const title = integrationOperationDisplayTitle(operationKey, context);
   return title ? { [DISPLAY_TITLE_META_KEY]: title } : {};
 }
 
 /**
- * A short, plain title for one API operation. Reviewed phrasing wins; any
- * other operation id reads as its verb and object ("me.ListMailFolders" →
- * "Read mail folders", "listPets" → "Read pets", "createPet" → "Create pet").
- * Returns undefined when nothing readable can be derived.
+ * A short, plain title for one API operation. Reviewed Microsoft 365 phrasing
+ * wins for operations served by Microsoft Graph; any other operation id reads
+ * as its verb and object ("me.ListMailFolders" → "Read mail folders",
+ * "listPets" → "Read pets", "drive.files.get" → "Read file",
+ * "issues/list-for-repo" → "Read issues for repo"). Returns undefined when
+ * nothing readable can be derived.
  */
-export function integrationOperationDisplayTitle(operationKey: string): string | undefined {
+export function integrationOperationDisplayTitle(
+  operationKey: string,
+  context: OperationTitleContext = {},
+): string | undefined {
   const key = operationKey.trim();
   if (!key || key.length > 512) return undefined;
-  for (const [pattern, title] of REVIEWED_OPERATION_TITLES) if (pattern.test(key)) return title;
+  if (graphHost(context.serverUrl))
+    for (const [pattern, title] of REVIEWED_GRAPH_TITLES) if (pattern.test(key)) return title;
   // An operation without an id is keyed by its method and path: "get_/pets/{id}".
   const route = /^(get|head|post|put|patch|delete)_(\/.*)$/.exec(key);
   if (route) {
@@ -139,7 +206,6 @@ export function integrationOperationDisplayTitle(operationKey: string): string |
     const noun = resource.length > 0 ? words(resource.at(-1)!) : [];
     if (noun.length === 0) return undefined;
     const one = path.at(-1)?.startsWith("{") === true || !["get", "head"].includes(route[1]!);
-    if (one) noun[noun.length - 1] = singular(noun.at(-1)!);
     const verb = {
       get: "Read",
       head: "Read",
@@ -148,7 +214,7 @@ export function integrationOperationDisplayTitle(operationKey: string): string |
       patch: "Update",
       delete: "Delete",
     }[route[1] as "get"];
-    return sentence([verb, ...noun]);
+    return sentence([verb, ...(one ? singularObject(noun) : noun)]);
   }
   // GraphQL operation keys read "query:issues" / "mutation:createIssue".
   const graphql = /^(query|mutation):(.+)$/.exec(key);
@@ -158,21 +224,31 @@ export function integrationOperationDisplayTitle(operationKey: string): string |
   if (!last) return undefined;
   const parts = words(last);
   if (parts.length === 0) return undefined;
-  const subject = segments.length > 1 ? words(segments.at(-2)!) : [];
+  const parent = segments.length > 1 ? words(segments.at(-2)!) : [];
+  const subject = parent.join(" ") === "me" ? [] : parent;
   if (parts[0] === "get" && parts[1] === "count" && parts.length === 2)
-    return subject.length > 0 && subject.join(" ") !== "me"
-      ? sentence(["Count", ...subject])
-      : undefined;
+    return subject.length > 0 ? sentence(["Count", ...subject]) : undefined;
   const verb = Object.hasOwn(CRUD_VERBS, parts[0]!) ? CRUD_VERBS[parts[0]!] : undefined;
-  if (verb && parts.length > 1) {
-    const object = parts.slice(1);
-    if (verb[1] === "one") object[object.length - 1] = singular(object.at(-1)!);
-    return sentence([verb[0], ...object]);
+  if (verb) {
+    const [action, count] = verb;
+    const own = parts.slice(1);
+    // "createPet" names its own object.
+    if (own.length > 0 && !PREPOSITION.test(own[0]!))
+      return sentence([action, ...(count === "one" ? singularObject(own) : own)]);
+    // "drive.files.get" and "issues/list-for-repo" act on their parent.
+    if (subject.length > 0)
+      return sentence([action, ...(count === "one" ? singularObject(subject) : subject), ...own]);
+    return own.length > 0 ? sentence([action, ...own]) : undefined;
   }
   if (graphql && parts.length === 1)
     return sentence(graphql[1] === "query" ? ["Read", ...parts] : parts);
+  const phrase = SUBJECT_ACTIONS[parts.join(" ")];
+  if (phrase) return subject.length > 0 ? phrase(subject.join(" ")) : undefined;
+  // A read named by what it returns ("supportedTimeZones") says that it reads.
+  if (context.method?.toLowerCase() === "get" && !READ_VERB.test(parts[0]!))
+    return sentence(["Read", ...parts]);
   // A bare action on a parent ("events.event.accept") names that parent.
-  if (parts.length === 1 && subject.length > 0 && subject.join(" ") !== "me")
+  if (parts.length === 1 && subject.length > 0)
     return sentence([...parts, ...subject.map(singular)]);
   return sentence(parts);
 }

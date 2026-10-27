@@ -96,7 +96,11 @@ test("an API operation's display title reaches the approval review and activity 
     expect(
       await tool.needsApproval(new RunContext(), { body: { subject: "Hi" } }, "draft-call"),
     ).toBe(true);
-    expect(prepareCalls[0]?.reviewContext).toMatchObject({ title: "Save a draft email" });
+    // The card reads the request: an API operation is marked so.
+    expect(prepareCalls[0]?.reviewContext).toMatchObject({
+      title: "Save a draft email",
+      kind: "api",
+    });
 
     expect(
       withMcpToolDisplayMetadata(prepared.mcpServers, { id: "draft-call", name }),
