@@ -19,6 +19,7 @@ import {
   getManagedHumanSandboxRecovery,
   requireSandboxRecoveryConsentHuman,
 } from "../src/application/sandbox-recovery";
+import { errorMessage } from "@opengeni/contracts/values";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -84,7 +85,7 @@ describe("sandbox recovery consent through the API as the user", () => {
         await run();
         return "allowed";
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         return message.includes("managed-human") ? "refused" : `failed: ${message}`;
       }
     };

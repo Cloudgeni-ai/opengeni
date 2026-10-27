@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The client side of the MCP Events extension (SEP-3415,
@@ -541,6 +542,6 @@ export function classifyMcpEventsError(error: unknown): McpEventsFailure {
       if (legacy.code === 403) return { kind: "forbidden", detail: null };
     }
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return { kind: "transient", detail: message.slice(0, 300) || "The request failed" };
 }

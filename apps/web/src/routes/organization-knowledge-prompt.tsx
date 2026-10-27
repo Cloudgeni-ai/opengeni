@@ -9,6 +9,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Field, TextArea } from "@opengeni/react/ui/field";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type OrganizationKnowledgeModelSelection = {
   model: string;
@@ -84,7 +85,7 @@ function useOrganizationKnowledgeCatalog(workspaceId: string): CatalogState & {
           setState({
             models: [],
             loading: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       });

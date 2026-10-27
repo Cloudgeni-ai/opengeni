@@ -1,3 +1,4 @@
+import { sha256Hex } from "@opengeni/contracts/values";
 const DEFAULT_DATABASE_NAME = "opengeni-voice-recordings-v1";
 const DATABASE_VERSION = 1;
 const MANIFEST_STORE = "recordings";
@@ -495,11 +496,6 @@ function assertManifestOwnership(
 function codecForMimeType(mimeType: string): string | null {
   const match = /(?:^|;)\s*codecs?\s*=\s*"?([^;"]+)/iu.exec(mimeType);
   return match?.[1]?.trim().toLowerCase() ?? null;
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function openDatabase(factory: IDBFactory, name: string): Promise<IDBDatabase> {

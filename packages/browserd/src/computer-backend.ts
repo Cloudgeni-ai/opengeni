@@ -120,10 +120,13 @@ export interface ComputerBackend {
   clipboard(): Promise<ComputerBackendClipboard>;
   validate(command: ComputerBackendActionCommand): Promise<void>;
   /** A backend that can act on an element of another role than the one an
-   * action's locator named reports each such action to `standIn`. */
+   * action's locator named reports each such action to `standIn`. A backend
+   * whose delivery of a single click or key press was not confirmed (the
+   * app gives no sign it acted on raw input) calls `unconfirmed`. */
   dispatch(
     command: ComputerBackendActionCommand,
     standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+    unconfirmed?: () => void,
   ): Promise<ComputerBackendObservation | null>;
   close(): Promise<void>;
 }

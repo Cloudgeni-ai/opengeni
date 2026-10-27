@@ -5857,6 +5857,15 @@
     --og-component-font-size: var(--og-font-size-xs);
     --og-component-line-height: var(--og-line-height-xs);
   }
+:where(.og-root).\[-webkit-app-region\:no-drag\],:where(.og-root) .\[-webkit-app-region\:no-drag\] {
+    -webkit-app-region: no-drag;
+  }
+:where(.og-root).\[-webkit-touch-callout\:none\],:where(.og-root) .\[-webkit-touch-callout\:none\] {
+    -webkit-touch-callout: none;
+  }
+:where(.og-root).\[app-region\:no-drag\],:where(.og-root) .\[app-region\:no-drag\] {
+    app-region: no-drag;
+  }
 :where(.og-root).\[overflow-anchor\:auto\],:where(.og-root) .\[overflow-anchor\:auto\] {
     overflow-anchor: auto;
   }
@@ -7505,6 +7514,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-white\/15,:where(.og-root) .hover\:bg-white\/15 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: color-mix(in srgb, #fff 15%, transparent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--color-white) 15%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-white\/20,:where(.og-root) .hover\:bg-white\/20 {
     &:hover {
       @media (hover: hover) {
@@ -8097,6 +8116,27 @@
 :where(.og-root).active\:cursor-grabbing,:where(.og-root) .active\:cursor-grabbing {
     &:active {
       cursor: grabbing;
+    }
+  }
+:where(.og-root).active\:border-white\/40,:where(.og-root) .active\:border-white\/40 {
+    &:active {
+      border-color: color-mix(in srgb, #fff 40%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--color-white) 40%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:bg-white\/25,:where(.og-root) .active\:bg-white\/25 {
+    &:active {
+      background-color: color-mix(in srgb, #fff 25%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--color-white) 25%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:text-white,:where(.og-root) .active\:text-white {
+    &:active {
+      color: var(--color-white);
     }
   }
 :where(.og-root).enabled\:hover\:bg-surface-2,:where(.og-root) .enabled\:hover\:bg-surface-2 {

@@ -34,6 +34,7 @@ import {
   planRenumber,
   resolveMigration,
 } from "./migration-ordinals";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type Args = {
   selector: string;
@@ -319,6 +320,6 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

@@ -64,6 +64,7 @@ import {
 } from "../lib/artifact-library-navigation";
 import type { ArtifactCatalogFilters } from "../lib/artifact-catalog";
 import type { ArtifactReturnSearch, SiteDetailTab } from "../lib/routes";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The Site view opens the same publish form through this route's code,
 // loaded when needed, so the form stays with the Site's Settings tab.
@@ -562,7 +563,7 @@ function ArtifactDetailPage({
       await load();
     } catch (nextError) {
       toast.error("Couldn't restore version", {
-        description: nextError instanceof Error ? nextError.message : String(nextError),
+        description: errorMessage(nextError),
       });
     } finally {
       setBusyVersion(null);

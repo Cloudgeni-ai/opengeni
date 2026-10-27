@@ -24,6 +24,7 @@ import { SettingRow, SettingRowGroup } from "../../../ui/setting-row";
 import { Switch } from "../../../ui/switch";
 import { UsageMeter } from "../../../ui/usage-meter";
 import { formatBytes } from "../../lib/format";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type SiteDataClient = Pick<
   OpenGeniBrowserClient,
@@ -387,7 +388,7 @@ function SiteDataCollection({
         });
     } catch (nextError) {
       toast.error("Couldn't export records", {
-        description: nextError instanceof Error ? nextError.message : String(nextError),
+        description: errorMessage(nextError),
       });
     } finally {
       setExporting(false);

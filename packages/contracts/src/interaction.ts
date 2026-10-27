@@ -268,6 +268,12 @@ export const BrowserSession = /* @__PURE__ */ defineSchema(() =>
       engine: z.enum(["chromium", "chrome", "firefox", "webkit", "lightpanda", "external"]),
       engineVersion: z.string().min(1).max(256).nullable(),
       headless: primitives.boolean,
+      /** How a headed managed browser shows on its machine, as its controller
+       * launched it: "window" is a native window on the machine's screen,
+       * "offscreen" is the same browser with no window (for example a managed
+       * browser on a person's Mac). Absent when unknown, headless, remote or
+       * the person's own Chrome. */
+      display: z.enum(["window", "offscreen"]).optional(),
       identityId: primitives.nullableUuid,
       baseRevisionId: primitives.nullableUuid,
       networkRouteId: primitives.nullableUuid,
@@ -3663,7 +3669,8 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           context.addIssue({
             code: "custom",
             path: ["continuationOfOperationId"],
-            message: "clickCount 2 requires exactly one prior first-click operation",
+            message:
+              'clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead',
           });
         }
         if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
@@ -3839,6 +3846,11 @@ export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn
  * ignore it, and callers that do not send it receive receipts without it. */
 export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
 
+/** Query parameter by which a caller asks a computer controller to include
+ * `unconfirmedInput` in an action receipt, on the same terms as
+ * {@link COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}. */
+export const COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER = "receiptUnconfirmedInput";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3860,6 +3872,11 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
         .array(ComputerActionRoleStandIn)
         .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
         .optional(),
+      /** The action sent raw input (a click or a key press) that its driver
+       * reported as delivered without any confirmation that the app acted on
+       * it. Present only when the controller supports it and the caller asked
+       * for it; never persisted in the controller's operation journal. */
+      unconfirmedInput: z.literal(true).optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

@@ -849,6 +849,45 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a click or key press CUA only sent is reported as unconfirmed, unlike confirmed or semantic actions", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const reported: string[] = [];
+      const click = async (label: string) => {
+        const frame = await backend.capture(target.id);
+        await backend.dispatch(
+          {
+            ...command(await backend.observe(target.id)),
+            expectedFrameId: frame.frameId,
+            action: { type: "pointer", action: "click", frameId: frame.frameId, x: 20, y: 20 },
+          },
+          undefined,
+          () => reported.push(label),
+        );
+      };
+      fixture.mutation = result({ effect: "unverifiable", route: "synthetic_events" });
+      await click("click");
+      await backend.dispatch(
+        {
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "Meta+W" },
+        },
+        undefined,
+        () => reported.push("key"),
+      );
+      await backend.dispatch(command(await backend.observe(target.id)), undefined, () =>
+        reported.push("invoke"),
+      );
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      await click("confirmed click");
+      expect(reported).toEqual(["click", "key"]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keys fenced on a reading another read has since replaced go where that reading showed the focus", async () => {
     const fixture = new Fixture();
     fixture.applyFocused = true;
@@ -1722,6 +1761,8 @@ describe("CUA desktop boundary", () => {
       sheet = true;
       showSheet = true;
       other = false;
+      withDecoy = true;
+      decoyUnreadable = false;
       // Another window of the app that the sheet also lies within.
       decoy = { x: 90, y: 55, width: 130, height: 70 };
       async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
@@ -1746,13 +1787,17 @@ describe("CUA desktop boundary", () => {
                       app_name: "TextEdit",
                       bounds: { x: 101, y: 60, width: 100, height: 60 },
                     },
-                    {
-                      pid: 42,
-                      window_id: 4,
-                      title: "Decoy",
-                      app_name: "TextEdit",
-                      bounds: this.decoy,
-                    },
+                    ...(this.withDecoy
+                      ? [
+                          {
+                            pid: 42,
+                            window_id: 4,
+                            title: "Decoy",
+                            app_name: "TextEdit",
+                            bounds: this.decoy,
+                          },
+                        ]
+                      : []),
                   ]
                 : []),
               ...(this.other
@@ -1787,6 +1832,8 @@ describe("CUA desktop boundary", () => {
               "ax_window_unresolved: window_id 2 exists and is owned by pid 42, but none of the AXWindow elements reports it",
           });
         }
+        if (name === "get_window_state" && args.window_id === 4 && this.decoyUnreadable)
+          return result({ error: { code: "ax_timeout", message: "no answer" } }, true);
         const response = await super.callTool(name, argumentsJson);
         // The other window reads normally, without the sheet.
         if (name === "get_window_state" && args.window_id === 4) {
@@ -1832,13 +1879,51 @@ describe("CUA desktop boundary", () => {
       expect(
         (await backend.observe("cua:window:42:4")).roots.some((node) => node.role === "AXSheet"),
       ).toBe(false);
-      // When no window shows it now, no parent is guessed.
+      // When no window shows it now, no parent is guessed. While a window it
+      // lies within could not be read, that window may still hold it.
       fixture.showSheet = false;
+      fixture.decoyUnreadable = true;
       await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
         code: "target_stale",
         message:
           "cua:window:42:2 cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of cua:window:42:1, cua:window:42:4) and act on its refs",
       });
+      // Every window it lies within was read and none shows it (a window that
+      // leaves its sheet out of its accessibility tree): sending the caller
+      // back to those windows would only lead here again.
+      fixture.decoyUnreadable = false;
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer",
+      });
+      // The same panel with nothing else open: keys refused for the window it
+      // is on do not send the caller to the panel, which cannot be read.
+      fixture.withDecoy = false;
+      await backend.targets();
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer",
+      });
+      fixture.mutation = result(
+        { effect: "refused", code: "window_not_key", reason: "CUA's own reason" },
+        true,
+      );
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Keys reach only the focused window of a background app, and that window (one of cua:window:42:2) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer",
+      });
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      fixture.withDecoy = true;
+      await backend.targets();
       fixture.showSheet = true;
       const keys = (value: string, observation: ComputerBackendObservation) =>
         backend.dispatch({

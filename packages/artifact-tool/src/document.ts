@@ -1,6 +1,7 @@
 import { FileBlob } from "./file-blob";
 import { boundInspectionRecords, defineHelpEntries, filterHelpEntries } from "./inspection";
 import type { HelpOptions, InspectOptions, InspectResult } from "./spreadsheet-types";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type DocumentPageGeometry = {
   readonly widthPt: number;
@@ -2403,9 +2404,6 @@ function validateText(value: string, label: string): void {
 function validateAndReturnText(value: string, label: string): string {
   validateText(value, label);
   return value;
-}
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function assertOnlyKeys(
   value: Readonly<Record<string, unknown>>,

@@ -1059,7 +1059,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Admission refuses what needs disk until it has a reading, and
         // spare VMs wait for a memory reading too, so one is taken before
         // any build starts or request is served.
-        self.sample();
+        self.sample().await;
         self.recovering = false;
         self.start_templates(shapes);
         tracing::info!(
@@ -1183,7 +1183,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// by while it runs; and what a wake from object storage writes
     /// locally: its disk, the memory image its pager fills, and its device
     /// state. A disk of unknown length counts as a copy of its image as it
-    /// is today, as a new sandbox's is.
+    /// is today grown to the length `config` asks for, as a new sandbox's
+    /// is.
     fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -1192,7 +1193,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             u64::from(config.memory_request()) << 20
         };
         let disk = disk_bytes.map_or_else(
-            || self.disk_bound(config.image),
+            || self.new_disk_bound(config),
             |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
         );
         Size {
@@ -1236,7 +1237,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick(), if acting => self.sample(),
+                _ = sample.tick(), if acting => self.sample().await,
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),

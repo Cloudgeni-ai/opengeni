@@ -36,6 +36,7 @@ import {
   FILE_UPLOAD_REAPER_SCHEDULE_ID,
   registerFileUploadReaperSchedule,
 } from "../../apps/worker/src/index";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 const APP_ROLE_PASSWORD = "opengeni_app";
 const DELEGATION_SECRET = "fileupload-file-upload-delegation-secret";
@@ -975,11 +976,6 @@ function pngBytes(): Uint8Array {
       "base64",
     ),
   );
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Buffer.from(digest).toString("hex");
 }
 
 function workspacePath(workspaceId: string, path: string): string {

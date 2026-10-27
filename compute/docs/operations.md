@@ -380,6 +380,40 @@ for a gateway with a certificate of a private authority, give each host
 `--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
 authority alone for agent links.
 
+### Runner pools
+
+GitHub Actions runner pools ([ADR 23](adr/0023-github-actions-runner-pools.md))
+reach compute through its E2B front door. In the chart:
+
+1. **The front door.** Set `computeControl.e2b.enabled` and give the
+   runner template a shape with room for a job's disk, for example
+   `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
+   where `runner` is a stored image built from
+   `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   It listens on its own port (3000) of the API Service, with the API's
+   certificate under `apiTls`, and network policy admits only the pools
+   and `e2b.ingressFrom`.
+2. **A key.** Add a team for the pools to `computeControl.keys`; its
+   sandboxes are its own. Put the key in a Secret (`COMPUTE_API_KEY`).
+3. **GitHub.** A GitHub App installed on the organization or repository,
+   with administration access to self-hosted runners (repository
+   `administration: write`, or organization `self-hosted runners: write`)
+   and, for warm templates, `contents: read`; or a token with the same
+   rights. Its private key (`app.pem`) or token (`GITHUB_TOKEN`) goes in a
+   Secret.
+4. **The pool**, an entry of `computeRunners.pools`: name, scope,
+   template, `minIdle` and `max`, the two Secrets, and optionally `warm`
+   (repository, branch, prepare command) and `cache` (bucket, its address
+   as runners reach it, a token Secret). The cache's Service must be
+   reachable from the hosts, so give it a LoadBalancer or an Ingress and
+   name that address in `cache.url`; the pods' identity
+   (`computeRunners.serviceAccount.annotations`) needs read and write on
+   the bucket.
+
+Workflows say `runs-on: <pool name>`, and with a warm template check out
+with `clean: false` so the prepared dependencies stay. A pool's log shows
+each job it takes, each runner it starts and ends, and each warm refresh.
+
 ## Hosts
 
 - **Adding hosts.** On GCP the service grows the group itself as spare
@@ -711,6 +745,12 @@ before users move to compute from Modal:
   than its free space suggests. Writes outside the agent (logs, other
   programs on the volume) are not booked: keep `--disk-reserve-mib` above
   them and alert on free space early, for example below 20 %.
+  A sleeping sandbox's disk holds little more than its files use: the guest
+  trims its file system's free runs of 1 MiB or more before every pause, so
+  space it freed comes back to the volume
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Sandboxes whose VM
+  booted before a host had discards, or whose image's guest is older, keep
+  what they freed until their next fresh boot.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted
@@ -1017,6 +1057,23 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
   default); keep them public, as sandboxes can look up whatever they
   know.
+- **Private destinations only some sandboxes need.** Where only some
+  workloads should reach a private destination, such as CI jobs that
+  deploy to a private cluster's API, offer it under a name instead:
+  `--offer previews=k3s.internal:6443` in `COMPUTE_HOST_ARGS`, repeated
+  per destination (entries with one name make one offer). It is checked
+  and resolved as `--reach` is, but opens only to the sandboxes whose
+  create lists the name in `reach` (`"reach": ["previews"]`), in their
+  namespaces and, on the host, for their links' addresses alone; their
+  name servers alone answer its names. The host tells the control service
+  its offers' names, and placement puts such a sandbox only on a host that
+  offers every name it asks for: elsewhere its create answers 503 (no host
+  offers it). Grant each team the names its sandboxes may ask for on the
+  control service, `--team-reach TEAM=NAME`, repeated (in the chart,
+  `computeControl.extraArgs`); a create asking for one its team was not
+  given is refused with 400. A sandbox keeps its `reach` for life,
+  including on another host after a move, which must offer it too; one on
+  a host restarted without the offer reaches it no more, and is warned of.
 - **Hosts on an overlay network.** Where the control service and Opengeni
   are reached only over an overlay network (a WireGuard mesh such as
   Tailscale), the GCP root joins hosts to it at boot with

@@ -1,4 +1,5 @@
 import type { HumanInputQuestion, SessionEvent, SessionHumanInputRequest } from "@opengeni/sdk";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Minimal actionable request shape available from the durable event log. */
 export type PendingHumanInputRequest = {
@@ -85,8 +86,4 @@ export function projectPendingHumanInputRequests(
     }
   }
   return [...pending.values()];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

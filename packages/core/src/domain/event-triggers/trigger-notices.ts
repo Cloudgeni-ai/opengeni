@@ -5,6 +5,7 @@ import {
 import type { Database, EventTriggerNotice } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Tell an automation's owner, once per episode, that its trigger stopped
@@ -56,7 +57,7 @@ export async function postTriggerNotices(
       // The automation page still shows the trigger's state and reason.
       deps.observability?.warn("Automation trigger notice was not posted", {
         taskId: notice.taskId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }

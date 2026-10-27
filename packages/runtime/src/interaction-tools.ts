@@ -143,6 +143,7 @@ import {
   computerOpenText,
   computerTargetsText,
 } from "./computer-model-text";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -1256,7 +1257,7 @@ export function createInteractionAttemptToolDefinitions(
           },
           (error: unknown) => {
             throw new Error(
-              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${error instanceof Error ? error.message : String(error)}`.slice(
+              `whether this computer runs a batch as one operation could not be read, so the batch was not sent; retry the call: ${errorMessage(error)}`.slice(
                 0,
                 8_192,
               ),
@@ -3822,7 +3823,7 @@ async function actInComputerBatch(
       return error instanceof OpenGeniApiError && error.status === 404 ? "absent" : "unknown";
     }
   };
-  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const reasonOf = (error: unknown) => errorMessage(error);
   // The two ways derive different operation IDs. The computer fixes its
   // answer for the session's life, so every try of one batch picks the same
   // way and cannot send its actions under both ways' IDs. Run as one
@@ -5759,7 +5760,7 @@ function openedScreenshotTarget(targets: readonly ComputerTarget[]): ComputerTar
 }
 
 function screenshotFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return message.replace(/\s+/gu, " ").trim().slice(0, 300) || "unknown error";
 }
 

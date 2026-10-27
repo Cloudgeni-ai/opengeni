@@ -57,6 +57,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { isRetryableControllerTransport } from "../controller-data-plane";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -483,13 +484,6 @@ export function shouldEvictChannelAHandleAfterError(
   return (
     cacheKind === "read" &&
     (error instanceof ChannelAUnavailableError || isRetryableControllerTransport(error))
-  );
-}
-
-function isRetryableControllerTransport(error: unknown): boolean {
-  return (
-    error instanceof BrowserControlTransportError ||
-    (error instanceof BrowserControlRequestError && error.retryable)
   );
 }
 

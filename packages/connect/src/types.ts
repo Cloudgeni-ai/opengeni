@@ -108,6 +108,7 @@ export interface ConnectTransport {
       providerId: string;
       ownership: ConnectOwnership;
       returnUrl: string;
+      finishInPopup?: true;
       idempotencyKey: string;
       reconnectAccountId?: string;
       installationTarget?: ConnectInstallationTarget;

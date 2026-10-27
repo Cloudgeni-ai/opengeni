@@ -120,6 +120,7 @@ import {
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -362,17 +363,23 @@ function classifyActionFailure(error: unknown, command: BrowserActionCommandValu
  * render (hidden, or drawn by the browser rather than the page) has no box to
  * scroll to or point at. Null for any other reply. */
 export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
-  if (/no node with given id|node is detached/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "locator_not_found",
-      "browser element is no longer present",
-    );
-  if (/does not have a layout object/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "invalid_action",
-      "browser element has no box on the page to act on; it is hidden or not rendered",
-    );
+  if (/no node with given id|node is detached/iu.test(message)) return elementGone();
+  if (/does not have a layout object/iu.test(message)) return elementUnrendered();
   return null;
+}
+
+function elementGone(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "locator_not_found",
+    "browser element is no longer present",
+  );
+}
+
+function elementUnrendered(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "invalid_action",
+    "browser element has no box on the page to act on; it is hidden or not rendered",
+  );
 }
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
@@ -437,6 +444,9 @@ export type BrowserCommandRunner = {
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   /** A plain line for the agent about how this browser was launched. */
   readonly networkNotice?: string | null;
+  /** How a headed managed browser shows on its machine: in a native window or
+   * offscreen with none. Absent for headless, remote and attached browsers. */
+  readonly display?: "window" | "offscreen" | null;
   /** Credentials for the launch's proxy. They never reach the browser's
    * argv or environment; the driver answers the proxy's challenges. */
   readonly proxyCredentials?: { username: string; password: string } | null;
@@ -824,6 +834,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
   }
+  get display(): "window" | "offscreen" | null {
+    return this.runner.display ?? null;
+  }
   /** The load error of the page start() opened and kept on the browser's
    * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
   startLoadError: string | null = null;
@@ -1013,7 +1026,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   event: "browser.window_parking.failed",
                   browserSessionId: this.browserSessionId,
                   phase,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   at: new Date().toISOString(),
                 }),
               ),
@@ -1683,52 +1696,64 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
-    return await this.withTarget(targetId, async (state, info) => {
-      if (state.dialog) return await this.observeUnlocked(state, info);
-      try {
-        return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
-      } catch (error) {
-        // A dialog opened while the page was being read: report it.
-        if (!(error instanceof DialogBlockedError)) throw error;
-        return await this.observeUnlocked(state, info);
-      }
-    });
+    return await this.withTarget(
+      targetId,
+      async (state, info) => {
+        if (state.dialog) return await this.observeUnlocked(state, info);
+        try {
+          return await this.untilDialog(state, async () => await this.observeUnlocked(state, info));
+        } catch (error) {
+          // A dialog opened while the page was being read: report it.
+          if (!(error instanceof DialogBlockedError)) throw error;
+          return await this.observeUnlocked(state, info);
+        }
+      },
+      { read: true },
+    );
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (!state.dialog) {
-        try {
-          await this.untilDialog(state, async () => await this.refreshFrame(state));
-        } catch (error) {
-          if (!(error instanceof DialogBlockedError)) throw error;
+    return await this.withTarget(
+      this.browserTargetIdOf(tabId),
+      async (state) => {
+        if (!state.dialog) {
+          try {
+            await this.untilDialog(state, async () => await this.refreshFrame(state));
+          } catch (error) {
+            if (!(error instanceof DialogBlockedError)) throw error;
+          }
         }
-      }
-      return this.targetStateFrom(state);
-    });
+        return this.targetStateFrom(state);
+      },
+      { read: true },
+    );
   }
 
   async readDom(
     tabId: string,
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
-    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
-      if (request.kind === "count") {
-        assertSafeDomReadSelector(request.selector);
-      } else if (request.locator.kind === "css") {
-        assertSafeDomReadSelector(request.locator.selector);
-      }
-      if (state.dialog) {
-        throw new InteractionDefiniteDriverError(
-          "resource_unavailable",
-          `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+    return await this.withTarget(
+      this.browserTargetIdOf(tabId),
+      async (state) => {
+        if (request.kind === "count") {
+          assertSafeDomReadSelector(request.selector);
+        } else if (request.locator.kind === "css") {
+          assertSafeDomReadSelector(request.locator.selector);
+        }
+        if (state.dialog) {
+          throw new InteractionDefiniteDriverError(
+            "resource_unavailable",
+            `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
+          );
+        }
+        return this.typedSecrets.redact(
+          await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
         );
-      }
-      return this.typedSecrets.redact(
-        await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
-      );
-    });
+      },
+      { read: true },
+    );
   }
 
   private async readDomUnlocked(
@@ -2015,6 +2040,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           throw new Error("unreachable screenshot attempt");
         }),
+      { read: true },
     );
   }
 
@@ -2500,35 +2526,87 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
         );
       }
-    }).catch((error: unknown) => {
-      if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
-        throw effects && effects.state.actionEffectCount !== effects.before
-          ? new InteractionOutcomeUnknownDriverError(
-              "tab_not_responding",
-              `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
-            )
-          : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
-      }
-      // A tab the browser will not let us control (an attached tab Chrome
-      // refuses to debug) fails before any input when nothing was sent yet,
-      // so the action definitely did not run.
-      if (
-        error instanceof InteractionControllerError &&
-        (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
-        (!effects || effects.state.actionEffectCount === effects.before)
-      ) {
-        throw new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
-      }
-      if (error instanceof CdpSessionDetachedError) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
-        );
-      }
-      throw error;
+    }).catch(async (error: unknown) => {
+      const failure = await this.actionFailure(error, effects);
+      if (effects) await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+      throw failure;
     });
     this.refreshSubscribedFrame(targetId);
     return redactInteractionSecretValues(observation, secretValues);
+  }
+
+  /** What a failed action reports, given whether it already sent input. */
+  private async actionFailure(
+    error: unknown,
+    effects: { state: TargetState; before: number } | undefined,
+  ): Promise<unknown> {
+    const inputSent = effects !== undefined && effects.state.actionEffectCount !== effects.before;
+    if (error instanceof InteractionControllerError && error.code === "tab_not_responding") {
+      return inputSent
+        ? new InteractionOutcomeUnknownDriverError(
+            "tab_not_responding",
+            `${TAB_NOT_RESPONDING_MESSAGE} Input was already sent: check its effects after recovery and do not repeat the action automatically.`,
+          )
+        : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
+    }
+    // A tab the browser will not let us control (an attached tab Chrome
+    // refuses to debug) fails before any input when nothing was sent yet,
+    // so the action definitely did not run.
+    if (
+      error instanceof InteractionControllerError &&
+      (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
+      !inputSent
+    ) {
+      return new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
+    }
+    // The tab's debugging ended after input was sent, while a command was
+    // under way or before the next one could be: whether the rest ran is
+    // unknown.
+    if (
+      error instanceof CdpSessionDetachedError ||
+      (inputSent && effects && (await this.attachmentEndedUnder(effects.state, error)))
+    ) {
+      return new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+      );
+    }
+    return error;
+  }
+
+  /**
+   * After the tab's debugging ended under an action (Chrome ends it when
+   * another extension adds a frame to the page, as password managers do when
+   * a login field gets focus), attaches the tab again and reads it, so the
+   * receipt shows the page as the action left it and the caller can continue
+   * without another call. Best effort, like any failure observation.
+   */
+  private async observeOnNewAttachment(
+    failure: unknown,
+    state: TargetState,
+    command: BrowserActionCommandValue,
+    secretValues: BrowserActionCommandValue["secretValues"],
+  ): Promise<void> {
+    if (
+      !(
+        failure instanceof InteractionDefiniteDriverError ||
+        failure instanceof InteractionOutcomeUnknownDriverError
+      ) ||
+      failure.observation !== null ||
+      (command.observationMode !== undefined && command.observationMode !== "full")
+    )
+      return;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+      if (this.states.get(state.targetId) === state || this.crashedTargets.has(state.targetId))
+        return;
+      failure.observation = redactInteractionSecretValues(
+        await this.observe(command.targetId),
+        secretValues,
+      );
+    } catch {
+      // Optional context only.
+    }
   }
 
   /**
@@ -3166,6 +3244,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
+    options: { read?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
@@ -3192,8 +3271,36 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (this.crashedTargets.has(targetId)) throw tabCrashedError();
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
         throw tabNotRespondingError(error);
+      // A read changes nothing, so one whose tab debugging ended under it
+      // (Chrome detaches when another extension adds a frame to the page, as
+      // password managers do for their inline menu) reads again on a new
+      // attachment. A tab that closed meanwhile then says so.
+      if (options.read && (await this.attachmentEndedUnder(state, error)))
+        return await this.withTarget(targetId, operation);
       throw error;
     }
+  }
+
+  /** Whether an operation failed only because the debugging session of its
+   * tab ended while it ran. The session's end is applied once its detach
+   * event has arrived, which attached Chrome reports by polling. */
+  private async attachmentEndedUnder(state: TargetState, error: unknown): Promise<boolean> {
+    if (
+      !(
+        error instanceof CdpSessionDetachedError ||
+        error instanceof CdpProtocolError ||
+        (error instanceof InteractionControllerError &&
+          error.code === "resource_unavailable" &&
+          error.retryable)
+      )
+    )
+      return false;
+    try {
+      await (await this.ensureConnection()).flushEvents?.();
+    } catch {
+      return false;
+    }
+    return this.states.get(state.targetId) !== state && !this.crashedTargets.has(state.targetId);
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -5227,7 +5334,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return await read(remaining);
     } catch (error) {
       const transport = error instanceof InteractionControllerError ? error.cause : error;
-      if (!(transport instanceof CdpTransportError)) throw error;
+      // The tab's debugging ending mid-capture is no page error either.
+      if (!(transport instanceof CdpTransportError || transport instanceof CdpSessionDetachedError))
+        throw error;
       const timeout = transport instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
@@ -5863,7 +5972,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "browser drag between different cross-origin frames is unsupported; use pointer drag coordinates",
           );
         }
-        await this.dragNodes(state, from.backendDOMNodeId, to.backendDOMNodeId);
+        await this.dragNodes(
+          state,
+          from.backendDOMNodeId,
+          to.backendDOMNodeId,
+          from.frameId ?? state.frame.id,
+          to.frameId ?? state.frame.id,
+        );
         return;
       }
       case "pointer":
@@ -6947,10 +7062,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const blocked = await this.settleHitTargetGuard(state, guard, count);
     if (blocked !== null) {
       // The pointer did move there, so whatever its arrival did stands, and
-      // the refusal is reported as an unknown outcome.
+      // the refusal is reported as an unknown outcome. A press that fell
+      // outside the target's own box found it moved away (the page was still
+      // reacting to a scroll, or to the pointer's arrival), not covered.
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        `browser element is covered by ${coverName(blocked)} at its center; the click was not delivered`,
+        blocked.moved
+          ? `browser element moved as the click was sent, so the press fell on ${coverName(blocked.name)}; the click was not delivered; click it again`
+          : `browser element is covered by ${coverName(blocked.name)} at its center; the click was not delivered`,
         true,
       );
     }
@@ -6981,7 +7100,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     const reportSession = this.commandSession(state, "Runtime.addBinding");
     const token = randomUUID();
-    const verdicts: Array<string | null> = [];
+    const verdicts: Array<HitTargetVerdict | null> = [];
     let stopReports: () => void = () => undefined;
     let executionContextId: number | undefined;
     if (frameId !== undefined) {
@@ -7012,7 +7131,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             return;
           }
           if (!isRecord(report) || report.token !== token) return;
-          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+          verdicts.push(hitTargetVerdict(report.blocked));
         },
         reportSession,
       );
@@ -7080,7 +7199,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     guard: HitTargetGuard,
     presses: number,
-  ): Promise<string | null> {
+  ): Promise<HitTargetVerdict | null> {
     const unknown = () =>
       new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
@@ -7121,10 +7240,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
-    if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
+    const verdict = hitTargetVerdict(value);
+    if (settled.exceptionDetails || (value !== null && verdict === null)) {
       throw unknown();
     }
-    return value === null || value === "" ? null : value;
+    return verdict === null || verdict.name === "" ? null : verdict;
   }
 
   /** Removes guards an interrupted click left armed, so they cannot hold back
@@ -7190,6 +7310,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     backendDOMNodeId: number | null,
     requireHit: boolean,
     frameId?: string,
+    /** The node's frame, for a caller that passes no frameId (a drag): only
+     * the wait after a scroll runs in that frame's isolated world. */
+    settleFrameId?: string,
   ): Promise<{ x: number; y: number }> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -7201,6 +7324,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    // Where scroll offsets cannot be read (a child frame), whether the
+    // target moved tells whether anything scrolled.
+    const boxBefore =
+      scrollBefore === null
+        ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
+        : null;
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
     const effectsBeforeElementScroll = state.actionEffectCount;
@@ -7215,12 +7344,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeElementScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    if (
-      scrollBefore !== null &&
-      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-    )
-      state.actionEffectCount = effectsBeforeScroll;
-    let point = await this.centerPoint(state, backendDOMNodeId);
+    const boxAfter =
+      boxBefore === null ? null : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+    const unscrolled =
+      scrollBefore !== null
+        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+        : boxBefore !== null &&
+          boxAfter !== null &&
+          Math.max(Math.abs(boxAfter.x - boxBefore.x), Math.abs(boxAfter.y - boxBefore.y)) <= 2;
+    if (unscrolled && scrollBefore !== null) state.actionEffectCount = effectsBeforeScroll;
+    // The page reacts to a scroll on its next frames (a sticky header that
+    // shrinks once the page scrolls, and the content it moves), so after one
+    // the target is measured only once it has stopped moving.
+    if (!unscrolled)
+      await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
+      throw (
+        (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
+        error
+      );
+    });
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
@@ -7250,6 +7393,65 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       point = revealed;
     }
     return point;
+  }
+
+  /**
+   * The definite refusal for a target Chromium could not measure: the page
+   * removed or replaced it (a list that renders its rows anew as it scrolls,
+   * possibly while the driver waited for the scroll to settle), or it is no
+   * longer rendered. Null for any other failure, which stays as it is.
+   */
+  private async unmeasuredRefusal(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    error: unknown,
+  ): Promise<InteractionDefiniteDriverError | null> {
+    // -32001: the tab's session is gone, which is not about this element.
+    if (!(error instanceof CdpProtocolError) || error.code === -32_001) return null;
+    const known = scrollRefusal(error.message);
+    if (known || !/could not compute box model/iu.test(error.message)) return known;
+    // Read in an isolated world where there is one, out of reach of page
+    // scripts that redefine isConnected.
+    const connected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      "function () { return this.isConnected; }",
+      [],
+      frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+    ).catch(() => false);
+    return connected === true ? elementUnrendered() : elementGone();
+  }
+
+  /**
+   * Waits, briefly and best effort, for the target to stop moving after the
+   * driver scrolled it into view: until its box has not changed for
+   * SCROLL_QUIET_MS of drawn frames, SCROLL_SETTLE_LIMIT_MS while it keeps
+   * moving, or SCROLL_SETTLE_MAX_MS by the driver's own clock. It runs in an
+   * isolated world, out of reach of page scripts that replace their timers
+   * or frame callbacks; without a frame to hold that world, and in a hidden
+   * tab or an engine without frames, there is no wait.
+   */
+  private async settleAfterScroll(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<void> {
+    if (this.engine === "lightpanda" || frameId === undefined) return;
+    await Promise.race([
+      this.callOnNode(
+        state,
+        backendDOMNodeId,
+        STEADY_BOX_FUNCTION,
+        [
+          { value: SCROLL_QUIET_MS },
+          { value: SCROLL_SETTLE_LIMIT_MS },
+          { value: SCROLL_SETTLE_MAX_MS },
+        ],
+        { isolatedFrameId: frameId },
+      ).catch(() => undefined),
+      delay(SCROLL_SETTLE_MAX_MS + SCROLL_SETTLE_SLACK_MS),
+    ]);
   }
 
   private async centerPoint(
@@ -7971,12 +8173,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     fromBackendNodeId: number | null,
     toBackendNodeId: number | null,
+    fromFrameId: string,
+    toFrameId: string,
   ): Promise<void> {
-    const from = await this.actionPoint(state, fromBackendNodeId, true);
+    const from = await this.actionPoint(state, fromBackendNodeId, true, undefined, fromFrameId);
     await this.dragPoints(
       state,
       from,
-      () => this.actionPoint(state, toBackendNodeId, false),
+      () => this.actionPoint(state, toBackendNodeId, false, undefined, toFrameId),
       "left",
     );
   }
@@ -10414,14 +10618,27 @@ const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
 const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
 
 /** One click's guard: its object in the page, and the verdicts it reported
- * for each press as it happened (null: the press reached the target; text:
- * what it landed on instead). `reported` is false when the guard runs where
- * it cannot report (no isolated world), so only its readback counts. */
+ * for each press as it happened (null: the press reached the target; else
+ * what it landed on instead, and whether it fell outside the target's own
+ * box). `reported` is false when the guard runs where it cannot report (no
+ * isolated world), so only its readback counts. */
 interface HitTargetGuard {
   objectId: string;
   reported: boolean;
-  verdicts: Array<string | null>;
+  verdicts: Array<HitTargetVerdict | null>;
   stopReports: () => void;
+}
+
+/** A press the guard held back: what took it, and whether the target had
+ * moved away from the press point (rather than being covered there). */
+interface HitTargetVerdict {
+  name: string;
+  moved: boolean;
+}
+
+function hitTargetVerdict(value: unknown): HitTargetVerdict | null {
+  if (!isRecord(value) || typeof value.name !== "string") return null;
+  return { name: value.name, moved: value.moved === true };
 }
 
 const HIT_TARGET_GUARD_FUNCTION = `function(token) {
@@ -10465,6 +10682,20 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   };
   const presses = ["pointerdown", "mousedown"];
   const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  // Whether a press at the event's point fell outside every box of the
+  // target as laid out now. A target that is gone (re-rendered, removed or
+  // hidden) has no box to judge by, so it does not count as moved.
+  const movedAway = (event) => {
+    if (!element.isConnected) return false;
+    const rects = element.getClientRects();
+    if (rects.length === 0) return false;
+    const x = event.clientX;
+    const y = event.clientY;
+    for (const rect of rects) {
+      if (x >= rect.left - 1 && x <= rect.right + 1 && y >= rect.top - 1 && y <= rect.bottom + 1) return false;
+    }
+    return true;
+  };
   const types = [...presses, ...followers];
   const guard = { blocked: null };
   const expiresAt = Date.now() + 5000;
@@ -10482,7 +10713,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
       // lands where the first one's effect left the page (a row the first
       // click turned into an editor), as a person's does.
       const onTarget = pointerDowns > 1 || reaches(hit);
-      const verdict = onTarget ? null : describe(hit);
+      // A press outside the target's own box means the target moved away
+      // from the point it was aimed at; inside it, something covers it.
+      const verdict = onTarget ? null : { name: describe(hit), moved: movedAway(event) };
       // One report per physical press, before any page listener after this
       // one can replace the document.
       if (event.type === "pointerdown" && typeof report === "function") {
@@ -10517,6 +10750,59 @@ const SETTLE_FRAMES_FUNCTION = `function() {
       clearTimeout(timer);
       resolve(true);
     }));
+  });
+}`;
+
+/** After the driver's own scroll, a pointer action's target counts as
+ * settled once its box has not changed for this long: the page's scroll
+ * listeners, the frame callbacks and short timers they schedule (a header
+ * that shrinks once the page scrolls, often debounced), have run. */
+const SCROLL_QUIET_MS = 150;
+/** The longest that wait lasts while the page draws frames and the target
+ * keeps moving (an endless animation). */
+const SCROLL_SETTLE_LIMIT_MS = 600;
+/** The longest it lasts in all: a busy browser can take this long to draw
+ * the two frames after the scroll in which the page reacts to it. Both are
+ * within the action's dispatch allowance. */
+const SCROLL_SETTLE_MAX_MS = 1_500;
+/** How much longer the driver waits for the page's own answer at that limit
+ * before it goes on regardless. */
+const SCROLL_SETTLE_SLACK_MS = 100;
+
+// Resolves true once the target's box has stayed the same for quietMs over
+// at least two drawn frames, and false while it still moves at limitMs. The
+// quiet time counts from the first frame, which is when the page's scroll
+// listeners run, and the wait sees at least two frames (the listeners' own,
+// and the next, for what they deferred to it) unless maxMs passes first, so
+// a busy browser's slow frames do not count as quiet. A hidden page, which
+// draws no frames, resolves true at once.
+const STEADY_BOX_FUNCTION = `function(quietMs, limitMs, maxMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return true;
+  if (document.visibilityState === "hidden") return true;
+  const box = () => {
+    const rect = element.getBoundingClientRect();
+    return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 4)).join();
+  };
+  return new Promise((resolve) => {
+    const start = performance.now();
+    let last = box();
+    let changedAt = null;
+    let frames = 0;
+    setTimeout(() => frames >= 2 && resolve(false), limitMs);
+    setTimeout(() => resolve(false), maxMs);
+    const next = () =>
+      requestAnimationFrame(() => {
+        const now = performance.now();
+        const current = box();
+        if (changedAt === null || current !== last) changedAt = now;
+        last = current;
+        frames += 1;
+        if (frames >= 2 && now - changedAt >= quietMs) resolve(true);
+        else if ((frames >= 2 && now - start >= limitMs) || now - start >= maxMs) resolve(false);
+        else next();
+      });
+    next();
   });
 }`;
 
@@ -11620,10 +11906,6 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

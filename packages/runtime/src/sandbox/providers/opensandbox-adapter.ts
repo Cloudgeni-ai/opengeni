@@ -76,6 +76,7 @@ import {
   withOpenSandboxCommandDispatchProof,
   withOpenSandboxCommandStreamProof,
 } from "./opensandbox-command-stream";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
@@ -822,7 +823,7 @@ export class OpenSandboxSession {
         process.failureCause = cause;
         process.events.push({
           stream: "stderr",
-          text: `${cause instanceof Error ? cause.message : String(cause)}\n`,
+          text: `${errorMessage(cause)}\n`,
           commandOutput: false,
         });
         if (

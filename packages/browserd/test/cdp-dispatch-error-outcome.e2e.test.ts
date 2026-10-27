@@ -6,16 +6,23 @@ import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contrac
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection } from "../src/cdp";
+import type { BrowserCdpConnection } from "../src/cdp-driver";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 // A search form whose results keep replacing their frame once submitted, so
 // the page's frame tree never holds still long enough for an outline read.
+// replaced() resolves once the results next replace their frame (at once
+// before the search starts), so a test can read the frame tree only after a
+// real change instead of racing the timer.
 const RESTLESS_RESULTS = `<!doctype html><title>Search</title>
 <form id="search"><input aria-label="Search" name="q"></form>
 <div id="results"></div>
 <script>
 globalThis.searched = [];
+const waiting = [];
+globalThis.replaced = () =>
+  globalThis.churn === undefined ? null : new Promise((resolve) => waiting.push(resolve));
 document.getElementById("search").addEventListener("submit", (event) => {
   event.preventDefault();
   searched.push(document.querySelector("input").value);
@@ -24,6 +31,7 @@ document.getElementById("search").addEventListener("submit", (event) => {
     const frame = document.createElement("iframe");
     frame.srcdoc = results;
     document.getElementById("results").replaceChildren(frame);
+    for (const resolve of waiting.splice(0)) resolve();
   }, 10);
 });
 </script>`;
@@ -47,6 +55,32 @@ for (const type of ["focus", "blur", "input", "change", "keydown"])
 document.getElementById("delivery").addEventListener("change", (event) => alert("Delivery: " + event.target.value));
 </script>`;
 
+/**
+ * The driver's own connection, except that each frame tree read first waits
+ * for pace(). A page that changes on every pace then changes between any two
+ * reads, however quickly the driver reads, so no outline read can settle.
+ */
+function pacedFrameReads(
+  connection: CdpConnection,
+  pace: () => Promise<unknown> | undefined,
+): BrowserCdpConnection {
+  return {
+    send: async <T = Record<string, unknown>>(
+      method: string,
+      params?: Readonly<Record<string, unknown>>,
+      options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
+    ) => {
+      if (method === "Page.getFrameTree") await pace();
+      return await connection.send<T>(method, params, options);
+    },
+    on: connection.on.bind(connection),
+    onDisconnect: connection.onDisconnect.bind(connection),
+    onDroppedMessage: connection.onDroppedMessage.bind(connection),
+    close: connection.close.bind(connection),
+    waitForEvent: connection.waitForEvent.bind(connection),
+  };
+}
+
 async function withBrowser(
   run: (input: {
     driver: AgentBrowserDriver;
@@ -58,6 +92,8 @@ async function withBrowser(
       observationMode?: BrowserActionCommand["observationMode"],
     ) => BrowserActionCommand;
     evaluate: (expression: string) => Promise<unknown>;
+    /** Runs before each of the driver's frame tree reads, until set to null. */
+    paceFrameReads: (pace: (() => Promise<unknown>) | null) => void;
   }) => Promise<void>,
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-dispatch-outcome-");
@@ -70,7 +106,14 @@ async function withBrowser(
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
   });
-  const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+  let pace: (() => Promise<unknown>) | null = null;
+  const driver = new AgentBrowserDriver({
+    browserSessionId,
+    controllerGeneration,
+    runner,
+    connect: async (endpoint) =>
+      pacedFrameReads(await CdpConnection.connect(endpoint), () => pace?.()),
+  });
   const controller = new BrowserInteractionController({
     browserSessionId,
     controllerGeneration,
@@ -111,10 +154,13 @@ async function withBrowser(
         (
           await cdp!.send<{ result: { value: unknown } }>(
             "Runtime.evaluate",
-            { expression, returnByValue: true },
+            { expression, returnByValue: true, awaitPromise: true },
             { sessionId: sessionId! },
           )
         ).result.value,
+      paceFrameReads: (next) => {
+        pace = next;
+      },
     });
   } finally {
     await (cdp as CdpConnection | null)?.close();
@@ -126,8 +172,12 @@ async function withBrowser(
 e2e(
   "actions that ran stay completed when only the outline after them cannot be read",
   async () => {
-    await withBrowser(async ({ driver, controller, start, command, evaluate }) => {
+    await withBrowser(async ({ driver, controller, start, command, evaluate, paceFrameReads }) => {
       const initial = await start(RESTLESS_RESULTS);
+      // Once the search starts, every frame tree read waits for the results'
+      // next frame, so the tree always differs between the reads around an
+      // outline, however fast the machine.
+      paceFrameReads(() => evaluate("replaced()"));
       const search = { kind: "label", text: "Search" } as const;
       const receipt = await controller.run(
         command(initial, {
@@ -150,6 +200,7 @@ e2e(
         },
       ]);
       // The browser was never lost: once the page holds still, it reads as usual.
+      paceFrameReads(null);
       await evaluate("clearInterval(churn)");
       const after = await driver.observe(initial.target.id);
       expect(after.target.id).toBe(initial.target.id);

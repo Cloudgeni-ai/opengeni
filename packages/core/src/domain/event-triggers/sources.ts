@@ -72,6 +72,7 @@ import {
 import { serverOffersMcpEvents } from "./mcp-events-protocol";
 import { generateStandardWebhookSecret, standardWebhookSecretKey } from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Event sources and the webhook intake. A webhook source is a URL a person
@@ -303,7 +304,7 @@ export function mcpSourceHttpError(error: unknown, serverName: string): HTTPExce
   ) {
     return new HTTPException(422, { message: error.message });
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return new HTTPException(503, {
     message: `Couldn't reach ${serverName} to read its events (${message.slice(0, 200)}). Try again shortly.`,
   });

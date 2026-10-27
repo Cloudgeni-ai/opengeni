@@ -87,6 +87,7 @@ import {
   type ConnectedCommandCompletionLocator,
 } from "./completion-locator";
 import { answerOperationInventory } from "./operation-inventory";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -539,7 +540,7 @@ async function fanOutMachineLinkEvents(
       observability?.warn?.("Failed to fan out a machine-link event to a session", {
         workspaceId,
         sessionId: session.sessionId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -571,7 +572,7 @@ export async function handleAgentEventPayload(
   } catch (error) {
     observability?.warn?.("Failed to decode an agent event for metrics ingestion", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
@@ -589,7 +590,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to settle a Connected Machine completion event", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -601,7 +602,7 @@ export async function handleAgentEventPayload(
       // Unanswered, the runner repeats the page on its next tick.
       observability?.warn?.("Failed to answer a runner's operation inventory", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -646,7 +647,7 @@ export async function handleAgentEventPayload(
         } catch (error) {
           observability?.warn?.("Failed to disconnect attached browsers with their machine", {
             subject,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
         // Fan out the link-plane events to the sessions with an active op on this
@@ -682,7 +683,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to record a machine clean going-offline", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -747,7 +748,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to ingest a machine self-update progress event", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     return;
@@ -769,7 +770,7 @@ export async function handleAgentEventPayload(
   } catch (error) {
     observability?.warn?.("Failed to renew a machine connection heartbeat", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
@@ -792,7 +793,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to ingest an attached-browser inventory", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -827,7 +828,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to refresh a machine desktop heartbeat", {
         subject,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -843,7 +844,7 @@ export async function handleAgentEventPayload(
   } catch (error) {
     observability?.warn?.("Failed to ingest a machine metrics heartbeat", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -1101,7 +1102,7 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to decode an agent Hello for display refresh", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
     return;
   }
@@ -1136,7 +1137,7 @@ export async function handleHelloPayload(
       observability?.warn?.("Ignored an invalid Connected Machine workspace root", {
         workspaceId: ids.workspaceId,
         agentId: ids.agentId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -1172,7 +1173,7 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to refresh an enrollment's capabilities from a Hello", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   // Screen control allowed while this machine was offline (or before its agent
@@ -1218,7 +1219,7 @@ export async function handleHelloPayload(
   } catch (error) {
     observability?.warn?.("Failed to clear a machine going-offline marker on a Hello", {
       subject,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
