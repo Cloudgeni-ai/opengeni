@@ -258,12 +258,16 @@ Clients read one list from `GET /v1/config/client?workspaceId=`:
 `web_search`, `image_generation`, `video_generation`, `realtime_voice`,
 `voice_input`, `meeting_transcription`, `live_transcription`,
 `knowledge_embeddings` and
-`code_search`, with `unavailableReason: "region_restricted"` when EU-only
-inference leaves the feature no route. The answer follows the routes the
-deployment is configured to use (its search providers, embedder, decision
-model, voice and transcription endpoints), so a declaration for an unused
-provider changes nothing. It is the region answer only; whether a feature is
-configured stays where it was. Existing lists carry the same code: model
+`code_search`, with `unavailableReason: "region_restricted"` when the
+deployment has a route for the feature but EU-only inference allows none of
+them. A feature with no route here at all is `available: false` with
+`unavailableReason: null`, so clients don't show it as an EU limit (media
+and live voice always count as having one, since a person can connect a
+subscription). The answer follows the routes the deployment is configured
+to use (its search providers, embedder, decision model, voice and
+transcription endpoints), so a declaration for an unused provider changes
+nothing. Outside EU every entry is available; whether a feature is
+configured is reported where it always was. Existing lists carry the same code: model
 availability `reason: "region_restricted"` (client config and the workspace
 model catalog), realtime catalog `unavailableCode`, recording models
 `unavailableReason` (an entry keeps only the capabilities its region allows;

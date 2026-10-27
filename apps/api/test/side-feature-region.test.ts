@@ -136,6 +136,21 @@ describe("agent capabilities under EU-only inference", () => {
     const open = capabilities(testSettings());
     expect(open.get("webSearch")?.code).toBeUndefined();
   });
+
+  test("a capability the server turned off keeps its own reason, without the region code", () => {
+    const eu = new Map(
+      clientAgentConfig(
+        testSettings({ requiredModelGeography: "eu", webSearchEnabled: false }),
+      ).capabilities.map((c) => [c.id, c]),
+    );
+    expect(eu.get("webSearch")).toEqual({
+      id: "webSearch",
+      available: false,
+      reason: "web search is turned off on this server",
+    });
+    // Media still has routes here, none in the EU.
+    expect(eu.get("media")?.code).toBe("region_restricted");
+  });
 });
 
 describe("Site viewer conversations under EU-only inference", () => {

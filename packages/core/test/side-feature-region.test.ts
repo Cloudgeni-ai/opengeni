@@ -323,6 +323,11 @@ describe("feature availability", () => {
         webSearchEnabled: true,
         webSearchProvider: "searxng",
         webSearchProviderCredentials: { searxng: { baseUrl: "https://search.example.test" } },
+        // Code search runs on OpenAI's own API: a route, but not an EU one.
+        codeSearchMode: "opt_in",
+        decisionModelProvider: "openai",
+        decisionModelId: "gpt-decision",
+        decisionModelApiKey: "decision-key",
         sideFeatureResidencyJson: declare({
           "web_search.searxng": ["https://search.example.test", declaration("self_hosted", "fsn1")],
         }),
@@ -347,6 +352,32 @@ describe("feature availability", () => {
         "video_generation.ai_gateway",
       ),
     ).toBe("Not supported in EU");
+  });
+
+  test("under EU a feature the deployment has no route for is unavailable without the region reason", () => {
+    const availability = inferenceFeatureAvailability(
+      testSettings({
+        requiredModelGeography: "eu",
+        webSearchEnabled: false,
+        codeSearchMode: "opt_in",
+      }),
+    );
+    const byId = new Map(availability.map((feature) => [feature.id, feature]));
+    // No search, no embedder, no decision model, no live transcription provider.
+    for (const id of [
+      "web_search",
+      "knowledge_embeddings",
+      "code_search",
+      "live_transcription",
+    ] as const) {
+      expect(byId.get(id)).toEqual({ id, available: false, unavailableReason: null });
+    }
+    // Media and live voice can always run on a connected subscription, never in the EU.
+    for (const id of ["image_generation", "video_generation", "realtime_voice"] as const) {
+      expect(byId.get(id)?.unavailableReason).toBe("region_restricted");
+    }
+    // A configured route that isn't EU still says so.
+    expect(byId.get("meeting_transcription")?.unavailableReason).toBe("region_restricted");
   });
 
   test("availability follows the route the deployment is configured to use", () => {

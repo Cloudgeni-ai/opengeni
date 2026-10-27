@@ -81,12 +81,44 @@ function configuredDeclarableTargets(
 }
 
 /**
+ * Whether the deployment has any route for this feature, EU or not. Media
+ * and live voice can always run on a subscription a person connects, and
+ * hosted web search needs only web search on, so those count as configured;
+ * the rest need a route the deployment sets up.
+ */
+function inferenceFeatureConfigured(
+  settings: Settings,
+  feature: InferenceFeatureId,
+  sources: InferenceFeatureSources,
+): boolean {
+  switch (feature) {
+    case "image_generation":
+    case "video_generation":
+    case "realtime_voice":
+      return true;
+    case "web_search":
+      return settings.webSearchEnabled;
+    case "knowledge_embeddings":
+      return Boolean(sources.embedder);
+    case "code_search":
+      return (
+        settings.codeSearchMode !== "off" &&
+        configuredDeclarableTargets(settings, feature, sources).length > 0
+      );
+    case "voice_input":
+    case "meeting_transcription":
+    case "live_transcription":
+      return configuredDeclarableTargets(settings, feature, sources).length > 0;
+  }
+}
+
+/**
  * Whether EU-only inference leaves this feature a route here: without the EU
  * requirement always; under it only when a route the deployment is actually
  * configured to use, at the endpoint it calls, has an EU residency record
  * (or, for Knowledge, the embedder is local). This is the region answer
- * only; whether the feature is configured at all is reported where it
- * always was.
+ * only, and enforcement's: a feature with no route at all is not allowed
+ * either. `inferenceFeatureAvailability` tells the two apart.
  */
 export function inferenceFeatureRegionAllowed(
   settings: Settings,
@@ -103,7 +135,9 @@ export function inferenceFeatureRegionAllowed(
 /**
  * Every side feature's region availability for settings already narrowed
  * with `settingsWithInferenceResidency`: the one list clients read to show
- * "Not supported in EU".
+ * "Not supported in EU". Under EU a feature this deployment has no route
+ * for at all is unavailable without a reason, so clients don't blame the
+ * region; `region_restricted` means a route exists but none is EU.
  */
 export function inferenceFeatureAvailability(
   settings: Settings,
@@ -111,6 +145,29 @@ export function inferenceFeatureAvailability(
 ): InferenceFeatureAvailability[] {
   return INFERENCE_FEATURE_IDS.map((id) => {
     const available = inferenceFeatureRegionAllowed(settings, id, sources);
-    return { id, available, unavailableReason: available ? null : REGION_RESTRICTED };
+    if (available) return { id, available, unavailableReason: null };
+    return {
+      id,
+      available,
+      unavailableReason: inferenceFeatureConfigured(settings, id, sources)
+        ? REGION_RESTRICTED
+        : null,
+    };
   });
+}
+
+/**
+ * Whether a side feature is switched off for the region alone: under EU, the
+ * deployment has a route for it but none is EU. False when it is allowed or
+ * has no route at all (that is reported as not configured, not as EU).
+ */
+export function inferenceFeatureRegionRestricted(
+  settings: Settings,
+  feature: InferenceFeatureId,
+  sources: InferenceFeatureSources = {},
+): boolean {
+  return (
+    !inferenceFeatureRegionAllowed(settings, feature, sources) &&
+    inferenceFeatureConfigured(settings, feature, sources)
+  );
 }
