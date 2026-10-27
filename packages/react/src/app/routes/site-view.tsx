@@ -89,8 +89,9 @@ const SitePublishingPage = lazy(() =>
 );
 // The regular chat route, loaded as the chat page loads it: a static import
 // would make the Site view share the chat's chunks and regroup them.
+const loadSessionRoute = () => import("./session");
 const SessionRoute = lazy(() =>
-  import("./session").then((module) => ({ default: module.SessionRoute })),
+  loadSessionRoute().then((module) => ({ default: module.SessionRoute })),
 );
 
 const SITE_ROUTE = "/workspaces/$workspaceId/sites/$siteId";
@@ -591,6 +592,13 @@ function SiteChatPanel({
     );
     return () => abort.abort();
   }, [context.client, conversation, list.loaded, listed, siteId, workspaceId]);
+
+  // Load the chat route with the panel, so a chat created here opens (and
+  // takes focus below) without waiting for it. A failed load shows when the
+  // route renders.
+  useEffect(() => {
+    void loadSessionRoute().catch(() => {});
+  }, []);
 
   // Move focus to the composer New opened, or to the new conversation's.
   useEffect(() => {
