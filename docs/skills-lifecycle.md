@@ -58,7 +58,7 @@ Knowledge > Needs review without interrupting the task.
 An agent removes only Skills in its chat's own learning scope. The exception
 is work the verified owner started in their own Personal workspace: it may also
 remove that workspace's Skills, including a directly installed one, because
-the workspace has no other member (migration 1004). An agent removal never
+the workspace has no other member (migration 1014). An agent removal never
 names a scope.
 
 A removal proposal is a marked, immutable revision, never executable guidance.

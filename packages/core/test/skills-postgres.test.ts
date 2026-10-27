@@ -648,7 +648,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     ).toBe(true);
     expect(await listInstalledPortableSkills(client.db, automatic.context.workspaceId)).toEqual([]);
 
-    // Off refuses before the Skill is read; this pins that ordering, not 1004.
+    // Off refuses before the Skill is read; this pins that ordering, not 1014.
     const off = await fixture("off", true);
     await markPersonalWorkspace(off, off.human.actor.subjectId);
     const guarded = await saveWorkspaceSkill(off);
