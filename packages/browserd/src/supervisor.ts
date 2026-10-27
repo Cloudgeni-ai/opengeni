@@ -380,6 +380,10 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * first result about it that reaches the caller; null when there is none
    * or it was already given. */
   takeReloadedTabNotice?(tabId: string): string | null;
+  /** The http(s) URL a tab showing the browser's error page failed to load:
+   * the address the browser reopens it at after a relaunch. Null when it
+   * can't be read. */
+  errorPageUrl?(tabId: string): Promise<string | null>;
   /** Give open tabs the IDs callers already hold for them (an earlier
    * controller on the same browser gave them those IDs). */
   adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
@@ -3530,7 +3534,7 @@ export class BrowserSupervisor {
     let targets: readonly BrowserTarget[] = runtime.lastTargets;
     if (driverAvailable) {
       try {
-        targets = await runtime.driver.listTargets();
+        targets = await restorableTargets(runtime.driver, await runtime.driver.listTargets());
       } catch {
         // The last tabs this controller saw.
       }
@@ -4980,6 +4984,24 @@ function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
     }));
 }
 
+/** Tabs as the browser reopens them after a relaunch: a tab showing the
+ * browser's error page is reopened at the address it failed to load, so it is
+ * recorded and matched under that address. Only for pairing tabs across a
+ * relaunch; what callers are shown keeps the browser's own URL. */
+async function restorableTargets(
+  driver: BrowserSupervisorDriver,
+  targets: readonly BrowserTarget[],
+): Promise<BrowserTarget[]> {
+  return await Promise.all(
+    targets.map(async (target) => {
+      if (!driver.errorPageUrl || !target.url.toLowerCase().startsWith("chrome-error:"))
+        return target;
+      const url = await driver.errorPageUrl(target.id).catch(() => null);
+      return url ? { ...target, url } : target;
+    }),
+  );
+}
+
 /** Tell a relaunched browser's driver which of its tabs reopened each tab of
  * the browser before it, so they keep their IDs. True when any did. Best
  * effort: a failure only leaves an old tab ID unexplained. */
@@ -4992,7 +5014,10 @@ async function noteRelaunchedTabs(
 ): Promise<boolean> {
   if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
-    const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(
+      previous,
+      await restorableTargets(driver, current ?? (await driver.listTargets())),
+    );
     if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
     return tabs.some((tab) => tab.replacementId !== null);
   } catch {

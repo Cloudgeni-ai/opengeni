@@ -562,6 +562,92 @@ recoveryE2e(
 );
 
 recoveryE2e(
+  "a tab showing an error page keeps its ID when a relaunch reopens it at the address it failed to load",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-error-tab-e2e-");
+    const rootDirectory = join(directory, "state");
+    const page = (request: Request) =>
+      new Response(
+        `<!doctype html><title>Loaded ${new URL(request.url).pathname}</title><h1>Loaded</h1>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: page });
+    // A port nothing listens on yet: the tab's load is refused and it shows
+    // the browser's error page until the address comes up.
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: page });
+    const refusedPort = Number(probe.port);
+    probe.stop(true);
+    const failedUrl = `http://127.0.0.1:${refusedPort}/later`;
+    let late: ReturnType<typeof Bun.serve> | undefined;
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: process.env.DISPLAY !== undefined,
+      initialUrl: failedUrl,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let relaunchedPid: number | undefined;
+    try {
+      // The first tab's load is refused; it stays open on the error page.
+      const failed = (await supervisor.createSession(options)).observation;
+      const other = await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/other`);
+      // What callers are shown is the browser's own error page.
+      expect(
+        (await supervisor.listTargets(options)).find((target) => target.id === failed.target.id)
+          ?.url,
+      ).toStartWith("chrome-error:");
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      late = Bun.serve({ hostname: "127.0.0.1", port: refusedPort, fetch: page });
+      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      // The browser reopened the tab at the address it failed to load, which
+      // loads now; the tab keeps its ID and says its page reloaded.
+      const reopened = await supervisor.listTargets(options);
+      expect(reopened.find((target) => target.url === failedUrl)?.id).toBe(failed.target.id);
+      expect(reopened.find((target) => target.url.endsWith("/other"))?.id).toBe(other.target.id);
+      const observed = await supervisor.observe(options, failed.target.id);
+      expect(observed.target.url).toBe(failedUrl);
+      expect(observed.notice).toBe(
+        "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",
+      );
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      late?.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
   "tabs showing the same page never take each other's IDs when the browser relaunches",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-duplicate-tabs-e2e-");

@@ -1628,6 +1628,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** The http(s) URL an error page failed to load, read from its current
    * history entry. Null when it can't be read; the caller keeps the error URL. */
+  async errorPageUrl(tabId: string): Promise<string | null> {
+    return await this.errorPageDestination(this.browserTargetIdOf(tabId));
+  }
+
+  /** errorPageUrl by the browser's own target ID. */
   private async errorPageDestination(targetId: string): Promise<string | null> {
     try {
       const connection = await this.ensureConnection();
