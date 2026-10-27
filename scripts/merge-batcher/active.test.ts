@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GitHubActiveExecutor } from "./active";
+import { COMMENTS_PER_TICK, GitHubActiveExecutor } from "./active";
 import { controllerOwner, main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
@@ -1144,6 +1144,105 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(effects["comment-backlog"]?.status).toBe("done");
     expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
   });
+  const seedComments = async (f: Awaited<ReturnType<typeof fixture>>, count: number) => {
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      for (let i = 0; i < count; i++) {
+        const id = `backlog-${String(i).padStart(2, "0")}`;
+        l.effects[id] = {
+          ...base,
+          id,
+          kind: "comment",
+          number: 1,
+          body: `Backlog ${i}\n\n<!-- ${id} -->`,
+          marker: `<!-- ${id} -->`,
+          nextAt: new Date(Date.parse(NOW) - 3600_000 + i * 1000).toISOString(),
+        };
+      }
+    });
+  };
+  const postedBacklog = (f: Awaited<ReturnType<typeof fixture>>) =>
+    f.api.comments.filter((body) => body.startsWith("Backlog ")).map((b) => b.split("\n")[0]);
+  test("one tick drains up to COMMENTS_PER_TICK due comments, oldest first, each exactly once", async () => {
+    const f = await fixture();
+    await f.publish();
+    await seedComments(f, COMMENTS_PER_TICK + 4);
+    await f.executor().maintain();
+    expect(postedBacklog(f)).toEqual(
+      Array.from({ length: COMMENTS_PER_TICK }, (_, i) => `Backlog ${i}`),
+    );
+    await f.executor().maintain();
+    expect(postedBacklog(f)).toHaveLength(COMMENTS_PER_TICK + 4);
+    expect(new Set(postedBacklog(f)).size).toBe(COMMENTS_PER_TICK + 4);
+    const effects = Object.values((await f.state()).ledger.effects).filter((e) =>
+      e.id.startsWith("backlog-"),
+    );
+    expect(effects.every((e) => e.status === "done" && e.attempts === 1)).toBe(true);
+    await f.executor().maintain();
+    expect(postedBacklog(f)).toHaveLength(COMMENTS_PER_TICK + 4);
+  });
+  test("a comment drain stops as soon as another owner takes the lease", async () => {
+    const f = await fixture();
+    await f.publish();
+    await seedComments(f, 6);
+    const original = f.api.hasComment.bind(f.api);
+    let reads = 0;
+    f.api.hasComment = async (number, marker) => {
+      // After two comments, a new generation takes over the (expired) lease.
+      if (++reads === 3) {
+        f.advance(f.cfg.leaseSeconds + 1);
+        await f.seed((l) => {
+          l.owner = "next-generation";
+          l.expiresAt = new Date(Date.parse(NOW) + 7200_000).toISOString();
+        });
+      }
+      return original(number, marker);
+    };
+    await f.executor().maintain();
+    expect(postedBacklog(f)).toEqual(["Backlog 0", "Backlog 1"]);
+    const state = await f.state();
+    expect(state.ledger.owner).toBe("next-generation");
+    expect(state.ledger.effects["backlog-02"]?.status).toBe("pending");
+    expect(state.ledger.effects["backlog-02"]?.attempts).toBe(0);
+  });
+  test("throttling ends the tick's comment drain without replaying or skipping order", async () => {
+    const f = await fixture();
+    await f.publish();
+    await seedComments(f, 5);
+    f.api.response = "throttled";
+    // Pins the processEffect wording the pre-drain skip matches on.
+    expect((await f.executor().maintain())?.split("; ")).toContain(
+      "REST effect deferred with bounded backoff",
+    );
+    expect(f.api.calls.filter((c) => c.endsWith("/comments"))).toHaveLength(1);
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["backlog-00"]?.status).toBe("pending");
+    expect(Date.parse(effects["backlog-00"]!.nextAt)).toBeGreaterThan(Date.parse(NOW));
+    for (const id of ["backlog-01", "backlog-02", "backlog-03", "backlog-04"])
+      expect(effects[id]?.attempts).toBe(0);
+    f.api.response = "ok";
+    await f.executor().maintain();
+    expect(postedBacklog(f)).toEqual(["Backlog 1", "Backlog 2", "Backlog 3", "Backlog 4"]);
+  });
+  test("an explicit provider rejection ends the tick's comment drain", async () => {
+    const f = await fixture();
+    await f.publish();
+    await seedComments(f, 4);
+    f.api.response = "forbidden";
+    // Pins the processEffect wording the pre-drain skip matches on.
+    expect((await f.executor().maintain())?.split("; ")).toContain(
+      "REST effect blocked by explicit provider rejection",
+    );
+    expect(f.api.calls.filter((c) => c.endsWith("/comments"))).toHaveLength(1);
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["backlog-00"]?.status).toBe("blocked");
+    for (const id of ["backlog-01", "backlog-02", "backlog-03"])
+      expect(effects[id]?.attempts).toBe(0);
+    f.api.response = "ok";
+    const messages = (await f.executor().maintain())?.split("; ") ?? [];
+    expect(messages.filter((m) => m === "durable REST effect submitted")).toHaveLength(3);
+    expect(postedBacklog(f)).toEqual(["Backlog 1", "Backlog 2", "Backlog 3"]);
+  });
   test("a rerun held by busy main does not starve the comment backlog", async () => {
     const f = await fixture();
     const m = await f.publish();
@@ -1721,8 +1820,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           (effect) => effect.kind === "comment" && effect.number === 99,
         ),
       ).toBe(true);
-      expect(f.api.comments).toHaveLength(1);
+      // The post-landing maintenance drain also posts the queued #99 conflict notice.
+      expect(f.api.comments).toHaveLength(2);
       expect(f.api.comments[0]).toContain("landed the exact tested PR head");
+      expect(f.api.comments[1]).toContain("Not queued: this PR conflicts with main");
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
     },
   );
