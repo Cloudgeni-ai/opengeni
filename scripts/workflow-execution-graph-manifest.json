@@ -38,7 +38,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "d459027f6a9669b83ec4eb6cb1587d055383e1ce7d8e06d3945283350b34fc89"
+      "sha256": "fd25682158c883800e4f7c72ff2533ef253bcc125473934659384ffaa92807a0"
     },
     {
       "path": ".github/workflows/compute-release.yml",
