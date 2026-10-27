@@ -5,7 +5,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { workspaceArchiveObjectKey, type WorkspaceArchiveObjectRef } from "@opengeni/contracts";
@@ -91,7 +91,7 @@ import {
 // applies); accounts/workspaces/sessions are seeded as the postgres superuser
 // (which bypasses RLS, and whose reads of the un-RLS'd workspaces/managed_accounts
 // tables let rlsContextForWorkspace resolve the account). pgvector/pgvector:pg16
-// because 0000_initial does CREATE EXTENSION vector. Container torn down in
+// because the migration baseline does CREATE EXTENSION vector. Container torn down in
 // afterAll regardless of outcome.
 
 let available = true;
@@ -458,26 +458,6 @@ async function seedLiveCanonicalAttempt(input: {
 }
 
 describe("archive object publication binding and disposition", () => {
-  test("warm capture reclamation migration replay preserves the exact function definition", async () => {
-    if (!available) return;
-    const definition = async () => {
-      const [row] = await admin`select pg_get_functiondef(
-        'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'::regprocedure
-      ) as definition`;
-      return String(row!.definition);
-    };
-    const before = await definition();
-    expect(before).toContain("0491 bounded warm capture holder");
-    const migration = await readFile(
-      new URL("../drizzle/0491_warm_capture_holder_reclamation.sql", import.meta.url),
-      "utf8",
-    );
-    await admin.begin(async (tx) => {
-      await tx.unsafe(migration);
-    });
-    expect(await definition()).toBe(before);
-  }, 60_000);
-
   async function fixture(liveness: "warm" | "draining") {
     const ids = await freshWorkspace();
     const sessionId = crypto.randomUUID();

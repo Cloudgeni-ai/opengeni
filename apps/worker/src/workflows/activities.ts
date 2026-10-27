@@ -109,7 +109,7 @@ export function turnTaskQueue(baseTaskQueue: string): string {
   return `${baseTaskQueue}-turns`;
 }
 
-export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCancellation = true) {
+export function turnActivityForTaskQueue(baseTaskQueue: string) {
   return proxyActivities<Pick<typeof activities, "runAgentTurn">>({
     taskQueue: turnTaskQueue(baseTaskQueue),
     // Agent segments legitimately run for days. A started turn heartbeats;
@@ -124,9 +124,7 @@ export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCanc
     // sandbox tools or processes are physically quiescent. The activity owns
     // that proof and writes an exact receipt after its hard tool fence; the
     // receipt transaction wakes the workflow to admit a replacement.
-    cancellationType: receiptGatedCancellation
-      ? ActivityCancellationType.TRY_CANCEL
-      : ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+    cancellationType: ActivityCancellationType.TRY_CANCEL,
     retry: { maximumAttempts: 1 },
   });
 }

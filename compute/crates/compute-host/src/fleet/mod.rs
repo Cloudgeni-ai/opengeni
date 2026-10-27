@@ -125,6 +125,10 @@ pub struct FleetConfig {
     /// The name the fleet gives the image this host's sandboxes start
     /// from, which its ready-clone reports carry.
     pub image: String,
+    /// The digest of the guest programs the host builds sandbox images
+    /// with, if it builds any, which its reports of what it can take on
+    /// carry.
+    pub guest: Option<String>,
     /// Where the host listens for the service.
     pub listen: SocketAddr,
     pub tls: TlsFiles,
@@ -347,6 +351,7 @@ impl FleetConfig {
             info: self.info,
             told,
             image: self.image,
+            guest: self.guest,
         };
         tokio::select! {
             result = renewer.run() => result,

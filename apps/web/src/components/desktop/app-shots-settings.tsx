@@ -11,6 +11,7 @@ import type {
 import { CheckIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { acceleratorFromKey, desktopShortcutLabel } from "@opengeni/react/desktop-dictation";
 import { Button } from "@opengeni/react/ui/button";
 import { Section } from "@opengeni/react/ui/section";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
@@ -18,95 +19,11 @@ import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 
-const MODIFIER_NAMES: Record<DesktopAppShotModifier, { mac: string; other: string }> = {
-  command: { mac: "⌘ Command", other: "Windows" },
-  option: { mac: "⌥ Option", other: "Alt" },
-  control: { mac: "⌃ Control", other: "Ctrl" },
-  shift: { mac: "⇧ Shift", other: "Shift" },
-};
-
-const MAC_KEYS: Record<string, string> = {
-  Command: "⌘",
-  Cmd: "⌘",
-  CommandOrControl: "⌘",
-  CmdOrCtrl: "⌘",
-  Control: "⌃",
-  Ctrl: "⌃",
-  Option: "⌥",
-  Alt: "⌥",
-  Shift: "⇧",
-};
+export { acceleratorFromKey };
 
 /** "⌘⇧2" on macOS, "Ctrl+Shift+2" elsewhere. */
 export function shortcutLabel(shortcut: DesktopAppShotShortcut, platform: DesktopPlatform): string {
-  if (shortcut.kind === "modifierPair") {
-    const name = MODIFIER_NAMES[shortcut.modifier];
-    return `Both ${platform === "macos" ? name.mac : name.other} keys`;
-  }
-  const parts = shortcut.accelerator.split("+");
-  if (platform === "macos") return parts.map((part) => MAC_KEYS[part] ?? part).join("");
-  return parts
-    .map((part) =>
-      part === "CommandOrControl" || part === "CmdOrCtrl" || part === "Control" ? "Ctrl" : part,
-    )
-    .join("+");
-}
-
-/**
- * The key combination a keydown makes, in Electron's accelerator syntax, or
- * null while only modifiers are held or none is (a shortcut needs one).
- */
-export function acceleratorFromKey(
-  event: Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
-  platform: DesktopPlatform,
-): string | null {
-  const key = acceleratorKey(event.code);
-  if (!key) return null;
-  const modifiers: string[] = [];
-  if (event.metaKey) modifiers.push(platform === "macos" ? "Command" : "Super");
-  if (event.ctrlKey) modifiers.push("Control");
-  if (event.altKey) modifiers.push("Alt");
-  if (event.shiftKey) modifiers.push("Shift");
-  // Shift alone would take an ordinary character from every app.
-  if (modifiers.length === 0 || (modifiers.length === 1 && event.shiftKey)) return null;
-  return [...modifiers, key].join("+");
-}
-
-const NAMED_KEYS: Record<string, string> = {
-  Space: "Space",
-  Enter: "Enter",
-  Tab: "Tab",
-  Backspace: "Backspace",
-  Delete: "Delete",
-  Insert: "Insert",
-  Home: "Home",
-  End: "End",
-  PageUp: "PageUp",
-  PageDown: "PageDown",
-  ArrowUp: "Up",
-  ArrowDown: "Down",
-  ArrowLeft: "Left",
-  ArrowRight: "Right",
-  Minus: "-",
-  Equal: "=",
-  BracketLeft: "[",
-  BracketRight: "]",
-  Semicolon: ";",
-  Quote: "'",
-  Comma: ",",
-  Period: ".",
-  Slash: "/",
-  Backslash: "\\",
-  Backquote: "`",
-};
-
-function acceleratorKey(code: string): string | null {
-  const letter = /^Key([A-Z])$/u.exec(code);
-  if (letter) return letter[1]!;
-  const digit = /^Digit([0-9])$/u.exec(code);
-  if (digit) return digit[1]!;
-  if (/^F([1-9]|1[0-9]|2[0-4])$/u.test(code)) return code;
-  return NAMED_KEYS[code] ?? null;
+  return desktopShortcutLabel(shortcut, platform);
 }
 
 const PERMISSION_ROWS: Record<

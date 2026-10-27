@@ -1,18 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type postgres from "postgres";
-import { executeMigrationFile, initialMigrationWithPreinstalledVector } from "../src/migrate";
+import { executeMigrationFile } from "../src/migrate";
+import { BASELINE_MIGRATIONS } from "../src/migration-baseline";
 
-const initial = await readFile(join(import.meta.dir, "../drizzle/0000_initial.sql"), "utf8");
-const prefix = "CREATE EXTENSION IF NOT EXISTS pgcrypto;\nCREATE EXTENSION IF NOT EXISTS vector;\n";
+const firstPart = BASELINE_MIGRATIONS[0]!;
+const secondPart = BASELINE_MIGRATIONS[1]!;
+const first = await readFile(new URL(`../drizzle/${firstPart}`, import.meta.url), "utf8");
+const vectorStatement = "\nCREATE EXTENSION IF NOT EXISTS vector;\n";
+const preamble =
+  "SELECT\n  pg_catalog.set_config('lock_timeout', '5s', true),\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n";
 
 function connection(present: boolean) {
   const statements: string[] = [];
   const inspections: string[] = [];
   const sql = Object.assign(
     (strings: TemplateStringsArray) => {
-      inspections.push(strings.join("?"));
+      const text = strings.join("?");
+      if (text.includes("current_schema() AS schema")) {
+        return Promise.resolve([
+          { schema: "public", schemaOid: "2200", owner: "opengeni", now: "2026-01-01 00:00:00+00" },
+        ]);
+      }
+      inspections.push(text);
       return Promise.resolve([{ present }]);
     },
     {
@@ -25,60 +35,64 @@ function connection(present: boolean) {
 }
 
 describe("explicit preinstalled-vector migration", () => {
-  test("default runs the shipped initial migration verbatim", async () => {
+  test("default runs the first baseline part with its vector installation", async () => {
     const { sql, statements, inspections } = connection(false);
-    await executeMigrationFile(sql, "0000_initial.sql", initial);
+    await executeMigrationFile(sql, firstPart, first);
     expect(inspections).toEqual([]);
     expect(statements).toHaveLength(1);
-    expect(statements[0]).toContain(prefix);
+    expect(statements[0]).toContain(vectorStatement);
+    expect(statements[0]).not.toContain("{{schema}}");
   });
 
   test("opt-in verifies extension-owned public type before omitting only vector installation", async () => {
     const { sql, statements, inspections } = connection(true);
-    await executeMigrationFile(sql, "0000_initial.sql", initial, { preinstalledVector: true });
+    await executeMigrationFile(sql, firstPart, first, { preinstalledVector: true });
     expect(inspections).toHaveLength(1);
     expect(inspections[0]).toContain("dependency.refobjid = extension.oid");
     expect(inspections[0]).toContain("namespace.nspname = 'public'");
     expect(statements).toHaveLength(1);
     expect(statements[0]).toContain(
-      "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n" + initial.slice(prefix.length),
+      "CREATE EXTENSION IF NOT EXISTS pgcrypto;\nCREATE EXTENSION IF NOT EXISTS pg_trgm;",
     );
     expect(statements[0]).not.toContain("CREATE EXTENSION IF NOT EXISTS vector;");
   });
 
-  test("absent extension or changed preamble fails before any migration DDL", async () => {
+  test("absent extension or changed statement fails before any migration DDL", async () => {
     const missing = connection(false);
     await expect(
-      executeMigrationFile(missing.sql, "0000_initial.sql", initial, { preinstalledVector: true }),
+      executeMigrationFile(missing.sql, firstPart, first, { preinstalledVector: true }),
     ).rejects.toThrow("Preinstalled public pgvector");
     expect(missing.statements).toEqual([]);
 
     const changed = connection(true);
     await expect(
-      initialMigrationWithPreinstalledVector(changed.sql, initial.replace(prefix, "SELECT 1;\n")),
-    ).rejects.toThrow("initial extension preamble changed");
+      executeMigrationFile(
+        changed.sql,
+        firstPart,
+        first.replace(vectorStatement, "\nSELECT 1;\n"),
+        {
+          preinstalledVector: true,
+        },
+      ),
+    ).rejects.toThrow("vector statement changed");
     expect(changed.inspections).toEqual([]);
     expect(changed.statements).toEqual([]);
   });
 
   test("never changes another migration even with opt-in", async () => {
-    const { sql, statements, inspections } = connection(true);
-    await executeMigrationFile(sql, "0001_other.sql", "SELECT 1;", { preinstalledVector: true });
-    expect(inspections).toEqual([]);
-    expect(statements).toEqual([
-      "SELECT\n  pg_catalog.set_config('lock_timeout', '5s', true),\n  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),\n  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\nSELECT 1;",
-    ]);
+    for (const file of [secondPart, "0999_other.sql"]) {
+      const { sql, statements, inspections } = connection(true);
+      await executeMigrationFile(sql, file, "SELECT 1;", { preinstalledVector: true });
+      expect(inspections).toEqual([]);
+      expect(statements).toEqual([`${preamble}SELECT 1;`]);
+    }
   });
 });
 
-test("0510 receives the ordinary lock bound without changing its migration SQL", async () => {
-  const file = "0510_knowledge_index_funding_wait.sql";
-  const body = await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
-  expect(body.match(/ALTER TABLE knowledge_index_jobs ADD COLUMN/g)).toHaveLength(3);
-  expect(body).not.toMatch(/^\s*(?:SET(?: LOCAL)?|RESET)\s+lock_timeout\b/im);
+test("recordApplied ends the same simple query with the ledger row", async () => {
   const { sql, statements } = connection(false);
-  await executeMigrationFile(sql, file, body);
-  expect(statements).toHaveLength(1);
-  expect(statements[0]).toContain("pg_catalog.set_config('lock_timeout', '5s', true)");
-  expect(statements[0]?.endsWith(body)).toBe(true);
+  await executeMigrationFile(sql, "0999_o'ther.sql", "SELECT 1;", { recordApplied: true });
+  expect(statements).toEqual([
+    `${preamble}SELECT 1;\n;\nINSERT INTO "schema_migrations" ("name") VALUES ('0999_o''ther.sql') ON CONFLICT DO NOTHING;`,
+  ]);
 });

@@ -584,6 +584,7 @@
     --text-2xs: 0.6875rem;
     --text-2xs--line-height: 1rem;
     --color-og-surface-1: var(--og-color-surface-1);
+    --color-og-fg: var(--og-color-fg);
     --color-bg: var(--og-color-bg);
     --color-canvas: var(--og-color-canvas);
     --color-selection: var(--og-color-selection);
@@ -799,6 +800,10 @@
 :where(.og-root).\@container\/computer-viewer,:where(.og-root) .\@container\/computer-viewer {
     container-type: inline-size;
     container-name: computer-viewer;
+  }
+:where(.og-root).\@container\/decision,:where(.og-root) .\@container\/decision {
+    container-type: inline-size;
+    container-name: decision;
   }
 :where(.og-root).\@container\/detail,:where(.og-root) .\@container\/detail {
     container-type: inline-size;
@@ -1669,9 +1674,6 @@
 :where(.og-root).h-\[clamp\(30rem\,62vh\,48rem\)\],:where(.og-root) .h-\[clamp\(30rem\,62vh\,48rem\)\] {
     height: clamp(30rem, 62vh, 48rem);
   }
-:where(.og-root).h-\[min\(28rem\,50dvh\)\],:where(.og-root) .h-\[min\(28rem\,50dvh\)\] {
-    height: min(28rem, 50dvh);
-  }
 :where(.og-root).h-\[min\(760px\,85dvh\)\],:where(.og-root) .h-\[min\(760px\,85dvh\)\] {
     height: min(760px, 85dvh);
   }
@@ -1783,9 +1785,6 @@
 :where(.og-root).max-h-\[min\(22rem\,var\(--radix-popover-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(22rem\,var\(--radix-popover-content-available-height\)\)\] {
     max-height: min(22rem, var(--radix-popover-content-available-height));
   }
-:where(.og-root).max-h-\[min\(28rem\,50dvh\)\],:where(.og-root) .max-h-\[min\(28rem\,50dvh\)\] {
-    max-height: min(28rem, 50dvh);
-  }
 :where(.og-root).max-h-\[min\(28rem\,55vh\)\],:where(.og-root) .max-h-\[min\(28rem\,55vh\)\] {
     max-height: min(28rem, 55vh);
   }
@@ -1857,6 +1856,9 @@
   }
 :where(.og-root).min-h-16,:where(.og-root) .min-h-16 {
     min-height: calc(var(--spacing) * 16);
+  }
+:where(.og-root).min-h-20,:where(.og-root) .min-h-20 {
+    min-height: calc(var(--spacing) * 20);
   }
 :where(.og-root).min-h-32,:where(.og-root) .min-h-32 {
     min-height: calc(var(--spacing) * 32);
@@ -3411,6 +3413,15 @@
       border-color: color-mix(in oklab, var(--og-color-danger) 30%, transparent);
     }
   }
+:where(.og-root).border-og-fg,:where(.og-root) .border-og-fg {
+    border-color: var(--og-color-fg);
+  }
+:where(.og-root).border-og-fg\/70,:where(.og-root) .border-og-fg\/70 {
+    border-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--og-color-fg) 70%, transparent);
+    }
+  }
 :where(.og-root).border-og-primary-border,:where(.og-root) .border-og-primary-border {
     border-color: var(--og-color-primary-border);
   }
@@ -3945,6 +3956,18 @@
       background-color: color-mix(in oklab, var(--og-color-fg) 8%, transparent);
     }
   }
+:where(.og-root).bg-og-fg\/\[0\.06\],:where(.og-root) .bg-og-fg\/\[0\.06\] {
+    background-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-fg) 6%, transparent);
+    }
+  }
+:where(.og-root).bg-og-fg\/\[0\.035\],:where(.og-root) .bg-og-fg\/\[0\.035\] {
+    background-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-fg) 3.5000000000000004%, transparent);
+    }
+  }
 :where(.og-root).bg-og-primary,:where(.og-root) .bg-og-primary {
     background-color: var(--og-color-primary);
   }
@@ -4388,10 +4411,6 @@
 :where(.og-root).bg-\[radial-gradient\(ellipse_80\%_90\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_80\%_90\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\],:where(.og-root) .bg-\[radial-gradient\(ellipse_80\%_90\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_80\%_90\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\] {
     background-image: radial-gradient(ellipse 80% 90% at 0% 0%,var(--og-glow-teal),transparent 70%),radial-gradient(ellipse 80% 90% at 100% 100%,var(--og-glow-peach),transparent 70%);
   }
-:where(.og-root).from-og-surface-1,:where(.og-root) .from-og-surface-1 {
-    --tw-gradient-from: var(--og-color-surface-1);
-    --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-  }
 :where(.og-root).from-og-surface-2,:where(.og-root) .from-og-surface-2 {
     --tw-gradient-from: var(--og-color-surface-2);
     --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
@@ -4399,14 +4418,6 @@
 :where(.og-root).from-transparent,:where(.og-root) .from-transparent {
     --tw-gradient-from: transparent;
     --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-  }
-:where(.og-root).via-og-surface-1\/85,:where(.og-root) .via-og-surface-1\/85 {
-    --tw-gradient-via: var(--og-color-surface-1);
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-gradient-via: color-mix(in oklab, var(--og-color-surface-1) 85%, transparent);
-    }
-    --tw-gradient-via-stops: var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-via) var(--tw-gradient-via-position), var(--tw-gradient-to) var(--tw-gradient-to-position);
-    --tw-gradient-stops: var(--tw-gradient-via-stops);
   }
 :where(.og-root).via-og-surface-2\/90,:where(.og-root) .via-og-surface-2\/90 {
     --tw-gradient-via: var(--og-color-surface-2);
@@ -4665,6 +4676,9 @@
   }
 :where(.og-root).pt-\[max\(0\.375rem\,env\(safe-area-inset-top\)\)\],:where(.og-root) .pt-\[max\(0\.375rem\,env\(safe-area-inset-top\)\)\] {
     padding-top: max(0.375rem, env(safe-area-inset-top));
+  }
+:where(.og-root).pt-px,:where(.og-root) .pt-px {
+    padding-top: 1px;
   }
 :where(.og-root).pr-0\.5,:where(.og-root) .pr-0\.5 {
     padding-right: calc(var(--spacing) * 0.5);
@@ -4979,6 +4993,10 @@
     --tw-leading: 1.45;
     line-height: 1.45;
   }
+:where(.og-root).leading-\[1\.125rem\],:where(.og-root) .leading-\[1\.125rem\] {
+    --tw-leading: 1.125rem;
+    line-height: 1.125rem;
+  }
 :where(.og-root).leading-\[18px\],:where(.og-root) .leading-\[18px\] {
     --tw-leading: 18px;
     line-height: 18px;
@@ -5212,6 +5230,9 @@
 :where(.og-root).text-og-accent-strong,:where(.og-root) .text-og-accent-strong {
     color: var(--og-color-accent-strong);
   }
+:where(.og-root).text-og-bg,:where(.og-root) .text-og-bg {
+    color: var(--og-color-bg);
+  }
 :where(.og-root).text-og-danger,:where(.og-root) .text-og-danger {
     color: var(--og-color-danger);
   }
@@ -5442,12 +5463,20 @@
     --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.2));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
+:where(.og-root).shadow-\[0_1px_2px_rgb\(0_0_0\/0\.04\)\,0_6px_20px_-12px_rgb\(0_0_0\/0\.18\)\],:where(.og-root) .shadow-\[0_1px_2px_rgb\(0_0_0\/0\.04\)\,0_6px_20px_-12px_rgb\(0_0_0\/0\.18\)\] {
+    --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.04)), 0 6px 20px -12px var(--tw-shadow-color, rgb(0 0 0/0.18));
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
 :where(.og-root).shadow-\[0_1px_2px_rgb\(0_0_0\/0\.04\)\],:where(.og-root) .shadow-\[0_1px_2px_rgb\(0_0_0\/0\.04\)\] {
     --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.04));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 :where(.og-root).shadow-\[0_1px_2px_rgb\(0_0_0\/0\.08\)\],:where(.og-root) .shadow-\[0_1px_2px_rgb\(0_0_0\/0\.08\)\] {
     --tw-shadow: 0 1px 2px var(--tw-shadow-color, rgb(0 0 0/0.08));
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+:where(.og-root).shadow-\[inset_0_0_0_1px_var\(--color-og-fg\)\],:where(.og-root) .shadow-\[inset_0_0_0_1px_var\(--color-og-fg\)\] {
+    --tw-shadow: inset 0 0 0 1px var(--tw-shadow-color, var(--color-og-fg));
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 :where(.og-root).shadow-\[inset_2px_0_0_var\(--og-color-accent\)\],:where(.og-root) .shadow-\[inset_2px_0_0_var\(--og-color-accent\)\] {
@@ -5542,12 +5571,6 @@
     --tw-ring-color: var(--og-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
       --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 45%, transparent);
-    }
-  }
-:where(.og-root).ring-og-border\/60,:where(.og-root) .ring-og-border\/60 {
-    --tw-ring-color: var(--og-color-border);
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-ring-color: color-mix(in oklab, var(--og-color-border) 60%, transparent);
     }
   }
 :where(.og-root).ring-og-status-running\/50,:where(.og-root) .ring-og-status-running\/50 {
@@ -5672,6 +5695,11 @@
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
+:where(.og-root).transition-\[background-color\,border-color\,color\,opacity\],:where(.og-root) .transition-\[background-color\,border-color\,color\,opacity\] {
+    transition-property: background-color,border-color,color,opacity;
+    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-duration: var(--tw-duration, var(--default-transition-duration));
+  }
 :where(.og-root).transition-\[background-color\,border-color\,color\],:where(.og-root) .transition-\[background-color\,border-color\,color\] {
     transition-property: background-color,border-color,color;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
@@ -5689,6 +5717,11 @@
   }
 :where(.og-root).transition-\[border-color\,background-color\,box-shadow\,transform\],:where(.og-root) .transition-\[border-color\,background-color\,box-shadow\,transform\] {
     transition-property: border-color,background-color,box-shadow,transform;
+    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-duration: var(--tw-duration, var(--default-transition-duration));
+  }
+:where(.og-root).transition-\[border-color\,background-color\,box-shadow\],:where(.og-root) .transition-\[border-color\,background-color\,box-shadow\] {
+    transition-property: border-color,background-color,box-shadow;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
@@ -6479,6 +6512,12 @@
 :where(.og-root).placeholder\:font-sans,:where(.og-root) .placeholder\:font-sans {
     &::placeholder {
       font-family: var(--font-sans);
+    }
+  }
+:where(.og-root).placeholder\:font-normal,:where(.og-root) .placeholder\:font-normal {
+    &::placeholder {
+      --tw-font-weight: var(--font-weight-normal);
+      font-weight: var(--font-weight-normal);
     }
   }
 :where(.og-root).placeholder\:text-fg-subtle,:where(.og-root) .placeholder\:text-fg-subtle {
@@ -7278,6 +7317,26 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-danger-fill\/90,:where(.og-root) .hover\:bg-og-danger-fill\/90 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-danger-fill);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-danger-fill) 90%, transparent);
+        }
+      }
+    }
+  }
+:where(.og-root).hover\:bg-og-fg\/85,:where(.og-root) .hover\:bg-og-fg\/85 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-fg);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-fg) 85%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-hover,:where(.og-root) .hover\:bg-og-hover {
     &:hover {
       @media (hover: hover) {
@@ -7336,16 +7395,6 @@
     &:hover {
       @media (hover: hover) {
         background-color: var(--og-color-surface-1);
-      }
-    }
-  }
-:where(.og-root).hover\:bg-og-surface-1\/80,:where(.og-root) .hover\:bg-og-surface-1\/80 {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--og-color-surface-1);
-        @supports (color: color-mix(in lab, red, red)) {
-          background-color: color-mix(in oklab, var(--og-color-surface-1) 80%, transparent);
-        }
       }
     }
   }
@@ -7718,6 +7767,14 @@
       border-color: var(--og-color-accent);
     }
   }
+:where(.og-root).focus\:border-og-fg\/50,:where(.og-root) .focus\:border-og-fg\/50 {
+    &:focus {
+      border-color: var(--og-color-fg);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--og-color-fg) 50%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus\:bg-hover,:where(.og-root) .focus\:bg-hover {
     &:focus {
       background-color: var(--color-hover);
@@ -7742,6 +7799,14 @@
 :where(.og-root).focus\:ring-og-accent-soft,:where(.og-root) .focus\:ring-og-accent-soft {
     &:focus {
       --tw-ring-color: var(--_og-color-accent-soft);
+    }
+  }
+:where(.og-root).focus\:ring-og-accent\/25,:where(.og-root) .focus\:ring-og-accent\/25 {
+    &:focus {
+      --tw-ring-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 25%, transparent);
+      }
     }
   }
 :where(.og-root).focus\:ring-ring,:where(.og-root) .focus\:ring-ring {
@@ -8004,6 +8069,11 @@
       --tw-ring-offset-color: var(--og-color-bg);
     }
   }
+:where(.og-root).focus-visible\:ring-offset-og-surface-1,:where(.og-root) .focus-visible\:ring-offset-og-surface-1 {
+    &:focus-visible {
+      --tw-ring-offset-color: var(--og-color-surface-1);
+    }
+  }
 :where(.og-root).focus-visible\:ring-offset-surface,:where(.og-root) .focus-visible\:ring-offset-surface {
     &:focus-visible {
       --tw-ring-offset-color: var(--color-surface);
@@ -8115,6 +8185,27 @@
       @supports (color: color-mix(in lab, red, red)) {
         border-color: color-mix(in oklab, var(--color-white) 40%, transparent);
       }
+    }
+  }
+:where(.og-root).active\:bg-og-danger-fill\/80,:where(.og-root) .active\:bg-og-danger-fill\/80 {
+    &:active {
+      background-color: var(--og-color-danger-fill);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--og-color-danger-fill) 80%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:bg-og-fg\/75,:where(.og-root) .active\:bg-og-fg\/75 {
+    &:active {
+      background-color: var(--og-color-fg);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--og-color-fg) 75%, transparent);
+      }
+    }
+  }
+:where(.og-root).active\:bg-og-surface-2,:where(.og-root) .active\:bg-og-surface-2 {
+    &:active {
+      background-color: var(--og-color-surface-2);
     }
   }
 :where(.og-root).active\:bg-white\/25,:where(.og-root) .active\:bg-white\/25 {
@@ -8249,6 +8340,11 @@
       opacity: 50%;
     }
   }
+:where(.og-root).disabled\:opacity-55,:where(.og-root) .disabled\:opacity-55 {
+    &:disabled {
+      opacity: 55%;
+    }
+  }
 :where(.og-root).disabled\:opacity-60,:where(.og-root) .disabled\:opacity-60 {
     &:disabled {
       opacity: 60%;
@@ -8306,6 +8402,20 @@
 :where(.og-root).has-data-\[slot\=card-action\]\:grid-cols-\[1fr_auto\],:where(.og-root) .has-data-\[slot\=card-action\]\:grid-cols-\[1fr_auto\] {
     &:has(*[data-slot="card-action"]) {
       grid-template-columns: 1fr auto;
+    }
+  }
+:where(.og-root).has-\[\:focus-visible\]\:ring-2,:where(.og-root) .has-\[\:focus-visible\]\:ring-2 {
+    &:has(*:is(:focus-visible)) {
+      --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+      box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    }
+  }
+:where(.og-root).has-\[\:focus-visible\]\:ring-og-accent\/40,:where(.og-root) .has-\[\:focus-visible\]\:ring-og-accent\/40 {
+    &:has(*:is(:focus-visible)) {
+      --tw-ring-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 40%, transparent);
+      }
     }
   }
 :where(.og-root).has-\[\:focus-visible\]\:outline-2,:where(.og-root) .has-\[\:focus-visible\]\:outline-2 {
@@ -8673,6 +8783,14 @@
 :where(.og-root).aria-pressed\:opacity-100,:where(.og-root) .aria-pressed\:opacity-100 {
     &[aria-pressed="true"] {
       opacity: 100%;
+    }
+  }
+:where(.og-root).aria-\[invalid\=true\]\:border-og-status-failed\/60,:where(.og-root) .aria-\[invalid\=true\]\:border-og-status-failed\/60 {
+    &[aria-invalid="true"] {
+      border-color: var(--og-color-status-failed);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--og-color-status-failed) 60%, transparent);
+      }
     }
   }
 :where(.og-root).data-\[active\=true\]\:bg-selection,:where(.og-root) .data-\[active\=true\]\:bg-selection {
@@ -9774,11 +9892,6 @@
       grid-template-columns: minmax(0,1fr) minmax(7rem,0.42fr);
     }
   }
-:where(.og-root).sm\:grid-cols-\[minmax\(0\,9rem\)_minmax\(0\,1fr\)\],:where(.og-root) .sm\:grid-cols-\[minmax\(0\,9rem\)_minmax\(0\,1fr\)\] {
-    @media (width >= 40rem) {
-      grid-template-columns: minmax(0,9rem) minmax(0,1fr);
-    }
-  }
 :where(.og-root).sm\:flex-row,:where(.og-root) .sm\:flex-row {
     @media (width >= 40rem) {
       flex-direction: row;
@@ -9947,11 +10060,6 @@
       padding-top: calc(var(--spacing) * 16);
     }
   }
-:where(.og-root).sm\:pt-px,:where(.og-root) .sm\:pt-px {
-    @media (width >= 40rem) {
-      padding-top: 1px;
-    }
-  }
 :where(.og-root).sm\:pr-14,:where(.og-root) .sm\:pr-14 {
     @media (width >= 40rem) {
       padding-right: calc(var(--spacing) * 14);
@@ -9982,11 +10090,6 @@
       padding-left: calc(var(--spacing) * 4);
     }
   }
-:where(.og-root).sm\:pl-\[3\.75rem\],:where(.og-root) .sm\:pl-\[3\.75rem\] {
-    @media (width >= 40rem) {
-      padding-left: 3.75rem;
-    }
-  }
 :where(.og-root).sm\:text-left,:where(.og-root) .sm\:text-left {
     @media (width >= 40rem) {
       text-align: left;
@@ -10002,18 +10105,6 @@
     @media (width >= 40rem) {
       font-size: var(--text-6xl);
       line-height: var(--tw-leading, var(--text-6xl--line-height));
-    }
-  }
-:where(.og-root).sm\:text-og-sm,:where(.og-root) .sm\:text-og-sm {
-    @media (width >= 40rem) {
-      font-size: var(--og-font-size-sm);
-      line-height: var(--tw-leading, var(--og-line-height-sm));
-    }
-  }
-:where(.og-root).sm\:text-og-sm,:where(.og-root) .sm\:text-og-sm {
-    @media (width >= 40rem) {
-      --og-component-font-size: var(--og-font-size-sm);
-      --og-component-line-height: var(--og-line-height-sm);
     }
   }
 :where(.og-root).md\:flex,:where(.og-root) .md\:flex {
@@ -10597,14 +10688,34 @@
       margin-top: calc(var(--spacing) * 1);
     }
   }
+:where(.og-root).\@md\/decision\:mr-auto,:where(.og-root) .\@md\/decision\:mr-auto {
+    @container decision (width >= 28rem) {
+      margin-right: auto;
+    }
+  }
 :where(.og-root).\@md\/access\:block,:where(.og-root) .\@md\/access\:block {
     @container access (width >= 28rem) {
       display: block;
     }
   }
+:where(.og-root).\@md\/decision\:min-h-8,:where(.og-root) .\@md\/decision\:min-h-8 {
+    @container decision (width >= 28rem) {
+      min-height: calc(var(--spacing) * 8);
+    }
+  }
+:where(.og-root).\@md\/decision\:min-h-9,:where(.og-root) .\@md\/decision\:min-h-9 {
+    @container decision (width >= 28rem) {
+      min-height: calc(var(--spacing) * 9);
+    }
+  }
 :where(.og-root).\@md\/access\:w-64,:where(.og-root) .\@md\/access\:w-64 {
     @container access (width >= 28rem) {
       width: calc(var(--spacing) * 64);
+    }
+  }
+:where(.og-root).\@md\/decision\:w-auto,:where(.og-root) .\@md\/decision\:w-auto {
+    @container decision (width >= 28rem) {
+      width: auto;
     }
   }
 :where(.og-root).\@md\/access\:max-w-none,:where(.og-root) .\@md\/access\:max-w-none {
@@ -10617,9 +10728,61 @@
       grid-template-columns: 2rem minmax(0,1fr) 12.5rem 2rem;
     }
   }
+:where(.og-root).\@md\/decision\:flex-row,:where(.og-root) .\@md\/decision\:flex-row {
+    @container decision (width >= 28rem) {
+      flex-direction: row;
+    }
+  }
+:where(.og-root).\@md\/decision\:flex-wrap,:where(.og-root) .\@md\/decision\:flex-wrap {
+    @container decision (width >= 28rem) {
+      flex-wrap: wrap;
+    }
+  }
+:where(.og-root).\@md\/decision\:items-center,:where(.og-root) .\@md\/decision\:items-center {
+    @container decision (width >= 28rem) {
+      align-items: center;
+    }
+  }
+:where(.og-root).\@md\/decision\:justify-end,:where(.og-root) .\@md\/decision\:justify-end {
+    @container decision (width >= 28rem) {
+      justify-content: flex-end;
+    }
+  }
+:where(.og-root).\@md\/decision\:justify-start,:where(.og-root) .\@md\/decision\:justify-start {
+    @container decision (width >= 28rem) {
+      justify-content: flex-start;
+    }
+  }
 :where(.og-root).\@md\/access\:self-center,:where(.og-root) .\@md\/access\:self-center {
     @container access (width >= 28rem) {
       align-self: center;
+    }
+  }
+:where(.og-root).\@md\/decision\:px-5,:where(.og-root) .\@md\/decision\:px-5 {
+    @container decision (width >= 28rem) {
+      padding-inline: calc(var(--spacing) * 5);
+    }
+  }
+:where(.og-root).\@\[30rem\]\/decision\:grid-cols-\[minmax\(0\,7\.5rem\)_minmax\(0\,1fr\)\],:where(.og-root) .\@\[30rem\]\/decision\:grid-cols-\[minmax\(0\,7\.5rem\)_minmax\(0\,1fr\)\] {
+    @container decision (width >= 30rem) {
+      grid-template-columns: minmax(0,7.5rem) minmax(0,1fr);
+    }
+  }
+:where(.og-root).\@\[30rem\]\/decision\:pt-px,:where(.og-root) .\@\[30rem\]\/decision\:pt-px {
+    @container decision (width >= 30rem) {
+      padding-top: 1px;
+    }
+  }
+:where(.og-root).\@\[30rem\]\/decision\:text-og-sm,:where(.og-root) .\@\[30rem\]\/decision\:text-og-sm {
+    @container decision (width >= 30rem) {
+      font-size: var(--og-font-size-sm);
+      line-height: var(--tw-leading, var(--og-line-height-sm));
+    }
+  }
+:where(.og-root).\@\[30rem\]\/decision\:text-og-sm,:where(.og-root) .\@\[30rem\]\/decision\:text-og-sm {
+    @container decision (width >= 30rem) {
+      --og-component-font-size: var(--og-font-size-sm);
+      --og-component-line-height: var(--og-line-height-sm);
     }
   }
 :where(.og-root).\@lg\/diff\:shrink-0,:where(.og-root) .\@lg\/diff\:shrink-0 {
@@ -11157,6 +11320,11 @@
       line-height: var(--tw-leading, var(--text-base--line-height));
     }
   }
+:where(.og-root).pointer-coarse\:text-\[16px\],:where(.og-root) .pointer-coarse\:text-\[16px\] {
+    @media (pointer: coarse) {
+      font-size: 16px;
+    }
+  }
 :where(.og-root).pointer-coarse\:opacity-70,:where(.og-root) .pointer-coarse\:opacity-70 {
     @media (pointer: coarse) {
       opacity: 70%;
@@ -11534,6 +11702,12 @@
     & svg {
       width: calc(var(--spacing) * 5);
       height: calc(var(--spacing) * 5);
+    }
+  }
+:where(.og-root).\[\&_svg\]\:size-\[18px\],:where(.og-root) .\[\&_svg\]\:size-\[18px\] {
+    & svg {
+      width: 18px;
+      height: 18px;
     }
   }
 :where(.og-root).\[\&_svg\]\:shrink-0,:where(.og-root) .\[\&_svg\]\:shrink-0 {
