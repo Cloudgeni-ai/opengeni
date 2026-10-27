@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -47,13 +47,26 @@ describe("migration plan", () => {
   });
 
   test("only rolling migrations pending means no drain", async () => {
-    const latest = shipped.at(-1)!;
-    await recordApplied("plan_rolling", shipped.slice(0, -1));
+    // The newest migration with no release-phase directive (a concurrent index,
+    // for example, runs after the release instead).
+    let pendingName: string | undefined;
+    for (const name of [...shipped].reverse()) {
+      const sql = await readFile(join(import.meta.dir, "../drizzle", name), "utf8");
+      if (!/^-- opengeni:/m.test(sql)) {
+        pendingName = name;
+        break;
+      }
+    }
+    const pending = pendingName!;
+    await recordApplied(
+      "plan_rolling",
+      shipped.filter((name) => name !== pending),
+    );
     const plan = await planMigrations(blank.databaseUrl, "plan_rolling");
     expect(plan).toEqual({
       phaseProtocol: 1,
-      phases: { pre: [], maintenance: [latest], post: [] },
-      pending: [{ name: latest, deploymentMode: "rolling" }],
+      phases: { pre: [], maintenance: [pending], post: [] },
+      pending: [{ name: pending, deploymentMode: "rolling" }],
       requiresDrain: false,
     });
   });
