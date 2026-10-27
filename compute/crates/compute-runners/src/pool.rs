@@ -349,6 +349,10 @@ impl Pool {
     /// sandbox, or when removing one whose sandbox failed to start failed.
     /// Runs after the pool took on every sandbox it has, and before it
     /// starts any, so every registration of a runner it knows is its own.
+    /// A registration named as the pool names its runners is its own only
+    /// when the actions service says it is in the pool's scale set: a pool
+    /// of the same name in another runner group of the scope has one of
+    /// its own.
     async fn forget_orphans(&self) {
         let registered = match self.github.registered().await {
             Ok(registered) => registered,
@@ -365,6 +369,15 @@ impl Pool {
                 && named_by(&self.settings.name, &runner.name)
                 && !self.runners.contains_key(&runner.name)
         }) {
+            match self.github.runner(&orphan.name).await {
+                Ok(Some(found))
+                    if found.id == orphan.id && found.runner_scale_set_id == Some(self.set) => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(runner = %orphan.name, error = format!("{error:#}"), "reading a registration's scale set failed; the next check tries again");
+                    continue;
+                }
+            }
             tracing::info!(runner = %orphan.name, "a registration without a sandbox goes");
             if let Err(error) = self.github.remove_runner(orphan.id).await {
                 tracing::warn!(runner = %orphan.name, error = format!("{error:#}"), "removing a registration failed; the next check tries again");

@@ -116,7 +116,9 @@ fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
 /// Keeps the pool's template warm until `stop`, telling `current` each new
 /// one. Refreshes only while `leading`, so a standby builds nothing; on
 /// taking over it adopts the newest template, which the replica that led
-/// before may have made.
+/// before may have made, and refreshes nothing until it has: what it had
+/// as a standby may be gone, and a refresh failing then would keep it for
+/// as long as refreshes wait.
 pub async fn keep(
     settings: Settings,
     github: Arc<Github>,
@@ -132,12 +134,12 @@ pub async fn keep(
     let mut cleared = false;
     loop {
         if *leading.borrow() {
-            if !cleared {
-                adopt(&settings, &compute, &current, &mut have, &mut tried).await;
+            if !cleared && adopt(&settings, &compute, &current, &mut have, &mut tried).await {
                 clear_builders(&compute, &settings.pool).await;
                 cleared = true;
             }
-            let due = tried.is_none_or(|at| now_s() >= at.saturating_add(settings.every.as_secs()));
+            let due = cleared
+                && tried.is_none_or(|at| now_s() >= at.saturating_add(settings.every.as_secs()));
             if due {
                 match look(&settings, &github, &mut branch, have.as_ref()).await {
                     Ok(Some(commit)) => {
@@ -177,14 +179,14 @@ pub async fn keep(
 
 /// Takes the pool's newest template as the one runners start from (the
 /// base when it has none), and as the one last made. Keeps what it had
-/// when the templates cannot be listed.
+/// when the templates cannot be listed, and says whether they were.
 async fn adopt(
     settings: &Settings,
     compute: &Compute,
     current: &watch::Sender<String>,
     have: &mut Option<Ours>,
     tried: &mut Option<u64>,
-) {
+) -> bool {
     let all = match compute.snapshots().await {
         Ok(all) => all,
         Err(error) => {
@@ -192,7 +194,7 @@ async fn adopt(
                 error = format!("{error:#}"),
                 "listing templates failed; runners keep the template they had"
             );
-            return;
+            return false;
         }
     };
     let newest = ours(&settings.pool, &all).pop();
@@ -205,6 +207,7 @@ async fn adopt(
     }
     *tried = newest.as_ref().map(|newest| newest.at);
     *have = newest;
+    true
 }
 
 /// The branch's head, when no template has it yet.

@@ -203,6 +203,83 @@ async fn a_replica_taking_over_starts_runners_from_the_newest_template() {
     keeping.await.unwrap();
 }
 
+/// A replica taking over whose look at the templates fails looks again
+/// before refreshing anything: the template it had as a standby may be
+/// gone, and a refresh failing then would keep it for as long as
+/// refreshes wait.
+#[tokio::test]
+async fn a_takeover_that_cannot_list_templates_lists_them_again() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.templates.push((
+            "tpl-a".into(),
+            "ci-100-aaaaaaaaaaaa".into(),
+            "sbx-gone".into(),
+        ));
+    }
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let (current_tx, mut current) = watch::channel("runner-base".to_owned());
+    let (leading_tx, leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let keeping = tokio::spawn(warm::keep(
+        warm::Settings {
+            every: Duration::from_secs(3600),
+            ..settings()
+        },
+        github,
+        compute,
+        current_tx,
+        leading,
+        stop.clone(),
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name == "ci-100-aaaaaaaaaaaa"),
+    )
+    .await
+    .expect("A, at start")
+    .unwrap();
+
+    // While it stands by, the replica leading makes B and deletes A; as
+    // it takes over, one listing and one creation fail.
+    {
+        let mut world = fake.world();
+        world.templates.clear();
+        world.templates.push((
+            "tpl-b".into(),
+            "ci-200-bbbbbbbbbbbb".into(),
+            "sbx-gone".into(),
+        ));
+        world.listing_failures = 1;
+        world.create_failures = 1;
+    }
+    leading_tx.send_replace(true);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name == "ci-200-bbbbbbbbbbbb"),
+    )
+    .await
+    .expect("B, once the templates can be listed")
+    .unwrap();
+    assert_eq!(
+        fake.world().create_failures,
+        1,
+        "B is at the head: no builder was asked for"
+    );
+
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
 /// One refresh: cloned with the token in its environment alone, prepared,
 /// written out, saved, and its builder gone.
 fn the_refresh_ran_as_it_should(world: &fake::World) {

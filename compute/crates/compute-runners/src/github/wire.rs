@@ -183,6 +183,10 @@ pub struct JitSetting<'a> {
 pub struct RunnerRef {
     pub id: u64,
     pub name: String,
+    /// The scale set it was registered in, as the actions service says
+    /// when asked about it by name.
+    #[serde(default)]
+    pub runner_scale_set_id: Option<u64>,
 }
 
 /// A just-in-time runner: registered already, and the configuration that

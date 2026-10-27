@@ -58,13 +58,16 @@ delivery can be late or missed.
   (rate limits, a lapsed token) is an error, and the runner is asked about
   again at the next check. A registration whose sandbox is gone is removed,
   and so is one of the pool's names with no sandbox at all (the service
-  stopped between registering it and starting its sandbox). Every sandbox
-  has a timeout, the pool's longest job, in case all else fails.
+  stopped between registering it and starting its sandbox), once the
+  actions service says it is in the pool's scale set: a pool of the same
+  name in another runner group has its own. Every sandbox has a timeout,
+  the pool's longest job, in case all else fails.
 - **No state of its own.** What runs is read back from the sandboxes'
   metadata and GitHub every 30 s and at start, so a restart or a standby
   taking over loses nothing and never leaks a sandbox or a registration. A
   standby taking over also adopts the pool's newest template, which the
-  replica before it may have made.
+  replica before it may have made, and refreshes nothing until it could
+  list them.
 - **Warm templates refreshed from the default branch.** Given a repository
   and a prepare command, the service watches the branch. When it moves (and
   at most every `--warm-every`), it starts a sandbox from the base template,

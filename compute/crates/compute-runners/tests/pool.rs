@@ -334,15 +334,23 @@ async fn registrations_without_a_sandbox_go() {
     let mut pool = pool(&fake, 1).await;
     {
         let mut world = fake.world();
+        let set = world.sets[0]["id"].as_u64().unwrap();
         // Registered, its sandbox never started: it goes.
         world.runners.insert(50, ("ci-0123456789ab".into(), false));
+        world.runner_sets.insert(50, set);
         // Without a sandbox but with a job (as GitHub has it): it stays.
         world.runners.insert(51, ("ci-aaaaaaaaaaaa".into(), true));
+        world.runner_sets.insert(51, set);
         // Not named as the pool names its runners: it stays.
         world
             .runners
             .insert(52, ("ci-gpu-0123456789ab".into(), false));
         world.runners.insert(53, ("someone-elses".into(), false));
+        // Named so, but of a pool of the same name in another runner
+        // group, or of no scale set: it stays.
+        world.runners.insert(55, ("ci-cccccccccccc".into(), false));
+        world.runner_sets.insert(55, set + 1000);
+        world.runners.insert(56, ("ci-dddddddddddd".into(), false));
         // In its sandbox: it stays.
         world.runners.insert(54, ("ci-bbbbbbbbbbbb".into(), false));
         world.sandboxes.insert(
@@ -363,7 +371,7 @@ async fn registrations_without_a_sandbox_go() {
     let world = fake.world();
     assert_eq!(
         world.runners.keys().copied().collect::<Vec<_>>(),
-        [51, 52, 53, 54]
+        [51, 52, 53, 54, 55, 56]
     );
     assert_eq!(world.sandboxes.len(), 1, "the kept runner is the idle one");
 }

@@ -43,6 +43,8 @@ pub struct World {
     pub sets: Vec<Value>,
     /// GitHub's runners: id to name and whether one has a job.
     pub runners: BTreeMap<u64, (String, bool)>,
+    /// The scale set each runner was registered in, by id.
+    pub runner_sets: BTreeMap<u64, u64>,
     /// Statuses the next removals of runners answer, before any is
     /// removed.
     pub removal_refusals: VecDeque<u16>,
@@ -62,6 +64,8 @@ pub struct World {
     pub acquire_expired: u32,
     pub acquired: Vec<i64>,
     pub sandboxes: BTreeMap<String, Sandbox>,
+    /// Sandbox creations failing (503) before one succeeds.
+    pub create_failures: u32,
     pub killed: Vec<String>,
     /// The repository's default branch's head.
     pub head: String,
@@ -70,6 +74,8 @@ pub struct World {
     pub failing: Option<String>,
     /// Templates saved from sandboxes: id, name, the sandbox.
     pub templates: Vec<(String, String, String)>,
+    /// Listings of templates failing (503) before one succeeds.
+    pub listing_failures: u32,
     pub deleted_templates: Vec<String>,
 }
 
@@ -234,7 +240,10 @@ async fn sets(State(fake): State<Fake>, Query(query): Query<BTreeMap<String, Str
     let found = world
         .sets
         .iter()
-        .filter(|set| set["name"] == query["name"])
+        .filter(|set| {
+            set["name"] == query["name"]
+                && set["runnerGroupId"].as_u64() == query["runnerGroupId"].parse().ok()
+        })
         .cloned()
         .collect::<Vec<_>>();
     axum::Json(listing(&found)).into_response()
@@ -248,14 +257,22 @@ async fn new_set(State(fake): State<Fake>, axum::Json(mut set): axum::Json<Value
     axum::Json(set).into_response()
 }
 
-async fn jit(State(fake): State<Fake>, axum::Json(setting): axum::Json<Value>) -> Response {
+async fn jit(
+    State(fake): State<Fake>,
+    Path(set): Path<u64>,
+    axum::Json(setting): axum::Json<Value>,
+) -> Response {
     let mut world = fake.world();
     world.next += 1;
     let id = world.next;
     let name = setting["name"].as_str().unwrap().to_owned();
     world.runners.insert(id, (name.clone(), false));
-    axum::Json(json!({"runner": {"id": id, "name": name}, "encodedJITConfig": format!("jit-{id}")}))
-        .into_response()
+    world.runner_sets.insert(id, set);
+    axum::Json(json!({
+        "runner": {"id": id, "name": name, "runnerScaleSetId": set},
+        "encodedJITConfig": format!("jit-{id}"),
+    }))
+    .into_response()
 }
 
 fn session(world: &World, id: &str) -> Value {
@@ -330,7 +347,13 @@ async fn agents(
         .runners
         .iter()
         .filter(|(_, (name, _))| *name == query["agentName"])
-        .map(|(id, (name, _))| json!({"id": id, "name": name}))
+        .map(|(id, (name, _))| {
+            json!({
+                "id": id,
+                "name": name,
+                "runnerScaleSetId": world.runner_sets.get(id).copied().unwrap_or(0),
+            })
+        })
         .collect::<Vec<_>>();
     axum::Json(listing(&found)).into_response()
 }
@@ -405,6 +428,10 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
 
 async fn create(State(fake): State<Fake>, axum::Json(body): axum::Json<Value>) -> Response {
     let mut world = fake.world();
+    if world.create_failures > 0 {
+        world.create_failures -= 1;
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     world.next += 1;
     let id = format!("sbx{}", world.next);
     world.sandboxes.insert(
@@ -543,7 +570,11 @@ async fn snapshot(
 }
 
 async fn snapshots(State(fake): State<Fake>) -> Response {
-    let world = fake.world();
+    let mut world = fake.world();
+    if world.listing_failures > 0 {
+        world.listing_failures -= 1;
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let all: Vec<Value> = world
         .templates
         .iter()
