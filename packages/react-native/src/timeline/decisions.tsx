@@ -325,7 +325,10 @@ function HumanInputForm({
       return remaining;
     });
   const update = (id: string, change: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
-    setDrafts((existing) => ({ ...existing, [id]: change(existing[id] ?? emptyDraft()) }));
+    setDrafts((existing) => ({
+      ...existing,
+      [id]: change(existing[id] ?? emptyDraft()),
+    }));
     clearError(id);
   };
   const updateSecret = (
@@ -405,7 +408,14 @@ function HumanInputForm({
         </Pressable>
       </View>
       {collapsed ? null : (
-        <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16, gap: 16 }}>
+        <View
+          style={{
+            paddingHorizontal: 16,
+            paddingTop: 12,
+            paddingBottom: 16,
+            gap: 16,
+          }}
+        >
           {questions.map((question, index) => (
             <View key={question.id} style={index === current ? null : { display: "none" }}>
               <QuestionControls
@@ -470,7 +480,9 @@ function HumanInputForm({
                   label={messages.skip}
                   disabled={busy}
                   onPress={() =>
-                    void submit({ outcome: "skipped" } as SubmitHumanInputResponseRequest)
+                    void submit({
+                      outcome: "skipped",
+                    } as SubmitHumanInputResponseRequest)
                   }
                 />
               ) : null
@@ -550,7 +562,13 @@ function QuestionControls({
     <View style={{ gap: 10 }}>
       {help ? <QuestionText text={help} tone="muted" style={secondary} /> : null}
       {hint ? (
-        <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: theme.size.sm,
+            color: c["fg-muted"],
+          }}
+        >
           {hint}
         </Text>
       ) : null}
@@ -655,7 +673,11 @@ function QuestionControls({
       {error ? (
         <Text
           accessibilityRole="alert"
-          style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["status-failed"] }}
+          style={{
+            ...fontStyle(theme),
+            fontSize: theme.size.sm,
+            color: c["status-failed"],
+          }}
         >
           {error}
         </Text>
@@ -716,13 +738,22 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
       });
     }
   };
-  const small = { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 18 };
-  const body = { ...fontStyle(theme), fontSize: theme.size.base, lineHeight: 20 };
+  const small = {
+    ...fontStyle(theme),
+    fontSize: theme.size.sm,
+    lineHeight: 18,
+  };
+  const body = {
+    ...fontStyle(theme),
+    fontSize: theme.size.base,
+    lineHeight: 20,
+  };
+  const bodyMaxHeight = Math.max(120, Math.round(height * 0.5 - 200));
   return (
     <ScrollView
-      // The card floats above the composer: it may take up to about half the
-      // screen, and scrolls within that only when a review is very long.
-      style={{ maxHeight: Math.max(320, Math.round(height * 0.5)) }}
+      // The cards float above the composer and take at most about 60% of the
+      // screen; several pending approvals scroll as a list within that.
+      style={{ maxHeight: Math.max(320, Math.round(height * 0.6)) }}
       contentContainerStyle={{ gap: 12 }}
       nestedScrollEnabled
     >
@@ -747,7 +778,13 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         return (
           <DecisionCard key={approval.id} accessibilityLabel={review.title}>
             <View style={{ padding: 16, gap: 12 }}>
-              <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12 }}>
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "flex-start",
+                  gap: 12,
+                }}
+              >
                 <DecisionMark icon="shield-check" />
                 <View style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
                   <Text
@@ -767,75 +804,81 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                   />
                 </View>
               </View>
-              {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
-              {facts.effects.length > 0 ? (
-                <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
-                  {facts.effects.map((effect) => (
-                    <Text key={effect} style={{ ...body, color: c.fg }}>
-                      {"\u2022 "}
-                      {effect}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-              {facts.shown.length > 0 ? (
-                <View
-                  style={{
-                    gap: 10,
-                    padding: 12,
-                    borderRadius: theme.radius.md,
-                    backgroundColor: withAlpha(c.fg, 0.035),
-                  }}
-                >
-                  {facts.shown.map((field) => (
-                    <View key={field.path} style={{ gap: 1 }}>
-                      <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
-                      <Text numberOfLines={6} style={{ ...body, color: c.fg }}>
-                        {field.preview}
+              {/* The title and the buttons stay pinned; a long review scrolls
+                  between them so the buttons are never pushed off screen. */}
+              <ScrollView
+                style={{ maxHeight: bodyMaxHeight, flexGrow: 0 }}
+                contentContainerStyle={{ gap: 12 }}
+                nestedScrollEnabled
+              >
+                {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
+                {facts.effects.length > 0 ? (
+                  <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
+                    {facts.effects.map((effect) => (
+                      <Text key={effect} style={{ ...body, color: c.fg }}>
+                        {"\u2022 "}
+                        {effect}
                       </Text>
-                    </View>
-                  ))}
-                  {facts.hiddenFields > 0 ? (
-                    <Text style={{ ...small, color: c["fg-muted"] }}>
-                      {facts.hiddenFields === 1
-                        ? t("toolActionReview.n1MoreValue")
-                        : t("toolActionReview.hiddenfieldsMoreValues", {
-                            hiddenFields: facts.hiddenFields,
-                          })}
-                    </Text>
-                  ) : null}
-                </View>
-              ) : null}
-              {!canApprove ? (
-                <Text style={{ ...body, color: c.fg }}>
-                  {t("toolActionReview.theDetailsOfThisOlder")}
-                </Text>
-              ) : null}
-              {showDetails ? (
-                <ScrollView
-                  style={{
-                    maxHeight: 180,
-                    borderRadius: theme.radius.md,
-                    borderWidth: 1,
-                    borderColor: c.border,
-                    backgroundColor: withAlpha(c.fg, 0.035),
-                  }}
-                  contentContainerStyle={{ padding: 12 }}
-                  nestedScrollEnabled
-                >
-                  <Text
-                    selectable
+                    ))}
+                  </View>
+                ) : null}
+                {facts.shown.length > 0 ? (
+                  <View
                     style={{
-                      ...fontStyle(theme, 400, "mono"),
-                      fontSize: theme.size.sm,
-                      lineHeight: 20,
-                      color: c["fg-muted"],
+                      gap: 10,
+                      padding: 12,
+                      borderRadius: theme.radius.md,
+                      backgroundColor: withAlpha(c.fg, 0.035),
                     }}
                   >
-                    {payload}
+                    {facts.shown.map((field) => (
+                      <View key={field.path} style={{ gap: 1 }}>
+                        <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
+                        <Text numberOfLines={6} style={{ ...body, color: c.fg }}>
+                          {field.preview}
+                        </Text>
+                      </View>
+                    ))}
+                    {facts.hiddenFields > 0 ? (
+                      <Text style={{ ...small, color: c["fg-muted"] }}>
+                        {facts.hiddenFields === 1
+                          ? t("toolActionReview.n1MoreValue")
+                          : t("toolActionReview.hiddenfieldsMoreValues", {
+                              hiddenFields: facts.hiddenFields,
+                            })}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+                {!canApprove ? (
+                  <Text style={{ ...body, color: c.fg }}>
+                    {t("toolActionReview.theDetailsOfThisOlder")}
                   </Text>
-                </ScrollView>
-              ) : null}
+                ) : null}
+                {showDetails ? (
+                  <View
+                    style={{
+                      padding: 12,
+                      borderRadius: theme.radius.md,
+                      borderWidth: 1,
+                      borderColor: c.border,
+                      backgroundColor: withAlpha(c.fg, 0.035),
+                    }}
+                  >
+                    <Text
+                      selectable
+                      style={{
+                        ...fontStyle(theme, 400, "mono"),
+                        fontSize: theme.size.sm,
+                        lineHeight: 20,
+                        color: c["fg-muted"],
+                      }}
+                    >
+                      {payload}
+                    </Text>
+                  </View>
+                ) : null}
+              </ScrollView>
               <DecisionActions
                 style={{ marginTop: 4 }}
                 primary={
@@ -866,7 +909,10 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                           : t("toolActionReview.details")
                       }
                       onPress={() =>
-                        setDetails((current) => ({ ...current, [approval.id]: !showDetails }))
+                        setDetails((current) => ({
+                          ...current,
+                          [approval.id]: !showDetails,
+                        }))
                       }
                     />
                   ) : null
