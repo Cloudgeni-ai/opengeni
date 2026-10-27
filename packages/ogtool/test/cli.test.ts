@@ -383,6 +383,46 @@ describe("ogtool CLI", () => {
     }
   });
 
+  test("an error result with --save-image prints the error, not an image save failure", async () => {
+    const error = {
+      code: "internal_error",
+      message: "API 500: The workspace could not complete the request. Reference: r-1.",
+      retryable: true,
+      requestId: "r-1",
+    };
+    const errorResult = {
+      content: [{ type: "text", text: JSON.stringify({ error }) }],
+      structuredContent: { error },
+      isError: true,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: errorResult });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      try {
+        const target = join(directory, "shot.png");
+        const result = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(result.exitCode).toBe(0);
+        const printed = JSON.parse(result.stdout);
+        expect(printed.isError).toBe(true);
+        expect(printed.structuredContent).toEqual({ error });
+        expect(printed.imageSaveError).toBeUndefined();
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("call prints the payload once by default and the exact result with --full", async () => {
     const mock = codemodeServer({ result: duplicatedResult });
     const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };

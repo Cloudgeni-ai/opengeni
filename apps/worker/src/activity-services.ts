@@ -10,7 +10,9 @@ import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   createDb,
+  databasePasswordFileOptions,
   databasePoolOptions,
+  logDatabaseCredentialEvent,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -52,6 +54,12 @@ export function createSharedActivityServices(
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
             ...databasePoolOptions(settings),
+            // Runtime login only: the files rotate this URL's password in place.
+            ...databasePasswordFileOptions(settings),
+            onCredentialEvent: logDatabaseCredentialEvent(
+              "worker-activities",
+              (message, attributes) => observability.warn(message, attributes),
+            ),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;

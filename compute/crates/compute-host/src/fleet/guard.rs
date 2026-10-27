@@ -54,6 +54,12 @@ pub const STEP: Duration = Duration::from_millis(100);
 /// How often a guard whose watchdog systemd does not keep yet asks again.
 const KEEP_AGAIN: Duration = Duration::from_secs(1);
 
+/// The stack of the thread that lists the store. The guard's memory is
+/// locked in ([`keep_resident`]), so the step that starts the thread
+/// brings in its whole stack before it goes on: a small one keeps that
+/// step short.
+const LISTING_STACK: usize = 256 * 1024;
+
 /// What the guard watches and holds.
 #[derive(Clone, Debug)]
 pub struct GuardConfig {
@@ -245,6 +251,37 @@ fn held(path: &Path) -> io::Result<bool> {
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Locks every page the guard process maps, now and later, into memory.
+///
+/// The guard must feed the watchdog within its timeout (3 s) however
+/// loaded the host is, or the watchdog resets the machine and every
+/// sandbox on it loses its programs. A host whose guests hold more memory
+/// than it has swaps and reclaims, and a guard whose code or data the
+/// kernel took back then waits on that same busy disk to get them again,
+/// for longer than the watchdog allows. Locked, its pages stay, including
+/// those of steps it has not taken yet, such as stopping the VMs. Its unit
+/// also gives it real-time priority (`compute-guard.service`), which puts
+/// its turn first and lets its few allocations draw on the kernel's
+/// reserve, and it never waits on the journal ([`super::Lossy`]) or on
+/// systemd ([`kept`]).
+///
+/// Locking covers the guard's own memory only: not the pages of the files
+/// it reads, such as the lease file (tmpfs, which a host short of memory
+/// swaps out too), nor what the kernel does for it. Bringing every page in
+/// takes a while on such a host, so the binary's own guard command calls
+/// this on a thread of its own as the guard starts, which takes over the
+/// watchdog and feeds it meanwhile. Tests running the guard in their own
+/// process do not call it.
+///
+/// # Errors
+///
+/// When the kernel refuses, as without the right to lock memory: the
+/// guard still guards, but a host short of memory may stall it.
+pub fn keep_resident() -> io::Result<()> {
+    rustix::mm::mlockall(rustix::mm::MlockAllFlags::CURRENT | rustix::mm::MlockAllFlags::FUTURE)
+        .map_err(io::Error::from)
 }
 
 /// Runs the guard until `stop` is set and it may stop, at a step that fed
@@ -465,6 +502,7 @@ impl Keeping {
             let list = Arc::clone(&self.list);
             std::thread::Builder::new()
                 .name("guard-store".into())
+                .stack_size(LISTING_STACK)
                 .spawn(move || {
                     let _ = answer.send(list(identity));
                 })?;
@@ -1131,5 +1169,67 @@ mod tests {
         let mut keeping = Keeping::new(false, Arc::new(|_| Ok(true)));
         assert!(!keeping.kept(device.as_fd(), None));
         assert!(keeping.told);
+    }
+
+    /// systemd slow to take its messages, as on a host short of memory:
+    /// the guard's step, which feeds the watchdog, never waits for it, and
+    /// the guard is ready once systemd takes them again.
+    #[test]
+    fn a_guard_whose_systemd_is_slow_steps_on_time_and_asks_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = File::create(dir.path().join("device")).unwrap();
+        let path = dir.path().join("notify");
+        let slow = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        let queued = kept::fill_queue(&path);
+        let mut keeping = Keeping::new(false, Arc::new(|_| Ok(false)));
+        let mut slowest = Duration::ZERO;
+        // Long enough to ask a few times.
+        let until = Instant::now() + KEEP_AGAIN * 2 + STEP;
+        while Instant::now() < until {
+            let started = Instant::now();
+            assert!(!keeping.kept(device.as_fd(), path.to_str()));
+            slowest = slowest.max(started.elapsed());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(keeping.told, "said why it is not ready");
+        assert!(slowest < STEP, "a step waited {slowest:?} on systemd");
+
+        // systemd takes its messages again.
+        drop((slow, queued));
+        std::fs::remove_file(&path).unwrap();
+        let systemd = Systemd::start(path.clone(), true, Duration::ZERO);
+        keeping.list = systemd.list();
+        assert!(keep_for(
+            &mut keeping,
+            &device,
+            systemd.socket(),
+            KEEP_AGAIN * 3,
+            || {}
+        ));
+    }
+
+    /// A host whose guests hold more memory than it has must not stall
+    /// its guard into the watchdog's reset: the installed unit gives the
+    /// guard the processor first, and it is never restarted.
+    #[test]
+    fn the_installed_guard_runs_first_and_is_never_restarted() {
+        let unit = include_str!("../../../../deploy/host/compute-guard.service");
+        let set: Vec<&str> = unit
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        for directive in [
+            "CPUSchedulingPolicy=fifo",
+            "CPUSchedulingPriority=1",
+            "OOMScoreAdjust=-1000",
+            "Restart=no",
+            "ExecStart=/opt/compute/current/compute-host guard",
+        ] {
+            assert!(
+                set.contains(&directive),
+                "compute-guard.service lacks {directive}"
+            );
+        }
     }
 }

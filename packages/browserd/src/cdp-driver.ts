@@ -6950,7 +6950,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // the refusal is reported as an unknown outcome.
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        `browser element is covered by ${blocked.slice(0, 160)} at its center; the click was not delivered`,
+        `browser element is covered by ${coverName(blocked)} at its center; the click was not delivered`,
         true,
       );
     }
@@ -7239,7 +7239,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
           cover
-            ? `browser element is covered by ${cover} at its center`
+            ? cover.shown
+              ? `browser element is covered by ${cover.description} where it shows`
+              : `browser element is covered by ${cover.description} at its center`
             : ((await this.unreachableReason(state, backendDOMNodeId)) ??
                 "browser element is covered or not pointer-actionable"),
           true,
@@ -7294,10 +7296,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * A target whose center lies outside the window or outside a container's
    * clip (a header the page slides up as its content scrolls, a row cut off
    * at a panel's edge) can still show part of itself, which is where a person
-   * clicks. Only used when nothing else is at the center: a target covered by
-   * another element keeps that refusal. Returns a point on the visible part
-   * that reaches the target itself, not a separate control nested inside it;
-   * `nested` names that control when it is all that shows; null otherwise.
+   * clicks. Only used when nothing else is at the center, or when the center
+   * is clipped away (the browser's hit stack there leaves the target out, so
+   * what is on top, such as the panel beside a tree's side panel, is not over
+   * it). A target covered by another element, at its center or at the middle
+   * of the part that shows, keeps that refusal. Returns a point on the
+   * visible part, nearest its middle, that reaches the target itself, not a
+   * separate control nested inside it; `nested` names that control when it
+   * is all that shows; null otherwise.
    */
   private async visiblePartPoint(
     state: TargetState,
@@ -7318,20 +7324,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // It must also keep its orientation: mirrored (scaleX(-1)) or turned
     // (180°) boxes map the page's fractions onto the wrong side.
     if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5 || x2 <= x1 || y4 <= y1) return null;
-    // A cross-origin frame cannot see how much of its window the page shows;
-    // pass the page's window in the frame's own coordinates.
-    let bounds: { left: number; top: number; right: number; bottom: number } | null = null;
-    let offset = { x: 0, y: 0 };
-    if (state.nodeRoute) {
-      offset = await this.frameOffset(state, state.nodeRoute);
-      const { viewport } = await this.layoutMetrics(state);
-      bounds = {
-        left: -offset.x,
-        top: -offset.y,
-        right: viewport.width - offset.x,
-        bottom: viewport.height - offset.y,
-      };
-    }
+    const { bounds, offset } = await this.pageWindowInFrame(state);
     const found = await this.callOnNode(state, backendDOMNodeId, VISIBLE_PART_FUNCTION, [
       { value: bounds },
     ]).catch(() => null);
@@ -7345,6 +7338,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return {
       x: offset.x + x1 + fx * (x2 - x1),
       y: offset.y + y1 + fy * (y4 - y1),
+    };
+  }
+
+  /** A cross-origin frame cannot see how much of its window the page shows:
+   * the page's window in the target frame's own coordinates (null bounds in
+   * the page's own frames), and that frame's offset in the page. */
+  private async pageWindowInFrame(state: TargetState): Promise<{
+    bounds: { left: number; top: number; right: number; bottom: number } | null;
+    offset: { x: number; y: number };
+  }> {
+    if (!state.nodeRoute) return { bounds: null, offset: { x: 0, y: 0 } };
+    const offset = await this.frameOffset(state, state.nodeRoute);
+    const { viewport } = await this.layoutMetrics(state);
+    return {
+      bounds: {
+        left: -offset.x,
+        top: -offset.y,
+        right: viewport.width - offset.x,
+        bottom: viewport.height - offset.y,
+      },
+      offset,
     };
   }
 
@@ -7367,20 +7381,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
       case "clipped":
         return "browser element is out of view: only its own container is at its center, where it is clipped or hidden; scroll the page or panel back to it, or use another control";
+      case "cut-off":
+        return "browser element is out of view: it lies past the clipped edge of a panel or container that holds it; scroll that panel to it, or use another control";
       default:
         return null;
     }
   }
 
-  /** A short role-and-label description of what receives pointer input at the
-   * target's center instead of the target, or null when nothing else does. */
+  /** A short role-and-label description of what receives pointer input
+   * instead of the target, or null when nothing else does. That is checked at
+   * the target's center, or (`shown`) at the middle of the part of it that
+   * shows when it does not show at its center (cut off at a panel's edge):
+   * an element beside that panel is not over the target there. */
   private async coveringElement(
     state: TargetState,
     backendDOMNodeId: number,
-  ): Promise<string | null> {
+  ): Promise<{ description: string; shown: boolean } | null> {
     try {
-      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, []);
-      return typeof value === "string" && value ? value.slice(0, 160) : null;
+      const { bounds } = await this.pageWindowInFrame(state);
+      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, [
+        { value: bounds },
+      ]);
+      if (typeof value === "string" && value) {
+        return { description: coverName(value), shown: false };
+      }
+      if (isRecord(value) && typeof value.shown === "string" && value.shown) {
+        return { description: coverName(value.shown), shown: true };
+      }
+      return null;
     } catch {
       return null;
     }
@@ -9992,10 +10020,21 @@ const HIT_TEST_FUNCTION = `function() {
 
 // Describes an element by its nearest labelled ancestor: role (or tag) and
 // accessible label. Text content is read only from non-editable elements and
-// bounded; input values never are.
+// bounded by code points, so a cut never splits a character; input values
+// never are read. The driver bounds the whole by bytes (coverName).
 const DESCRIBE_HELPER = `
   const describe = (hit) => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const head = (value, count) => {
+      let kept = "";
+      let taken = 0;
+      for (const character of value) {
+        if (taken === count) break;
+        kept += character;
+        taken += 1;
+      }
+      return kept;
+    };
     let node = hit instanceof Element ? hit : hit && hit.parentElement;
     if (!(node instanceof Element)) return "another element";
     const start = node;
@@ -10004,29 +10043,221 @@ const DESCRIBE_HELPER = `
       const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
       if (role || label) {
         const kind = role || node.tagName.toLowerCase();
-        return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+        return label ? kind + " " + JSON.stringify(head(label, 80)) : kind;
       }
       node = node.parentElement;
     }
     const editable = start.closest("input, textarea, select, [contenteditable]");
-    const text = editable ? "" : clean(start.textContent).slice(0, 60);
+    const text = editable ? "" : head(clean(start.textContent), 60);
     return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
   };`;
 
-// Describes the element on top at the target's centre, or null when nothing
-// else is there.
-const COVER_DESCRIPTION_FUNCTION = `function() {
+// Page-side helpers, after HIT_HELPERS, that let the browser say where the
+// target shows. holds: the target (or something in it) is in the stack of
+// elements at a point. elementsFromPoint leaves an element out where it is
+// clipped away (a panel's overflow edge, clip-path, containment) or hidden,
+// and keeps it, under its cover, where something covers it; the top layer,
+// transforms and zoom are the browser's own. So a target missing from the
+// stack at its centre is cut off there, and whatever is on top there (the
+// panel beside the target's own panel) is not over it. visibleArea: the part
+// of the target's box inside its window, narrowed to what every same-origin
+// parent frame shows and to bounds (the page's window in this frame's
+// coordinates) when the driver passes them, one pixel in from every edge so
+// rounding cannot put a press beside it; null when empty. shownPoints: the
+// points of a grid over that area where the target shows, nearest the middle
+// of the part that shows first (that middle itself when it shows); null when
+// no part shows. shutOut: the page keeps the target from taking pointer input
+// from outside the target itself, so it is missing from every stack without
+// being cut off: it is inert or inside an inert element, an open modal (a
+// showModal() dialog, or a fullscreen element) does not hold it (including
+// the modal on top at its centre, stacked over its own or inside an open
+// shadow root), or its
+// pointer-events: none comes from a container (a modal library setting it on
+// the body). What is on top over it then covers it, as #6170 reported. A
+// target that sets pointer-events: none on itself is not shut out.
+const SHOWN_PART_HELPER = `
+  const holds = (target, x, y) => {
+    const root = target.getRootNode();
+    const scope = root && typeof root.elementsFromPoint === "function" ? root : document;
+    return scope.elementsFromPoint(x, y).some((node) => owns(target, node));
+  };
+  const shutOut = (target) => {
+    const flatParent = (node) => {
+      const next = node.assignedSlot ?? node.parentNode ?? null;
+      return next instanceof ShadowRoot ? next.host : next;
+    };
+    for (let node = target; node instanceof Element; node = flatParent(node)) {
+      if (node.hasAttribute("inert")) return true;
+    }
+    try {
+      const modals = Array.from(target.ownerDocument.querySelectorAll(":modal"));
+      if (modals.length && !modals.some((modal) => owns(modal, target))) return true;
+      // The modal on top, when it does not hold the target: one stacked over
+      // the target's own modal (a confirm opened from a dialog), or one in an
+      // open shadow root, which the document's query does not reach. The
+      // stack names only the outermost host, so first follow the hit down
+      // through open shadow roots (an app component wrapping a dialog
+      // component) to the element really on top.
+      const box = target.getBoundingClientRect();
+      const ox = box.left + box.width / 2;
+      const oy = box.top + box.height / 2;
+      let over = topHit(target, ox, oy);
+      for (let depth = 0; depth < 32 && over instanceof Element && over.shadowRoot; depth += 1) {
+        const inner = over.shadowRoot.elementsFromPoint(ox, oy)[0];
+        if (!inner || inner === over) break;
+        over = inner;
+      }
+      for (let node = over; node instanceof Element; node = flatParent(node)) {
+        const modal = node.matches(":modal") ? node : node.shadowRoot?.querySelector(":modal");
+        if (modal && !owns(modal, target)) return true;
+      }
+    } catch {}
+    const view = target.ownerDocument.defaultView || window;
+    if (view.getComputedStyle(target).pointerEvents !== "none") return false;
+    const parent = flatParent(target);
+    return parent instanceof Element && view.getComputedStyle(parent).pointerEvents === "none";
+  };
+  const visibleArea = (target, rect, bounds) => {
+    const viewport = target.ownerDocument.documentElement;
+    let left = 0;
+    let top = 0;
+    let right = viewport.clientWidth || innerWidth;
+    let bottom = viewport.clientHeight || innerHeight;
+    if (bounds) {
+      left = Math.max(left, bounds.left);
+      top = Math.max(top, bounds.top);
+      right = Math.min(right, bounds.right);
+      bottom = Math.min(bottom, bounds.bottom);
+    }
+    try {
+      let dx = 0;
+      let dy = 0;
+      for (let view = target.ownerDocument.defaultView; view && view.frameElement; ) {
+        const frame = view.frameElement;
+        const box = frame.getBoundingClientRect();
+        dx += box.left + frame.clientLeft;
+        dy += box.top + frame.clientTop;
+        const parent = frame.ownerDocument;
+        const shownRight = parent.documentElement.clientWidth || parent.defaultView.innerWidth;
+        const shownBottom = parent.documentElement.clientHeight || parent.defaultView.innerHeight;
+        left = Math.max(left, -dx);
+        top = Math.max(top, -dy);
+        right = Math.min(right, shownRight - dx);
+        bottom = Math.min(bottom, shownBottom - dy);
+        view = parent.defaultView;
+      }
+    } catch {}
+    left = Math.max(rect.left, left) + 1;
+    right = Math.min(rect.right, right) - 1;
+    top = Math.max(rect.top, top) + 1;
+    bottom = Math.min(rect.bottom, bottom) - 1;
+    return right > left && bottom > top ? { left, top, right, bottom } : null;
+  };
+  const shownPoints = (target, area) => {
+    const steps = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1];
+    const points = [];
+    let box = null;
+    for (const sy of steps) {
+      for (const sx of steps) {
+        const x = area.left + (area.right - area.left) * sx;
+        const y = area.top + (area.bottom - area.top) * sy;
+        if (!holds(target, x, y)) continue;
+        points.push({ x, y });
+        box = box
+          ? {
+              left: Math.min(box.left, x),
+              top: Math.min(box.top, y),
+              right: Math.max(box.right, x),
+              bottom: Math.max(box.bottom, y),
+            }
+          : { left: x, top: y, right: x, bottom: y };
+      }
+    }
+    if (!box) return null;
+    // The grid only brackets each edge of the part that shows (a long row
+    // cut off at a narrow panel can show in one column of it): bisect each
+    // edge along the middle line to within a fraction of a pixel.
+    const edge = (inside, outside, at) => {
+      for (let step = 0; step < 8; step += 1) {
+        const half = (inside + outside) / 2;
+        if (at(half)) inside = half;
+        else outside = half;
+      }
+      return inside;
+    };
+    const stepX = (area.right - area.left) / (steps.length - 1);
+    const stepY = (area.bottom - area.top) / (steps.length - 1);
+    const lineY = (box.top + box.bottom) / 2;
+    if (holds(target, box.left, lineY) && holds(target, box.right, lineY)) {
+      const across = (x) => holds(target, x, lineY);
+      if (box.left > area.left) box.left = edge(box.left, Math.max(area.left, box.left - stepX), across);
+      if (box.right < area.right) box.right = edge(box.right, Math.min(area.right, box.right + stepX), across);
+    }
+    const lineX = (box.left + box.right) / 2;
+    if (holds(target, lineX, box.top) && holds(target, lineX, box.bottom)) {
+      const down = (y) => holds(target, lineX, y);
+      if (box.top > area.top) box.top = edge(box.top, Math.max(area.top, box.top - stepY), down);
+      if (box.bottom < area.bottom) box.bottom = edge(box.bottom, Math.min(area.bottom, box.bottom + stepY), down);
+    }
+    const mx = (box.left + box.right) / 2;
+    const my = (box.top + box.bottom) / 2;
+    points.sort((a, b) => (a.x - mx) ** 2 + (a.y - my) ** 2 - ((b.x - mx) ** 2 + (b.y - my) ** 2));
+    if (holds(target, mx, my)) points.unshift({ x: mx, y: my });
+    return points;
+  };`;
+
+// Describes the element on top at the target's centre, over the target, or
+// null when nothing else is there. When the target does not show at its
+// centre (cut off at a panel's edge, or outside the window), describes what
+// is on top at the middle of the part that shows instead, as { shown }. bounds
+// as for VISIBLE_PART_FUNCTION.
+const COVER_DESCRIPTION_FUNCTION = `function(bounds) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
-  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!hit || owns(element, hit) || owns(hit, element)) return null;
-  return describe(hit);
+  ${SHOWN_PART_HELPER}
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
+  if (hit && owns(element, hit)) return null;
+  if (hit && !owns(hit, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return describe(hit);
+  }
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  const area = visibleArea(element, rect, bounds);
+  const points = area && shownPoints(element, area);
+  if (!points) return null;
+  const over = topHit(element, points[0].x, points[0].y);
+  if (!over || owns(element, over) || owns(over, element)) return null;
+  return { shown: describe(over) };
 }`;
 
 const NESTED_CONTROL_NAME_BYTES = 160;
+
+/** A cover's description as the page reported it (`kind "label"`), at most
+ * COVER_NAME_BYTES of UTF-8: cut on a code-point boundary and ending in an
+ * ellipsis when cut, inside the closing quote when the cut falls in the
+ * label. */
+const COVER_NAME_BYTES = 160;
+function coverName(value: string): string {
+  const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+  if (bytes(value) <= COVER_NAME_BYTES) return value;
+  const quote = value.indexOf(' "');
+  const tail = (kept: string) => (quote >= 0 && kept.length > quote + 1 ? '…"' : "…");
+  let kept = "";
+  for (const character of value) {
+    const next = kept + character;
+    if (bytes(next + tail(next)) > COVER_NAME_BYTES) break;
+    kept = next;
+  }
+  // A cut between a backslash and the character it escapes drops the
+  // backslash, so the quote still closes.
+  const escapes = /\\+$/.exec(kept)?.[0].length ?? 0;
+  if (quote >= 0 && escapes % 2 === 1) kept = kept.slice(0, -1);
+  return kept + tail(kept);
+}
 
 /** `kind "label"` for a nested control the page reported, at most
  * NESTED_CONTROL_NAME_BYTES of UTF-8: the label is cut on a code-point
@@ -10050,59 +10281,38 @@ function nestedControlName(reported: Record<string, unknown>): string {
   return quoted(`${kept}…`);
 }
 
-// The part of the target inside its window, as fractions of its border box
-// at a point there that reaches the target itself, nearest its centre. A point
-// whose hit lies in a separate control nested in the target (a card's own
-// Delete button) does not count: when only such controls show, returns
-// { nested } naming the first. Null when no point qualifies or something other
-// than the target's own container is at its centre. The window is narrowed to
-// what every same-origin parent frame shows, and to bounds (the page's window
-// in this frame's coordinates) when the driver passes them.
+// A point on the part of the target that shows, as fractions of its border
+// box, that reaches the target itself, nearest the middle of that part. A
+// point whose hit lies in a separate control nested in the target (a card's
+// own Delete button) does not count: when only such controls show, returns
+// { nested } naming the first. Null when no point qualifies, or when the
+// target is covered: something else is on top over it at its centre, or,
+// when it does not show at its centre, at the middle of the part that shows.
+// The window is narrowed as visibleArea says.
 const VISIBLE_PART_FUNCTION = `function(bounds) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
   ${HIT_HELPERS}
+  ${SHOWN_PART_HELPER}
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   const centre = topHit(element, cx, cy);
-  if (centre && !owns(centre, element)) return null;
-  const viewport = element.ownerDocument.documentElement;
-  let left = 0;
-  let top = 0;
-  let right = viewport.clientWidth || innerWidth;
-  let bottom = viewport.clientHeight || innerHeight;
-  if (bounds) {
-    left = Math.max(left, bounds.left);
-    top = Math.max(top, bounds.top);
-    right = Math.min(right, bounds.right);
-    bottom = Math.min(bottom, bounds.bottom);
+  // Something else on top at the centre, where the target shows under it or
+  // the page shuts it out (behind a modal), covers it. Where the target does
+  // not show at its centre (a row running past its side panel's edge, with
+  // the next panel on top there), what is on top there is not over it.
+  if (centre && !owns(centre, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return null;
   }
-  try {
-    let dx = 0;
-    let dy = 0;
-    for (let view = element.ownerDocument.defaultView; view && view.frameElement; ) {
-      const frame = view.frameElement;
-      const box = frame.getBoundingClientRect();
-      dx += box.left + frame.clientLeft;
-      dy += box.top + frame.clientTop;
-      const parent = frame.ownerDocument;
-      const shownRight = parent.documentElement.clientWidth || parent.defaultView.innerWidth;
-      const shownBottom = parent.documentElement.clientHeight || parent.defaultView.innerHeight;
-      left = Math.max(left, -dx);
-      top = Math.max(top, -dy);
-      right = Math.min(right, shownRight - dx);
-      bottom = Math.min(bottom, shownBottom - dy);
-      view = parent.defaultView;
-    }
-  } catch {}
-  // One pixel in from every edge, so rounding cannot put the press beside it.
-  left = Math.max(rect.left, left) + 1;
-  right = Math.min(rect.right, right) - 1;
-  top = Math.max(rect.top, top) + 1;
-  bottom = Math.min(rect.bottom, bottom) - 1;
-  if (right <= left || bottom <= top) return null;
+  const area = visibleArea(element, rect, bounds);
+  const points = area && shownPoints(element, area);
+  if (!points) return null;
+  // What is on top at the middle of the part that shows covers the target
+  // there, as at its centre.
+  const middle = topHit(element, points[0].x, points[0].y);
+  if (middle && !owns(element, middle) && !owns(middle, element)) return null;
   const controlRoles = new Set([
     "button", "checkbox", "combobox", "link", "listbox", "menuitem", "menuitemcheckbox",
     "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab",
@@ -10145,16 +10355,8 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
     );
     return { kind, label: label.slice(0, 200).join(""), cut: label.length > 200 };
   };
-  const steps = [0.5, 0.25, 0.75, 0, 1];
-  const points = [];
-  for (const sy of steps) {
-    for (const sx of steps) {
-      const x = left + (right - left) * sx;
-      const y = top + (bottom - top) * sy;
-      points.push({ x, y, distance: (x - cx) ** 2 + (y - cy) ** 2 });
-    }
-  }
-  points.sort((a, b) => a.distance - b.distance);
+  // Nearest the middle of the part that shows first: away from its edges,
+  // whose exact position hit testing and the box model can round apart.
   let nested = null;
   for (const point of points) {
     const hit = topHit(element, point.x, point.y);
@@ -10173,17 +10375,27 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
 // "pointer-events" (pointer-events: none on it or inherited from a container),
 // "outside" (nothing is at its centre, which is outside the window),
 // "clipped" (its own container is on top at its centre: clipped by an
-// overflow edge or hidden there), or null.
+// overflow edge or hidden there), "cut-off" (it does not show at its centre,
+// clipped away there by a panel or container that holds it, and something
+// beside that container is on top), or null.
 const UNREACHABLE_REASON_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   ${HIT_HELPERS}
+  ${SHOWN_PART_HELPER}
   if (getComputedStyle(element).pointerEvents === "none") return "pointer-events";
   const rect = element.getBoundingClientRect();
-  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
   if (!hit) return "outside";
   if (!owns(element, hit) && owns(hit, element)) return "clipped";
-  return null;
+  if (owns(element, hit) || holds(element, cx, cy)) return null;
+  // Hidden (visibility: hidden) or shut out (behind a modal) is missing from
+  // the stack too, but not cut off.
+  if (shutOut(element)) return null;
+  if (typeof element.checkVisibility === "function" && !element.checkVisibility({ visibilityProperty: true })) return null;
+  return "cut-off";
 }`;
 
 // Guards one pointer click on the target. Hit-testing happens before input is

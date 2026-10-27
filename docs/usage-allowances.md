@@ -77,6 +77,8 @@ database for each test file.
 
 Every amount named `includedCredits`, `credits`, `limit`, `used`, `remaining`,
 or `grantsRemaining` is an integer USD micro: **1 USD = 1,000,000 micros**.
+Usage responses say so in `unit: "usd_micros"` (absent from older servers,
+same unit).
 Use nonnegative safe integers for configured amounts; a grant must be positive.
 Never pass floating-point dollars or reinterpret a credit as one token. Shares
 and threshold fractions are ordinary dimensionless numbers.
@@ -408,6 +410,7 @@ returns:
 
 ```ts
 {
+  unit: "usd_micros",
   period: { start: string | null, end: string | null },
   workspace: {
     limit: number | null, used: number, remaining: number | null,
@@ -439,7 +442,10 @@ and `"exhausted"` even when no usage has been recorded.
 
 `period: "YYYY-MM"` selects a historical allowance window; use its returned
 `start`/`end`, particularly with a non-first-day anchor, rather than inventing
-calendar bounds. Reads do not execute model work.
+calendar bounds. `period` is the window the counters cover: without a
+configured budget, usage still counts per calendar month (UTC), so the current
+read returns that month. It is null for a nonrenewing budget's open end, and
+for a past month with no recorded history. Reads do not execute model work.
 Configuration/usage GETs and admission checks have no persisted read-side
 effects: they do not create snapshots, counters, notifications, or rollover
 jobs. The ordinary API dispatch maintenance loop owns that lifecycle.

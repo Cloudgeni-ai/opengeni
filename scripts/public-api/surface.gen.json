@@ -32929,6 +32929,7 @@
         "$.members[]": "ref(MemberAllowanceUsage)",
         "$.nextCursor": "string! null",
         "$.period": "ref(UsageAllowanceWindow)!",
+        "$.unit": "const?=[\"\\\"usd_micros\\\"\"]",
         "$.workspace": "ref(WorkspaceAllowanceUsage)!"
       }
     },
@@ -38024,10 +38025,12 @@
       "CodexRealtimeControl": "value",
       "EmbeddedRealtimeSessionClientLike": "type",
       "EmbeddedRealtimeSessionClientOverride": "type",
+      "MicrophoneAccess": "type",
       "NewSessionRealtimeControl": "value",
       "prestartSessionRealtime": "value",
       "realtimeAppLanguage": "value",
       "realtimeConversationLanguage": "value",
+      "RealtimeLoadState": "type",
       "RealtimeModelOption": "type",
       "RealtimeModelPickerMenu": "value",
       "RealtimeVoiceControl": "value",
