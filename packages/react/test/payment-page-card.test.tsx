@@ -4,9 +4,9 @@ import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { defaultToolRegistry, type ToolCallItem } from "../src/timeline";
 import {
   ClientPaymentPageActivity,
-  nextPaymentCheckDelay,
   PaymentPageActivityProvider,
-} from "../src/timeline/payment-page-card";
+} from "../src/timeline/payment-page-activity";
+import { nextPaymentCheckDelay } from "../src/timeline/payment-page-card";
 import { paymentPageOf, TRUSTED_APP_ACTION_CALL_NAMES } from "../src/timeline/payment-page";
 import { activityPresentsImage } from "../src/timeline/presented-image";
 import { flush, registerDom, renderComponent, withVirtualClock } from "./render-hook";

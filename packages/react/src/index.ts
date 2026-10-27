@@ -900,7 +900,7 @@ export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
 export {
   PaymentPageActivityProvider,
   type PaymentPageActivity,
-} from "./timeline/payment-page-card";
+} from "./timeline/payment-page-activity";
 export {
   LearningRefusalActionsProvider,
   type LearningRefusalActions,

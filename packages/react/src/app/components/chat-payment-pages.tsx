@@ -3,7 +3,7 @@ import { useCallback, type ReactNode } from "react";
 import {
   ClientPaymentPageActivity,
   PaymentPageActivityProvider,
-} from "../../timeline/payment-page-card";
+} from "../../timeline/payment-page-activity";
 import { useAppContext } from "../app-context";
 import { notifyCreditBalanceChanged } from "../lib/credit-balance-events";
 

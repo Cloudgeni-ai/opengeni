@@ -75,7 +75,7 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { ClientPaymentPageActivity } from "../timeline/payment-page-card";
+import { ClientPaymentPageActivity } from "../timeline/payment-page-activity";
 import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
