@@ -1265,6 +1265,7 @@ impl Lab {
     async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
             disk_mib: None,
+            reach: Vec::new(),
             image: None,
             vcpus: 1,
             memory_mib: 256,

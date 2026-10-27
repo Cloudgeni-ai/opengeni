@@ -5,6 +5,7 @@
  * recording is done.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import type { RecordingTrack } from "@opengeni/contracts";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon } from "lucide-react";
 
@@ -15,6 +16,7 @@ import {
   groupLiveTurns,
   tidyLiveText,
   tidyPartialText,
+  withoutLiveMicrophoneEchoes,
   type LiveTranscriptLine,
 } from "../recordings";
 
@@ -25,10 +27,12 @@ const defaultText = createOpenGeniText();
 export { groupLiveTurns, tidyLiveText, tidyPartialText, type LiveTranscriptLine };
 
 const NO_PARTIALS: readonly { trackNumber: number; text: string }[] = [];
+const NO_TRACKS: readonly { trackNumber: number; source: RecordingTrack["source"] }[] = [];
 
 export function LiveTranscript({
   lines,
   partials = NO_PARTIALS,
+  tracks = NO_TRACKS,
   speakerName,
   status,
   empty,
@@ -38,6 +42,11 @@ export function LiveTranscript({
   lines: readonly LiveTranscriptLine[];
   /** Words still being heard per track, which may change. */
   partials?: readonly { trackNumber: number; text: string }[];
+  /**
+   * The recording's tracks. With computer or tab audio beside the
+   * microphone, the microphone's echo of the others is left out.
+   */
+  tracks?: readonly { trackNumber: number; source: RecordingTrack["source"] }[];
   speakerName: (trackNumber: number) => string;
   /** A short line about the connection, such as reconnecting. */
   status?: { text: string; tone: "muted" | "waiting" } | null;
@@ -48,7 +57,10 @@ export function LiveTranscript({
   className?: string;
 }) {
   const msg = useOpenGeniText();
-  const turns = useMemo(() => groupLiveTurns(lines), [lines]);
+  const turns = useMemo(
+    () => groupLiveTurns(withoutLiveMicrophoneEchoes(lines, tracks)),
+    [lines, tracks],
+  );
   const heard = partials
     .map((partial) => ({ ...partial, text: tidyPartialText(partial.text) }))
     .filter((partial) => partial.text);

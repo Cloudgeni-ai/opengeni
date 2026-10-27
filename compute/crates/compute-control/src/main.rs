@@ -2,7 +2,7 @@
 //! and the hosts' authority: making one and issuing a host's first
 //! certificate where Google Cloud's identity tokens cannot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -199,6 +199,12 @@ struct Serve {
     /// A team's agent gateway, as `team=wss://...`; repeat for more.
     #[arg(long = "team-link", value_parser = parse_team_link)]
     team_links: Vec<(String, String)>,
+    /// What a team's sandboxes may ask to reach of what hosts offer
+    /// (`compute-host --offer`), as `team=offer`; repeat for more. A team
+    /// given none may ask for none. Taking one away refuses new sandboxes
+    /// that ask for it; those made before keep it.
+    #[arg(long = "team-reach", value_parser = parse_team_reach)]
+    team_reach: Vec<(String, String)>,
     /// A Google Cloud managed instance group of hosts to grow, as
     /// `projects/P/zones/Z/instanceGroupManagers/N`.
     #[arg(long)]
@@ -291,6 +297,18 @@ fn parse_team_link(text: &str) -> Result<(String, String), String> {
         .split_once('=')
         .ok_or("a team link is `team=wss://...`")?;
     Ok((team.to_owned(), url.to_owned()))
+}
+
+fn parse_team_reach(text: &str) -> Result<(String, String), String> {
+    let (team, offer) = text
+        .split_once('=')
+        .ok_or("a team's reach is `team=offer`")?;
+    if !compute_protocol::host::is_offer_name(offer) {
+        return Err(format!(
+            "{offer:?} is not an offer's name: 1 to 63 lowercase letters, digits and inner hyphens"
+        ));
+    }
+    Ok((team.to_owned(), offer.to_owned()))
 }
 
 fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
@@ -542,6 +560,16 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
                     .collect::<BTreeMap<_, _>>(),
             ),
             links: args.links()?,
+            reach: args
+                .team_reach
+                .iter()
+                .fold(BTreeMap::new(), |mut reach, (team, offer)| {
+                    reach
+                        .entry(team.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .insert(offer.clone());
+                    reach
+                }),
             ..Settings::default()
         },
         operator: args.operator_team.clone(),

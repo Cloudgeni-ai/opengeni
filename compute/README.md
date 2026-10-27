@@ -295,7 +295,9 @@ not retried. Each sandbox has its own namespace, NAT and firewall: the
 internet is allowed; the host, private and link-local ranges (including the
 cloud metadata address) and other sandboxes are not. A host may list exact
 private destinations and TCP ports sandboxes may also open (`--reach`, such
-as a private Opengeni's API), and nothing else private opens. Every guest's
+as a private Opengeni's API), or offer them by name to only the sandboxes
+whose create asks for that name (`--offer`, and a create's `reach`, which
+placement honours), and nothing else private opens. Every guest's
 name server is its gateway, where the host answers listed names itself and
 passes the rest to public name servers, never to the host's own, so guests
 learn no private name but those listed
@@ -415,6 +417,25 @@ name. Left out: snapshots with memory, volumes, MCP, IAM, egress rules,
 sandboxes without internet access, template builds, metrics and logs. A
 request asking for those is refused.
 
+## GitHub Actions runner pools
+
+`compute-runners serve` runs one pool: a GitHub runner scale set whose
+every job gets a fresh sandbox, deleted when the job ends
+([ADR 23](docs/adr/0023-github-actions-runner-pools.md)). It speaks
+GitHub's scale set protocol (a long-polled message queue, no webhooks)
+and compute's E2B API, keeps no state of its own, and a second replica
+stands by. Runners start from the pool's template, normally the
+`opengeni-compute-github-runner` image (`docker/github-runner.Dockerfile`),
+which runs Docker for the job and keeps its sandbox awake while the runner
+runs. With `--warm-repo` the pool keeps a warm template: a sandbox with
+the repository cloned where `actions/checkout` puts it and a prepare
+command run (dependencies installed, a first build), saved as a template
+whenever the branch moves, at most every `--warm-every-s`. With
+`--cache-store` it also serves Turborepo's remote cache from object
+storage and gives runners `TURBO_API`, `TURBO_TOKEN` and `TURBO_TEAM`.
+Workflows target a pool by its name (`runs-on: <name>`). The Helm chart
+runs pools from `computeRunners.pools`.
+
 ## Code map
 
 | Path | What it owns |
@@ -427,6 +448,7 @@ request asking for those is refused.
 | `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
 | `crates/compute-control` | The control service: its store, public API and proxy, the hosts' API, placement, moves and recovery, the leader and the host group. |
 | `crates/compute-control/src/e2b` | The E2B front door: REST API, lifecycle states and their sweeper, traffic routing with kept streams and holds, TLS. |
+| `crates/compute-runners` | GitHub Actions runner pools: the scale set listener, runners as sandboxes, warm templates and the build cache. |
 | `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
