@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;

@@ -12,6 +12,7 @@ mod images;
 mod moves;
 mod reach;
 mod requests;
+mod templates;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -33,6 +34,7 @@ pub use holds::Depth;
 pub use moves::Drained;
 pub use reach::Reached;
 pub use requests::request_digest;
+pub use templates::{COLLECT_EVERY, TEMPLATE_PREFIX, UNUSED_FOR};
 
 /// How a fleet sandbox sleeps when its create says nothing: the
 /// recommended ladder, with a checkpoint after every ten minutes it runs,
@@ -62,6 +64,9 @@ pub enum Failure {
     NoCapacity,
     #[error("busy: {0}")]
     Busy(String),
+    /// What a create of something named asked for exists already.
+    #[error("{0}")]
+    Exists(String),
     /// A create's request id was used before for another create.
     #[error("request {0} was used for another create")]
     Mismatch(String),
@@ -405,7 +410,8 @@ impl<S: Store> Service<S> {
                 Write::Done => return Ok((next, Some(row))),
                 // Written meanwhile, or about to be given to a host given
                 // up on meanwhile: the rules run again on the row as it is.
-                Write::Conflict | Write::OwnerLost => {}
+                // (Only an insert finds its template gone.)
+                Write::Conflict | Write::OwnerLost | Write::TemplateGone => {}
             }
         }
     }
@@ -444,7 +450,9 @@ impl<S: Store> Service<S> {
         metadata: BTreeMap<String, String>,
         request: Option<&str>,
     ) -> Result<SandboxRow, Failure> {
-        let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
+        let mut spec = spec;
+        let image = self.image_of(team, &mut spec).await?;
+        let (mut row, demand) = self.new_row(id, team, spec, image, metadata)?;
         let id = row.id;
         let mut exclude = HashSet::new();
         let mut inserted = false;
@@ -492,6 +500,14 @@ impl<S: Store> Service<S> {
                         why: "it changed while being created".into(),
                     });
                 }
+                // Deleted since the create found it: its image may be
+                // forgotten. Only an insert, which holds nothing yet.
+                Write::TemplateGone => {
+                    return Err(Failure::Invalid(format!(
+                        "no such template: {}",
+                        row.spec.image
+                    )));
+                }
             }
             let asked = Asked {
                 op: Op::Create,
@@ -532,6 +548,7 @@ impl<S: Store> Service<S> {
         id: Id,
         team: &str,
         mut spec: Spec,
+        image: Option<ImageId>,
         metadata: BTreeMap<String, String>,
     ) -> Result<(SandboxRow, Demand), Failure> {
         spec.config.validate().map_err(Failure::Invalid)?;
@@ -553,11 +570,8 @@ impl<S: Store> Service<S> {
             }
         }
         // The host boots the image the config names, fetching it by id;
-        // a name the fleet does not know must not boot something else.
-        spec.config.image = self
-            .settings
-            .image_named(&spec.image)
-            .ok_or_else(|| Failure::Invalid(format!("no such image: {}", spec.image)))?;
+        // a name the fleet does not know never boots something else.
+        spec.config.image = image;
         let shape = shape_key(
             &spec.image,
             u32::from(spec.config.vcpus),

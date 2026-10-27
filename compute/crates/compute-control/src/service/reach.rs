@@ -194,7 +194,8 @@ impl<S: Store> Service<S> {
             row.class = Some(target.class.clone());
             match replace(&*self.store, &mut row).await? {
                 Write::Done => {}
-                Write::Conflict => return Ok(()),
+                // (Only an insert finds its template gone.)
+                Write::Conflict | Write::TemplateGone => return Ok(()),
                 // Given up on since it was placed: elsewhere, unless it
                 // was asked for there.
                 Write::OwnerLost if on.is_none() => {
