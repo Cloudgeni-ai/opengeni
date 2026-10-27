@@ -36,7 +36,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 60_000);
 
 async function organization(euOnly: boolean) {
   const userId = `eu-flow-${crypto.randomUUID()}`;
