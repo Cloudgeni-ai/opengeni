@@ -263,6 +263,7 @@ added later, is refused unless its route's record is EU. Non-empty
 | Feature | Under EU |
 | --- | --- |
 | Session titles | Use the chat model's route checks (see Enforcement). |
+| Meeting summaries | An ordinary chat on a subscription model. In an EU-only workspace only a model whose route is EU is chosen, before any session exists; with none, nothing starts (`region_restricted`). |
 | Image generation | Off: no route is EU. The tool is not offered and refuses if called. |
 | Video generation | Off. Funding options report "Not supported in EU"; the video Skill is hidden. |
 | Web search | Hosted search is off. Provider search keeps only declared-EU providers, and failover skips the rest. Self-hosted SearXNG with a declaration stays on. |

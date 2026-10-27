@@ -440,7 +440,11 @@ describe("dictation over the shared providers", () => {
       db: {} as never,
       deployment: createSpeechToTextDeployment(
         { settings },
-        { providers: [listening, deaf], loadWorkspaceKey: async () => "workspace-key" },
+        {
+          providers: [listening, deaf],
+          loadWorkspaceKey: async () => "workspace-key",
+          isEuOnly: async () => false,
+        },
       ),
     });
     const keyterms = ["Kubernetes", "Ada Lovelace"];
