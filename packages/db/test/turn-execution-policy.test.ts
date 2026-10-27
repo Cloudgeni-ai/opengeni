@@ -27,6 +27,7 @@ import {
   getCodexCapacityWaitForSession,
 } from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
+import { errorMessage } from "@opengeni/contracts/values";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -280,7 +281,7 @@ describe("accepted turn execution policy", () => {
       try {
         await install(value, claimed);
       } catch (error) {
-        message = error instanceof Error ? error.message : String(error);
+        message = errorMessage(error);
       }
       expect(message).toContain("Malformed turn execution policy metadata");
       for (const marker of sensitiveMarkers) {

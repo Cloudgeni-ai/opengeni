@@ -372,6 +372,7 @@ async function organizationCaller(
     );
   return {
     keyId: key.id,
+    bearer: `Bearer ${bearer}`,
     app,
     post,
     resolve: (replica: ReturnType<typeof app>) => send(replica, "resolve"),
@@ -866,6 +867,58 @@ describe("targeted tool fence on PostgreSQL", () => {
       provider.server.close();
     }
   }, 180_000);
+
+  test("an organization service key cannot approve its own Ask calls", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    try {
+      const fixture = await serviceFixture(provider);
+      await updateConnectorToolPermissionPolicies(seed!.db, {
+        ...fixture.grant,
+        connectionId: fixture.connection.id,
+        serverId: "grafana",
+        toolNames: ["search_documents"],
+        policy: "ask",
+      });
+      const replica = fixture.app();
+      const operationId = crypto.randomUUID();
+      const args = { query: "vector(1)" };
+      provider.reset();
+      const resolved = await fixture.resolve(replica);
+      expect(resolved.status).toBe(200);
+      const { definitionDigest } = (await resolved.json()) as { definitionDigest: string };
+      const targeted = await fixture.post(replica, "target-approvals", {
+        identity: fixture.identity,
+        arguments: args,
+        operationId,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(targeted.status).toBe(403);
+      const catalog = await replica.request(
+        `http://localhost/v1/workspaces/${fixture.grant.workspaceId}/tools/catalog`,
+        { headers: { authorization: fixture.bearer } },
+      );
+      expect(catalog.status).toBe(200);
+      const { digest } = (await catalog.json()) as { digest: string };
+      const legacy = await fixture.post(replica, "approvals", {
+        operationId,
+        catalogDigest: digest,
+        identity: fixture.identity,
+        arguments: args,
+      });
+      expect(legacy.status).toBe(403);
+      // Without an approval the Ask call stays blocked and never reaches the provider.
+      const invoked = await fixture.post(replica, "invoke", {
+        target: { identity: fixture.identity },
+        operationId,
+        arguments: args,
+      });
+      expect(invoked.status).toBe(409);
+      expect(provider.server.calls).toHaveLength(0);
+    } finally {
+      provider.server.close();
+    }
+  }, 120_000);
 
   test("an invisible target and a missing tool are 404 without a recorded denial", async () => {
     if (!shared) return;

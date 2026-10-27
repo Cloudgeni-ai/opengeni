@@ -11,6 +11,7 @@ import {
   imageDimensions,
   type BrowserImageFrame,
 } from "./media";
+import { isRecord } from "@opengeni/contracts/values";
 
 export {
   BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES,
@@ -212,8 +213,4 @@ function stringBound(key: string): number {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -108,6 +108,7 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * The durable identity of a turn holding a shared sandbox lease.
@@ -280,7 +281,7 @@ export class SandboxProvisionStageError extends Error {
     public readonly stage: SandboxProvisionFailureStage,
     public readonly source: unknown,
   ) {
-    super(source instanceof Error ? source.message : String(source), { cause: source });
+    super(errorMessage(source), { cause: source });
   }
 }
 

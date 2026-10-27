@@ -3,6 +3,7 @@ import {
   applyModelCatalogDocument,
   dbSearchPath,
   getSettings,
+  modelCatalogResidencyProblems,
   parseModelCatalogDocument,
   validateModelCatalogSettings,
   type ModelCatalogDocument,
@@ -10,6 +11,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import postgres from "postgres";
+import { errorMessage } from "@opengeni/contracts/values";
 
 function usage(exitCode = 1): never {
   const message =
@@ -56,7 +58,13 @@ export function preflightModelCatalogDocument(
     ...env,
     OPENGENI_MODEL_CATALOG_SOURCE: "database",
   };
-  const settings = applyModelCatalogDocument(getSettings(databaseRuntimeEnv), document);
+  const hostSettings = getSettings(databaseRuntimeEnv);
+  // At runtime these only make the affected routes unknown; refuse them here.
+  const residencyProblems = modelCatalogResidencyProblems(hostSettings, document);
+  if (residencyProblems.length > 0) {
+    throw new Error(`model catalog residency is invalid: ${residencyProblems.join("; ")}`);
+  }
+  const settings = applyModelCatalogDocument(hostSettings, document);
   validateModelCatalogSettings(settings, databaseRuntimeEnv);
   return document;
 }
@@ -86,10 +94,9 @@ export async function runModelCatalogUpsert(
   try {
     raw = JSON.parse(await readFile(file, "utf8"));
   } catch (error) {
-    throw new Error(
-      `Unable to read a valid JSON catalog document: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+    throw new Error(`Unable to read a valid JSON catalog document: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
   const document = preflightModelCatalogDocument(raw, env);
   const searchPath = modelCatalogDatabaseSearchPath(env);
@@ -169,7 +176,7 @@ if (import.meta.main) {
   try {
     await runModelCatalogUpsert();
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${errorMessage(error)}\n`);
     process.exitCode = 1;
   }
 }

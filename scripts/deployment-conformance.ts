@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { errorMessage } from "@opengeni/contracts/values";
 
 interface Args {
   baseUrl: string;
@@ -716,8 +717,4 @@ function skipped(id: string, detail: string): CheckResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

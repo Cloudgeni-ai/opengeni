@@ -7,6 +7,7 @@ import {
   encodeModelContextSnapshotContent,
   writeSessionContentBlobs,
 } from "./session-content-blobs";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Rewrite rows stored before session content blobs existed into the
@@ -178,19 +179,19 @@ export async function compactLegacySessionContent(
 /** Command-line entry. Bundled release images call this explicitly; see
  * scripts/assemble-server-runtime.ts. */
 export async function runSessionContentCompactionCli(): Promise<void> {
-  const { createDb } = await import("./index");
+  const { createDb, databasePasswordFileOptionsFromEnvironment } = await import("./index");
   const url = process.env.OPENGENI_DATABASE_URL;
   if (!url) throw new Error("Set OPENGENI_DATABASE_URL to the application database URL");
   const batchArgument = process.argv.find((value) => value.startsWith("--batch-size="));
-  const client = createDb(url);
+  const client = createDb(url, databasePasswordFileOptionsFromEnvironment());
   try {
     const outcome = await compactLegacySessionContent(client.db, {
       batchSize: batchArgument ? Number(batchArgument.split("=")[1]) : 100,
       onRowError: (candidate, error) =>
         console.error(
-          `[session-content] ${candidate.kind} ${candidate.attemptId} failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `[session-content] ${candidate.kind} ${candidate.attemptId} failed: ${errorMessage(
+            error,
+          )}`,
         ),
     });
     console.log(`[session-content] ${JSON.stringify(outcome)}`);

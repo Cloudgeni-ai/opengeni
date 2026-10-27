@@ -3,6 +3,7 @@
 // canary API image). Only the SHA a release lane chooses is ever approved, so
 // older parked runs never finish and pile up, slowing every scan of active
 // runs. Cancel parked runs that are clearly superseded; keep the approval gate.
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type ParkedRun = {
   id: number;
@@ -212,7 +213,7 @@ async function main() {
       await api(`actions/runs/${id}/cancel`, { method: "POST" });
     } catch (error) {
       failed++;
-      console.log(`  skipped: ${error instanceof Error ? error.message : String(error)}`);
+      console.log(`  skipped: ${errorMessage(error)}`);
     }
   }
   if (failed) console.log(`${failed} cancels skipped; the next pass retries`);

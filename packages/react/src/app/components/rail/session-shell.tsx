@@ -70,6 +70,7 @@ import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { useUiEventTarget } from "../../lib/ui-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("../session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -568,7 +569,7 @@ function SessionRouteHeader({
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
-          description: error instanceof Error ? error.message : String(error),
+          description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;

@@ -20,6 +20,11 @@ export type ConnectWindowHost = {
   /** A sign-in window for an attempt that already waits for authorization. */
   open(): ConnectNavigation;
   /**
+   * Sign-in runs in a popup the card opened, so the provider's return ends on
+   * a small page that closes itself rather than at the return URL.
+   */
+  finishInPopup?: boolean | undefined;
+  /**
    * Where a card remembers its unfinished attempt, so it can pick the attempt
    * up again after the page reloads or the app restarts. Defaults to the
    * browser's session storage.
@@ -42,6 +47,7 @@ export function browserConnectWindowHost(browser: ConnectBrowserWindow): Connect
   return {
     reserve: () => reserveBrowserConnectNavigation(browser),
     open: () => createBrowserConnectNavigation(browser),
+    finishInPopup: true,
   };
 }
 

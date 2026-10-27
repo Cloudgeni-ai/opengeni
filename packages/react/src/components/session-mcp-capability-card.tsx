@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { browserConnectWindowHost } from "../connect-window-host";
 import { useOpenGeniText } from "../messages/runtime";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
+import { showsMcpServerLabel } from "./mcp-server-label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
 export type SessionMcpCapabilityCardProps = {
@@ -126,7 +127,9 @@ function ScopedCard({
       name={item?.name ?? name}
       subtitle={dialogSubtitle !== undefined ? "" : (item?.providerDomain ?? "")}
       logo={logo ?? logoSrc ?? null}
-      typeLabel={dialogSubtitle ?? t("sessionMcpCapabilityCard.mcpServer")}
+      typeLabel={
+        dialogSubtitle ?? (showsMcpServerLabel(item) ? t("sessionMcpCapabilityCard.mcpServer") : "")
+      }
       description={hostDescription || item?.description || rationale}
       skill={false}
       expanded={flow.expanded}

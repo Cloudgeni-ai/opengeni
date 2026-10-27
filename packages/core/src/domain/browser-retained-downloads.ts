@@ -14,6 +14,7 @@ import {
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import type { Settings } from "@opengeni/config";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** How long a retention upload may take before its authority expires. */
 const RETENTION_UPLOAD_TTL_SECONDS = 20 * 60;
@@ -91,7 +92,7 @@ export async function retainCompletedBrowserDownloads(
   } catch (error) {
     return {
       retained: [],
-      failed: [{ downloadId: null, error: error instanceof Error ? error.message : String(error) }],
+      failed: [{ downloadId: null, error: errorMessage(error) }],
     };
   }
   return await withBrowserDownloadFileOwner(owner, () =>
@@ -109,7 +110,7 @@ async function retainCompletedBrowserDownloadsAs(
   const fail = (downloadId: string | null, error: unknown) =>
     result.failed.push({
       downloadId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   const scope = {
     accountId: input.accountId,

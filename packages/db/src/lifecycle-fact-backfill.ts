@@ -1,5 +1,11 @@
 import postgres from "postgres";
 import { databaseBootConnectOptions } from "./boot-connect";
+import {
+  databasePasswordFileOptionsFromEnvironment,
+  logDatabaseCredentialEvent,
+  rotatingDatabasePasswordFor,
+  withDatabaseAuthenticationRetry,
+} from "./database-credentials";
 
 /**
  * One-time, operator-invoked backfill of product lifecycle facts captured
@@ -79,11 +85,20 @@ export async function backfillProductLifecycleFacts(
 /** Command-line entry. Bundled release images call this explicitly; see
  * scripts/assemble-server-runtime.ts. */
 export async function runLifecycleFactBackfillCli(): Promise<void> {
-  const databaseUrl =
-    process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_URL;
+  const migrationsDatabaseUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL;
+  const databaseUrl = migrationsDatabaseUrl ?? process.env.OPENGENI_DATABASE_URL;
   if (!databaseUrl) {
     throw new Error("Set OPENGENI_MIGRATIONS_DATABASE_URL to the migration owner database URL");
   }
+  // The password files hold the runtime login's password, so they apply only
+  // when this falls back to the runtime URL.
+  const credential = migrationsDatabaseUrl
+    ? undefined
+    : rotatingDatabasePasswordFor(
+        databaseUrl,
+        databasePasswordFileOptionsFromEnvironment().passwordFiles,
+        logDatabaseCredentialEvent("lifecycle-backfill"),
+      );
   const requested = process.argv.slice(2).filter((value) => !value.startsWith("--"));
   const unknown = requested.filter(
     (value) => !(LIFECYCLE_BACKFILL_SOURCES as readonly string[]).includes(value),
@@ -102,12 +117,19 @@ export async function runLifecycleFactBackfillCli(): Promise<void> {
   const sql = postgres(databaseUrl, {
     max: 1,
     onnotice: () => undefined,
+    ...(credential ? { pass: () => credential.password() } : {}),
     ...databaseBootConnectOptions(databaseUrl),
   });
   try {
     // One pooled connection, so these session settings bound every call.
-    await sql`select set_config('statement_timeout', ${statementTimeout}, false),
-      set_config('lock_timeout', '5s', false)`;
+    // This first statement opens the connection; a 28P01 means it never ran,
+    // so it alone is retried on the next password candidate.
+    await withDatabaseAuthenticationRetry(
+      credential,
+      async () =>
+        await sql`select set_config('statement_timeout', ${statementTimeout}, false),
+          set_config('lock_timeout', '5s', false)`,
+    );
     const results = await backfillProductLifecycleFacts(sql, {
       ...(requested.length > 0 ? { sources: requested as LifecycleBackfillSource[] } : {}),
       ...(batchArgument ? { batchSize: Number(batchArgument.split("=")[1]) } : {}),

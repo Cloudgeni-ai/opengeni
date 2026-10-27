@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { readAutomationWebhookBody } from "../src/routes/automations";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -20,7 +21,7 @@ function startBodyReader(maxBytes: number) {
     } catch (error) {
       const status = error instanceof HTTPException ? error.status : 500;
       return Response.json(
-        { error: error instanceof Error ? error.message : String(error) },
+        { error: errorMessage(error) },
         {
           status,
         },

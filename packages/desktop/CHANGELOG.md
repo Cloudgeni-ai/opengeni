@@ -1,5 +1,31 @@
 # @opengeni/desktop
 
+## 5.4.2
+
+### Patch Changes
+
+- a671e98: Recording computer audio no longer fails while macOS asks for permission. The first time a meeting recording includes computer audio, macOS asks for System Audio Recording permission and the capture waits for the answer. The app used to give up after 10 seconds, so anyone who took longer to answer saw "Recording computer audio stopped unexpectedly". The audio capture helper now says when macOS is asking (`{"event":"awaiting_permission"}`), and the app waits for the answer however long it takes, as the microphone prompt does. When the person chooses Don't Allow, the start now fails as not allowed instead of recording only silence. Both fixes need the audio capture helper from this release; with an older helper, nothing changes.
+- 3d298e6: On Windows, a desktop app run from source now uses its own app ID (the packaged ID plus `.dev`). Sharing the installed app's ID left two Start-menu shortcuts with one ID, so Windows could show the installed app's notifications under "Electron" and open the development build when one was clicked.
+- 415c32b: Any Electron app that shows Opengeni's meetings can now record the computer's audio, which includes the other people in a call, as its own track, the way the Opengeni desktop app does. `@opengeni/desktop/system-audio` exports `handleSystemAudioIpc` and `systemAudioHelperName` next to `SystemAudioCaptures`, and its `channels` option is now optional. `@opengeni/desktop/preload/system-audio` exports `exposeSystemAudio()`, which defines `window.opengeniSystemAudio`. The meeting recorder uses that global when the Opengeni desktop bridge is absent (`getDesktopSystemAudio` in `@opengeni/sdk/desktop-bridge`). Each desktop release attaches the helper binaries (`opengeni-audio-capture-<os>-<arch>`), and `SHA256SUMS` covers them. Inside an Electron app that can't record computer audio, the recorder no longer offers a browser tab's audio, because Electron has no share picker of its own and choosing it only failed.
+- 4641312: Turning on Computer use in a second workspace no longer fails with "this machine was first connected as a personal machine from another workspace". When the computer's existing connection was made without screen control, the app now turns screen control on for that connection (where it was made) and lets agents in the new workspace use it, instead of setting the computer up anew, which the server refuses for a person's own computer. On the server, a personal computer that was removed can now be connected again from any workspace its owner uses; before, it could only come back in the workspace it was first connected from.
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [4488c59]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [415c32b]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [d30a243]
+- Updated dependencies [de7087a]
+- Updated dependencies [a2ae2ce]
+- Updated dependencies [96502c5]
+- Updated dependencies [4641312]
+- Updated dependencies [1320698]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+  - @opengeni/sdk@5.4.0
+  - @opengeni/agent-host@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

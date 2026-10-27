@@ -8,6 +8,7 @@ import {
   withCodexTokenDeadline,
 } from "../src/codex-token-resolver";
 import type { Database } from "../src/database";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type PendingTimer = { callback: () => void; dueAt: number };
 
@@ -144,7 +145,7 @@ describe("buildCodexTokenResolver refresh single-flight", () => {
     const appsToken = apps.getToken();
     const appsOutcome = appsToken.then(
       () => "resolved",
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      (error: unknown) => errorMessage(error),
     );
     await flushMicrotasks();
     const first = await Promise.race([
