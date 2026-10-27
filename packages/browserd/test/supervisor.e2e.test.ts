@@ -5,6 +5,7 @@ import { mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promis
 import { basename, join } from "node:path";
 import type {
   BrowserActionCommand,
+  BrowserActionReceipt,
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
@@ -411,152 +412,252 @@ recoveryE2e(
   90_000,
 );
 
-recoveryE2e(
-  "a relaunch that reloaded a tab says so once, and an action chosen before that does not run",
-  async () => {
-    const directory = await mkdtemp("/tmp/ogb-reloaded-tab-e2e-");
-    const rootDirectory = join(directory, "state");
-    // A page that keeps what was typed only in memory, and counts its loads.
-    let loads = 0;
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: (request) => {
-        loads += 1;
-        const path = new URL(request.url).pathname;
-        return new Response(
-          `<!doctype html><title>Draft ${path}</title><label>Message <textarea placeholder="Message"></textarea></label><button onclick="document.title='sent ' + document.querySelector('textarea').value">Send</button>`,
-          { headers: { "content-type": "text/html" } },
-        );
-      },
-    });
-    let clock = Date.now();
-    const options = {
-      ...reference(),
-      headed: process.env.DISPLAY !== undefined,
-      initialUrl: `http://127.0.0.1:${server.port}/acted`,
-      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-        : {}),
-      workingRuntimeAuthority: {
-        tokenGeneration: 1,
-        placementDigest: "a".repeat(64),
-        controlDigest: "b".repeat(64),
-        viewDigest: "c".repeat(64),
-      },
-    };
-    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
-    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
-      idleReleaseMs: 60_000,
-      now: () => clock,
-    });
-    const command = async (
+/** A managed browser with these tabs open, each holding unsaved typing, that
+ * was stopped for going unused and relaunched: Chrome reopens the tabs and
+ * loads each page again. Chrome restores the pages of only the first few;
+ * the rest have no renderer until they are used. */
+async function withRelaunchedTabs(
+  paths: readonly string[],
+  run: (relaunched: {
+    supervisor: BrowserSupervisor;
+    options: ReturnType<typeof reference>;
+    tabs: Record<string, string>;
+    url: (path: string) => string;
+    command: (
       targetId: string,
       action: BrowserActionCommand["action"],
-    ): Promise<BrowserActionCommand> => {
-      const state = await supervisor.targetState(options, targetId);
-      return {
-        protocolVersion: 1,
-        operationId: randomUUID(),
-        browserSessionId: options.browserSessionId,
-        controllerGeneration: state.controllerGeneration,
-        targetId,
-        expectedTargetGeneration: state.targetGeneration,
-        expectedDocumentGeneration: state.documentGeneration,
-        expectedFrameId: state.frameId,
-        actor: { kind: "system", subjectId: "native-e2e" },
-        action,
-      };
+      observationMode?: BrowserActionCommand["observationMode"],
+    ) => Promise<BrowserActionCommand>;
+    /** The agent fills a tab's message, as its own tools ask: with notices. */
+    fill: (targetId: string) => Promise<BrowserActionReceipt>;
+  }) => Promise<void>,
+): Promise<void> {
+  const directory = await mkdtemp("/tmp/ogb-reloaded-tab-e2e-");
+  const rootDirectory = join(directory, "state");
+  // A page that keeps what was typed only in memory.
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      new Response(
+        `<!doctype html><title>Draft ${new URL(request.url).pathname}</title><label>Message <textarea placeholder="Message"></textarea></label>`,
+        { headers: { "content-type": "text/html" } },
+      ),
+  });
+  const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
+  let clock = Date.now();
+  const options = {
+    ...reference(),
+    headed: process.env.DISPLAY !== undefined,
+    initialUrl: url(paths[0]!),
+    ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+      ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+      : {}),
+    workingRuntimeAuthority: {
+      tokenGeneration: 1,
+      placementDigest: "a".repeat(64),
+      controlDigest: "b".repeat(64),
+      viewDigest: "c".repeat(64),
+    },
+  };
+  const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+  const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+    idleReleaseMs: 60_000,
+    now: () => clock,
+  });
+  const command = async (
+    targetId: string,
+    action: BrowserActionCommand["action"],
+    observationMode?: BrowserActionCommand["observationMode"],
+  ): Promise<BrowserActionCommand> => {
+    const state = await supervisor.targetState(options, targetId);
+    return {
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId: options.browserSessionId,
+      controllerGeneration: state.controllerGeneration,
+      targetId,
+      expectedTargetGeneration: state.targetGeneration,
+      expectedDocumentGeneration: state.documentGeneration,
+      expectedFrameId: state.frameId,
+      actor: { kind: "system", subjectId: "native-e2e" },
+      ...(observationMode ? { observationMode } : {}),
+      action,
     };
-    const message = { kind: "placeholder", text: "Message" } as const;
-    const typed = async (targetId: string) => {
-      const { semantic } = await supervisor.observe(options, targetId);
-      return flatten(semantic?.kind === "snapshot" ? semantic.roots : []).find(
-        (node) => node.role === "textbox",
-      )?.value;
+  };
+  const fillWith = async (targetId: string, value: string, notices: boolean) =>
+    await supervisor.action(
+      await command(targetId, { type: "fill", locator: reloadedMessage, value }),
+      notices ? { notices: true } : {},
+    );
+  let relaunchedPid: number | undefined;
+  try {
+    const tabs: Record<string, string> = {
+      [paths[0]!]: (await supervisor.createSession(options)).observation.target.id,
     };
-    const reloaded =
-      "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
-    let relaunchedPid: number | undefined;
-    try {
-      const acted = (await supervisor.createSession(options)).observation.target.id;
-      const observed = (
-        await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/observed`)
-      ).target.id;
-      const navigated = (
-        await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/navigated`)
-      ).target.id;
-      for (const tab of [acted, observed, navigated]) {
-        const receipt = await supervisor.action(
-          await command(tab, { type: "fill", locator: message, value: "half-written" }),
-        );
-        expect(receipt.error).toBeNull();
-      }
-      expect(await typed(acted)).toBe("half-written");
-      const browserPid = await chromiumProfilePid(profile);
-      clock += 61_000;
-      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
-      await waitForProcessExit(browserPid);
-      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
-      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
-      relaunchedPid = await chromiumProfilePid(profile);
-      expect(relaunchedPid).not.toBe(browserPid);
-      const reopened = (await supervisor.listTargets(options)).map((target) => target.id);
-      expect(reopened).toEqual(expect.arrayContaining([acted, observed, navigated]));
-
-      // An action chosen for the page as it was: nothing reaches the page.
-      const loadsBefore = loads;
-      const refused = await supervisor.action(
-        await command(acted, { type: "press", key: "Enter" }),
-      );
-      expect(refused.state).toBe("failed");
-      expect(refused.error).toMatchObject({
-        code: "target_stale",
-        message: `Nothing was done: ${reloaded.charAt(0).toLowerCase()}${reloaded.slice(1, -1)}. Observe the tab and continue from what it shows.`,
-      });
-      const after = await supervisor.observe(options, acted);
-      expect(after.notice).toBeUndefined();
-      expect(after.target.title).toBe("Draft /acted");
-      expect(loads).toBe(loadsBefore);
-
-      // Observed first: it says the page reloaded, once, and the page is
-      // as the reload left it; an action chosen from there runs.
-      const first = await supervisor.observe(options, observed);
-      expect(first.notice).toBe(reloaded);
-      expect((await supervisor.observe(options, observed)).notice).toBeUndefined();
-      expect(await typed(observed)).toBeFalsy();
-      const sent = await supervisor.action(
-        await command(observed, { type: "fill", locator: message, value: "again" }),
-      );
-      expect(sent.error).toBeNull();
-      expect(await typed(observed)).toBe("again");
-
-      // An action that does not depend on the page runs, and its receipt
-      // carries the notice.
-      const moved = await supervisor.action(
-        await command(navigated, {
-          type: "navigate",
-          url: `http://127.0.0.1:${server.port}/elsewhere`,
-        }),
-      );
-      expect(moved.error).toBeNull();
-      expect(moved.observation?.notice).toBe(reloaded);
-      expect((await supervisor.observe(options, navigated)).notice).toBeUndefined();
-
-      await supervisor.endSession(options, { removeState: true });
-      await waitForProcessExit(relaunchedPid);
-    } catch (error) {
-      if (relaunchedPid) {
-        try {
-          process.kill(relaunchedPid, "SIGKILL");
-        } catch {}
-      }
-      throw error;
-    } finally {
-      await supervisor.close();
-      server.stop(true);
-      await rm(directory, { recursive: true, force: true });
+    for (const path of paths.slice(1)) {
+      tabs[path] = (await supervisor.openTarget(options, url(path))).target.id;
     }
+    for (const tab of Object.values(tabs)) {
+      expect((await fillWith(tab, "half-written", false)).error).toBeNull();
+    }
+    const browserPid = await chromiumProfilePid(profile);
+    clock += 61_000;
+    expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+    await waitForProcessExit(browserPid);
+    const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+    await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+    relaunchedPid = await chromiumProfilePid(profile);
+    expect(relaunchedPid).not.toBe(browserPid);
+    expect((await supervisor.listTargets(options)).map((target) => target.id)).toEqual(
+      expect.arrayContaining(Object.values(tabs)),
+    );
+    await run({
+      supervisor,
+      options,
+      tabs,
+      url,
+      command,
+      fill: async (targetId) => await fillWith(targetId, "again", true),
+    });
+    await supervisor.endSession(options, { removeState: true });
+    await waitForProcessExit(relaunchedPid);
+  } catch (error) {
+    if (relaunchedPid) {
+      try {
+        process.kill(relaunchedPid, "SIGKILL");
+      } catch {}
+    }
+    throw error;
+  } finally {
+    await supervisor.close();
+    server.stop(true);
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+const reloadedMessage = { kind: "placeholder", text: "Message" } as const;
+
+const reloadedNotice =
+  "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.";
+
+function textboxValue(observation: BrowserObservation | null | undefined): unknown {
+  return flatten(observation?.semantic?.kind === "snapshot" ? observation.semantic.roots : []).find(
+    (node) => node.role === "textbox",
+  )?.value;
+}
+
+recoveryE2e(
+  "a relaunch's reload notice goes to the agent once, and a person's viewer neither sees nor uses it up",
+  async () => {
+    await withRelaunchedTabs(["/viewed", "/acted"], async ({ supervisor, options, tabs, fill }) => {
+      // A person's viewer reads the tab first: no notice, and it stays.
+      const viewed = await supervisor.observe(options, tabs["/viewed"]!);
+      expect(viewed.notice).toBeUndefined();
+      expect(textboxValue(viewed)).toBeFalsy();
+      const agent = { notices: true } as const;
+      expect((await supervisor.observe(options, tabs["/viewed"]!, agent)).notice).toBe(
+        reloadedNotice,
+      );
+      expect((await supervisor.observe(options, tabs["/viewed"]!, agent)).notice).toBeUndefined();
+      // An action's receipt carries it the same way, after a viewer read.
+      await supervisor.observe(options, tabs["/acted"]!);
+      const acted = await fill(tabs["/acted"]!);
+      expect(acted.error).toBeNull();
+      expect(acted.observation?.notice).toBe(reloadedNotice);
+    });
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "after a relaunch, an agent that saw a tab by selecting, capturing, reading or a quiet navigation acts on it",
+  async () => {
+    await withRelaunchedTabs(
+      ["/selected", "/captured", "/read", "/quiet"],
+      async ({ supervisor, options, tabs, url, command, fill }) => {
+        const agent = { notices: true } as const;
+        // Selecting shows the tab with the notice; acting next runs.
+        const selected = await supervisor.selectTarget(options, tabs["/selected"]!, agent);
+        expect(selected.notice).toBe(reloadedNotice);
+        const afterSelect = await fill(tabs["/selected"]!);
+        expect(afterSelect.error).toBeNull();
+        expect(textboxValue(afterSelect.observation)).toBe("again");
+        expect(afterSelect.observation?.notice).toBeUndefined();
+
+        // A screenshot or a page read returns no observation: the action
+        // after it runs, and its receipt carries the notice.
+        await supervisor.screenshot(options, tabs["/captured"]!);
+        const afterCapture = await fill(tabs["/captured"]!);
+        expect(afterCapture.error).toBeNull();
+        expect(afterCapture.observation?.notice).toBe(reloadedNotice);
+        const state = await supervisor.targetState(options, tabs["/read"]!);
+        const read = await supervisor.readDom(options, tabs["/read"]!, {
+          kind: "count",
+          selector: "textarea",
+          expectedTargetGeneration: state.targetGeneration,
+          expectedDocumentGeneration: state.documentGeneration!,
+          expectedFrameId: state.frameId!,
+        });
+        expect(read.count).toBe(1);
+        const afterRead = await fill(tabs["/read"]!);
+        expect(afterRead.error).toBeNull();
+        expect(afterRead.observation?.notice).toBe(reloadedNotice);
+
+        // A navigation that returns no observation, then an action: both
+        // run, and the action's receipt carries the notice.
+        const quiet = await supervisor.action(
+          await command(tabs["/quiet"]!, { type: "navigate", url: url("/quiet-next") }, "none"),
+          agent,
+        );
+        expect(quiet.error).toBeNull();
+        expect(quiet.observation ?? null).toBeNull();
+        const afterQuiet = await fill(tabs["/quiet"]!);
+        expect(afterQuiet.error).toBeNull();
+        expect(afterQuiet.observation?.target.title).toBe("Draft /quiet-next");
+        expect(afterQuiet.observation?.notice).toBe(reloadedNotice);
+      },
+    );
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "after a relaunch, a batch that navigates and then fills runs whole",
+  async () => {
+    await withRelaunchedTabs(["/batched"], async ({ supervisor, tabs, url, command }) => {
+      const batched = await supervisor.action(
+        await command(tabs["/batched"]!, {
+          type: "batch",
+          actions: [
+            { type: "navigate", url: url("/batched-next") },
+            { type: "fill", locator: reloadedMessage, value: "again" },
+          ],
+        }),
+        { notices: true },
+      );
+      expect(batched.error).toBeNull();
+      expect(batched.observation?.target.title).toBe("Draft /batched-next");
+      expect(textboxValue(batched.observation)).toBe("again");
+      expect(batched.observation?.notice).toBe(reloadedNotice);
+    });
+  },
+  90_000,
+);
+
+recoveryE2e(
+  "every tab a relaunch reopened answers, including those Chrome had not loaded yet",
+  async () => {
+    const paths = Array.from({ length: 9 }, (_, index) => `/tab-${index}`);
+    await withRelaunchedTabs(paths, async ({ supervisor, options, tabs }) => {
+      // From the last tab back, so the tabs Chrome left unloaded are read
+      // before anything else could load them.
+      for (const path of [...paths].reverse()) {
+        const observation = await supervisor.observe(options, tabs[path]!);
+        expect(observation.target.title).toBe(`Draft ${path}`);
+        expect(textboxValue(observation)).toBeFalsy();
+      }
+    });
   },
   90_000,
 );
@@ -623,7 +724,7 @@ recoveryE2e(
       const reopened = await supervisor.listTargets(options);
       expect(reopened.find((target) => target.url === failedUrl)?.id).toBe(failed.target.id);
       expect(reopened.find((target) => target.url.endsWith("/other"))?.id).toBe(other.target.id);
-      const observed = await supervisor.observe(options, failed.target.id);
+      const observed = await supervisor.observe(options, failed.target.id, { notices: true });
       expect(observed.target.url).toBe(failedUrl);
       expect(observed.notice).toBe(
         "This browser was stopped after going unused for 1 minute and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone.",

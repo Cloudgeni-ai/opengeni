@@ -308,6 +308,82 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("gives a tab's notice only to a caller that asks for it, once", async () => {
+    // A person's viewer, an auth check or an API client reading the tab first
+    // leaves the notice for the agent, whose tools ask for it.
+    const notices: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        expect(
+          (
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            })
+          ).status,
+        ).toBe(201);
+        const tab = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`;
+        const observed = async (path: string, init: Parameters<typeof request>[2]) => {
+          const response = await request(server, path, init);
+          expect(response.status).toBe(200);
+          const body = await json(response);
+          return (body.data.observation ?? body.data) as BrowserObservation;
+        };
+        const reloaded = "This tab's page reloaded.";
+
+        // Readers that do not ask see no notice and leave it in place.
+        notices.push(reloaded);
+        expect((await observed(`${tab}/observation`, { token: viewToken })).notice).toBeUndefined();
+        expect(
+          (await observed(`${tab}/select`, { method: "POST", token: controlToken, body: {} }))
+            .notice,
+        ).toBeUndefined();
+        const created = await observed(`${tab}/observation`, { token: viewToken });
+        expect(
+          (
+            await observed(`/v1/browser-sessions/${reference.browserSessionId}/actions`, {
+              method: "POST",
+              token: controlToken,
+              body: command(created),
+            })
+          ).notice,
+        ).toBeUndefined();
+        expect(notices).toEqual([reloaded]);
+        // The agent's observation receives it, once.
+        expect((await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice).toBe(
+          reloaded,
+        );
+        expect(
+          (await observed(`${tab}/observation?notices=1`, { token: viewToken })).notice,
+        ).toBeUndefined();
+
+        // A tab selection and an action's receipt carry it the same way.
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(`${tab}/select?notices=1`, {
+              method: "POST",
+              token: controlToken,
+              body: {},
+            })
+          ).notice,
+        ).toBe(reloaded);
+        notices.push(reloaded);
+        expect(
+          (
+            await observed(
+              `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptNotes=2&notices=1`,
+              { method: "POST", token: controlToken, body: command(created) },
+            )
+          ).notice,
+        ).toBe(reloaded);
+        expect(notices).toEqual([]);
+      },
+      { reloadedTabNotices: notices },
+    );
+  });
+
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
     await withServer(
@@ -522,7 +598,7 @@ describe("BrowserControlServer", () => {
   test("browser and computer actions run without the idle timeout, then restore it", async () => {
     const source = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
     for (const run of [
-      "async () => await this.supervisor.action(command)",
+      "async () => await this.supervisor.action(command, observationNotices(url))",
       "async () => await supervisor.action(command)",
     ]) {
       const at = source.indexOf(run);
@@ -1708,6 +1784,8 @@ async function withServer(
     };
     onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
     onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+    /** Notices the driver gives, each once, for its tab. */
+    reloadedTabNotices?: string[];
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-server-");
@@ -1780,6 +1858,7 @@ function fakeDriver(
         | "openTargetWithInventory"
         | "dispatch",
     ) => void;
+    reloadedTabNotices?: string[];
   },
 ): BrowserSupervisorDriver {
   const target: BrowserTarget = {
@@ -1841,6 +1920,9 @@ function fakeDriver(
     },
     async selectTarget() {
       return observation();
+    },
+    takeReloadedTabNotice(tabId) {
+      return tabId === target.id ? (options.reloadedTabNotices?.shift() ?? null) : null;
     },
     async closeTarget() {
       if (options.closeError) throw options.closeError;

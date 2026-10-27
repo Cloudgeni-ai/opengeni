@@ -312,6 +312,11 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
   upload: BrowserStateUploadAuthority;
 };
 
+/** Whether the caller asked for BrowserObservation.notice (see
+ * BROWSER_OBSERVATION_NOTICES_PARAMETER): the agent's own tools do, so a
+ * notice reaches the agent and nothing else uses it up. */
+export type BrowserObservationNoticeOptions = { notices?: boolean };
+
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
@@ -1353,11 +1358,7 @@ export class BrowserSupervisor {
       return {
         ...binding(active),
         ...displayOf(active),
-        observation: this.reported(
-          active,
-          await this.currentObservation(active),
-          !options.recoverExistingWorkingDirectory,
-        ),
+        observation: await this.currentObservation(active),
       };
     }
     const pending = this.creating.get(options.browserSessionId);
@@ -1368,11 +1369,7 @@ export class BrowserSupervisor {
       return {
         ...binding(runtime),
         ...displayOf(runtime),
-        observation: this.reported(
-          runtime,
-          await this.currentObservation(runtime),
-          !options.recoverExistingWorkingDirectory,
-        ),
+        observation: await this.currentObservation(runtime),
       };
     }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
@@ -1408,11 +1405,7 @@ export class BrowserSupervisor {
         runtime.waitHoldUntil = detachedHold;
       }
       this.sessions.set(options.browserSessionId, runtime);
-      const observation = this.reported(
-        runtime,
-        runtime.creationObservation ?? (await this.currentObservation(runtime)),
-        !options.recoverExistingWorkingDirectory,
-      );
+      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
       // The browser opened even if its first page did not load; say why in
       // plain words rather than leave the caller to infer it from the
@@ -1558,6 +1551,7 @@ export class BrowserSupervisor {
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
+    options: BrowserObservationNoticeOptions = {},
   ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.mutateWithRecovery(runtime, async () => {
@@ -1567,7 +1561,7 @@ export class BrowserSupervisor {
     this.noteRecordingTarget(runtime, "select_tab", observation.target.id, {
       url: observation.target.url,
     });
-    return observation;
+    return this.reported(runtime, observation, options);
   }
 
   async closeTarget(
@@ -1582,13 +1576,17 @@ export class BrowserSupervisor {
     return targets;
   }
 
-  async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
+  async observe(
+    reference: BrowserSessionReference,
+    targetId: string,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserObservation> {
     const runtime = this.requireActive(reference);
     const observation = await this.readWithRecovery(runtime, async () => {
       return await runtime.controller.observe(targetId);
     });
     this.rememberObservation(runtime, observation);
-    return this.reported(runtime, observation);
+    return this.reported(runtime, observation, options);
   }
 
   async targetState(
@@ -1618,7 +1616,10 @@ export class BrowserSupervisor {
     return this.requireActive(reference).driver.readClipboard();
   }
 
-  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+  async action(
+    command: BrowserActionCommand,
+    options: BrowserObservationNoticeOptions = {},
+  ): Promise<BrowserActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
@@ -1627,7 +1628,7 @@ export class BrowserSupervisor {
     this.noteRecordingTarget(runtime, "action", command.targetId, { action: command.action });
     const ran = await this.presented(runtime, async () => await runtime.controller.run(command));
     const receipt = ran.observation
-      ? { ...ran, observation: this.reported(runtime, ran.observation) }
+      ? { ...ran, observation: this.reported(runtime, ran.observation, options) }
       : ran;
     if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
     if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
@@ -3117,15 +3118,17 @@ export class BrowserSupervisor {
     this.rememberTarget(runtime, observation.target);
   }
 
-  /** An observation that reaches the caller says, once, that a relaunch
-   * reloaded its tab's page. One the caller does not see (the browser a
-   * recovery relaunched) leaves that for the next one it does. */
+  /** An observation for a caller that asked for notices says, once, that a
+   * relaunch reloaded its tab's page. Other callers (a person's viewer, auth
+   * checks, API clients) neither see the notice nor use it up. */
   private reported(
     runtime: Runtime,
     observation: BrowserObservation,
-    reaches = true,
+    options: BrowserObservationNoticeOptions,
   ): BrowserObservation {
-    const notice = reaches ? runtime.driver.takeReloadedTabNotice?.(observation.target.id) : null;
+    const notice = options.notices
+      ? runtime.driver.takeReloadedTabNotice?.(observation.target.id)
+      : null;
     return notice ? { ...observation, notice } : observation;
   }
 
@@ -5014,11 +5017,16 @@ async function noteRelaunchedTabs(
 ): Promise<boolean> {
   if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
-    const tabs = matchReopenedTabs(
-      previous,
-      await restorableTargets(driver, current ?? (await driver.listTargets())),
-    );
-    if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+    const reopened = await restorableTargets(driver, current ?? (await driver.listTargets()));
+    const tabs = matchReopenedTabs(previous, reopened);
+    if (tabs.length > 0) {
+      driver.noteRelaunchedTabs({
+        reason,
+        ...details,
+        tabs,
+        restoredTargetIds: reopened.map((target) => target.id),
+      });
+    }
     return tabs.some((tab) => tab.replacementId !== null);
   } catch {
     // Unexplained, not failed.

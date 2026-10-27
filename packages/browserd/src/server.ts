@@ -11,6 +11,7 @@ import {
   BROWSER_ACTION_NOTE_KIND_VERSIONS,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
+  BROWSER_OBSERVATION_NOTICES_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
@@ -685,7 +686,7 @@ export class BrowserControlServer {
       const receipt = await withoutActionIdleTimeout(
         server,
         request,
-        async () => await this.supervisor.action(command),
+        async () => await this.supervisor.action(command, observationNotices(url)),
       );
       // Older clients parse receipts strictly. Return resolved targets and
       // per-action notes only to a caller that asked for them, and only the
@@ -894,11 +895,13 @@ export class BrowserControlServer {
     }
     const operation = segments[5];
     if (operation === "select" && request.method === "POST") {
-      return success(await this.supervisor.selectTarget(reference, targetId));
+      return success(
+        await this.supervisor.selectTarget(reference, targetId, observationNotices(url)),
+      );
     }
     if (operation === "observation" && request.method === "GET") {
       return await browserReadResponse("observation", () =>
-        this.supervisor.observe(reference, targetId),
+        this.supervisor.observe(reference, targetId, observationNotices(url)),
       );
     }
     if (operation === "state" && request.method === "GET") {
@@ -3250,4 +3253,12 @@ function sameRfbScope(left: ComputerRfbScope, right: ComputerRfbScope): boolean 
     left.targetGeneration === right.targetGeneration &&
     left.inputAllowed === right.inputAllowed
   );
+}
+
+/** Whether the caller asked for observation notices; only it receives and
+ * uses one up (see BROWSER_OBSERVATION_NOTICES_PARAMETER). */
+function observationNotices(url: URL): { notices?: true } {
+  return url.searchParams.get(BROWSER_OBSERVATION_NOTICES_PARAMETER) === "1"
+    ? { notices: true }
+    : {};
 }

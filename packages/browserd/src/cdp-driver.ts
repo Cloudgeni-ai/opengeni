@@ -544,6 +544,9 @@ type TargetState = {
   sessionId: string;
   authorityGeneration: string;
   actionEffectCount: number;
+  /** This attachment started the page of a reopened tab Chrome had not
+   * loaded; tab details read before it describe the tab before its page. */
+  startedRestoredPage?: true;
   createdAt: string;
   frame: MainFrame;
   documentGeneration: string;
@@ -787,27 +790,10 @@ export type ReloadedBrowserTab = { reason: BrowserRelaunchReason; idleReleaseMin
 const RELOADED_PAGE =
   "so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone";
 
-/** Actions chosen without looking at the page's content, which a reload
- * does not make wrong. */
-const PAGE_INDEPENDENT_ACTIONS: ReadonlySet<BrowserAction["type"]> = new Set([
-  "navigate",
-  "history",
-  "activate",
-  "viewport",
-  "permission",
-  "wait",
-]);
-
 /** The observation notice for a tab a relaunch reloaded. */
 export function reloadedTabNotice(reloaded: ReloadedBrowserTab): string {
   const why = relaunchText(reloaded);
   return `${why.charAt(0).toUpperCase()}${why.slice(1)}, ${RELOADED_PAGE}.`;
-}
-
-/** The refusal of an action on a tab a relaunch reloaded before anyone saw it
- * again: the action was chosen for the page as it was. */
-export function reloadedTabRefusal(reloaded: ReloadedBrowserTab): string {
-  return `Nothing was done: ${relaunchText(reloaded)}, ${RELOADED_PAGE}. Observe the tab and continue from what it shows.`;
 }
 
 /** The answer for a tab ID that names no open tab: why it is gone when the
@@ -873,9 +859,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** Tabs that vanished while this driver knew them, or that a relaunch
    * replaced, most recent last: a later call naming one learns why. */
   private readonly goneTargets = new Map<string, GoneBrowserTarget>();
-  /** Tabs a relaunch reopened under their earlier IDs whose reload no result
-   * has reported yet, by tab ID. The next observation of one says so; an
-   * action on one before that is refused. */
+  /** Tabs a relaunch reopened under their earlier IDs whose reload the agent
+   * has not been told of yet, by tab ID. The next observation the agent's
+   * tools receive for one says so. */
   private readonly reloadedTabs = new Map<string, ReloadedBrowserTab>();
   /** Tabs a close-tab call of this driver is closing. */
   private readonly closingTargetIds = new Set<string>();
@@ -923,6 +909,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly attachingSessions = new Map<string, string>();
   /** Tabs whose renderer process died. Cleared when the tab attaches healthily again. */
   private readonly crashedTargets = new Set<string>();
+  /** Tabs a relaunch reopened that have not attached since, by the browser's
+   * own ID. Chrome restores only the first few tabs' pages and leaves the
+   * rest without a renderer until they are used, which a first attachment
+   * would otherwise take for a crash. The value is when a load this driver
+   * started stops being waited for; null before one started. */
+  private readonly restoredTargets = new Map<string, number | null>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
@@ -2298,19 +2290,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const targetId = this.browserTargetIdOf(command.targetId);
     const observation = await this.withTarget(targetId, async (state, info) => {
       effects = { state, before: state.actionEffectCount };
-      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-      // An action on the page's content was chosen for the page as it was
-      // before a relaunch reloaded it, unseen since: it could act on an empty
-      // form or a dialog that is gone. Actions that do not depend on the
-      // page run, and the observation they return says it reloaded.
-      if (actions.some((action) => !PAGE_INDEPENDENT_ACTIONS.has(action.type))) {
-        const reloaded = this.takeReloadedTab(state.targetId);
-        if (reloaded) {
-          throw new InteractionDefiniteDriverError("target_stale", reloadedTabRefusal(reloaded));
-        }
-      }
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
+      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
       if (state.dialog && actions[0]?.type !== "handle_dialog") {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -3279,8 +3261,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: { read?: boolean } = {},
   ): Promise<T> {
     const connection = await this.ensureConnection();
-    const info = await this.requireTargetInfo(connection, targetId);
+    let info = await this.requireTargetInfo(connection, targetId);
+    const attached = this.states.get(targetId);
     const state = await this.ensureTargetState(info);
+    if (state !== attached && state.startedRestoredPage) {
+      info = await this.requireTargetInfo(connection, targetId);
+    }
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
@@ -3371,6 +3357,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // replace the real initialization outcome.
     void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
+    let loadingRestored = false;
     const viewport = this.viewportFor(info.targetId);
     try {
       const initialized = (async () => {
@@ -3399,6 +3386,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (!outcome) {
         // Detaching below ends the enables still waiting on the dead renderer.
         void initialized.catch(() => undefined);
+        const loadUntil = this.restoredTargets.get(info.targetId);
+        if (loadUntil === null || (loadUntil !== undefined && Date.now() < loadUntil)) {
+          // A reopened tab Chrome has not loaded yet: load its page now, as
+          // switching to it would but without activating it, and attach
+          // again once it has a renderer.
+          if (loadUntil === null) {
+            this.restoredTargets.set(info.targetId, Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS);
+            await connection
+              .send("Page.reload", {}, { sessionId, timeoutMs: RESTORED_TAB_RELOAD_TIMEOUT_MS })
+              .catch(() => undefined);
+          }
+          loadingRestored = true;
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser tab is loading its page",
+            true,
+          );
+        }
+        this.restoredTargets.delete(info.targetId);
         this.crashedTargets.add(info.targetId);
         throw tabCrashedError();
       }
@@ -3419,6 +3425,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
         .catch(() => undefined);
+      if (loadingRestored) {
+        await delay(RESTORED_TAB_ATTACH_INTERVAL_MS);
+        return await this.attachTarget(info);
+      }
       if (error instanceof CdpCommandTimeoutError && error.sessionId)
         throw tabNotRespondingError(error);
       throw error;
@@ -3428,11 +3438,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.attachingSessions.delete(info.targetId);
     }
     this.crashedTargets.delete(info.targetId);
+    // A reopened tab whose page this attachment started shows it once it
+    // has loaded, as a tab Chrome restored itself does.
+    const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
+    this.restoredTargets.delete(info.targetId);
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      ...(startedRestoredLoad ? { startedRestoredPage: true as const } : {}),
       unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
@@ -3572,7 +3587,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (error instanceof CdpTransportError) throw error;
       }
     }
+    if (startedRestoredLoad) {
+      // Best effort: a page still loading after this is observed as it is.
+      await this.waitForRestoredPage(state, info.url).catch(() => undefined);
+    }
     return state;
+  }
+
+  /** Wait until a reopened tab whose page this driver started shows that
+   * page (not the empty document a new renderer starts with) and has parsed
+   * it, as long as RESTORED_TAB_LOAD_TIMEOUT_MS. */
+  private async waitForRestoredPage(state: TargetState, url: string): Promise<void> {
+    const blank = isBlankTabUrl(url);
+    const deadline = Date.now() + RESTORED_TAB_LOAD_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const value = await this.evaluate(
+          state,
+          `document.readyState !== "loading" && (${blank} || location.href !== "about:blank")`,
+        );
+        if (value === true) return;
+      } catch (error) {
+        if (!missingExecutionContext(error)) throw error;
+      }
+      await delay(25);
+    }
   }
 
   /**
@@ -9019,22 +9058,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  /** Whether a relaunch reloaded this tab and no result has said so yet;
-   * the caller reports it, so later results do not repeat it. */
-  private takeReloadedTab(targetId: string): ReloadedBrowserTab | null {
-    return this.takeReloadedTabId(this.tabIdOf(targetId));
-  }
-
-  private takeReloadedTabId(tabId: string): ReloadedBrowserTab | null {
+  /** The notice for an observation of this tab the agent receives, when a
+   * relaunch reloaded its page and the agent was not told yet; said once. */
+  takeReloadedTabNotice(tabId: string): string | null {
     const reloaded = this.reloadedTabs.get(tabId) ?? null;
     this.reloadedTabs.delete(tabId);
-    return reloaded;
-  }
-
-  /** The notice for a result about this tab that reaches the caller, when a
-   * relaunch reloaded its page and nothing has said so yet; said once. */
-  takeReloadedTabNotice(tabId: string): string | null {
-    const reloaded = this.takeReloadedTabId(tabId);
     return reloaded ? reloadedTabNotice(reloaded) : null;
   }
 
@@ -9072,6 +9100,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * that no reopened tab shows learns why it is gone, and the first result
    * about a reopened tab says that its page reloaded. */
   noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    this.restoredTargets.clear();
+    for (const targetId of relaunched.restoredTargetIds ??
+      relaunched.tabs.flatMap((tab) => (tab.replacementId ? [tab.replacementId] : []))) {
+      if (!this.states.has(targetId)) this.restoredTargets.set(targetId, null);
+    }
     this.adoptTabIds(
       relaunched.tabs.flatMap((tab) =>
         tab.replacementId ? [{ tabId: tab.targetId, browserTargetId: tab.replacementId }] : [],
@@ -9357,6 +9390,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
       this.targetViewports.delete(targetId);
+      this.restoredTargets.delete(targetId);
     }
   }
 
@@ -9406,6 +9440,13 @@ function tabCrashedError(): InteractionDefiniteDriverError {
     false,
   );
 }
+
+/** How long a reopened tab Chrome had not loaded yet gets to start a
+ * renderer once its load was asked for, and how often attachment retries
+ * meanwhile. A tab still without one after that is reported as crashed. */
+const RESTORED_TAB_LOAD_TIMEOUT_MS = 10_000;
+const RESTORED_TAB_RELOAD_TIMEOUT_MS = 2_000;
+const RESTORED_TAB_ATTACH_INTERVAL_MS = 100;
 
 /** How long a runtime continuing a session in the person's own browser waits
  * for the tab the session was using before it opens a new one instead. A
