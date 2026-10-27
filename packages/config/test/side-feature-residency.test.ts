@@ -114,8 +114,13 @@ describe("side-feature residency records", () => {
   test("vendor default hosts keep their code-owned rule and cannot be declared", () => {
     for (const [route, endpoint, geography] of [
       ["decision_model.openai", "https://api.openai.com/v1", "us"],
+      // DNS reads a trailing dot and any case as the same host.
+      ["decision_model.openai", "https://api.openai.com./v1", "us"],
+      ["decision_model.openai", "https://API.OpenAI.com../v1", "us"],
       ["knowledge.embeddings", "https://api.openai.com/v1", "us"],
+      ["knowledge.embeddings", "https://api.openai.com.:443/v1", "us"],
       ["web_search.firecrawl", "https://api.firecrawl.dev", "unknown"],
+      ["web_search.firecrawl", "https://api.firecrawl.dev.", "unknown"],
       ["web_search.jina", "https://s.jina.ai", "unknown"],
       ["web_search.jina", "https://r.jina.ai", "unknown"],
     ] as const) {
@@ -386,6 +391,17 @@ describe("decision models under EU-only inference", () => {
         settings({
           ...openai,
           decisionModelBaseUrl: "https://other.example.com/v1",
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: declaredElsewhere,
+        }),
+      ),
+    ).toBeUndefined();
+    // Nor does a trailing dot reach the vendor host past its rule.
+    expect(
+      decisionModelConfiguration(
+        settings({
+          ...openai,
+          decisionModelBaseUrl: "https://api.openai.com./v1",
           requiredModelGeography: "eu",
           sideFeatureResidencyJson: declaredElsewhere,
         }),

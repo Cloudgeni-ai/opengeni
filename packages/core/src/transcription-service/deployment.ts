@@ -105,6 +105,8 @@ export type SpeechToTextDeployment = {
    * deployment configured it; null for a provider it cannot place (never EU).
    */
   route(providerId: string): SideFeatureTarget | null;
+  /** Where the provider's live-transcript clients connect; null when it has no live route (never EU). */
+  liveRoute(providerId: string): SideFeatureTarget | null;
   /**
    * EU-only inference: whether this workspace may send audio to the provider.
    * Always true outside EU-only workspaces; under EU only for a provider whose
@@ -377,6 +379,7 @@ export function createSpeechToTextDeployment(
       return apiKey ? { credentials: { apiKey } } : "missing";
     },
     route: (providerId) => routes.get(providerId) ?? null,
+    liveRoute: (providerId) => liveRoutes.get(providerId) ?? null,
     regionAllowed,
     async assertRegion(providerId, scope, feature) {
       if (!(await regionAllowed(providerId, scope, feature))) {

@@ -1,6 +1,5 @@
 import {
   decisionModelRoute,
-  resolveVoiceInputProviderRegistry,
   resolveWebSearchProvider,
   sideFeatureRouteAllowed,
   sideFeatureRouteIsEu,
@@ -19,7 +18,7 @@ import {
 } from "@opengeni/contracts";
 import { isWorkspaceEuOnly, type Database } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
-import { openAiRealtimeTranscribes } from "./transcription-service/providers/openai-realtime";
+import { createSpeechToTextDeployment } from "./transcription-service/deployment";
 
 /** What the deployment runs that settings alone do not describe. */
 export type InferenceFeatureSources = {
@@ -36,8 +35,9 @@ export function knowledgeEmbeddingTarget(
 
 /**
  * The routes this deployment is configured to use for a feature that could
- * be EU, with the endpoints they call. Code-owned routes are never EU, so
- * they are not listed: a feature with only those (media) has none.
+ * be EU, with the endpoints they call. Code-owned routes are never EU, so a
+ * feature with only those (media) lists none; where a list includes one it
+ * never makes the feature available.
  */
 function configuredDeclarableTargets(
   settings: Settings,
@@ -56,30 +56,29 @@ function configuredDeclarableTargets(
         ? [{ route: "realtime_voice.azure_live", endpoint: settings.azureLiveEndpoint }]
         : [];
     case "voice_input":
-    case "meeting_transcription": {
-      const targets: SideFeatureTarget[] = [];
-      for (const config of resolveVoiceInputProviderRegistry(settings)) {
-        if (config.kind === "azure-openai") {
-          targets.push({ route: "transcription.azure-openai", endpoint: config.endpoint });
-        } else if (config.kind === "azure-mai") {
-          targets.push({ route: "transcription.azure-speech", endpoint: config.endpoint });
+    case "meeting_transcription":
+    case "live_transcription": {
+      // Each provider's own route, as the deployment resolves it (the
+      // recording Azure Speech account wins over voice input MAI, and so on).
+      let deployment: ReturnType<typeof createSpeechToTextDeployment>;
+      try {
+        deployment = createSpeechToTextDeployment({ settings });
+      } catch {
+        // A deployment that cannot be built offers no route: not available.
+        return [];
+      }
+      return deployment.order.flatMap((providerId) => {
+        if (feature === "live_transcription") {
+          const live = deployment.registry
+            .get(providerId)
+            ?.models.some((spec) => spec.capabilities.live);
+          const target = live ? deployment.liveRoute(providerId) : null;
+          return target ? [target] : [];
         }
-      }
-      if (settings.recordingAzureSpeechEndpoint) {
-        targets.push({
-          route: "transcription.azure-speech",
-          endpoint: settings.recordingAzureSpeechEndpoint,
-        });
-      }
-      return targets;
+        const target = deployment.route(providerId);
+        return target ? [target] : [];
+      });
     }
-    case "live_transcription":
-      // Only Azure OpenAI's Realtime API could be EU; OpenAI's is code-owned.
-      return resolveVoiceInputProviderRegistry(settings).flatMap((config) =>
-        config.kind === "azure-openai" && openAiRealtimeTranscribes(config.model)
-          ? [{ route: "transcription.azure-openai-realtime", endpoint: config.endpoint } as const]
-          : [],
-      );
     case "knowledge_embeddings":
       return sources.embedder ? [knowledgeEmbeddingTarget(sources.embedder)] : [];
     case "code_search": {

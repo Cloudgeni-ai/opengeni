@@ -252,12 +252,19 @@ const VENDOR_DEFAULT_HOSTS: Record<string, Rule> = {
   "api.firecrawl.dev": saas("Firecrawl"),
 };
 
-/** The origin a URL sends to, or null when it is not an http(s) URL. */
+/**
+ * The origin a URL sends to, or null when it is not an http(s) URL. The host
+ * is normalised the way DNS reads it (lowercase, no trailing dot), so
+ * `api.openai.com.` is the vendor host too.
+ */
 export function sideFeatureEndpointOrigin(endpoint: string | null | undefined): string | null {
   if (!endpoint) return null;
   try {
     const url = new URL(endpoint);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const host = url.hostname.toLowerCase().replace(/\.+$/u, "");
+    if (!host) return null;
+    return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}`;
   } catch {
     return null;
   }

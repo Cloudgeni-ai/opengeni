@@ -373,6 +373,35 @@ describe("feature availability", () => {
     expect(byId({ embedder: { local: true } }).get("knowledge_embeddings")).toBe(true);
   });
 
+  test("transcription availability follows the provider that wins: the recording Azure Speech account over voice input MAI", () => {
+    const MAI = "https://voice.example.test";
+    const SPEECH = "https://speech.example.cognitiveservices.azure.com";
+    const transcription = (declared: string) =>
+      new Map(
+        inferenceFeatureAvailability(
+          testSettings({
+            requiredModelGeography: "eu",
+            voiceInputProviderOrder: "azure-mai",
+            voiceInputMaiEndpoint: MAI,
+            voiceInputMaiApiKey: "voice-key",
+            recordingAzureSpeechEndpoint: SPEECH,
+            recordingAzureSpeechApiKey: "key",
+            sideFeatureResidencyJson: declare({
+              "transcription.azure-speech": [
+                declared,
+                declaration("azure_data_zone", "swedencentral"),
+              ],
+            }),
+          }),
+        ).map((feature) => [feature.id, feature.available]),
+      );
+    // The MAI endpoint is declared, but the recording account is the one that sends audio.
+    expect(transcription(MAI).get("voice_input")).toBe(false);
+    expect(transcription(MAI).get("meeting_transcription")).toBe(false);
+    expect(transcription(SPEECH).get("voice_input")).toBe(true);
+    expect(transcription(SPEECH).get("meeting_transcription")).toBe(true);
+  });
+
   test("outside a turn the workspace setting decides, and only EU records pass", async () => {
     const settings = testSettings({
       sideFeatureResidencyJson: declare({
