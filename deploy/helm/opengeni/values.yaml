@@ -1688,6 +1688,7 @@ computeRunners:
   #     service:                # how runners, outside the cluster, reach it
   #       type: ClusterIP
   #       port: 8080
+  #       nodePort: null        # with type NodePort, the node's port
   #       annotations: {}
   #       loadBalancerSourceRanges: []
   #   resources: {}             # default: computeRunners.resources

@@ -876,6 +876,31 @@ describe("computeRunners", () => {
     );
   });
 
+  test("serve a cache on a node's own port for a proxy in front of it", async () => {
+    const cache = (service: Record<string, unknown>) => ({
+      store: "gs://example-cache/runners",
+      url: "https://runner-cache.example.com",
+      existingSecret: "ci-cache",
+      service,
+    });
+    const ports = async (service: Record<string, unknown>) =>
+      find(
+        await render({ ...front, computeRunners: { pools: [{ ...pool, cache: cache(service) }] } }),
+        "Service",
+        "cc-opengeni-runners-ci",
+      ).spec;
+
+    const fixed = await ports({ type: "NodePort", nodePort: 30448 });
+    expect(fixed.type).toBe("NodePort");
+    expect(fixed.ports).toEqual([
+      { name: "cache", port: 8080, targetPort: "http", protocol: "TCP", nodePort: 30448 },
+    ]);
+    // A node port means nothing to any other kind of Service.
+    const cluster = await ports({ nodePort: 30448 });
+    expect(cluster.type).toBe("ClusterIP");
+    expect(cluster.ports[0].nodePort).toBeUndefined();
+  });
+
   test("refuse pools they cannot run", async () => {
     const cases: [Record<string, unknown>, string][] = [
       [
