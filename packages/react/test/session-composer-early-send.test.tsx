@@ -1,6 +1,6 @@
 // An open chat's composer while its saved draft is still loading: the real
 // useComposer and ChatComposer, wired the way the session page wires them.
-import { afterEach, describe, expect, jest, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import type { ComposerDraft, SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 
@@ -11,12 +11,21 @@ import {
 } from "../src/app/lib/session-composer-readiness";
 import { ChatComposer } from "../src/components/chat-composer";
 import { useComposer } from "../src/hooks/use-composer";
-import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
 
 let mounted: RenderedComponent | null = null;
+
+// The composer remembers an outcome-unknown send per workspace and session for
+// the life of the page (module state and sessionStorage), and other test files
+// in the same process leave one behind for the shared fake session. A fresh
+// session per test keeps these tests independent of whatever ran before.
+let sessionId = crypto.randomUUID();
+beforeEach(() => {
+  sessionId = crypto.randomUUID();
+});
 
 afterEach(async () => {
   if (mounted) {
@@ -61,7 +70,7 @@ function SessionComposer({
     loading,
     loadFailed: false,
   };
-  const composer = useComposer(SESSION_ID, {
+  const composer = useComposer(sessionId, {
     client,
     workspaceId: WORKSPACE_ID,
     sendBlocked: () => gate.blocker(send) !== null,
@@ -99,7 +108,7 @@ function clientWithSlowDraft(sent: string[]) {
       sent.push(input.text ?? "");
       return {
         id: crypto.randomUUID(),
-        sessionId: SESSION_ID,
+        sessionId,
         sequence: 2,
         type: "user.message",
         payload: { text: input.text },
@@ -205,7 +214,7 @@ describe("Enter while an open chat's saved draft is still loading", () => {
         sent.push(input.text ?? "");
         return {
           id: crypto.randomUUID(),
-          sessionId: SESSION_ID,
+          sessionId,
           sequence: 2,
           type: "user.message",
           payload: { text: input.text },
