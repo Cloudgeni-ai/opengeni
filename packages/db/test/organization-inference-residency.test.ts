@@ -45,7 +45,7 @@ afterAll(async () => {
   await runtime?.end({ timeout: 5 }).catch(() => undefined);
   await client?.close();
   await shared?.release();
-});
+}, 60_000);
 
 async function organization() {
   const userId = `eu-only-${crypto.randomUUID()}`;
