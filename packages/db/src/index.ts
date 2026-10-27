@@ -289,6 +289,7 @@ import {
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 export * from "./personal-api-keys";
 export * from "./organization-privacy-preferences";
+export * from "./organization-inference-residency";
 import { personalApiKeyAccess } from "./personal-api-keys";
 import {
   effectiveKeyPermissions,

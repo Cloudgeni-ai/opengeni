@@ -22912,6 +22912,7 @@ export * from "./task-notes";
 export * from "./canonical-human-identities";
 export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
+export * from "./inference-residency";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
 

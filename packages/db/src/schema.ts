@@ -4885,6 +4885,52 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// An organization's EU-only inference setting (migration 0999). No row means
+// off. The runtime reads it; only update_organization_inference_residency_v1 writes it.
+export const organizationInferenceResidency = pgTable("organization_inference_residency", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  euOnly: boolean("eu_only").notNull(),
+  version: bigint("version", { mode: "number" }).notNull(),
+  updatedBySubjectId: text("updated_by_subject_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Append-only history of EU-only inference changes (migration 0999). Each row
+// is also the stored result of its operation id. No runtime privileges.
+export const organizationInferenceResidencyEvents = pgTable(
+  "organization_inference_residency_events",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    id: uuid("id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorKind: text("actor_kind").$type<"browser_person" | "agent" | "api_key">().notNull(),
+    requestedEuOnly: boolean("requested_eu_only").notNull(),
+    expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
+    previousEuOnly: boolean("previous_eu_only").notNull(),
+    resultEuOnly: boolean("result_eu_only").notNull(),
+    resultVersion: bigint("result_version", { mode: "number" }).notNull(),
+    // Null only for an unchanged request before the first change.
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }),
+    changed: boolean("changed").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "organization_inference_residency_events_pkey",
+      columns: [table.accountId, table.id],
+    }),
+    // One version per change; unchanged requests repeat the current version.
+    uniqueIndex("organization_inference_residency_events_version_key")
+      .on(table.accountId, table.resultVersion)
+      .where(sql`${table.changed}`),
+  ],
+);
+
 // A session an owner or admin gave admin access; the row ends when it is removed.
 export const sessionAdminAccess = pgTable(
   "session_admin_access",

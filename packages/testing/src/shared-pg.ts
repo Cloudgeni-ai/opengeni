@@ -854,8 +854,9 @@ export async function acquireSharedTestDatabase(
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES,
  * DEFERRED_RUNTIME_TARGET_ROUTINES and RUNTIME_DEFERRED_FULL_DML_TABLES):
  * EXECUTE on the personal-machine owner lookup (0978), the connected-command
- * re-arm (0984) and the queued-turn hold summary (0988), and passkey storage
- * (0998). Tests that exercise them run as they will once they are granted.
+ * re-arm (0984), the queued-turn hold summary (0988) and the EU-only inference
+ * change function (0999), and passkey storage (0998). Tests that exercise them
+ * run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -871,6 +872,9 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE auth_passkeys TO ${grantee};
     GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(
+      uuid, text, text, boolean, bigint, uuid
+    ) TO ${grantee};
   `);
 }
 

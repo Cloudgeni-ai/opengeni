@@ -50,8 +50,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
- * the running commands a returning runner did not answer for (0984) and the
- * control worker's content-free queued-turn hold summary (0988). Each is
+ * the running commands a returning runner did not answer for (0984), the
+ * control worker's content-free queued-turn hold summary (0988) and the only
+ * writer of the EU-only inference setting and its history (0999). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -66,6 +67,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const;
 
 /**
@@ -80,11 +82,14 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
+ * 0999 withholds the EU-only change function; until it is granted the setting
+ * cannot be changed and stays off.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -132,6 +137,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
   "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
+    "organization_inference_residency",
+    "organization_inference_residency_events",
+    "organization_memberships",
+    "api_keys",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -1934,6 +1945,8 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_credential_providers",
+  "organization_inference_residency",
+  "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -2566,6 +2579,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_inference_residency",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_plans",
@@ -2755,6 +2769,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_inference_residency_events",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",

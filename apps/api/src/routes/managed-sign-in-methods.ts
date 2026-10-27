@@ -76,7 +76,10 @@ const ConnectIntent = z.object({
     .optional(),
 });
 
-async function rows<T>(deps: ApiRouteDeps, query: ReturnType<typeof sql>): Promise<T[]> {
+async function rows<T>(
+  deps: Pick<ApiRouteDeps, "db">,
+  query: ReturnType<typeof sql>,
+): Promise<T[]> {
   const result = await deps.db.execute(query);
   return (Array.isArray(result) ? result : (result as { rows: T[] }).rows) as T[];
 }
@@ -88,6 +91,25 @@ async function identity(context: Context, deps: ApiRouteDeps) {
     managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
     managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
   });
+}
+
+/**
+ * Whether this browser session was signed in during the last five minutes:
+ * the re-authentication sign-in method changes require, and turning EU-only
+ * off too. Refusals carry SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED.
+ */
+export async function hasRecentManagedSignIn(
+  deps: Pick<ApiRouteDeps, "db">,
+  input: { authSessionId: string; authUserId: string },
+): Promise<boolean> {
+  const [fresh] = await rows<{ fresh: boolean }>(
+    deps,
+    sql`select exists(select 1 from auth_sessions where id=${input.authSessionId}
+      and user_id=${input.authUserId}
+      and created_at > clock_timestamp() - interval '5 minutes'
+      and created_at <= clock_timestamp()) as fresh`,
+  );
+  return fresh?.fresh === true;
 }
 
 export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
@@ -290,14 +312,7 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
       // Saving a passkey needs a sign-in from the last five minutes. Check it
       // before the browser makes one, or the device keeps a passkey this
       // account then refuses.
-      const [fresh] = await rows<{ fresh: boolean }>(
-        deps,
-        sql`select exists(select 1 from auth_sessions where id=${actor.authSessionId}
-          and user_id=${actor.authUserId}
-          and created_at > clock_timestamp() - interval '5 minutes'
-          and created_at <= clock_timestamp()) as fresh`,
-      );
-      if (!fresh?.fresh)
+      if (!(await hasRecentManagedSignIn(deps, actor)))
         return context.json(
           {
             code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
