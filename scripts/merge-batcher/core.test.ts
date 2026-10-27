@@ -690,6 +690,47 @@ describe("real temporary bare Git", () => {
       expect((e as MergeConflict).number).toBe(2);
     }
   });
+  test("a Version PR conflicts when main changed one of its files after it was generated", async () => {
+    const f = await fixture();
+    const lines = (first: string, last: string) => `${first}\nb\nc\nd\ne\nf\n${last}\n`;
+    const generated = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "g") },
+      [f.base],
+    );
+    // Main edits the top of the file; the Version head edits the bottom.
+    const main = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("A", "g") },
+      [generated],
+    );
+    const head = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "G") },
+      [generated],
+    );
+    const version = (sha: string) => ({ ...pull(1, sha), headRef: "changeset-release/main" });
+    // The edits merge cleanly, so an ordinary PR still lands combined...
+    const ordinary = await f.git.build(spec([pull(1, head)], main));
+    expect(await f.git.exec(["show", `${ordinary.tipSha}:package.json`])).toBe(
+      lines("A", "G").trim(),
+    );
+    // ...but a Version landing would no longer be its exact reviewed delta.
+    await expect(f.git.build(spec([version(head)], main))).rejects.toBeInstanceOf(MergeConflict);
+    // Disjoint files, or a head generated on current main, still land.
+    const disjoint = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("a", "g"), "CHANGELOG.md": "1.0.1\n" },
+      [generated],
+    );
+    await expect(f.git.build(spec([version(disjoint)], main))).resolves.toBeDefined();
+    const fresh = await f.commitFiles(
+      f.git,
+      { "base.txt": "base\n", "package.json": lines("A", "G") },
+      [main],
+    );
+    await expect(f.git.build(spec([version(fresh)], main))).resolves.toBeDefined();
+  });
   test("tampered tree, parents and missing manifest rejected", async () => {
     const f = await fixture(),
       s = spec([pull(1, f.first)], f.base),

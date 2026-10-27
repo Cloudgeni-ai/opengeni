@@ -516,6 +516,38 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("macOS focus is refused before anything is sent while someone else uses the computer", async () => {
+    let seconds: number | null = 3.4;
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      personInput: () => seconds,
+    });
+    try {
+      const focus = async () =>
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "focus", targetId: "cua:window:42:1" },
+        });
+      await expect(focus()).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Someone other than Opengeni used this computer's keyboard, mouse or trackpad 3 s ago, so this window was not brought to the front: ask them first, or keep working in the background",
+      });
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toEqual([]);
+      // Input a minute or more ago, or none the reading can tell, leaves
+      // focus as it was.
+      fixture.mutation = result({ status: "activated", activated: true, pid: 42, window_id: 1 });
+      for (const reading of [60, null]) {
+        seconds = reading;
+        expect((await focus())?.target.id).toBe("cua:window:42:1");
+      }
+      expect(fixture.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("input an agent sent in the foreground is not reported as a person's, in any session", async () => {
     // The HID timers the reading comes from see input sent in the foreground
     // as they see a person's; input sent to an app in the background they
@@ -2247,15 +2279,51 @@ describe("CUA desktop boundary", () => {
         message:
           "That element is in another window of this app (cua:window:42:3), not in cua:window:42:1, so nothing was done: observe cua:window:42:3 and act on its refs there",
       });
-      // There is no focus action; work happens in the background.
+      // A focus action brings the window to the front and leaves it there,
+      // once CUA confirms it as the front app's focused window.
+      fixture.mutation = result({ status: "activated", activated: true, pid: 42, window_id: 1 });
+      const before = fixture.calls.length;
+      const focused = await backend.dispatch({
+        ...command(await backend.observe("cua:window:42:1")),
+        action: { type: "focus", targetId: "cua:window:42:1" },
+      });
+      expect(fixture.calls.slice(before).filter((call) => call.name === "bring_to_front")).toEqual([
+        { name: "bring_to_front", args: { pid: 42, window_id: 1 } },
+      ]);
+      expect(focused?.target.id).toBe("cua:window:42:1");
+      // macOS took the request but did not confirm the window in front.
+      fixture.mutation = result({ status: "partial", activated: false }, true);
       await expect(
         backend.dispatch({
           ...command(await backend.observe("cua:window:42:1")),
           action: { type: "focus", targetId: "cua:window:42:1" },
         }),
       ).rejects.toMatchObject({
-        code: "unsupported",
-        message: expect.stringContaining("it has no focus action"),
+        code: "outcome_unknown",
+        dispatched: true,
+        message:
+          "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
+      });
+      // A window that is no longer on screen takes nothing, and the refusal
+      // says where to act instead.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "off_space_or_ax_unresolved",
+            message:
+              "Background input refused (off_space_or_ax_unresolved): window 1 is not among the process's current AXWindows (another Space, or its AX surface is unresolved); background input is refused so a sibling window cannot receive it. Observation (capture/list_windows) remains available",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe("cua:window:42:1"))),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
       });
     } finally {
       await backend.close();
@@ -4712,6 +4780,42 @@ describe("CUA desktop boundary", () => {
             dispatched: true,
             message:
               "CUA stopped the batch at action 2: That element is in another window of this app, not in cua:window:42:1, so nothing was done",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // A later action's window was closed or hidden by an earlier one, and
+        // CUA refused before sending anything: the earlier actions ran, this
+        // one did not, and the failure says where to act instead.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "off_space_or_ax_unresolved",
+            message:
+              "Background input refused (off_space_or_ax_unresolved): window 1 is not among the process's current AXWindows (another Space, or its AX surface is unresolved); background input is refused so a sibling window cannot receive it. Observation (capture/list_windows) remains available",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // A later step named by role and name found its window closed by an
+        // earlier one while waiting for its element, which will never appear:
+        // it fails at once with the same line.
+        {
+          reply: step(1, {
+            phase: "wait_for",
+            code: "window_not_on_screen",
+            message:
+              'menuitem "Minimize" is shown, enabled did not hold: window 1 is closed or not on screen, so nothing in it can be found',
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: This window is no longer on screen (an earlier action closed or hid it, or it is on another Space), so nothing was sent to it: list the app's windows and act on one that is shown",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
