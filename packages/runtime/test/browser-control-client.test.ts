@@ -631,12 +631,7 @@ describe("BrowserControlClient", () => {
           operationId: randomUUID(),
           action: {
             type: "batch" as const,
-            actions: [
-              {
-                type: "click" as const,
-                locator: { kind: "text" as const, text: "Save", exact: true },
-              },
-            ],
+            actions: [{ type: "viewport_reset" as const }],
           },
         }),
       ).rejects.toMatchObject({
@@ -646,8 +641,9 @@ describe("BrowserControlClient", () => {
           retryable: false,
           message:
             "This browser's controller image is older than this server and does not accept " +
-            '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-            "the element by its ref. Updating the controller image adds support.",
+            'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+            "or set type viewport with the window's own width and height. Updating the " +
+            "controller image adds support.",
         },
       });
       rejected = { status: 404, code: "resource_not_found", message: "route not found" };
@@ -2617,7 +2613,7 @@ test("an older agent's controller refusal names the newer option without replayi
       expectedDocumentGeneration: "document-1",
       expectedFrameId: "frame-1",
       actor: { kind: "system", subjectId: "test" },
-      action: { type: "click", locator: { kind: "text", text: "Save", exact: true } },
+      action: { type: "viewport_reset" },
     }),
   ).rejects.toMatchObject({
     status: 409,
@@ -2626,8 +2622,9 @@ test("an older agent's controller refusal names the newer option without replayi
       retryable: false,
       message:
         "This browser's controller runs in an older Opengeni agent that does not accept " +
-        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
-        "the element by its ref. Updating the agent adds support.",
+        'type "viewport_reset" on an action. Nothing ran. Retry without type "viewport_reset", ' +
+        "or set type viewport with the window's own width and height. Updating the agent " +
+        "adds support.",
     },
   });
   rejected = { status: 404, code: "resource_not_found", message: "route not found" };
