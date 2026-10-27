@@ -780,6 +780,165 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await unconfigured.close();
     }
   }, 60_000);
+  test("tells the agent when the person can't connect from the card, matching what the card shows", async () => {
+    if (!shared) return;
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+      integrationsEnabled: true,
+      integrationsStateSecret: "capability-discovery-integrations-state-secret",
+      integrationsOauthClientsJson: JSON.stringify({
+        "https://login.microsoftonline.com/common/v2.0": {
+          clientId: "microsoft-client",
+          clientSecret: "microsoft-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      }),
+    });
+    const conversation = ["workspace:read", "sessions:create", "sessions:read", "sessions:control"];
+    const request = async (
+      permissions: string[] | null,
+      // What the person's sign-in could do when they sent this turn's message,
+      // frozen with the turn (an embed's token narrows it).
+      sent?: string[],
+      // Sent with an earlier message in this chat: this turn is one the
+      // platform started for them (a wake-up, a child's result, a goal
+      // continuation), which records no grant of its own.
+      sentEarlier = false,
+    ) => {
+      // The human this agent acts for: a member with exactly these
+      // permissions, or (null) someone in their own workspace with no
+      // membership row.
+      const person = `user:${crypto.randomUUID()}`;
+      if (permissions) {
+        await shared!.admin`
+          INSERT INTO workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+          VALUES (${workspace.accountId}, ${workspace.workspaceId}, ${person}, 'member',
+            ${shared!.admin.json(permissions)}::jsonb)`;
+      }
+      const attempt = await seedAttempt(false, undefined, person);
+      if (sent) {
+        if (sentEarlier) {
+          const [earlier] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 1, 'Check my email',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${person}, '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${earlier!.id}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+          // Someone else's later message in the same chat never stands in for them.
+          const [other] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 2, 'Hello',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', 'user:someone-else',
+              '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${other!.id}, ${workspace.accountId}, ${workspace.workspaceId},
+              'user:someone-else', 'none',
+              ${[...conversation, "connections:personal"]}::text[])`;
+        } else {
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${attempt.turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+        }
+      }
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: attempt.sessionId,
+            turnId: attempt.turnId,
+            attemptId: attempt.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      try {
+        const result = await mcp.callTool({
+          name: "capability_authorization_request",
+          arguments: {
+            capabilityId: "api:integration:microsoft-outlook-mail",
+            rationale: "Reading the newest emails needs access to the person's inbox.",
+          },
+        });
+        expect(result.isError).not.toBe(true);
+        const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
+        expect(events.some((event) => event.type === "tool.auth_needed")).toBe(true);
+        return mcpJson(result);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    };
+
+    // Without personal setup the card says Outlook can't be connected here,
+    // so the agent is told not to send the person to it.
+    expect(await request(conversation)).toEqual({
+      capabilityId: "api:integration:microsoft-outlook-mail",
+      status: "authorization_requested",
+      action: "connect",
+      eventId: expect.any(String),
+      message:
+        "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.",
+    });
+    // With it, the existing Connect card message is unchanged.
+    const connectCard =
+      "The Outlook Mail Connect card was posted. It handles the Microsoft sign-in and any admin approval link, so do not repeat its steps; nothing is connected yet. When the person finishes connecting, you get an update and its tools are available then.";
+    const cannotConnect =
+      "The card was posted, but this person can't connect Outlook Mail from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.";
+    expect(await request([...conversation, "connections:personal"])).toMatchObject({
+      status: "authorization_requested",
+      message: connectCard,
+    });
+    // The person's chat decides from what their sign-in could do when they
+    // sent the message, as the card does: an embed's token that leaves out
+    // personal setup narrows a membership that has it.
+    expect(await request([...conversation, "connections:personal"], conversation)).toMatchObject({
+      status: "authorization_requested",
+      message: cannotConnect,
+    });
+    // Someone in their own workspace has no membership row; their sign-in's
+    // access still decides, either way.
+    expect(await request(null, conversation)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"])).toMatchObject({
+      message: connectCard,
+    });
+    // A turn the platform started for them decides from their latest message
+    // in this chat, the same way.
+    expect(
+      await request([...conversation, "connections:personal"], conversation, true),
+    ).toMatchObject({ message: cannotConnect });
+    expect(await request(null, conversation, true)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"], true)).toMatchObject({
+      message: connectCard,
+    });
+  }, 60_000);
   test("posts the Connected Machine card without a token, and keeps it useful once machines exist", async () => {
     if (!shared) return;
     const attempt = await seedAttempt(false, [
@@ -1240,6 +1399,7 @@ async function seedAttempt(
     "capability_catalog_search",
     "capability_authorization_request",
   ],
+  initiatorSubjectId: string = workspace.subjectId,
 ): Promise<{
   sessionId: string;
   turnId: string;
@@ -1270,7 +1430,7 @@ async function seedAttempt(
       ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`capability-wf-${crypto.randomUUID()}`}, 'running', 0, 'Use GitHub',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${workspace.subjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
+      ${initiatorSubjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared!.admin.begin(async (tx) => {

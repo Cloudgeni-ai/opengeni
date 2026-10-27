@@ -71,7 +71,8 @@ pub struct StreamTokenClaims {
     /// fence.
     #[serde(rename = "leaseEpoch")]
     pub lease_epoch: u64,
-    /// `"view"` (always, v1) or `"control"` (the never-granted raw-input plane).
+    /// `"view"` (watch only) or `"control"` (may send input: PTY keystrokes on the
+    /// terminal port, typed desktop input on the desktop port). The relay enforces it.
     pub mode: String,
     /// The exposed stream port the token pins to.
     pub port: u32,

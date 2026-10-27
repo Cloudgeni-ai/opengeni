@@ -54957,8 +54957,8 @@ export type AgentHeldBrowserSession = {
  * that is still working (a turn queued, running, recovering, waiting for
  * capacity or waiting on a person) or has an armed input wait. The same rule
  * as the box release below; the API renews each one's hold on its controller.
- * Most recently used first, at most `limit`. Migration 0999 creates the
- * routine and 1001 grants it to the runtime.
+ * Most recently used first, at most `limit`. Migration 1002 creates the
+ * routine and 1004 grants it to the runtime.
  */
 export async function listAgentHeldBrowserSessions(
   db: Database,
@@ -54998,7 +54998,7 @@ export async function listAgentHeldBrowserSessions(
  * waiting (an armed input wait) keeps it, page state and all, but never
  * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
  * browser's own controller keeps it by the same rule;
- * `list_idle_interaction_leases` (migration 0999) skips such boxes.
+ * `list_idle_interaction_leases` (migration 1002) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle

@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- Grants the runtime role EXECUTE on the held-browser inventory
--- (list_agent_held_browser_sessions), which 0999 created withheld: the
+-- (list_agent_held_browser_sessions), which 1002 created withheld: the
 -- previous release now knows it (its runtime posture accepts it granted or
 -- withheld). Readiness requires it from this release on, and the API renews
 -- browser holds instead of listing nothing.
