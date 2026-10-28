@@ -304,6 +304,81 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
 );
 
 describe("query-independent tool discovery", () => {
+  test.each([
+    ["an exact-name load", { query: "", names: [WEATHER_TOOL] }],
+    ["a ranked search", { query: "weather lookup city", limit: 5 }],
+  ] as const)(
+    "%s in the first response sees servers that finished preparing while the model answered",
+    async (_label, searchArguments) => {
+      let releasePreparation!: () => void;
+      let prepared = false;
+      const preparation = new Promise<void>((resolve) => {
+        releasePreparation = () => {
+          prepared = true;
+          resolve();
+        };
+      });
+      const agent = agentWith(firstPartyTool("request_human_input", "Human input"));
+      const originalGetAllTools = agent.getAllTools.bind(agent);
+      agent.getAllTools = (async (runContext: unknown) => [
+        ...(await originalGetAllTools(runContext)),
+        ...(prepared ? [weatherTool()] : []),
+      ]) as typeof agent.getAllTools;
+      const runtime = installLazyToolRuntime(
+        agent,
+        "generic_dispatch",
+        new Set([SERVER_ID]),
+        preparation,
+        new Set([SERVER_ID]),
+        new Set(),
+        undefined,
+        true,
+      );
+      // Preparation settles after the first request carried its tools but
+      // before the model's answer is processed, as when a provider takes a
+      // few seconds to answer and the servers finish listing meanwhile.
+      class SettlingModel extends ScriptedStreamingModel {
+        override async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+          if (this.requests.length === 0) {
+            releasePreparation();
+            await preparation;
+          }
+          yield* super.getStreamedResponse(request);
+        }
+      }
+      const model = new SettlingModel([
+        [
+          {
+            type: "function_call",
+            callId: "first-search",
+            name: "tool_search",
+            arguments: JSON.stringify(searchArguments),
+          },
+        ],
+        [finalMessage("done")],
+      ]);
+      await runStreamed(agent, model, runtime);
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
+        WEATHER_TOOL,
+      );
+      const searched = (model.requests[1]!.input as { type?: string; output?: unknown }[]).find(
+        (item) => item.type === "function_call_result",
+      ) as { output: { text?: string } | string };
+      const text = typeof searched.output === "string" ? searched.output : searched.output.text!;
+      const output = JSON.parse(text) as {
+        tools: Array<{ name: string }>;
+        unavailable?: string[];
+        suggestions?: Array<{ name: string }>;
+      };
+      const surfaced = [...output.tools, ...(output.suggestions ?? [])].map((entry) => entry.name);
+      expect(surfaced).toContain(WEATHER_TOOL);
+      if ("names" in searchArguments) {
+        expect(output.tools.map((entry) => entry.name)).toEqual([WEATHER_TOOL]);
+        expect(output.unavailable).toEqual([]);
+      }
+    },
+  );
+
   test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
     const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);
     const catalog = names.map((name) => firstPartyTool(name, "🧭".repeat(500)));

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql, type SQL } from "drizzle-orm";
@@ -12,7 +12,6 @@ import {
   withWorkspaceSubjectRls,
   type Database,
 } from "../src";
-import { parseConcurrentIndexMigration } from "../src/migrate";
 
 let shared: SharedTestDatabase;
 let driver: postgres.Sql;
@@ -47,21 +46,6 @@ type PlanNode = {
   "Shared Read Blocks"?: number;
   Plans?: PlanNode[];
 };
-
-test("personal-state probe index is rolling, concurrent and idempotent", async () => {
-  const migration = "0901_session_personal_state_probes.sql";
-  const source = await readFile(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
-  expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-  const parsed = parseConcurrentIndexMigration(migration, source)!;
-  expect(parsed.indexName).toBe("session_pins_session_subject_idx");
-  await shared.admin.unsafe(parsed.statement);
-  await shared.admin.unsafe(parsed.statement);
-  const [index] =
-    await shared.admin`select indisvalid, indisready, pg_get_indexdef(indexrelid) as definition
-    from pg_index where indexrelid='session_pins_session_subject_idx'::regclass`;
-  expect(index).toMatchObject({ indisvalid: true, indisready: true });
-  expect(index!.definition).toContain("(session_id, subject_id)");
-});
 
 test("shallow workspace totals only read cursors contributing to unarchived groups", async () => {
   const identity = crypto.randomUUID();

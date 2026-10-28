@@ -38,6 +38,15 @@ import { createManagedAuthDatabasePool } from "../src/auth/managed-auth";
 //   1. the Secret update gives previous = old and current = new (the files are
 //      swapped the way kubelet does it: one atomic symlink switch);
 //   2. ALTER ROLE to the new password: each pool takes one 28P01, then sticks;
+//   2b. a rollback drill right after the switch: ALTER ROLE back to the old
+//      password and, moments later, forward again. Each pool that meets it
+//      switches back and forward at once (no time-based grace), and logins
+//      still in flight with a replaced password never move a pool or use up
+//      an operation's attempts;
+//   2c. the mirrored rollback by file reversal: the Secret gets previous = new
+//      and current = old, so each pool reloads onto the new password (the one
+//      the server has) without a refusal; then ALTER ROLE back to the old
+//      password, and each pool switches exactly once;
 //   3. previous is cleared.
 // No operation may fail and no request may return 500.
 //
@@ -463,10 +472,81 @@ describe("runtime database password rotation", () => {
       expect(tally.count("candidates_exhausted")).toEqual({});
       expect(failures).toEqual([]);
 
-      // 3. Previous is cleared: the only candidate is the new password, which
+      // 2b. Rollback drill, within seconds of the switch (as a failed rotation
+      //     script's rollback does): back to the old password, then forward.
+      await admin.unsafe(`alter role opengeni_app password '${originalPassword}'`);
+      await Bun.sleep(1_500);
+      await admin.unsafe(`alter role opengeni_app password '${rotated}'`);
+      await Bun.sleep(4_000);
+      await restartListener(current);
+      const drillSwitches = tally.count("candidate_switched");
+      const drillRefusals = tally.count("candidate_refused");
+      const staleRefusals: Record<string, number> = {};
+      for (const { pool, event } of tally.events) {
+        if (event.type === "candidate_refused" && event.stale) {
+          staleRefusals[pool] = (staleRefusals[pool] ?? 0) + 1;
+        }
+      }
+      console.info(
+        "[rotation-test] after the rollback drill",
+        JSON.stringify({ switches: drillSwitches, refusals: drillRefusals, staleRefusals }),
+      );
+      for (const pool of pools) {
+        // Every pool ends on the new password: forward, and back and forth
+        // again for each pool that opened a connection during the drill.
+        expect(drillSwitches[`g1:${pool}`]! % 2).toBe(1);
+        // A handful of refused logins per pool for three password changes
+        // (#6210's attribution refused hundreds per pool in this drill).
+        expect(drillRefusals[`g1:${pool}`]!).toBeLessThanOrEqual(12);
+      }
+      expect(tally.count("candidates_exhausted")).toEqual({});
+      expect(failures).toEqual([]);
+
+      // 2c. Mirrored rollback: reverse the files first. The reload starts over
+      //     at the first candidate, now the new password the server still
+      //     has, so nothing is refused or switched.
+      const beforeReversal = tally.events.length;
+      const since = (mark: number, type: DatabaseCredentialEvent["type"]) => {
+        const counts: Record<string, number> = {};
+        for (const { pool, event } of tally.events.slice(mark)) {
+          if (event.type === type) counts[pool] = (counts[pool] ?? 0) + 1;
+        }
+        return counts;
+      };
+      await volume.update({
+        "previous-password": `${rotated}\n`,
+        password: `${originalPassword}\n`,
+      });
+      await Bun.sleep(2_500);
+      await restartListener(current);
+      expect(since(beforeReversal, "candidate_refused")).toEqual({});
+      expect(since(beforeReversal, "candidate_switched")).toEqual({});
+      expect(failures).toEqual([]);
+      //     Then the server goes back to the old password: one switch per pool.
+      const beforeRestore = tally.events.length;
+      await admin.unsafe(`alter role opengeni_app password '${originalPassword}'`);
+      await Bun.sleep(5_000);
+      await restartListener(current);
+      const restoreSwitches = since(beforeRestore, "candidate_switched");
+      console.info(
+        "[rotation-test] after the file-reversal rollback",
+        JSON.stringify({
+          switches: restoreSwitches,
+          refusals: since(beforeRestore, "candidate_refused"),
+        }),
+      );
+      const restoreRefusals = since(beforeRestore, "candidate_refused");
+      for (const pool of pools) {
+        expect(restoreSwitches[`g1:${pool}`]).toBe(1);
+        expect(restoreRefusals[`g1:${pool}`]!).toBeLessThanOrEqual(6);
+      }
+      expect(tally.count("candidates_exhausted")).toEqual({});
+      expect(failures).toEqual([]);
+
+      // 3. Previous is cleared: the only candidate is the old password, which
       //    every pool already uses, so nothing is refused or switched.
       const before = tally.events.length;
-      await volume.update({ password: `${rotated}\n` });
+      await volume.update({ password: `${originalPassword}\n` });
       await Bun.sleep(2_500);
       await restartListener(current);
       const afterClear = tally.events.slice(before).map(({ event }) => event.type);

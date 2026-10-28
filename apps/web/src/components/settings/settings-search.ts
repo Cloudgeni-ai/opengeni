@@ -44,7 +44,6 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "vault",
     "variables",
     "environment variables",
-    "variable sets",
     "tokens",
     "one-time codes",
     "totp",
@@ -68,6 +67,10 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "chrome extension",
     "app-shots",
     "microphone",
+    "dictation",
+    "voice typing",
+    "speech to text",
+    "shortcut",
     "privacy",
   ],
   "organization:general": ["organization name", "organization id", "rename organization"],
@@ -153,6 +156,21 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   ],
   "workspace:api-keys": [
     { label: "Create API key", keywords: ["new key", "token"], search: { key: "new" } },
+  ],
+  // Only in the desktop app, like its page: dictating into any app with a shortcut.
+  "workspace:/workspaces/$workspaceId/computer-use": [
+    {
+      label: "Dictation",
+      keywords: [
+        "dictate",
+        "voice typing",
+        "speech to text",
+        "shortcut",
+        "hotkey",
+        "vocabulary",
+        "push to talk",
+      ],
+    },
   ],
   "workspace:developer": [
     { label: "Add webhook", keywords: ["events", "callback"], search: { view: "new-webhook" } },

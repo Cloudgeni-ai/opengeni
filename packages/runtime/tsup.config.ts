@@ -1,10 +1,11 @@
 import { defineConfig } from "tsup";
 
-// @opengeni/runtime has eleven public entry points:
+// @opengeni/runtime has twelve public entry points:
 //   .             -> the full agent loop
 //   ./sandbox     -> the API-safe sandbox leaf
 //   ./skill-library -> immutable bundled skill metadata
 //   ./mcp-network -> the credential-bearing MCP network leaf
+//   ./calling-workspace -> the EU-only calling-workspace header leaf
 //   ./model-call  -> stateless single model calls (no tools, no agent loop)
 //   ./gmail-rest-mcp -> the bounded API-safe Gmail transport adapter
 //   ./google-calendar-rest-mcp -> the bounded API-safe Google Calendar transport adapter
@@ -21,6 +22,7 @@ export default defineConfig({
     "sandbox/index": "src/sandbox/index.ts",
     "skill-library": "src/skill-library.ts",
     "mcp-network": "src/mcp-network.ts",
+    "calling-workspace": "src/calling-workspace.ts",
     "model-call": "src/model-call.ts",
     "gmail-rest-mcp": "src/gmail-rest-mcp.ts",
     "google-calendar-rest-mcp": "src/google-calendar-rest-mcp.ts",

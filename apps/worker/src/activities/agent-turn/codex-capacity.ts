@@ -1,4 +1,3 @@
-import { readSubscriptionProviderCutoverState, withRlsContext } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
 
 import type {
@@ -9,7 +8,6 @@ import type {
 
 import { createTurnCredentialLeases } from "./credential-leases";
 import { selectCoreCodexTurnCapacity } from "./codex-core-capacity";
-import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 
 import type { ClaimTurnOk } from "./claim";
 import type {
@@ -55,33 +53,11 @@ export type CapacityPhaseDeps = {
 
 export type CapacityPhaseOutcome = { exit: RunAgentTurnResult } | { ok: true };
 
-export type CodexCutoverState = "not_configured" | "disabled" | "enabled";
-
-/** Missing or disabled cutover state is maintenance, never legacy routing. */
-export function codexCutoverDisposition(state: CodexCutoverState): "core" | "fail_closed" {
-  return state === "enabled" ? "core" : "fail_closed";
-}
-
 export async function selectCodexTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
-  // This phase is invoked for every turn. Only Codex-billed work may read or
-  // be blocked by Codex's one-way cutover state.
+  // This phase is invoked for every turn; only Codex-billed work is placed
+  // on the shared core here.
   if (!deps.billingState.isCodexTurn) return { ok: true };
-
-  const cutover = await withRlsContext(
-    deps.db,
-    { accountId: deps.input.accountId, workspaceId: deps.input.workspaceId },
-    (scoped) =>
-      readSubscriptionProviderCutoverState(scoped, {
-        accountId: deps.input.accountId,
-        provider: "codex",
-      }),
-  );
-  const disposition = codexCutoverDisposition(cutover);
-  // Once the one-way migration has created a provider row, an explicitly
-  // disabled cutover must never silently route work back through the legacy
-  // Codex tables; an enabled one places the turn on the shared core.
-  if (disposition === "fail_closed") throw subscriptionCoreCutoverDisabledFailure();
   return await selectCoreCodexTurnCapacity(deps);
 }

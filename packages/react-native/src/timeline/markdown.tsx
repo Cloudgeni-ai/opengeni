@@ -36,6 +36,12 @@ import {
   type NativeTimelineTheme,
 } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { NativeInteractiveAnswer } from "./interactive-answer";
+import {
+  INTERACTIVE_ANSWER_FENCE,
+  trailingOpenFence,
+} from "@opengeni/react/interactive-answer-model";
+import { tableColumns, tableLayout } from "./markdown-table-layout";
 
 /**
  * One parser for every message, configured like the web's `remark-gfm`: no typographic
@@ -291,18 +297,6 @@ function tableRows(table: AstNode): string[][] {
   return rows;
 }
 
-/**
- * Content-sized columns, as a browser's auto table layout lays them out: short
- * columns keep their natural width on one line, long ones share the rest.
- */
-function tableColumns(rows: string[][]): { width?: number; grow: number }[] {
-  const count = Math.max(0, ...rows.map((row) => row.length));
-  return Array.from({ length: count }, (_, index) => {
-    const longest = Math.max(1, ...rows.map((row) => row[index]?.length ?? 0));
-    return longest <= 14 ? { width: Math.ceil(longest * 8.4) + 20, grow: 0 } : { grow: longest };
-  });
-}
-
 /** A cell's column: its sibling index in the row (set by the AST builder). */
 function cellIndex(node: { index?: unknown }): number {
   return typeof node.index === "number" && node.index >= 0 ? node.index : 0;
@@ -310,25 +304,6 @@ function cellIndex(node: { index?: unknown }): number {
 
 /** Explicit column widths for a measured table; empty until the table lays out. */
 const TableColumnsContext = createContext<number[]>([]);
-
-function columnWidths(columns: { width?: number; grow: number }[], available: number): number[] {
-  const fixed = columns.reduce((sum, column) => sum + (column.width ?? 0), 0);
-  const growth = columns.reduce(
-    (sum, column) => sum + (column.width === undefined ? column.grow : 0),
-    0,
-  );
-  const rest = Math.max(0, available - fixed);
-  if (growth === 0) return columns.map((column) => column.width ?? 0);
-  // Long columns share the rest by length, each keeping a readable minimum.
-  return columns.map((column) =>
-    column.width !== undefined ? column.width : Math.max(64, (rest * column.grow) / growth),
-  );
-}
-
-/** A column's comfortable width when the table is wider than the screen. */
-function naturalColumnWidth(column: { width?: number; grow: number }): number {
-  return column.width ?? Math.min(280, Math.max(120, Math.ceil(column.grow * 7.6) + 20));
-}
 
 function MarkdownTable({
   node,
@@ -343,16 +318,15 @@ function MarkdownTable({
   const m = useNativeTimelineMessages();
   const rows = useMemo(() => tableRows(node), [node]);
   const columns = useMemo(() => tableColumns(rows), [rows]);
-  const natural = useMemo(() => columns.map(naturalColumnWidth), [columns]);
-  const naturalWidth = natural.reduce((sum, width) => sum + width, 0);
   const [available, setAvailable] = useState(0);
   // Web wraps tables in overflow-x-auto: a table that cannot fit keeps readable
   // columns and scrolls sideways instead of crushing every cell.
-  const scrolls = available > 0 && naturalWidth > available;
-  const widths = useMemo(
-    () => (available > 0 ? (scrolls ? natural : columnWidths(columns, available)) : []),
-    [available, columns, natural, scrolls],
+  const layout = useMemo(
+    () => (available > 0 ? tableLayout(columns, available) : { widths: [], scrolls: false }),
+    [available, columns],
   );
+  const { widths, scrolls } = layout;
+  const scrollWidth = widths.reduce((sum, width) => sum + width, 0);
   const [copied, setCopied] = useState(false);
   // A soft edge says "more columns this way" until the reader reaches the end.
   const [atEnd, setAtEnd] = useState(false);
@@ -381,7 +355,7 @@ function MarkdownTable({
             }}
             accessibilityHint={m.scrollTableHint}
           >
-            <View style={{ width: naturalWidth }}>{body}</View>
+            <View style={{ width: scrollWidth }}>{body}</View>
           </ScrollView>
           {atEnd ? null : (
             <Svg
@@ -587,6 +561,15 @@ function webRules(
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
       const info = (node as { sourceInfo?: unknown }).sourceInfo;
       const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
+      if (language === INTERACTIVE_ANSWER_FENCE) {
+        return (
+          <AnswerFence
+            key={node.key}
+            content={content}
+            renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
+          />
+        );
+      }
       const kind = interactivePreviewKind(language);
       if (kind && media.renderInteractiveBlock) {
         return (
@@ -696,21 +679,7 @@ export interface MarkdownLinkOptions {
 /** Text groups whose only link the host drew as a block, so they render as views. */
 const BLOCK_LINK_GROUPS = new WeakSet<object>();
 
-/** Whether the message ends inside an unclosed fence, and that fence's body. */
-export function trailingOpenFence(text: string): string | null {
-  let open: { char: string; length: number; lines: string[] } | null = null;
-  for (const line of text.split("\n")) {
-    if (open) {
-      const close = /^ {0,3}([`~]{3,})\s*$/.exec(line);
-      if (close && close[1]![0] === open.char && close[1]!.length >= open.length) open = null;
-      else open.lines.push(line);
-      continue;
-    }
-    const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (start) open = { char: start[1]![0]!, length: start[1]!.length, lines: [] };
-  }
-  return open ? open.lines.join("\n") : null;
-}
+export { trailingOpenFence };
 
 const FenceStateContext = createContext<{ openTail: string | null; streaming: boolean }>({
   openTail: null,
@@ -730,6 +699,20 @@ function InteractiveFence({
   const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
   const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
   return <>{render({ kind, content: state === "complete" ? content : "", state })}</>;
+}
+
+/** An `opengeni-ui` answer: drawn natively, growing in place while it streams. */
+function AnswerFence({
+  content,
+  renderSource,
+}: {
+  content: string;
+  renderSource: () => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <NativeInteractiveAnswer source={content} state={state} renderSource={renderSource} />;
 }
 
 /** Plain image URLs load directly; retained files need the host's `renderImage`. */
@@ -795,8 +778,12 @@ function TrimmedMarkdown({
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
   }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
+  // Previews and interactive answers both need to know whether the last fence is still open.
   const openTail = useMemo(
-    () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
+    () =>
+      media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE)
+        ? trailingOpenFence(text)
+        : null,
     [media.renderInteractiveBlock, text],
   );
   const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);

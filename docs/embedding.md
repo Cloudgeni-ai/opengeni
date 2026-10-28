@@ -342,7 +342,7 @@ precedence, and host-managed connections (`authoritySource: "host"`) keep their
 own row.
 
 The agent's cards for the deployment's reviewed Microsoft integrations
-(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+(Outlook Mail, Calendar and Contacts, OneDrive, SharePoint and Teams) render the same way,
 with `SessionIntegrationCapabilityCard`. Each person connects their own
 Microsoft account, which installs the integration's reviewed tools for that
 account alone, so these cards need `sessions:control` plus

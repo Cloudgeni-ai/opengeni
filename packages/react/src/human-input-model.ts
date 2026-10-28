@@ -33,6 +33,8 @@ export type HumanInputFormMessages = {
   title: string;
   description: string;
   submit: string;
+  /** The submit label when the request asks one question; falls back to {@link submit}. */
+  submitOne?: string;
   skip: string;
   submitting: string;
   other: string;
@@ -83,6 +85,7 @@ export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMe
   /** Multi-question chrome has no default subtitle; hosts may still override. */
   description: "",
   submit: t("humanInputModel.sendAnswers"),
+  submitOne: t("humanInputModel.sendAnswer"),
   skip: t("humanInputModel.skip"),
   submitting: t("humanInputModel.submitting"),
   other: t("humanInputModel.other"),
@@ -135,6 +138,20 @@ export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMe
   secretSaved: (vaultName, itemName) =>
     t("humanInputModel.savedToVaultnameItemname", { vaultName, itemName }),
 });
+
+/**
+ * The default copy overlaid with a host's. A host that sets its own submit
+ * label keeps it for single questions too, unless it also sets submitOne.
+ */
+export function mergeHumanInputFormMessages(
+  defaults: HumanInputFormMessages,
+  overrides?: Partial<HumanInputFormMessages>,
+): HumanInputFormMessages {
+  const merged = { ...defaults, ...overrides };
+  if (overrides?.submit !== undefined && overrides.submitOne === undefined)
+    merged.submitOne = overrides.submit;
+  return merged;
+}
 
 /**
  * Text, single- and multi-select drafts. Secret questions are not drafted:

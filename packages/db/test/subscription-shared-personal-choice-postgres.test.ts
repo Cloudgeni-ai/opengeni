@@ -6,8 +6,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
-import { readFile } from "node:fs/promises";
-import postgres from "postgres";
+
 import type { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
   connectSubscriptionCoreCodexConnection,
@@ -235,27 +234,6 @@ async function accept(f: Fixture, requestSubject: string | null, acceptingSubjec
 }
 
 describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema owner", () => {
-  test("maintenance activation rejects missing role inventory and live old/new application sessions before changes", async () => {
-    await rawRows(client!.db, sql`select current_user`);
-    const migration = await readFile(
-      new URL("../drizzle/0749_subscription_shared_personal_choice.sql", import.meta.url),
-      "utf8",
-    );
-    const owner = postgres(database!.ownerUrl, { max: 1, onnotice: () => undefined });
-    try {
-      for (const roles of ["", "[]", '["opengeni_app"]']) {
-        await expect(
-          owner.begin(async (tx) => {
-            await tx`select set_config('opengeni.migration_application_roles', ${roles}, true)`;
-            await tx.unsafe(migration);
-          }),
-        ).rejects.toMatchObject({ code: "55000" });
-      }
-    } finally {
-      await owner.end();
-    }
-  });
-
   test("live workspace policy and participant removal revoke use, not the frozen entry", async () => {
     for (const change of ["workspace_policy", "participation", "resource_revocation"] as const) {
       const f = await fixture();

@@ -288,7 +288,7 @@ export type SessionProxyHandlerOptions = {
    * {@link SessionProxyCreateInput}; this hook returns the complete create
    * request (agent, tools, MCP servers, Skills, instructions, model policy), and
    * the relay refuses the routes that would change that setup afterwards: a
-   * chat's agent, tool policy, Skills, variable sets, usage limit, visibility,
+   * chat's agent, tool policy, Skills, usage limit, visibility,
    * active sandbox and Codex account, forks, and `chat/completions`.
    *
    * Without it, the browser creates chats with Opengeni's own create request,
@@ -483,7 +483,6 @@ const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
   "PUT agent",
   "PUT tool-policy",
   "PUT skills",
-  "PUT variable-sets",
   "PUT usage-limit",
   "PUT visibility",
   "POST active-sandbox",

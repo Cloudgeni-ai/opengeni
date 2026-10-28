@@ -38,10 +38,23 @@ Rules:
 - An `eu` claim must also fit its route (`modelResidencyRouteProblems`): a
   Bedrock upstream id with a non-EU inference profile prefix (`us.`,
   `us-gov.`, `apac.`, `jp.`, `au.`, `ca.`, `global.`, any case), a
-  `bedrock_geo_profile` whose id does not start with `eu.`, or an endpoint on a
+  `bedrock_geo_profile` whose id does not start with `eu.`, an endpoint on a
   known global host (`NON_EU_MODEL_HOSTS`, exact host match ignoring a
-  trailing dot) is wrong. Every resolver, including built-in models, treats
-  such a claim as unknown. `OPENGENI_MODEL_PROVIDERS_JSON`,
+  trailing dot), or a deployment-path endpoint (`.../deployments/{name}`,
+  Azure's form) whose deployment is not the model's upstream id is wrong. Such
+  an endpoint runs its deployment whatever model the request names, so only
+  that one model can be EU on it; this includes the built-in Azure provider
+  configured with `OPENGENI_AZURE_OPENAI_ENDPOINT` and
+  `OPENGENI_AZURE_OPENAI_DEPLOYMENT` and no base URL. Every resolver, including built-in models, treats
+  such a claim as unknown. The path is read the way the provider reads it
+  (`modelEndpointDeployment`): segments percent-decoded, empty segments
+  dropped, `deployments` in any case. A deployment path whose name can't be
+  read is never EU. Once a segment holds or hides `deployments` (in any case,
+  percent-encoded, or inside a longer segment), the name and every later
+  segment must be plain `[A-Za-z0-9._-]+` and not `.` or `..`, with no second
+  marker; anything else (a missing name, `..%2F`, `%5C`, `;`, `deployments;`)
+  is unknown.
+  `OPENGENI_MODEL_PROVIDERS_JSON`,
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
   stored database document is never refused for it, so a later release that
   adds a host or prefix cannot take the catalog down. Names only ever reject a
@@ -101,3 +114,95 @@ Declaration example (a registry provider in the deployment catalog):
   "models": [{ "id": "azure-eu/gpt-eu", "upstreamModelId": "gpt-eu" }]
 }
 ```
+
+## Enforcement
+
+The setting is read per workspace with `isWorkspaceEuOnly` (today it follows
+the organization). When a workspace is EU-only, every model call must run on an
+EU route, and nothing falls back to a route that is not EU.
+
+- **Settings.** `settingsWithModelProviderCredentials`, the overlay every run,
+  title, model call and compaction uses, reads the setting in the same
+  transaction as its provider inputs and sets `requiredModelGeography: "eu"`
+  on the run's settings before any overlay that resolves a route
+  (`settingsWithInferenceResidency` does the same on its own). It is per-run
+  only and never read from the environment. A failed read throws.
+- **Resolution.** `resolveTurnModel` refuses a route whose live residency
+  record is not EU, and refuses an unlisted model instead of using the legacy
+  built-in client. The built-in fallback binding in `MultiProviderModelProvider`
+  checks the built-in model's record the same way.
+- **Transport.** Every provider adapter (OpenAI and Azure Responses and Chat,
+  Anthropic Messages, Codex, SuperGrok, gateways) sends through
+  `instrumentedModelFetch`, which checks each request before it is sent:
+  - A client built from EU settings carries the requirement, so it refuses any
+    request whose provider and request-body model are not an EU route
+    (`euModelRoutes`), wherever it is used. When the URL calls a deployment by
+    path (`/openai/deployments/{name}/`), that deployment must be an EU route
+    too, because the provider runs it rather than the body's model; one
+    whose name can't be read is refused. Clients for EU and other settings
+    are never shared through the client cache.
+  - The body's model is read from the object an SDK request body encodes, so
+    a request is never buffered for the check; only other stream bodies are
+    read from a copy.
+  - The run's context (`withInferenceResidency`) adds the same check for
+    clients built before the setting was known. A worker turn starts with an
+    unresolved context that refuses every request until the claim binds it,
+    and an EU context never widens again. A nested context applies on top of
+    the contexts around it: their requirements combine, and it refuses while
+    any of them is unresolved.
+  - Other provider requests (images, audio, files) are refused under EU unless
+    they are `GET` or `HEAD` reads such as model lists, with or without a
+    body. Side features check their own routes before calling.
+  - A refusal is final. The OpenAI SDK does not retry it and surfaces the
+    typed error itself, not a connection error.
+- **Worker.** Each attempt reads the setting again right after its claim and
+  before any model call (`settingsWithTurnInferenceResidency`), so a setting
+  turned on after the claim still applies. The narrowed settings replace the
+  claim's for the rest of the attempt: resolution, run settings and every
+  client built from them carry the requirement. A turn whose route is not EU
+  fails once with `region_restricted`, not retryable, however an SDK wrapped
+  the refusal. A turn already running keeps its route until its next attempt;
+  the transport check still applies to every request it sends.
+- **API.** The model-call API returns `422` with code `region_restricted`.
+
+A refusal is `InferenceRegionRestrictedError` (code `region_restricted`), whose
+message says the model is not supported in EU.
+
+## Content between workspaces
+
+Content from an EU-only workspace reaches another Opengeni workspace only when
+that workspace is EU-only too: agents reading or messaging chats in another
+workspace, and Opengeni's own MCP endpoints added to a workspace as a remote
+MCP server, are refused with `422 region_restricted` otherwise, and fail
+closed. EU-only covers Opengeni's own inference and content moving between
+Opengeni workspaces. It does not cover outside agents an organization connects
+itself (organization MCP clients, API keys, desktop clients): an
+organization's API key handed to an agent and used directly, including inside
+another Opengeni workspace's sandbox or behind a relay, counts as connecting an
+outside agent and stays allowed. Saving that key as an MCP credential in a
+workspace is checked both ways and refused when either side's EU-only content
+may not reach the other. Details and enforcement points are in
+[organization-tenancy.md](organization-tenancy.md).
+
+## Recorded region
+
+Every agent-session model call that writes a model-call fact (turn responses,
+the aggregate billing fallback, compaction and session titles) records where
+the route that served it processes data. Side-feature calls (decision models,
+transcription, embeddings, web search and the standalone model-call API) record
+it on `usage_events.processing_residency` instead (#6221). The worker resolves
+the record from the route that actually served the call (the resolved
+`ConfiguredModel.residency`, or `builtinModelResidency` for the built-in
+fallback), never from a name, and stores its claim
+(`ModelCallProcessingResidencyV1`: `geography`, `deploymentType`, `regions`,
+never evidence) on the call's `model_call_facts.processing_residency` and its
+durable `agent.model.usage` event as `processingResidency`. The independent
+title freezes its accepted route's record in its request; a title whose route
+was never resolved records `unknown`, not the turn's record. Facts rebuilt from
+usage events keep the event's value. A new call whose route has no readable
+record is recorded as `unknown`; null means only that the call was recorded
+before calls carried one (migration 1030). A stored `eu` claim reads back as
+`eu` only under the same rules as the route record (an EU-capable deployment
+type and, for Azure and Bedrock, EU regions only); anything else reads as
+`unknown`. Insights calls expose each call's `processingGeography`; it is
+undefined in responses from servers older than this release.

@@ -1967,20 +1967,6 @@ impl<P: Platform + 'static> Supervisor<P> {
                     let _ = client.flush().await;
                 }));
             }
-            Route::LegacyGit(git) => {
-                let resource_policy = request.resource_policy;
-                self.spawn_git_adapter(
-                    link,
-                    client,
-                    &request,
-                    git,
-                    resource_policy,
-                    reply,
-                    label,
-                    reservation.expect("work reservation"),
-                    rpc_tasks,
-                );
-            }
             Route::Work(class) => {
                 let client = client.clone();
                 let platform = link.platform.clone();
@@ -2470,47 +2456,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         self.update_drain.accept_update(operation_id)
     }
 
-    /// Spawns a request/reply Git op as an engine job on its own task. The
-    /// adapter path fences epochs before the engine, exactly like the dispatch
-    /// table does for every other op.
-    #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
-    fn spawn_git_adapter(
-        &self,
-        link: &WorkspaceLink<P>,
-        client: &async_nats::Client,
-        request: &ControlRequest,
-        git: v1::GitRequest,
-        resource_policy: Option<v1::OperationResourcePolicy>,
-        reply: async_nats::Subject,
-        label: &'static str,
-        reservation: WorkReservation,
-        rpc_tasks: &mut JoinSet<()>,
-    ) {
-        let max_payload = client.server_info().max_payload;
-        let client = client.clone();
-        let platform = link.platform.clone();
-        let engine = self.engine.clone();
-        let scope = link.connection_id.clone();
-        let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
-        let request_id = request.request_id.clone();
-        spawn_admitted_rpc(rpc_tasks, reservation, async move {
-            let response = if request_epoch != 0 && request_epoch < held_epoch {
-                dispatch::fenced_reply(request_id, request_epoch, held_epoch)
-            } else {
-                crate::legacy::serve_git_scoped_with_policy(
-                    &engine,
-                    &platform,
-                    &scope,
-                    request_id,
-                    git,
-                    resource_policy,
-                )
-                .await
-            };
-            publish_response(&client, reply, response, label, max_payload).await;
-        });
-    }
-
     /// Spawns an `OpStart` onto its own task (admission may park) with the
     /// frame sink bound to the op's subject on the link's CURRENT bulk lane
     /// (`None` between generations — frames drop and OpAttach replay heals;
@@ -2959,8 +2904,6 @@ impl<P: Platform + 'static> Supervisor<P> {
 enum Route {
     /// Answered inline on the serve loop — liveness never enters admission.
     Liveness,
-    /// Runs as an engine job through the legacy git adapter.
-    LegacyGit(v1::GitRequest),
     /// Starts an op-stream job (admission may park; runs on its own task).
     OpStart(v1::OpStart),
     /// Op-control (cancel/query/attach): engine state + routing only — served
@@ -2974,14 +2917,12 @@ enum Route {
     Work(JobClass),
 }
 
-/// Classifies a decoded RPC. Request/reply Git is heavy (long-running and
-/// resource-owning); everything else platform-backed is light; `ping` bypasses
-/// admission entirely (liveness ⊥ work — invariant #4).
+/// Classifies a decoded RPC. Request/reply platform work is light; `ping`
+/// bypasses admission entirely (liveness ⊥ work — invariant #4).
 fn classify(request: &ControlRequest) -> Route {
     use v1::control_request::Op;
     match &request.op {
         Some(Op::Ping(_)) => Route::Liveness,
-        Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::OpRelease(_)) => {
             Route::OpControl
@@ -3322,7 +3263,6 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::FsMove(_)) => "fs_move",
         Some(Op::FsStat(_)) => "fs_stat",
         Some(Op::FsRemove(_)) => "fs_remove",
-        Some(Op::Git(_)) => "git",
         Some(Op::PtyOpen(_)) => "pty_open",
         Some(Op::PtyWrite(_)) => "pty_write",
         Some(Op::PtyResize(_)) => "pty_resize",
@@ -5178,7 +5118,6 @@ mod tests {
         let cases = [
             Op::Ping(v1::PingRequest::default()),
             Op::FsRead(v1::FsReadRequest::default()),
-            Op::Git(v1::GitRequest::default()),
             Op::Metrics(v1::MetricsRequest::default()),
         ];
         for op in cases {
@@ -5195,7 +5134,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_routes_liveness_git_and_classed_work() {
+    fn classify_routes_liveness_and_classed_work() {
         use v1::control_request::Op;
 
         let request = |op| ControlRequest {
@@ -5212,11 +5151,7 @@ mod tests {
             }))),
             Route::Liveness
         ));
-        // Git runs as an engine job through its adapter; fs ops are light.
-        assert!(matches!(
-            classify(&request(Op::Git(v1::GitRequest::default()))),
-            Route::LegacyGit(_)
-        ));
+        // Fs ops are light.
         assert!(matches!(
             classify(&request(Op::FsRead(v1::FsReadRequest::default()))),
             Route::Work(JobClass::Light)
@@ -5251,7 +5186,6 @@ mod tests {
                 "connection_missing",
                 false,
             ),
-            (RenewNowError::LegacyOrigin, "legacy_origin", false),
             (RenewNowError::LocalState, "local_state_unavailable", false),
         ] {
             let response = credential_renew_response("r2".into(), Err(failure));
@@ -5741,7 +5675,7 @@ mod tests {
         // Exercise the periodic renewal path and the same state reconciliation
         // as the file watcher, not just the short quiet interval after rejection.
         let mut diagnostics = crate::credential_renewal::RenewalDiagnostics::default();
-        crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+        crate::credential_renewal::renew_due_connections(&mut diagnostics)
             .await
             .unwrap();
         let listener = renewal_server.await.unwrap();
@@ -5756,7 +5690,7 @@ mod tests {
             let mut suspended = rejected.clone();
             suspended.authentication_state = saved.authentication_state;
             updates.send(vec![suspended, healthy.clone()]).unwrap();
-            crate::credential_renewal::renew_due_connections(&api_url, &mut diagnostics)
+            crate::credential_renewal::renew_due_connections(&mut diagnostics)
                 .await
                 .unwrap();
         }

@@ -1,6 +1,16 @@
 import { isDirectModelId } from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { configuredProviders, resolveModelProvider } from "@opengeni/config";
+import {
+  builtinModelResidency,
+  configuredProviders,
+  modelRouteMeetsResidencyRequirement,
+  resolveModelProvider,
+} from "@opengeni/config";
+import {
+  InferenceRegionRestrictedError,
+  inferenceResidencyRequirement,
+  type InferenceResidencyRequirement,
+} from "./inference-residency";
 import {
   OpenAIChatCompletionsModel,
   type Model,
@@ -379,12 +389,13 @@ export function buildModelInstance(
   provider: ResolvedModelProvider,
   client: OpenAI,
   modelId: string,
+  residency: InferenceResidencyRequirement | null = null,
 ): Model {
   if (provider.api === "anthropic-messages")
     return new AnthropicMessagesModel(
       provider,
       modelId,
-      instrumentedModelFetch(provider.id, globalThis.fetch),
+      instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
     );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
@@ -410,13 +421,27 @@ export function resolveTurnModel(
 } | null {
   const resolved = resolveModelProvider(settings, modelId);
   if (!resolved) {
+    // EU-only inference has no unlisted-model fallback: the legacy global
+    // client is not an EU route.
+    if (settings.requiredModelGeography === "eu") {
+      throw new InferenceRegionRestrictedError(modelId);
+    }
     return null;
+  }
+  // The live residency record decides, on every resolution.
+  if (!modelRouteMeetsResidencyRequirement(settings, resolved.model.residency)) {
+    throw new InferenceRegionRestrictedError(modelId);
   }
   const client = buildProviderClient(resolved.provider, settings);
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
+    model: buildModelInstance(
+      resolved.provider,
+      client,
+      resolved.model.upstreamModelId,
+      inferenceResidencyRequirement(settings),
+    ),
     configured: resolved.model,
   };
 }
@@ -523,8 +548,16 @@ export class MultiProviderModelProvider implements ModelProvider {
     // JSON parse/stringify transport wrapper on the fallback path.
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
-    const client = buildProviderClient(builtin, this.settings);
     const modelId = modelName ?? this.settings.openaiModel;
+    if (
+      !modelRouteMeetsResidencyRequirement(
+        this.settings,
+        builtinModelResidency(this.settings, modelId),
+      )
+    ) {
+      throw new InferenceRegionRestrictedError(modelId);
+    }
+    const client = buildProviderClient(builtin, this.settings);
     return {
       provider: builtin,
       client,

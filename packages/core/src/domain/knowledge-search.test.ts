@@ -60,7 +60,7 @@ mock.module("@opengeni/db", () => ({
   SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
   // Knowledge queries and document indexing carry no inference model, so the
   // imported billing helper must never consult subscription-route funding.
-  readSubscriptionCoreRouteFunding: async () => {
+  readSubscriptionCoreFunding: async () => {
     throw new Error("Unexpected subscription-route funding lookup in knowledge fixture");
   },
   getWorkspaceModelPolicy: async () => creditPolicy,

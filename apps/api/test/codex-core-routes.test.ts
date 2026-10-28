@@ -11,9 +11,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { codexAccountJson } from "../src/routes/codex";
 
-// Codex routes for an organization whose Codex cutover row exists. db
-// accessors are spied; every legacy Codex accessor is poisoned so a core or
-// maintenance route that reached legacy state fails loudly.
+// Codex routes on the shared core. db accessors are spied.
 
 const DELEGATION_SECRET = "codex-core-routes-delegation-secret";
 const WS = "00000000-0000-4000-8000-0000000000a1";
@@ -149,71 +147,17 @@ function jwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
 }
 
-/** Connect and disconnect on the core never reach a legacy writer. */
-function poisonLegacyWriters() {
-  for (const legacy of [
-    "upsertCodexSubscriptionCredential",
-    "upsertOrganizationCodexSubscriptionCredential",
-    "ensureCodexRotationSettings",
-    "ensureOrganizationCodexRotationSettings",
-    "setInitialActiveCodexCredential",
-    "disconnectCodexAccount",
-    "disconnectAllCodexAccounts",
-    "disconnectOrganizationCodexAccount",
-    "withCodexCapacityMutation",
-    "withSessionCodexCapacityMutation",
-  ] as const) {
-    mock(legacy, async () => {
-      throw new Error(`legacy Codex writer ${legacy} must not run`);
-    });
-  }
-}
-
-function cutover(disposition: "core" | "maintenance") {
-  mock("readCodexCutoverDisposition", async () => disposition);
-  for (const legacy of [
-    "listCodexAccountStatuses",
-    "getCodexRotationSettings",
-    "getCodexAppsSettings",
-    "getWorkspaceCodexSubscriptionSource",
-    "getCodexCredentialStatus",
-    "updateCodexAllocatorEligibility",
-    "getSessionCodexAccounts",
-    "switchSessionCodexAccount",
-    "fetchCodexUsageForAccount",
-    "buildCodexTokenResolver",
-  ] as const) {
-    mock(legacy, async () => {
-      throw new Error(`legacy Codex accessor ${legacy} must not run`);
-    });
-  }
+function coreRoutes() {
+  mock("buildCodexTokenResolver", async () => {
+    throw new Error("legacy Codex token resolver must not run");
+  });
   mock("deliverSubscriptionCoreCodexWake", async (_db: never, wake: never) => {
     wakes.push(wake);
   });
 }
 
-describe("Codex routes with a disabled cutover", () => {
-  test("fail closed with a typed 503 and read no legacy state", async () => {
-    cutover("maintenance");
-    for (const path of ["/codex/accounts", "/codex/status", "/codex/source"]) {
-      const response = await app().request(`/v1/workspaces/${WS}${path}`, {
-        headers: { authorization: await bearer(["workspace:read"]) },
-      });
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({
-        error: {
-          status: 503,
-          code: "upstream_unavailable",
-          details: { reason: "subscription_core_cutover_disabled" },
-        },
-      });
-    }
-  });
-});
-
 describe("Codex Apps designation authenticates before reading organization state", () => {
-  test("unauthenticated and bearer callers learn nothing about the cutover row", async () => {
-    const cutoverRead = mock("readCodexCutoverDisposition", async () => "core");
+  test("unauthenticated and bearer callers are refused", async () => {
     for (const headers of [
       { "content-type": "application/json" },
       { "content-type": "application/json", authorization: await bearer(["connections:write"]) },
@@ -226,13 +170,12 @@ describe("Codex Apps designation authenticates before reading organization state
       expect(response.status).toBeGreaterThanOrEqual(400);
       expect(response.status).toBeLessThan(500);
     }
-    expect(cutoverRead.mock.calls.length).toBe(0);
   });
 });
 
-describe("Codex routes with an enabled cutover", () => {
+describe("Codex routes on the shared core", () => {
   test("GET accounts keeps the legacy shape, projected from the core", async () => {
-    cutover("core");
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
     mock("getSubscriptionCoreCodexAppsSettings", async () => ({
       credentialId: CONNECTION,
@@ -269,7 +212,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("GET status reports core readiness without a live provider probe", async () => {
-    cutover("core");
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
     const response = await app().request(`/v1/workspaces/${WS}/codex/status`, {
       headers: { authorization: await bearer(["workspace:read"]) },
@@ -303,7 +246,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("per-account credit consent writes use their own revision and wake placement", async () => {
-    cutover("core");
+    coreRoutes();
     const consent = mock("setSubscriptionCoreCodexExtraCredits", async () => ({
       result: {
         kind: "updated",
@@ -343,7 +286,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("allocator and source writes go to the core and wake waiters", async () => {
-    cutover("core");
+    coreRoutes();
     const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({
       result: {
         kind: "updated",
@@ -399,8 +342,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("a sign-in started on one API replica polls on another", async () => {
-    cutover("core");
-    poisonLegacyWriters();
+    coreRoutes();
     // Two independent processes configured like a real deployment: no
     // explicit manifest state secret, only the shared deployment secrets.
     const replica = () =>
@@ -439,8 +381,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("connect start and poll write through the core writer (M3 PR 3b)", async () => {
-    cutover("core");
-    poisonLegacyWriters();
+    coreRoutes();
     const headers = {
       authorization: await bearer(["workspace:read", "connections:write"]),
       "content-type": "application/json",
@@ -536,24 +477,10 @@ describe("Codex routes with an enabled cutover", () => {
         );
       }
     }
-    // The cutover can change while token exchange is in flight. Re-read it
-    // before deciding whether its core writer may still run.
-    let gateReads = 0;
-    mock("readCodexCutoverDisposition", async () => (++gateReads === 1 ? "core" : "maintenance"));
-    result = {
-      kind: "connected",
-      id: CONNECTION,
-      isNew: false,
-      ownership: "shared",
-      wake: { accountId: ACCOUNT, reason: "core_codex_connected" },
-    };
-    expect((await poll()).status).toBe(503);
-    expect(gateReads).toBe(2);
   });
 
   test("disconnect one and all map every core outcome (M3 PR 3b)", async () => {
-    cutover("core");
-    poisonLegacyWriters();
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
     mock("deliverSubscriptionCoreCodexWake", async (_db: never, wake: never) => {
       wakes.push(wake);
@@ -647,8 +574,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("a principal without connections:write reaches no writer", async () => {
-    cutover("core");
-    poisonLegacyWriters();
+    coreRoutes();
     for (const name of [
       "connectSubscriptionCoreCodexConnection",
       "disconnectSubscriptionCoreCodexConnection",
@@ -671,7 +597,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("live usage, per-account usage and refresh read through the core seam", async () => {
-    cutover("core");
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
     mock("resolveSubscriptionCoreCodexConnectionId", async (_db: never, input: never) =>
       (input as { connectionId: string }).connectionId === CONNECTION ? CONNECTION : null,
@@ -726,7 +652,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("a failed wake hint never turns a committed usage read into an error", async () => {
-    cutover("core");
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
     mock("deliverSubscriptionCoreCodexWake", async () => {
       throw new Error("wake delivery failed");
@@ -752,11 +678,8 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("the overview settles usage and reset details per account through the core seam", async () => {
-    cutover("core");
+    coreRoutes();
     mock("getSubscriptionCoreCodexWorkspaceProjection", async () => projection);
-    mock("listCodexResetRedemptionRecoveries", async () => {
-      throw new Error("legacy redemption recoveries must not run");
-    });
     const usage = {
       status: "ok" as const,
       planType: "pro",
@@ -798,7 +721,7 @@ describe("Codex routes with an enabled cutover", () => {
   });
 
   test("the session account view and pin use the core binding", async () => {
-    cutover("core");
+    coreRoutes();
     const sessionId = crypto.randomUUID();
     mock("getSessionAuthorizationFacts", async () => ({
       target: {
@@ -905,74 +828,53 @@ function organizationAdminRequest(path: string, init: RequestInit = {}): Request
   return request;
 }
 
-describe("organization Codex routes with a cutover row", () => {
-  function organizationCutover(disposition: "core" | "maintenance") {
-    cutover(disposition);
-    // The organization administrator check, with no legacy Codex read.
+describe("organization Codex routes", () => {
+  function organizationRoutes() {
+    coreRoutes();
+    // The organization administrator check.
     mock("assertOrganizationCodexAdministrator", async () => undefined);
-    for (const legacy of [
-      "getOrganizationCodexRotationSettings",
-      "listOrganizationCodexAccountStatuses",
-      "setActiveOrganizationCodexCredential",
-      "updateOrganizationCodexRotationSettings",
-      "renameOrganizationCodexAccount",
-    ] as const) {
-      mock(legacy, async () => {
-        throw new Error(`legacy Codex accessor ${legacy} must not run`);
-      });
-    }
   }
   const orgPath = `/v1/organizations/${ACCOUNT}/codex`;
   const orgAdmin = { accountId: ACCOUNT, workspaceId: null, subjectId: "user:org-admin" };
 
-  for (const mode of ["core"] as const) {
-    test(`organization usage keeps administrator authority outside workspace routing (${mode})`, async () => {
-      cutover(mode);
-      const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
-      mock("getOrganizationCodexRotationSettings", async () => {
-        throw new Error("organization usage must not read legacy Codex rotation settings");
-      });
-      const payload = {
-        status: "ok" as const,
-        planType: "pro",
-        weekly: null,
-        fiveHour: null,
-        limitReached: false,
-        fetchedAt: new Date().toISOString(),
-        credits: {
-          hasCredits: true,
-          unlimited: false,
-          overageLimitReached: false,
-          balance: "50.00",
-        },
-      };
-      const usage = mock("fetchOrganizationCodexUsageForAccount", async () => payload);
-      const path = `${orgPath}/accounts/${CONNECTION}/usage`;
-      const response = await app().fetch(organizationAdminRequest(path));
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ status: "ok", usage: payload });
-      expect(administrator.mock.calls[0]![1]).toEqual({
-        organizationId: ACCOUNT,
-        actorSubjectId: "user:org-admin",
-      });
-      expect(usage.mock.calls[0]![2]).toEqual({
-        organizationId: ACCOUNT,
-        actorSubjectId: "user:org-admin",
-        credentialId: CONNECTION,
-        mode,
-      });
-      const denied = await app().request(path);
-      expect(denied.status).toBe(401);
-      expect(usage).toHaveBeenCalledTimes(1);
-      cutover("maintenance");
-      const held = await app().fetch(organizationAdminRequest(path));
-      expect(held.status).toBe(503);
-      expect(usage).toHaveBeenCalledTimes(1);
+  test("organization usage keeps administrator authority outside workspace routing", async () => {
+    coreRoutes();
+    const administrator = mock("assertOrganizationCodexAdministrator", async () => undefined);
+    const payload = {
+      status: "ok" as const,
+      planType: "pro",
+      weekly: null,
+      fiveHour: null,
+      limitReached: false,
+      fetchedAt: new Date().toISOString(),
+      credits: {
+        hasCredits: true,
+        unlimited: false,
+        overageLimitReached: false,
+        balance: "50.00",
+      },
+    };
+    const usage = mock("fetchOrganizationCodexUsageForAccount", async () => payload);
+    const path = `${orgPath}/accounts/${CONNECTION}/usage`;
+    const response = await app().fetch(organizationAdminRequest(path));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok", usage: payload });
+    expect(administrator.mock.calls[0]![1]).toEqual({
+      organizationId: ACCOUNT,
+      actorSubjectId: "user:org-admin",
     });
-  }
+    expect(usage.mock.calls[0]![2]).toEqual({
+      organizationId: ACCOUNT,
+      actorSubjectId: "user:org-admin",
+      credentialId: CONNECTION,
+    });
+    const denied = await app().request(path);
+    expect(denied.status).toBe(401);
+    expect(usage).toHaveBeenCalledTimes(1);
+  });
 
   test("organization pause uses organization authority and preserves conflict responses", async () => {
-    organizationCutover("core");
+    organizationRoutes();
     const allocator = mock("setSubscriptionCoreCodexAllocator", async () => ({
       result: {
         kind: "updated",
@@ -1029,31 +931,8 @@ describe("organization Codex routes with a cutover row", () => {
     expect(unauthorized.status).toBe(403);
   });
 
-  test("a disabled cutover fails closed on every organization route", async () => {
-    organizationCutover("maintenance");
-    for (const [method, path, body] of [
-      ["GET", "/accounts", undefined],
-      ["POST", `/accounts/${CONNECTION}/activate`, {}],
-      ["PATCH", "/settings", { rotationEnabled: false }],
-      ["PATCH", `/accounts/${CONNECTION}`, { label: "x" }],
-      ["PATCH", `/accounts/${CONNECTION}/allocator`, { enabled: false, expectedVersion: 3 }],
-    ] as const) {
-      const response = await app().fetch(
-        organizationAdminRequest(`${orgPath}${path}`, {
-          method,
-          ...(body ? { body: JSON.stringify(body) } : {}),
-        }),
-      );
-      expect(response.status).toBe(503);
-      expect((await response.json()).error.details.reason).toBe(
-        "subscription_core_cutover_disabled",
-      );
-    }
-  });
-
   test("organization disconnect goes to the core writer with no workspace (M3 PR 3b)", async () => {
-    organizationCutover("core");
-    poisonLegacyWriters();
+    organizationRoutes();
     mock("getSubscriptionCoreOrganizationCodexProjection", async () => ({
       accounts: [],
       rotation: { activeCredentialId: null, rotationEnabled: true, rotationStrategy: "sharded" },
@@ -1086,7 +965,7 @@ describe("organization Codex routes with a cutover row", () => {
   });
 
   test("accounts, activate, settings and rename go to the core organization row", async () => {
-    organizationCutover("core");
+    organizationRoutes();
     const orgProjection = mock("getSubscriptionCoreOrganizationCodexProjection", async () => ({
       accounts: [{ ...account, label: "Renamed" }],
       rotation: projection.rotation,
@@ -1186,7 +1065,7 @@ describe("the organization access editor for a workspace-managed Codex account",
   const PERSON = "00000000-0000-4000-8000-0000000000d4";
   const path = `/v1/organizations/${ACCOUNT}/model-connections/codex/${CONNECTION}/access`;
   function editor() {
-    cutover("core");
+    coreRoutes();
     mock("assertOrganizationCodexAdministrator", async () => undefined);
     mock("getOrganizationAdministrationOverview", async () => ({
       workspaces: [
@@ -1317,10 +1196,6 @@ describe("the organization access editor for a workspace-managed Codex account",
 describe("the Codex Apps designation for a run", () => {
   const poison = poisonDb as never;
   function leaves() {
-    const legacy = mock("getCodexAppsCredentialAuthorizationForRun", async () => ({
-      credentialId: "legacy-apps",
-      ownerSubjectId: "user:owner",
-    }));
     mock("getWorkspaceGrant", async () => ({
       accountId: ACCOUNT,
       workspaceId: WS,
@@ -1335,27 +1210,11 @@ describe("the Codex Apps designation for a run", () => {
       accountId: ACCOUNT,
       workspaceId: WS,
     }));
-    return { legacy, core, lookup };
+    return { core, lookup };
   }
 
-  test("maintenance designates nothing and reads neither the legacy nor the core designation", async () => {
-    const { legacy, core, lookup } = leaves();
-    mock("readCodexCutoverDisposition", async () => "maintenance");
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
-    expect(await resolveCodexAppsDesignationForRun(poison, WS)).toBeNull();
-    expect(
-      await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "maintenance" }),
-    ).toBeNull();
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
-    expect(legacy.mock.calls.length).toBe(0);
-    expect(core.mock.calls.length).toBe(0);
-    // A known organization (or a known disposition) is never looked up.
-    expect(lookup.mock.calls.length).toBe(2);
-  });
-
   test("uses only an active core designation and preserves the credential-ID alias", async () => {
-    const { legacy, core, lookup } = leaves();
-    mock("readCodexCutoverDisposition", async () => "core");
+    const { core } = leaves();
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toEqual({
       source: "core",
       accountId: ACCOUNT,
@@ -1367,18 +1226,6 @@ describe("the Codex Apps designation for a run", () => {
       status: "needs_relogin",
     }));
     expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
-    expect(legacy.mock.calls.length).toBe(0);
-
-    const dispositionRead = mock("readCodexCutoverDisposition", async () => "maintenance");
-    expect(await resolveCodexAppsDesignationForRun(poison, WS, { accountId: ACCOUNT })).toBeNull();
-    expect(await resolveCodexAppsCredentialIdForRun(poison, WS)).toBeNull();
-    const lookupsBefore = lookup.mock.calls.length;
-    const readsBefore = dispositionRead.mock.calls.length;
-    expect(
-      await resolveCodexAppsDesignationForRun(poison, WS, { disposition: "maintenance" }),
-    ).toBeNull();
-    expect(lookup.mock.calls.length).toBe(lookupsBefore);
-    expect(dispositionRead.mock.calls.length).toBe(readsBefore);
     expect(core.mock.calls.length).toBeGreaterThan(0);
   });
 

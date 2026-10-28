@@ -3,7 +3,6 @@ import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
 import { createBrowserDeadlineCheckpointActivities } from "./activities/browser-deadline-checkpoint";
-import { createAutomationActivities } from "./activities/automations";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createRecordingActivities } from "./activities/recordings";
@@ -34,7 +33,6 @@ export function createControlActivitiesFromServices(
   resolveDocumentServices?: () => Promise<import("@opengeni/documents").DocumentServices>,
 ) {
   return {
-    ...createAutomationActivities(services),
     ...createDocumentActivities(services, resolveDocumentServices),
     ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
     ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),

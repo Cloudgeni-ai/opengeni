@@ -54,6 +54,7 @@ import {
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
+  environmentsEncryptionKeyBytes,
   resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
@@ -108,7 +109,6 @@ import type {
   EventingState,
   RenewalState,
   SandboxRuntimeState,
-  WorkspaceRefState,
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
@@ -129,7 +129,16 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
+import {
+  attemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
+import {
+  attachSessionTreeSecretValues,
+  attachTaskVaultSecretCapture,
+  currentAttemptSecretValues,
+} from "./secret-values";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -154,7 +163,6 @@ export type PrepareTurnToolPolicyDeps = {
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   runSettings: GovernanceModelOk["runSettings"];
   rigVersion: GovernanceModelOk["rigVersion"];
-  workspaceRefs: WorkspaceRefState;
 };
 
 export type PrepareTurnToolRuntimeDeps = {
@@ -218,16 +226,8 @@ export type PrepareTurnToolRuntimeDeps = {
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
-  const {
-    input,
-    db,
-    turn,
-    session,
-    fileAuthoritySubjectId,
-    capabilitySettings,
-    runSettings,
-    workspaceRefs,
-  } = deps;
+  const { input, db, turn, session, fileAuthoritySubjectId, capabilitySettings, runSettings } =
+    deps;
 
   const turnResources = mergeResourceRefs(session.resources, turn.resources);
   // Repositories remain durable workspace inputs. File attachments do not:
@@ -275,15 +275,13 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,
-  // and nothing user-defined is injected into the sandbox environment. User
+  // Nothing user-defined is injected into the sandbox environment. User
   // secrets reach a command only through `{{secret:…}}` references resolved at
-  // the exec boundary. Variable Sets stay readable elsewhere until W6 removes them.
+  // the exec boundary.
   const connectionScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  workspaceRefs.variableSetId = "";
   return {
     turnResources,
     runtimeResources,
@@ -998,6 +996,33 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  const maskingPrincipal = {
+    kind: "attempt",
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: attempt.executionGeneration,
+  } as const;
+  const maskingKey = environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null;
+  // Best effort: values this session tree used before are masked too.
+  attachSessionTreeSecretValues({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    observability,
+  });
+  // Secrets that show up in tool output are saved to the task vault.
+  attachTaskVaultSecretCapture({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    enabled: secretsCapabilityEnabled(session.agent),
+    observability,
+  });
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {

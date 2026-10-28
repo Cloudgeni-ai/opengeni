@@ -68,6 +68,7 @@ test("Microsoft definitions persist bounded provider-validated schemas; custom s
     paths: {
       "/me/messages": operation,
       "/me/calendar": operation,
+      "/search/query": operation,
       "/me/contacts": operation,
       "/me/drive": operation,
       "/chats/{chat-id}/messages": operation,

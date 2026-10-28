@@ -98,6 +98,8 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({ useAppApi: () => ({ request: async () => ({}) }) }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async () => {},
+  useSearch: () => ({}),
+  useStringifySearch: () => () => "",
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("../lib/console-site", () => ({

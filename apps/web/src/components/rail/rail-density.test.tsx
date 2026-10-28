@@ -96,12 +96,12 @@ describe("rail overflow boundaries", () => {
     );
   });
 
-  test("reserves the macOS title row outside scrolling without pinning the workspace picker", () => {
-    expect(railShell).toMatch(
-      /windowControlsInPage \? \([\s\S]*?data-rail-window-controls[\s\S]*?<RailHeader showSwitcher=\{false\} \/>[\s\S]*?data-rail-scroll-viewport/,
-    );
-    expect(railShell).toContain("{!windowControlsInPage ? <RailHeader /> : null}");
-    expect(railShell).toContain("{rail.collapsed || windowControlsInPage ? switcher : null}");
+  test("keeps one rail header in the scrolling list on every platform", () => {
+    // The desktop app's window bar holds the window controls above the page,
+    // so the rail reserves no row of its own for them.
+    expect(railShell).not.toContain("data-rail-window-controls");
+    expect(railShell).toMatch(/data-rail-scroll-viewport[\s\S]*?<RailHeader \/>/);
+    expect(railShell).toContain("{rail.collapsed ? switcher : null}");
     expect(webRailShell).toContain("switcher: <SwitcherBlock />,");
   });
 });
@@ -154,7 +154,7 @@ describe("session-first rail density", () => {
       expect(rendered.container.textContent).not.toContain("For you");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        5,
+        6,
       );
       expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
     } finally {
@@ -169,7 +169,7 @@ describe("session-first rail density", () => {
       expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
       await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(5);
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(6);
       expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
       await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
@@ -201,7 +201,7 @@ describe("session-first rail density", () => {
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        5,
+        6,
       );
       expect(railShell).toMatch(
         /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,

@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
 import {
@@ -12,12 +13,14 @@ import { knowledgeContextForAccess } from "./knowledge";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
+  meetingSummarySessionScope,
   setSessionModelInTransaction,
   withWorkspaceSessionActivityRls,
   retryFailedSessionInTransaction,
   SessionRetryConflictError,
 } from "@opengeni/db";
 import type {
+  SessionAvatar,
   SessionRetryRequest,
   SessionRetryResponse,
   SessionTurnSurface,
@@ -150,7 +153,6 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
-  type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -161,7 +163,7 @@ import {
   canonicalSessionCommandHash,
   frozenInitiatorForCommandActor,
   getComposerDraftInTransaction,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getAnySessionInGroup,
   getEnrollment,
   getChannel,
@@ -200,6 +202,7 @@ import {
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
+  updateSessionProfileWithEvent,
   setSessionKeepLive,
   type SetSessionKeepLiveResult,
   withWorkspaceSubjectSessionActivityRls,
@@ -289,7 +292,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIdsFor,
 } from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
-import { requireEnvironmentEncryption, variableSetsRemovedError } from "./encryption-key";
+import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -775,7 +778,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey!, value),
+        encryptEnvironmentValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -877,7 +880,7 @@ export function validateSessionMcpCredentialUpdates(input: {
       headersEncrypted: Object.fromEntries(
         Object.entries(headers).map(([name, value]) => [
           name,
-          encryptVariableSetValue(encryptionKey, value),
+          encryptEnvironmentValue(encryptionKey, value),
         ]),
       ),
     };
@@ -997,6 +1000,8 @@ export async function createAndStartSessionWithOutcome(input: {
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
+  /** Internal proof for the built-in meeting summary; see `@opengeni/db` createSession. */
+  meetingSummary?: { recordingId: string; ownerSubjectId: string };
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
@@ -1036,13 +1041,6 @@ export async function createAndStartSessionWithOutcome(input: {
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
-  // Ordered low-to-high precedence. Names/ids only; session.created never
-  // carries variable values.
-  variableSets?: Array<{
-    id: string;
-    name: string;
-    scope: VariableSet["scope"];
-  }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -1308,6 +1306,7 @@ export async function createAndStartSessionWithOutcome(input: {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           visibility: input.visibility ?? "workspace_shared",
+          ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
           initialMessage: input.initialMessage,
           initialModelContext: input.modelContext ?? null,
           resources: input.resources,
@@ -1325,8 +1324,6 @@ export async function createAndStartSessionWithOutcome(input: {
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode ?? "standard",
           sandboxBackend: input.sandboxBackend,
-          variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-          variableSetId: input.variableSets?.at(-1)?.id ?? null,
           rigId: input.rigId ?? null,
           rigVersionId: input.rigVersionId ?? null,
           channelId: input.channelId ?? null,
@@ -1421,6 +1418,7 @@ export async function createAndStartSessionWithOutcome(input: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         visibility: input.visibility ?? "workspace_shared",
+        ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
         initialMessage: input.initialMessage,
         initialModelContext: input.modelContext ?? null,
         resources: input.resources,
@@ -1438,8 +1436,6 @@ export async function createAndStartSessionWithOutcome(input: {
         reasoningEffort: input.reasoningEffort,
         latencyMode: input.latencyMode ?? "standard",
         sandboxBackend: input.sandboxBackend,
-        variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-        variableSetId: input.variableSets?.at(-1)?.id ?? null,
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId: input.channelId ?? null,
@@ -1584,11 +1580,6 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSets?: Array<{
-      id: string;
-      name: string;
-      scope: VariableSet["scope"];
-    }>;
     goal?: GoalSpec | null;
     initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
@@ -1675,15 +1666,6 @@ async function finishStartSession(
       surface: input.surface ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
-        ...(input.variableSets?.length
-          ? {
-              variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-              variableSets: input.variableSets,
-              // Legacy highest-precedence aliases.
-              variableSetId: input.variableSets.at(-1)!.id,
-              variableSetName: input.variableSets.at(-1)!.name,
-            }
-          : {}),
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
       },
       goal: input.goal
@@ -2281,7 +2263,7 @@ export async function postUserMessageTurn(
 
 /**
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
- * `session_create` tool: payload validation, resource/tool/variableSet
+ * `session_create` tool: payload validation, resource/tool
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
  * their meaning: a child inherits repositories (never files), tools, and MCP
@@ -2921,7 +2903,6 @@ async function createSessionForRequestInFileScope(
               ? { requestedSessionId: payload.requestedSessionId }
               : {}),
             visibility: effectiveVisibility,
-            variableSetIds: payload.variableSetIds ?? [],
             initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
             deferInitialTurn: payload.startMode === "realtime",
             agentConfig,
@@ -3180,6 +3161,17 @@ async function createSessionForRequestInFileScope(
           await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
         )
       : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
+  if (hasOwnProperty(rawPayload, "mcpServers")) {
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    for (const server of payload.mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(db, {
+        target: { accountId: grant.accountId, workspaceId },
+        url: server.url,
+        headers: server.headers,
+      });
+    }
+  }
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
@@ -3365,7 +3357,7 @@ async function createSessionForRequestInFileScope(
   let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
-  const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
+  const attachmentOwnerContext = await measureSessionStartPhase(
     unresolvedDeps.observability,
     "resource_validation",
     async () => {
@@ -3392,9 +3384,7 @@ async function createSessionForRequestInFileScope(
         resources,
         ownerContext,
       );
-      // Variable Sets were replaced by vaults (RM-1); a session never selects one.
-      if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
-      return { attachmentOwnerContext: ownerContext, variableSets: [] as VariableSet[] };
+      return ownerContext;
     },
   );
   const attachmentOwner =
@@ -3517,12 +3507,6 @@ async function createSessionForRequestInFileScope(
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
             ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(variableSets.length
-              ? {
-                  variableSetIds: variableSets.map((variableSet) => variableSet.id),
-                  variableSetId: variableSets.at(-1)!.id,
-                }
-              : {}),
             ...(payload.rigId ? { rigId: payload.rigId } : {}),
             ...(payload.goal ? { goal: payload.goal } : {}),
             ...(payload.firstPartyMcpPermissions
@@ -4176,11 +4160,6 @@ async function createSessionForRequestInFileScope(
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
@@ -4946,6 +4925,90 @@ export async function updateSessionTitle(
 }
 
 /**
+ * Rename a chat and change its description or avatar: the shared path for the
+ * PATCH route and the agent's title tools. Only what is named changes.
+ *
+ * A rename through this path is a deliberate name, whoever makes it: the
+ * agent's title is cleaned like any model-written title, then stored as a
+ * chosen name, so automatic titling never replaces it. Only automatic titling
+ * (which writes through `updateSessionTitle` directly) is kept off a chosen
+ * name. An image avatar must already have been checked by the caller.
+ */
+export async function updateSessionProfile(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  change: {
+    title?: string | undefined;
+    description?: string | null | undefined;
+    avatar?: SessionAvatar | null | undefined;
+  },
+  source: "user" | "agent",
+): Promise<{
+  titleUpdated: boolean;
+  profileUpdated: boolean;
+  title: string | null;
+  description: string | null;
+  avatar: SessionAvatar | null;
+  relatedSessionAccess: "target" | "root";
+}> {
+  let title: string | null = null;
+  let titleUpdated = false;
+  let relatedSessionAccess: "target" | "root" = "root";
+  if (change.title !== undefined) {
+    const name = source === "agent" ? normalizeAutomaticSessionTitle(change.title) : change.title;
+    if (name !== null) {
+      const result = await updateSessionTitle(deps, grant, sessionId, name, "user");
+      title = result.title;
+      titleUpdated = result.updated;
+      relatedSessionAccess = result.relatedSessionAccess;
+    }
+  }
+  if (change.description === undefined && change.avatar === undefined) {
+    const current = await getSession(deps.db, grant.workspaceId, sessionId);
+    return {
+      titleUpdated,
+      profileUpdated: false,
+      title: title ?? current?.title ?? null,
+      description: current?.description ?? null,
+      avatar: current?.avatar ?? null,
+      relatedSessionAccess,
+    };
+  }
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.title.write",
+    surface: "core",
+  });
+  relatedSessionAccess = authorization?.relatedSessionAccess ?? relatedSessionAccess;
+  const result = await updateSessionProfileWithEvent(deps.db, {
+    workspaceId: grant.workspaceId,
+    sessionId,
+    ...(change.description !== undefined ? { description: change.description } : {}),
+    ...(change.avatar !== undefined ? { avatar: change.avatar } : {}),
+    source,
+  });
+  if (result.events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, result.events);
+  }
+  if (title === null) {
+    title = (await getSession(deps.db, grant.workspaceId, sessionId))?.title ?? null;
+  }
+  return {
+    titleUpdated,
+    profileUpdated: result.updated,
+    title,
+    description: result.description,
+    avatar: result.avatar,
+    relatedSessionAccess,
+  };
+}
+
+/**
  * Set or clear the session's keep-live exemption from the idle-session archive.
  * Archived sessions are read-only and reject the change.
  */
@@ -5219,6 +5282,23 @@ function sessionToolPolicyCeiling(
 }
 
 /**
+ * A built-in meeting-summary chat keeps exactly its meeting tools for its
+ * whole life (docs/recordings.md, "Built-in summary"); the database refuses
+ * the same change.
+ */
+async function refuseMeetingSummaryToolChange(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  if (await meetingSummarySessionScope(db, { workspaceId, sessionId })) {
+    throw new HTTPException(409, {
+      message: "A meeting notes chat keeps only its meeting tools.",
+    });
+  }
+}
+
+/**
  * Replace the durable session tool policy. The target and its parent (when
  * present) are locked by the DB event-writer helper, and the update/event are
  * committed under one version-fenced transaction. An already claimed turn
@@ -5241,6 +5321,7 @@ export async function updateSessionToolPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
@@ -5631,6 +5712,7 @@ export async function updateSessionAgent(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const goal = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -5899,6 +5981,7 @@ export async function updateSessionSkills(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   let skills: SessionSkill[];
   try {
     skills = SessionSkills.parse(request.skills);

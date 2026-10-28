@@ -74,7 +74,7 @@ explicit decision, not silently overwriting another administrator's change.
 Dedicated provider adapters and curated API definitions use server-owned keys.
 Aliases for one service, such as Fiken's token and OAuth setup, share a policy
 key. The catalog labels distinguish personal Slack accounts from Slack bots and
-separate GitHub personal accounts, App installations and PR review.
+separate GitHub personal accounts and App installations.
 
 Custom MCP, OpenAPI and GraphQL have separate broad permissions:
 `custom:mcp`, `custom:openapi`, and `custom:graphql`. A manually entered URL,

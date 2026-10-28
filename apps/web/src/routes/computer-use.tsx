@@ -8,6 +8,7 @@ import {
   ThisComputerMicrophoneSettings,
 } from "@/components/desktop/this-computer-settings";
 import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
+import { DesktopDictationSettings } from "@opengeni/react/desktop-dictation";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { Notice } from "@opengeni/react/ui/notice";
 import { PageHeader } from "@opengeni/react/ui/page-header";
@@ -25,6 +26,7 @@ export function ComputerUseRoute() {
           <>
             <ThisComputerAgentSettings />
             <AppShotsSettings />
+            <DesktopDictationSettings />
             <ThisComputerMicrophoneSettings />
           </>
         ) : (

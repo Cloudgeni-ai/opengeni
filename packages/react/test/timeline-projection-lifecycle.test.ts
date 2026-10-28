@@ -1,11 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
-import type { TimelineGroup } from "../src/timeline/types";
+import { toolRowPresentation } from "../src/timeline/tool-presentation";
+import type { TimelineGroup, ToolCallItem } from "../src/timeline/types";
 import { createOpenGeniText } from "../src/messages/runtime";
 import { coalesceSessionEventDeltas } from "@opengeni/events";
 
 const englishText = createOpenGeniText();
+
+describe("a tool call waiting for approval", () => {
+  const waiting = [
+    event(1, "turn.started"),
+    event(2, "agent.toolCall.created", { id: "call-1", name: "deploy_preview", arguments: {} }),
+    event(3, "session.requiresAction", {
+      approvals: [{ id: "approval-1", name: "deploy_preview", rawItem: { callId: "call-1" } }],
+    }),
+  ];
+  const call = (items: ReturnType<typeof buildTimeline>) =>
+    items.find((item): item is ToolCallItem => item.kind === "tool-call")!;
+
+  test("says it is waiting for the person, not that it is done", () => {
+    const item = call(buildTimeline(englishText, waiting));
+    expect(item.awaitingApproval).toBe(true);
+    const row = toolRowPresentation(englishText, item);
+    expect(row.preview).toEqual({ kind: "text", text: "Waiting for your approval" });
+    expect(row.running).toBe(false);
+    expect(row.iconTone).toBe("accent");
+  });
+
+  test("settles normally once its output arrives", () => {
+    const item = call(
+      buildTimeline(englishText, [
+        ...waiting,
+        event(4, "agent.toolCall.output", { id: "call-1", output: "Deployed" }),
+      ]),
+    );
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("complete");
+  });
+
+  test("reads as not run when its turn is cancelled before a decision", () => {
+    const item = call(buildTimeline(englishText, [...waiting, event(4, "turn.cancelled")]));
+    expect(item.awaitingApproval).toBeUndefined();
+    expect(item.status).toBe("cancelled");
+  });
+});
 
 test("an explicit empty-workspace selection is a durable notice, not an agent reply", () => {
   const text = "An empty workspace was selected. The old archive is retained.";

@@ -27,6 +27,10 @@ export type TranscriptionRequest = {
   mimeType: string;
   /** Optional client-reported duration; enforced as a soft ceiling before upstream. */
   durationSeconds?: number | undefined;
+  /** ISO 639 hint for what is spoken; omitted means detect. */
+  language?: string | undefined;
+  /** Names and terms to listen for; a model that can't take them ignores them. */
+  keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
   /** Absolute server-owned provider deadline persisted for resumable attempts. */

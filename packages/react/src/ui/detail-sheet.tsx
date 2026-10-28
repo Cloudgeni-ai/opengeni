@@ -102,6 +102,7 @@ export const DetailSheetContent = /* @__PURE__ */ forwardRef<
       <DialogPrimitive.Content
         ref={ref}
         data-slot="detail-sheet"
+        data-window-layer
         {...props}
         onOpenAutoFocus={(event) => {
           // Focus hasn't moved yet: this is still the row that opened the sheet.

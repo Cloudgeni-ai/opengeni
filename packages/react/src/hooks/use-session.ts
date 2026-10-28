@@ -43,6 +43,8 @@ export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
 function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
   return (
     isTitleEvent(event) ||
+    // Description or avatar edits (by a person or the agent) refresh the header.
+    event.type === "session.profile_set" ||
     event.type.startsWith("session.command.") ||
     event.type.startsWith("session.wait.") ||
     event.type === "session.status.changed" ||

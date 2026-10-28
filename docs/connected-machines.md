@@ -495,19 +495,36 @@ infer the Chrome device.
 
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
-inventory must name the exact live port. `stateGeneration` is created once per
-extension worker lifetime and reused by every native reconnect in it; Chrome
-keeps the tab ids, pages and debugger attachments that the worker owns for
-exactly that long. The agent reports `stateGeneration` as the profile's
+inventory must name the exact live port. `stateGeneration` names the
+extension's live state: the tab ids, pages and the extension's debugger
+attachments. Chrome keeps those while it stops and restarts the extension's
+background worker, which it does whenever it likes; it drops the attachments
+when the extension reloads or updates, and everything when Chrome restarts.
+The extension keeps `stateGeneration` in `chrome.storage.session`, which lives
+exactly as long, together with the tabs it has attached. A new worker reads
+them, probes each recorded attachment with a debugger command that changes
+nothing, carries on with the ones that answer, and only then reports the same
+`stateGeneration`. The agent reports `stateGeneration` as the profile's
 inventory `connectionGeneration` (the placement instance above), so a
-native-host exit, an agent restart or an agent update reconnects in place and
-the profile's sessions stay live; if the agent restarted, the next action
-re-creates the controller session. A restarted worker, a reloaded or updated
-extension, or a restarted Chrome reports a new `stateGeneration` and ends the
-sessions as above. Extensions that do not send `stateGeneration` keep the
-per-port behavior, and the agent's update gate waits while one of them backs a
-live attached controller, because restarting would end its sessions. A
-quiescent attached session does not otherwise hold back an agent update.
+native-host exit, an agent restart or update, or a restarted extension worker
+reconnects in place and the profile's sessions stay live; if the agent
+restarted, the next action re-creates the controller session. A reloaded or
+updated extension, or a restarted Chrome, starts a new `stateGeneration` and
+ends the sessions as above. Extensions that do not send `stateGeneration`, or
+that keep it per worker (older versions), keep that narrower behavior, and the
+agent's update gate waits while one without it backs a live attached
+controller, because restarting would end its sessions. A quiescent attached
+session does not otherwise hold back an agent update.
+
+The debugger event buffer does not survive a worker restart, and its sequence
+numbers start again. Every `debugger.poll` result names the worker's event
+`stream`; browserd treats a different stream as lost history and
+resynchronizes, re-attaching each tab when it is next used. Commands that were
+in flight on the old worker fail on the closed native port, so their outcome
+is unknown and nothing replays them; once a new stream appears, a tab whose
+input was in flight is usable again. Each time a worker carries on an earlier
+worker's state, the extension adds `{at, attachmentsKept, attachmentsEnded,
+tabsClosed}` to `stateResumptions` in `chrome.storage.local` (the latest 20).
 
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
@@ -961,10 +978,10 @@ of the command: the daemon chooses that workload's cgroup and OOM score. Operato
 must configure such delegated workloads so they are not more protected from
 global OOM selection than the supervisor. The generated fragment requests an
 unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
-installer never resets them with runtime `set-property`. A verified self-update
-migrates only the byte-identical old generated unit after proving its live MainPID,
-canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
-left untouched with an actionable diagnostic. The default operation leaf has no
+installer never resets them with runtime `set-property`. The agent never rewrites
+a unit on its own: at startup it only warns when the live unit is custom or systemd
+did not place it in the `supervisor` subgroup, and `service install --restart`
+adopts the generated unit. The default operation leaf has no
 memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
 Before user code executes, the agent creates the operation leaf, applies any
@@ -1400,10 +1417,7 @@ private to the user, and ends the agent's process tree only if it does not stop
 within 45 seconds. The agent stays paused across sign-ins until `start`.
 `status` prints `opengeni-agent background task: running`, `paused`, `stopped`
 or `not installed`, read from the agent's own instance lock. The agent does not
-run while nobody is signed in to Windows. Earlier releases
-registered an `OpengeniAgent` Windows Service that could never start; `start`
-deletes it when allowed, and otherwise prints the one elevated command that
-removes it.
+run while nobody is signed in to Windows.
 
 The agent also never treats a filesystem root or the Windows system directory
 as its workspace, so an older service definition needs no manual step: when
@@ -1723,9 +1737,8 @@ Otherwise it is `status: "pending"` with a `reason`:
 - `agent_update_required`: the agent predates the `credential_renew`
   capability. Update it, and the successor's Hello applies it.
 - `renewal_failed`: retry the request.
-- `reconnect_required`: the machine's connection predates in-place renewal
-  (for example a legacy-origin connection file). Run the connect command on it
-  again with screen control on. The chat card's **Connect again** opens the
+- `reconnect_required`: the machine's saved connection can't be renewed in
+  place. Run the connect command on it again with screen control on. The chat card's **Connect again** opens the
   connect dialog with screen control on and the machine's current access
   chosen (**Only me** for a personal machine, otherwise **This workspace**), so
   following the defaults reconnects the same machine without changing who can
@@ -2056,7 +2069,7 @@ expecting transactional support. Changing transport limits is not required.
 
 ## Run as another local user
 
-Exec (including op-stream and background commands), git, PTY open and every file
+Exec (including op-stream and background commands), PTY open and every file
 request, transactional uploads included, carry an optional `run_as`: a local user
 name, else a decimal uid, which must exist in the machine's password database.
 The agent honors it only when it advertises `Capabilities.run_as`, which it does

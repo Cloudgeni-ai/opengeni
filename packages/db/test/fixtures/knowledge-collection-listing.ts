@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { readFile } from "node:fs/promises";
+import { historicalKnowledgeSql } from "./knowledge-historical";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 /** Optional pre-migrated, disposable native PostgreSQL fixture; CI uses the shared harness. */
@@ -111,10 +111,7 @@ export type ListingFixture = Awaited<ReturnType<typeof seedListingFixture>>;
 
 /** Install historical comparison functions only in the disposable test database. */
 export async function installListingBaseline(connection: postgres.Sql, appUrl: string) {
-  const source = await readFile(
-    new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url),
-    "utf8",
-  );
+  const source = await historicalKnowledgeSql("knowledge_entry_visible_body", "knowledge_entry_read");
   // Publish the historical bodies and their final security metadata together.
   await connection.begin(async (admin) => {
     const [ownerRow] = await admin`SELECT pg_get_userbyid(p.proowner) AS owner,
@@ -147,7 +144,7 @@ export async function installListingBaseline(connection: postgres.Sql, appUrl: s
       const signature =
         name === "knowledge_entry_read" ? "uuid,uuid,jsonb,jsonb" : "uuid,jsonb,boolean";
       await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) OWNER TO ${admin(owner)}`;
-      // 0461's final $secure$ block is part of the historical contract too;
+      // The historical migration's final $secure$ block is part of the contract too;
       // extracting only CREATE FUNCTION would benchmark an unhardened routine.
       await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) SET search_path = ${admin(schema)}, pg_catalog, pg_temp`;
       await admin`REVOKE ALL ON FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) FROM PUBLIC`;

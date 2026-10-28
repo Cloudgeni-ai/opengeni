@@ -38,6 +38,8 @@ const ICONS: Record<string, string> = {
   "file-diff": "FileDiffIcon",
   "file-search": "FileSearchIcon",
   "file-text": "FileTextIcon",
+  "layout-grid": "LayoutGridIcon",
+  "table-2": "Table2Icon",
   image: "ImageIcon",
   folder: "FolderIcon",
   "folder-git": "FolderGitIcon",

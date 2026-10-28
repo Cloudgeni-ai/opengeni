@@ -33,11 +33,6 @@ import type {
 } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
-  triggerAutomationRun?: (input: {
-    accountId: string;
-    workspaceId: string;
-    runId: string;
-  }) => Promise<void>;
   signalUserMessage: (input: {
     sessionId: string;
     eventId: string;
@@ -241,7 +236,6 @@ export type AppDependencies = {
    */
   githubAppApi?: GitHubAppApiPort;
   /** Optional provider seam for the separately registered Opengeni Lens App. */
-  prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port

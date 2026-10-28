@@ -343,7 +343,7 @@ export function installModalCommandSession(
       : null;
   session.captureCommandOutput = async (result) => {
     const receipt = receipts.get(result);
-    if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
+    if (!receipt) return false;
     if (
       !receipt.page.expected &&
       receipt.page.exitCode === null &&
@@ -365,11 +365,8 @@ export function installModalCommandSession(
     if (!(await captureRouterPage(entry, receipt.page))) {
       const target = receipt.page.command;
       const covered = () =>
-        entry.command.kind === "modal-router-v1" &&
         (["stdout", "stderr"] as const).every((stream) => {
           const current = entry.command.streams[stream];
-          // This narrowing stays inside the discriminator's synchronous scope.
-          if (!("byteOffset" in current)) return false;
           const wanted = target.streams[stream];
           return (
             current.byteOffset >= wanted.byteOffset &&
@@ -390,18 +387,6 @@ export function installModalCommandSession(
     }
     receipts.delete(result);
     return true;
-  };
-  session.acknowledgeCommandOutput = async (result) => {
-    const receipt = receipts.get(result);
-    if (!receipt) return;
-    const entry = entries.get(receipt.handle);
-    if (!entry?.persistence)
-      throw new Error("Modal output cannot advance before durable command retention");
-    const saved = await entry.persistence.acknowledge(receipt.page.command);
-    if (!sameExecution(entry.command, saved))
-      throw new Error("Modal output acknowledgment changed execution identity");
-    entry.command = saved;
-    receipts.delete(result);
   };
   session.writeStdin = async (args) => {
     const sdkHandle = setupHandles.get(args.sessionId);

@@ -1,11 +1,9 @@
 import { expect, test } from "bun:test";
 import {
-  AutomationSessionTemplate,
   SkillArtifactDefinition,
   SessionSkill,
   SessionSkills,
   StoredSessionSkills,
-  StoredAutomationSessionTemplate,
 } from "../src/index";
 
 const files = [
@@ -53,23 +51,6 @@ test("session deduplication compares the derived metadata and exact files", () =
   expect(SessionSkills.parse([{ files }, { files, name: "deploy" }])).toHaveLength(1);
 });
 
-test("automation admission uses the same authoritative Skill contract as dispatch", () => {
-  const template = AutomationSessionTemplate.parse({
-    prompt: "Deploy safely",
-    skills: [{ files }, { files, name: "deploy" }],
-  });
-  expect(template.skills).toEqual(SessionSkills.parse([{ files }]));
-  for (const skill of [
-    { name: "deploy", files: [{ path: "SKILL.md", content: "Missing frontmatter" }] },
-    { files, description: "Competing summary" },
-    { files: [...files, ...files] },
-  ]) {
-    expect(
-      AutomationSessionTemplate.safeParse({ prompt: "Deploy safely", skills: [skill] }).success,
-    ).toBe(false);
-  }
-});
-
 test("every inline admission rejects non-text, oversized and conflicting folder content", () => {
   const invalidFiles = [
     [...files, { path: "data.bin", content: "a\u0000b" }],
@@ -89,10 +70,6 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
   for (const candidate of invalidFiles) {
     expect(SessionSkill.safeParse({ files: candidate }).success).toBe(false);
     expect(SkillArtifactDefinition.safeParse({ files: candidate }).success).toBe(false);
-    expect(
-      AutomationSessionTemplate.safeParse({ prompt: "Use Skill", skills: [{ files: candidate }] })
-        .success,
-    ).toBe(false);
   }
   const text = [
     ...files,
@@ -102,15 +79,11 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
   expect(SessionSkill.parse({ files: text }).files).toEqual(text);
 });
 
-test("stored metadata is derived without rewriting historical files or session templates", () => {
+test("stored metadata is derived without rewriting historical files", () => {
   const legacy = { name: "old-label", description: "Old database description", files };
-  const template = { prompt: "Use the deployment Skill", skills: [legacy] };
-  const historicalBytes = JSON.stringify(template);
+  const historicalBytes = JSON.stringify(legacy);
   expect(StoredSessionSkills.parse([legacy])).toEqual(SessionSkills.parse([{ files }]));
-  expect(StoredAutomationSessionTemplate.parse(template).skills).toEqual(
-    SessionSkills.parse([{ files }]),
-  );
-  expect(JSON.stringify(template)).toBe(historicalBytes);
+  expect(JSON.stringify(legacy)).toBe(historicalBytes);
   expect(SessionSkill.safeParse(legacy).success).toBe(false);
 });
 
@@ -121,7 +94,4 @@ test("stored projection never invents missing frontmatter or hides invalid conte
     files: [{ path: "SKILL.md", content: "No frontmatter" }],
   };
   expect(StoredSessionSkills.safeParse([plain]).success).toBe(false);
-  expect(
-    StoredAutomationSessionTemplate.safeParse({ prompt: "Use Skill", skills: [plain] }).success,
-  ).toBe(false);
 });

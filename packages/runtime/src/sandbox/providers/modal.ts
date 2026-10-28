@@ -837,6 +837,7 @@ export const modalProvider: ProviderRegistration = {
     }
   },
   descriptor: CAPABILITY_DESCRIPTORS.modal,
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).
     if (Boolean(settings.modalTokenId) !== Boolean(settings.modalTokenSecret)) {

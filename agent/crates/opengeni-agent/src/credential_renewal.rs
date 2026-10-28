@@ -14,8 +14,6 @@ use crate::{config, enrollment};
 pub(crate) enum RenewNowError {
     /// The connection file is gone (disconnected or replaced).
     ConnectionMissing,
-    /// A legacy record has no verified deployment origin to renew against.
-    LegacyOrigin,
     /// The install identity or connection store could not be read or written.
     LocalState,
     /// The control plane refused or could not be reached; retrying may help.
@@ -29,7 +27,6 @@ impl RenewNowError {
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::ConnectionMissing => "connection_missing",
-            Self::LegacyOrigin => "legacy_origin",
             Self::LocalState => "local_state_unavailable",
             Self::Renewal => "renewal_failed",
             Self::Unsupported => "renewal_unsupported",
@@ -113,9 +110,6 @@ pub(crate) async fn renew_now(connection_id: &str) -> Result<bool, RenewNowError
     if connection.credentials.consented_screen_control {
         return Ok(true);
     }
-    if connection.legacy_origin {
-        return Err(RenewNowError::LegacyOrigin);
-    }
     let identity = enrollment::InstallIdentity::load_existing(
         &config::config_dir().map_err(|error| local(&error))?,
     )
@@ -143,10 +137,10 @@ pub(crate) async fn renew_now(connection_id: &str) -> Result<bool, RenewNowError
         .consented_screen_control)
 }
 
-pub(crate) async fn run(api_url: String) {
+pub(crate) async fn run() {
     let mut diagnostics = RenewalDiagnostics::default();
     loop {
-        if let Err(error) = renew_due_connections(&api_url, &mut diagnostics).await {
+        if let Err(error) = renew_due_connections(&mut diagnostics).await {
             warn!(%error, "could not inspect machine credential renewal");
         }
         // Bounds retries on older APIs, revoked grants and transport failures.
@@ -156,10 +150,9 @@ pub(crate) async fn run(api_url: String) {
 }
 
 pub(crate) async fn renew_due_connections(
-    api_url: &str,
     diagnostics: &mut RenewalDiagnostics,
 ) -> Result<(), config::ConfigError> {
-    let connections = config::load_connections(api_url)?;
+    let connections = config::load_connections()?;
     diagnostics.0.retain(|id, _| {
         connections
             .iter()
@@ -170,12 +163,6 @@ pub(crate) async fn renew_due_connections(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Legacy records lack a verified deployment origin. Never send their
-        // credentials to a guessed/default API; explicit reconnect establishes it.
-        if connection.legacy_origin {
-            require_reconnect(&connection)?;
-            continue;
-        }
         if connection.authentication_state == Some(config::AuthenticationState::ReconnectRequired)
             || (connection.authentication_state
                 != Some(config::AuthenticationState::RenewalRequired)
@@ -303,9 +290,7 @@ pub(crate) mod tests {
         config::save_connection(&saved).unwrap();
         let mut diagnostics = RenewalDiagnostics::default();
         for _ in 0..3 {
-            renew_due_connections(&saved.api_url, &mut diagnostics)
-                .await
-                .unwrap();
+            renew_due_connections(&mut diagnostics).await.unwrap();
         }
         assert_eq!(
             config::load_connection(&saved.connection_id)
@@ -314,10 +299,8 @@ pub(crate) mod tests {
                 .authentication_state,
             Some(config::AuthenticationState::ReconnectRequired)
         );
-        config::remove_connection(&saved.connection_id, &saved.api_url).unwrap();
-        renew_due_connections(&saved.api_url, &mut diagnostics)
-            .await
-            .unwrap();
+        config::remove_connection(&saved.connection_id).unwrap();
+        renew_due_connections(&mut diagnostics).await.unwrap();
         assert!(diagnostics.0.is_empty());
     }
 
@@ -343,7 +326,7 @@ pub(crate) mod tests {
         let subscriber =
             tracing::Dispatch::new(tracing_subscriber::registry().with(warnings.clone()));
         for _ in 0..3 {
-            renew_due_connections(&url, &mut diagnostics)
+            renew_due_connections(&mut diagnostics)
                 .with_subscriber(subscriber.clone())
                 .await
                 .unwrap();
@@ -362,8 +345,8 @@ pub(crate) mod tests {
             "unchanged failure logs only once"
         );
         // Deleting the connection also deletes its diagnostic state.
-        config::remove_connection(&saved.connection_id, &url).unwrap();
-        renew_due_connections(&url, &mut diagnostics).await.unwrap();
+        config::remove_connection(&saved.connection_id).unwrap();
+        renew_due_connections(&mut diagnostics).await.unwrap();
         assert!(diagnostics.0.is_empty());
     }
 
@@ -399,33 +382,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn rejected_legacy_origin_stays_paused_without_sending_credentials_to_a_guessed_api() {
-        let (_lock, _dir) = config::tests::with_temp_config();
-        let original = connection("http://127.0.0.1:1");
-        config::save_credentials(&original.credentials).unwrap();
-        let mut saved = config::load_connections(&original.api_url)
-            .unwrap()
-            .remove(0);
-        assert!(saved.legacy_origin);
-        saved.authentication_state = Some(config::AuthenticationState::RenewalRequired);
-        config::save_connection(&saved).unwrap();
-        let mut diagnostics = RenewalDiagnostics::default();
-        for _ in 0..3 {
-            renew_due_connections(&saved.api_url, &mut diagnostics)
-                .await
-                .unwrap();
-        }
-        assert_eq!(
-            config::load_connection(&saved.connection_id)
-                .unwrap()
-                .unwrap()
-                .authentication_state,
-            Some(config::AuthenticationState::ReconnectRequired)
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn rejected_connections_stop_on_refusal_but_temporary_outages_remain_recoverable() {
         let (_lock, dir) = config::tests::with_temp_config();
         enrollment::InstallIdentity::load_or_generate(dir.path()).unwrap();
@@ -450,7 +406,7 @@ pub(crate) mod tests {
                 listener
             });
             let mut diagnostics = RenewalDiagnostics::default();
-            renew_due_connections(&url, &mut diagnostics).await.unwrap();
+            renew_due_connections(&mut diagnostics).await.unwrap();
             let listener = server.await.unwrap();
             let current = config::load_connection(&saved.connection_id)
                 .unwrap()
@@ -471,11 +427,11 @@ pub(crate) mod tests {
                         .is_ok()
                 });
                 for _ in 0..3 {
-                    renew_due_connections(&url, &mut diagnostics).await.unwrap();
+                    renew_due_connections(&mut diagnostics).await.unwrap();
                 }
                 assert!(!attempted.await.unwrap());
             }
-            config::remove_connection(&saved.connection_id, &url).unwrap();
+            config::remove_connection(&saved.connection_id).unwrap();
         }
     }
 
@@ -497,7 +453,7 @@ pub(crate) mod tests {
                 + 30 * 24 * 3600,
         );
         let server = tokio::spawn(serve_one_renewal(listener, fresh.clone()));
-        renew_due_connections(&url, &mut RenewalDiagnostics::default())
+        renew_due_connections(&mut RenewalDiagnostics::default())
             .await
             .unwrap();
         server.await.unwrap();
@@ -604,7 +560,7 @@ pub(crate) mod tests {
         assert!(saved.credentials.consented_screen_control);
         assert_eq!(saved.credentials.nats_bearer, fresh);
         assert_eq!(saved.credentials.resume_token, "retained-resume");
-        assert_eq!(config::load_connections(&url).unwrap().len(), 1);
+        assert_eq!(config::load_connections().unwrap().len(), 1);
 
         // Asked again (another API replica, a repeated call): the consent is
         // already on disk, so nothing is renewed or rewritten. The listener is

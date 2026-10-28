@@ -68,7 +68,11 @@ import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructiv
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { orgLabel } from "@opengeni/react/app/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import {
   connectViewProvider,
   type SecretsConnectOwner,
@@ -212,16 +216,16 @@ export function SecretsRoute({
   const navigate = useNavigate();
   const access = context.accessContext;
   const can = (permission: string) => hasWorkspacePermission(access, workspaceId, permission);
-  const canList = can("secrets:list") || can("variable-sets:list");
+  const canList = can("secrets:list");
   const canWrite = can("secrets:write");
   // "use = reveal": viewers can see that an item exists, never its value.
-  const canUse = can("secrets:use") || can("variable-sets:use") || can("environments:use");
+  const canUse = can("secrets:use");
   const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const accountId = workspaceGrant?.accountId ?? null;
   const canManageOrganization = Boolean(
     accountId && hasAccountPermission(access, accountId, "account:admin"),
   );
-  const canWriteWorkspace = can("variable-sets:write") || can("secrets:write");
+  const canWriteWorkspace = can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace
     ? orgLabel(t, workspace.accountId, access.accountGrants)
@@ -234,7 +238,11 @@ export function SecretsRoute({
     [context.workspaces, workspace?.accountId],
   );
   const capabilityOff = secretsCapabilityOff(workspace?.settings);
-  const canEditAgentDefaults = can("workspace:admin");
+  const canEditAgentDefaults = canManageWorkspaceSettings(
+    access,
+    workspace,
+    context.managedSelfContext,
+  );
 
   const vaults = useVaults({ enabled: canList });
   const api = vaults.api;

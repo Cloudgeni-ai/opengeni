@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ConnectAttempt, ConnectProvider, ConnectTransport } from "@opengeni/connect";
-import { act } from "react";
+import { act, StrictMode } from "react";
 
 GlobalRegistrator.register();
 const { createRoot } = await import("react-dom/client");
@@ -16,6 +16,13 @@ let providers: ConnectProvider[] = [];
 let installed: Array<Record<string, unknown>> = [];
 let afterSignIn: Partial<ConnectAttempt> = {};
 let current: ConnectAttempt | null = null;
+let stillSigningIn = false;
+/** What the next poll after sign-in reports instead of the default, or a failure. */
+let nextPoll: Partial<ConnectAttempt> | Error | null = null;
+let popupBlocked = false;
+// A window showing the provider's site: like a browser, the card can't close it.
+let foreignWindow = false;
+const cancels: unknown[] = [];
 const begins: Array<Record<string, unknown>> = [];
 const advances: Array<Record<string, unknown>> = [];
 const policies: Array<Record<string, unknown>> = [];
@@ -56,9 +63,14 @@ const transport: ConnectTransport = {
       },
     });
   },
-  // The provider callback has landed by the first poll.
-  get: async () =>
-    current!.nextAction.type === "authorize" ? attempt(afterSignIn) : structuredClone(current!),
+  // The provider callback has landed by the first poll, unless the person is still signing in.
+  get: async () => {
+    if (nextPoll instanceof Error) throw nextPoll;
+    if (nextPoll && current!.nextAction.type === "authorize") return attempt(nextPoll);
+    return current!.nextAction.type === "authorize" && !stillSigningIn
+      ? attempt(afterSignIn)
+      : structuredClone(current!);
+  },
   advance: async (_workspaceId, _attemptId, input) => {
     advances.push(input as Record<string, unknown>);
     const action = (input as { action: { type: string } }).action;
@@ -88,7 +100,10 @@ const transport: ConnectTransport = {
       nextAction: { type: "none" },
     });
   },
-  cancel: async () => current!,
+  cancel: async (_workspaceId, attemptId) => {
+    cancels.push(attemptId);
+    return attempt({ state: "cancelled", nextAction: { type: "none" } });
+  },
   disconnect: async () => {},
 };
 
@@ -113,15 +128,20 @@ const client = {
   },
 };
 
-const popups: Array<{ closed: boolean; urls: string[] }> = [];
+const popups: Array<{ closed: boolean; urls: string[]; focused: number }> = [];
 window.open = (() => {
+  if (popupBlocked) return null;
   const popup = {
     opener: {} as unknown,
     closed: false,
+    focused: 0,
     urls: [] as string[],
     location: { replace: (url: string) => popup.urls.push(url) },
     close: () => {
-      popup.closed = true;
+      if (!foreignWindow) popup.closed = true;
+    },
+    focus: () => {
+      popup.focused += 1;
     },
   };
   popups.push(popup);
@@ -160,27 +180,33 @@ beforeEach(() => {
   continued.length = 0;
   continuation = { outcome: "queued", updateId: "update-1" };
   popups.length = 0;
+  stillSigningIn = false;
+  nextPoll = null;
+  popupBlocked = false;
+  foreignWindow = false;
+  cancels.length = 0;
   sessionStorage.clear();
 });
 
-async function mount() {
+async function mount({ strict = false } = {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   const configured = mock(async () => {});
+  const card = (
+    <SessionIntegrationCapabilityCard
+      client={client as never}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId={`api:integration:${DEFINITION}`}
+      name="Outlook Mail"
+      rationale="Reading your newest emails needs your Hotmail inbox."
+      returnUrl="https://app.example.test/chat"
+      onConfigured={configured}
+    />
+  );
   await act(async () => {
-    root.render(
-      <SessionIntegrationCapabilityCard
-        client={client as never}
-        workspaceId="workspace"
-        sessionId="session"
-        capabilityId={`api:integration:${DEFINITION}`}
-        name="Outlook Mail"
-        rationale="Reading your newest emails needs your Hotmail inbox."
-        returnUrl="https://app.example.test/chat"
-        onConfigured={configured}
-      />,
-    );
+    root.render(strict ? <StrictMode>{card}</StrictMode> : card);
   });
   return { host, root, configured };
 }
@@ -250,6 +276,182 @@ test("one click signs in, installs the reviewed tools, adds them to this chat an
   expect(continued).toEqual([
     ["workspace", "session", { capabilityId: `api:integration:${DEFINITION}` }],
   ]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("under StrictMode the replayed mount still signs in", async () => {
+  const { host, root } = await mount({ strict: true });
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => connected(host), "complete");
+  expect(host.textContent).not.toContain("disposed");
+  expect(begins).toHaveLength(1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+async function waitingForSignIn() {
+  stillSigningIn = true;
+  const mounted = await mount();
+  const { host } = mounted;
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => host.textContent?.includes("in the window that opened") ?? false, "waiting");
+  return mounted;
+}
+
+test("while the sign-in window is open the card offers one way out, and it ends the attempt", async () => {
+  const { host, root } = await waitingForSignIn();
+  // One status line, a way to get the window back and one Cancel: no second
+  // sign-in, status check or setup cancel.
+  for (const label of ["Sign in", "Check status", "Cancel setup", "Stop waiting"])
+    expect(button(host, label)).toBeUndefined();
+  // Focus follows the step to its status line, not a button a second Enter
+  // would press.
+  expect(document.activeElement?.getAttribute("role")).toBe("status");
+  expect(document.activeElement?.textContent).toContain("in the window that opened");
+  await act(async () => {
+    button(host, "Cancel")!.click();
+  });
+  await until(() => !!button(host, "Try again"), "try again");
+  // The attempt itself is cancelled and its window closed, so finishing there can't connect.
+  expect(cancels).toEqual(["attempt-1"]);
+  expect(popups[0]!.closed).toBe(true);
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).not.toContain("Sign-in window closed");
+  // The window did close, so nothing asks the person to close it.
+  expect(host.textContent).not.toContain("close the sign-in window");
+  expect(document.activeElement).toBe(button(host, "Try again")!);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a sign-in window the card can't close is left for the person to close, and the card says so", async () => {
+  foreignWindow = true;
+  const { host, root } = await waitingForSignIn();
+  await act(async () => {
+    button(host, "Cancel")!.click();
+  });
+  await until(() => !!button(host, "Try again"), "try again");
+  expect(cancels).toEqual(["attempt-1"]);
+  expect(popups[0]!.closed).toBe(false);
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).toContain("You can close the sign-in window.");
+  // Once the person moves on, the reminder goes with the step it was for.
+  foreignWindow = false;
+  stillSigningIn = false;
+  await act(async () => {
+    button(host, "Try again")!.click();
+  });
+  await until(() => connected(host), "complete");
+  expect(host.textContent).not.toContain("close the sign-in window");
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a lost sign-in window can be reopened, and a blocked window says so", async () => {
+  const { host, root } = await waitingForSignIn();
+  // A window still open behind others comes forward: no second window.
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  expect(popups).toHaveLength(1);
+  expect(popups[0]!.focused).toBe(1);
+  // One the person closed opens again, for the same attempt.
+  popups[0]!.closed = true;
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => popups.length === 2, "second window");
+  expect(host.textContent).toContain("in the window that opened");
+  expect(cancels).toEqual([]);
+  expect(begins).toHaveLength(1);
+  popups[1]!.closed = true;
+  popupBlocked = true;
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => host.textContent?.includes("blocked the sign-in window") ?? false, "blocked");
+  expect(host.textContent).not.toContain("Refresh its status");
+  expect(button(host, "Try signing in again")).toBeDefined();
+  // In a chat card nothing asks the person to check status after a sign-in window.
+  expect(button(host, "Check status")).toBeUndefined();
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a sign-in that fails after the first attempt still says so in plain words", async () => {
+  const { host, root } = await waitingForSignIn();
+  nextPoll = new Error("upstream 502 with internal detail");
+  popups[0]!.closed = true;
+  await act(async () => {
+    button(host, "Reopen window")!.click();
+  });
+  await until(() => host.textContent?.includes("Sign-in couldn't continue") ?? false, "failed");
+  expect(host.textContent).not.toContain("internal detail");
+  expect(host.textContent).not.toContain("Refresh its status");
+  expect(button(host, "Try signing in again")).toBeDefined();
+  // Cancelling then leaves only what is true now: the error was for sign-in.
+  await act(async () => {
+    button(host, "Cancel setup")!.click();
+  });
+  await until(() => !!button(host, "Try again"), "try again");
+  expect(host.textContent).toContain("Setup cancelled");
+  expect(host.textContent).not.toContain("Sign-in couldn't continue");
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a pop-up blocked on the first Connect says so and keeps keyboard focus on the card", async () => {
+  popupBlocked = true;
+  const { host, root } = await mount();
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    const connect = button(host, "Connect Outlook Mail")!;
+    connect.focus();
+    connect.click();
+  });
+  await until(() => host.textContent?.includes("blocked the sign-in window") ?? false, "blocked");
+  expect(document.activeElement).toBe(button(host, "Try again")!);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("when the provider moves setup elsewhere the card shows that step right away", async () => {
+  nextPoll = {
+    state: "requires_user_action",
+    nextAction: {
+      type: "wait",
+      pollAfterMs: 5000,
+      userCode: "ABCD-1234",
+      verificationUrl: "https://microsoft.com/devicelogin",
+    },
+  };
+  const { host, root } = await mount();
+  await until(
+    () => !!button(host, "Connect Outlook Mail") && !button(host, "Connect Outlook Mail")!.disabled,
+    "Connect",
+  );
+  await act(async () => {
+    button(host, "Connect Outlook Mail")!.click();
+  });
+  await until(() => host.textContent?.includes("ABCD-1234") ?? false, "code");
+  expect(host.textContent).not.toContain("in the window that opened");
+  expect(button(host, "Check status")).toBeDefined();
   await act(async () => root.unmount());
   host.remove();
 });

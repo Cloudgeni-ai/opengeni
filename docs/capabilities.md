@@ -131,7 +131,7 @@ separate work. See
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
 flow. Curated Integration Definitions cover Microsoft
-Outlook Mail/Calendar/Contacts/OneDrive; Gmail and Google Drive use catalog MCP
+Outlook Mail/Calendar/Contacts, OneDrive, SharePoint and Teams; Gmail and Google Drive use catalog MCP
 connections. For other APIs, a general OpenAPI URL, GraphQL endpoint,
 or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
@@ -585,7 +585,7 @@ and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.
 
 **Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
-Outlook Calendar, Outlook Contacts, and OneDrive. These integrations receive
+Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
 events, post as Opengeni, or hold their own identity in the other product.
 Previous Google Drive and Atlassian connections retain historical cleanup
 surfaces; their native source setup is retired. Every integration's page renders through the same component
@@ -594,12 +594,13 @@ surfaces; their native source setup is retired. Every integration's page renders
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
 `use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
-`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`) maps
+`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
+`use-sharepoint-integration.tsx`) maps
 that provider's data onto the view-model and picks the content for the
 viewer's role. There is exactly one row per provider, never one row per
 account and never a separate control center: the shared multi-account layer
 (`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
-instance a provider has (Outlook Mail/Calendar/Contacts and OneDrive) into that
+instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive and SharePoint) into that
 one row's rolled-up state. The page contains no provider-specific
 branch; every account/provider difference lives in the adapters.
 
@@ -788,10 +789,10 @@ sends an ordinary human message carrying the composer picker's repository
 resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
 
 The deployment's reviewed API integrations (Outlook Mail, Outlook Calendar,
-Outlook Contacts, OneDrive and, where the Teams rollout allows it, Microsoft
-Teams) are also search results for agents, as `api:integration:<definition id>`
+Outlook Contacts, OneDrive, SharePoint and, where the Teams rollout allows it,
+Microsoft Teams) are also search results for agents, as `api:integration:<definition id>`
 entries tagged only with names that mean Microsoft (Outlook, Hotmail, MSN,
-Exchange, OneDrive, Teams), so generic requests such as "send an email" or
+Exchange, OneDrive, SharePoint, Teams), so generic requests such as "send an email" or
 "schedule a meeting" keep finding Gmail or Google Calendar. They are offered
 only when the definition is available in the workspace and the deployment's
 OAuth client and encryption are configured. Their setup state is per person:
