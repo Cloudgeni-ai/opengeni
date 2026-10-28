@@ -18,13 +18,16 @@ test("one signal per session, at its newest revision, all at once", async () => 
   const sent: SessionWorkflowWake[] = [];
   let inFlight = 0;
   let peak = 0;
-  await signalBackgroundCommandWakes([wake("a", 3), wake("b", 1), wake("a", 4)], async (pending) => {
-    inFlight += 1;
-    peak = Math.max(peak, inFlight);
-    await Bun.sleep(10);
-    inFlight -= 1;
-    sent.push(pending);
-  });
+  await signalBackgroundCommandWakes(
+    [wake("a", 3), wake("b", 1), wake("a", 4)],
+    async (pending) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Bun.sleep(10);
+      inFlight -= 1;
+      sent.push(pending);
+    },
+  );
   expect(sent.map((pending) => `${pending.sessionId}@${pending.wakeRevision}`).sort()).toEqual([
     "a@4",
     "b@1",

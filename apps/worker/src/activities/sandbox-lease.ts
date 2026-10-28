@@ -4834,9 +4834,7 @@ async function terminateDrainableBox(
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
   const { wentCold, unpublishedProviderLost, backgroundCommandEvents, backgroundCommandWakes } =
-    await confirmDrainCold(
-    db,
-    {
+    await confirmDrainCold(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
@@ -4855,8 +4853,7 @@ async function terminateDrainableBox(
       // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
       providerStopped:
         managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
-    },
-  );
+    });
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {

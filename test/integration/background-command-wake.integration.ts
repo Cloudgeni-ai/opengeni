@@ -155,8 +155,10 @@ async function wakeLatency(
 async function commandRows(databaseUrl: string, sessionId: string): Promise<string> {
   const sql = postgres(databaseUrl, { max: 1 });
   try {
-    const commands = await sql`select * from session_background_commands where session_id = ${sessionId}`;
-    const processes = await sql`select * from sandbox_retained_processes where session_id = ${sessionId}`;
+    const commands =
+      await sql`select * from session_background_commands where session_id = ${sessionId}`;
+    const processes =
+      await sql`select * from sandbox_retained_processes where session_id = ${sessionId}`;
     return JSON.stringify({ commands, processes }, null, 1);
   } catch (error) {
     return `command rows unavailable: ${String(error)}`;
@@ -168,8 +170,7 @@ async function commandRows(databaseUrl: string, sessionId: string): Promise<stri
 function trace(events: EventProjection[]): string {
   return events
     .map(
-      (event) =>
-        `${event.occurredAt} ${event.type} ${JSON.stringify(event.payload).slice(0, 300)}`,
+      (event) => `${event.occurredAt} ${event.type} ${JSON.stringify(event.payload).slice(0, 300)}`,
     )
     .join("\n");
 }

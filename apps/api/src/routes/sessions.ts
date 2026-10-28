@@ -503,7 +503,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     bus,
     objectStorage,
     observability: deps.observability,
-    wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+    // Read at call time: route-only compositions (tests) have no workflow client.
+    wakeSessionWorkflow: (input: Parameters<typeof workflowClient.wakeSessionWorkflow>[0]) =>
+      workflowClient.wakeSessionWorkflow(input),
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
