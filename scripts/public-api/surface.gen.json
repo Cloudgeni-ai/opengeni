@@ -36512,6 +36512,7 @@
       "useWorkspaceModelCatalog": "value",
       "UseWorkspaceModelCatalogOptions": "type",
       "UseWorkspaceModelCatalogResult": "type",
+      "useWorkspacePanelOwnsExpand": "value",
       "useWorkspaces": "value",
       "useWorkspaceSessions": "value",
       "UseWorkspaceSessionsOptions": "type",
