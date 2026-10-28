@@ -176,7 +176,8 @@ html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
 
 /* Layers that fill the window's content (a full-window Site or artifact, the
    maximized workspace) are the same inset panel, over the rail. The sidebar
-   toggle has nothing to show or hide under them. */
+   toggle has nothing to show or hide under them: while one is open the layer
+   marks the document (`data-window-layer-open`) and the toggle steps aside. */
 html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer] {
   inset: var(--og-window-bar-height) var(--og-window-panel-gap) var(--og-window-panel-gap);
   width: auto;
@@ -186,7 +187,7 @@ html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surfa
   overflow: hidden;
 }
 
-html[data-desktop="macos"]:has(:is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer]:not([hidden])) [data-window-bar-controls] {
+html[data-desktop="macos"][data-window-layer-open] [data-window-bar-controls] {
   display: none;
 }
 
