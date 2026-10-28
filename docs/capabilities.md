@@ -91,6 +91,35 @@ widens the model-visible tool policy. Runtime authorization is rechecked before
 each Apps request; ownership and mutation rules are detailed in
 [`mcp-surfaces.md`](mcp-surfaces.md).
 
+### Personal workspace extension
+
+A Personal workspace extends its owner's organization for that one person. In
+the owner's Personal workspace, agents and the Connections page also get the
+MCP connectors behind the owner's own active **Only me** (subject-scoped)
+connections made in other workspaces of the same organization. Nothing is
+copied: `personalWorkspaceExtensionMcpServers`
+(`packages/core/src/domain/personal-workspace-connectors.ts`) derives them on
+every catalog read, session create, approval-policy read and worker claim.
+
+- A curated catalog connector uses its catalog definition. A custom MCP uses
+  the origin workspace's enabled capability whose connection reference matches
+  the connection. Workspace-held credential headers, installation config and
+  host-authority references never follow; the carried server always binds the
+  owner's own subject-scoped account.
+- It applies only in the subject's canonical Personal workspace, only to that
+  subject's own active subject-scoped connections in the same account, and only
+  while the owner is still a live member of the origin workspace (rechecked
+  each time, so removing the connection or the membership leaves nothing).
+  Workspace-scoped connections and other people's connections never follow.
+- Personal's own installation of the same capability, enabled or disabled,
+  wins, as does an organization integration policy that does not allow
+  `custom:mcp`. Shared workspaces are unchanged.
+- The Connections page lists a carried connector as connected, labelled
+  **From <workspace>**; it is managed in the origin workspace.
+
+API integration definitions, MCP event sources and per-connector tool
+permission rows are not carried yet.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:

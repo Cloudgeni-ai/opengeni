@@ -11533,6 +11533,63 @@ export async function listEnabledMcpCapabilityServers(
    */
   only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
 ): Promise<EnabledMcpCapabilityServer[]> {
+  return (await listEnabledMcpCapabilityRows(db, workspaceId, only)).flatMap(
+    ({ item, installation }) => {
+      const server = enabledMcpCapabilityServerFromRow(item, installation, "installation");
+      return server ? [server] : [];
+    },
+  );
+}
+
+/**
+ * A connector enabled in an origin workspace, as the definition its members'
+ * own (subject-scoped) connections can carry into their Personal workspace.
+ *
+ * Never carries workspace-held credential headers: only the connection
+ * reference, which the caller narrows to the person's own accounts. A curated
+ * (global catalog) connector is projected from its catalog definition alone,
+ * so the origin workspace's per-installation configuration is not copied; a
+ * custom connector defined by the origin workspace keeps its enabled
+ * definition. This is a read of `originWorkspaceId`'s enabled set, NOT an
+ * authorization: the caller must already have established that the person
+ * still holds authority in the origin workspace.
+ */
+export type OriginMcpCapabilityServer = Omit<EnabledMcpCapabilityServer, "headersEncrypted"> & {
+  connectionRef: McpServerConnectionRef;
+  /** `global`: a curated/registry catalog row; `workspace`: the origin's own definition. */
+  catalogScope: "global" | "workspace";
+};
+
+export async function listOriginMcpCapabilityServersForPersonalExtension(
+  db: Database,
+  originWorkspaceId: string,
+): Promise<OriginMcpCapabilityServer[]> {
+  return (await listEnabledMcpCapabilityRows(db, originWorkspaceId)).flatMap(
+    ({ item, installation }) => {
+      const catalogScope = item.workspaceId === null ? "global" : "workspace";
+      const server = enabledMcpCapabilityServerFromRow(
+        item,
+        installation,
+        catalogScope === "global" ? "catalog" : "installation",
+      );
+      const connectionRef = server?.connectionRef;
+      if (!server || !connectionRef || connectionRef.authoritySource === "host") return [];
+      const { headersEncrypted: _workspaceHeaders, ...definition } = server;
+      return [{ ...definition, connectionRef, catalogScope }];
+    },
+  );
+}
+
+type EnabledMcpCapabilityRow = {
+  item: typeof schema.capabilityCatalogItems.$inferSelect;
+  installation: typeof schema.capabilityInstallations.$inferSelect;
+};
+
+async function listEnabledMcpCapabilityRows(
+  db: Database,
+  workspaceId: string,
+  only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
+): Promise<EnabledMcpCapabilityRow[]> {
   if (only && only.capabilityIds.length === 0 && only.serverIds.length === 0) return [];
   const rows = await withWorkspaceRls(
     db,
@@ -11595,51 +11652,64 @@ export async function listEnabledMcpCapabilityServers(
       preferredByInstallation.set(row.installation.id, row);
     }
   }
+  return [...preferredByInstallation.values()];
+}
 
-  return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
-    if (
-      catalogExposureState(item, installation) === "blocked" ||
-      !item.endpointUrl ||
-      !mcpConnectivityOk(installation.metadata)
-    ) {
-      return [];
-    }
-    const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
-    const connectionRef = connectionRefConfig(installation.config.connectionRef);
-    if (item.authModel && !headersEncrypted && !connectionRef) {
-      // Credential-gated MCPs are runnable only when either legacy static
-      // credential headers or the connections broker ref were stored at enable
-      // time.
-      return [];
-    }
-    const metadata = item.metadata;
-    const config = installation.config;
-    const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
-    const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
-    const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = resolveMcpApprovalRecommendation(
-      config.requireApproval,
-      metadata.requireApproval,
-    );
-    return [
-      {
-        capabilityId: item.id,
-        id: mcpServerIdForCapability(item.id, metadata),
-        name: item.name,
-        ...(item.category ? { category: item.category } : {}),
-        url: item.endpointUrl,
-        ...(allowedTools ? { allowedTools } : {}),
-        ...(timeoutMs ? { timeoutMs } : {}),
-        ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
-        ...(requireApproval !== undefined ? { requireApproval } : {}),
-        ...(item.workspaceId === null
-          ? { approvalFloor: sessionMcpApprovalPolicyConfig(metadata.requireApproval) ?? false }
-          : {}),
-        ...(headersEncrypted ? { headersEncrypted } : {}),
-        ...(connectionRef ? { connectionRef } : {}),
-      },
-    ];
-  });
+/**
+ * `definition: "installation"` is the workspace's own enabled server: catalog
+ * defaults overlaid with the installation's configuration and stored
+ * credentials. `"catalog"` projects the catalog definition alone (no
+ * installation configuration, no stored headers) and keeps only the
+ * installation's connection reference.
+ */
+function enabledMcpCapabilityServerFromRow(
+  item: EnabledMcpCapabilityRow["item"],
+  installation: EnabledMcpCapabilityRow["installation"],
+  definition: "installation" | "catalog",
+): EnabledMcpCapabilityServer | null {
+  if (
+    catalogExposureState(item, installation) === "blocked" ||
+    !item.endpointUrl ||
+    !mcpConnectivityOk(installation.metadata)
+  ) {
+    return null;
+  }
+  const headersEncrypted =
+    definition === "installation"
+      ? encryptedHeadersConfig(installation.config.headersEncrypted)
+      : undefined;
+  const connectionRef = connectionRefConfig(installation.config.connectionRef);
+  if (item.authModel && !headersEncrypted && !connectionRef) {
+    // Credential-gated MCPs are runnable only when either legacy static
+    // credential headers or the connections broker ref were stored at enable
+    // time.
+    return null;
+  }
+  const metadata = item.metadata;
+  const config: Record<string, unknown> = definition === "installation" ? installation.config : {};
+  const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
+  const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
+  const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
+  const requireApproval = resolveMcpApprovalRecommendation(
+    config.requireApproval,
+    metadata.requireApproval,
+  );
+  return {
+    capabilityId: item.id,
+    id: mcpServerIdForCapability(item.id, metadata),
+    name: item.name,
+    ...(item.category ? { category: item.category } : {}),
+    url: item.endpointUrl,
+    ...(allowedTools ? { allowedTools } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+    ...(requireApproval !== undefined ? { requireApproval } : {}),
+    ...(item.workspaceId === null
+      ? { approvalFloor: sessionMcpApprovalPolicyConfig(metadata.requireApproval) ?? false }
+      : {}),
+    ...(headersEncrypted ? { headersEncrypted } : {}),
+    ...(connectionRef ? { connectionRef } : {}),
+  };
 }
 
 const ecmaScriptTrimCharacters =

@@ -32,6 +32,8 @@ import {
   listSocialConnections,
   listOwnedConnectionAccounts,
   namedSubjectHasLiveWorkspaceAuthority,
+  namedSubjectPersonalWorkspaceId,
+  externalPersonPersonalWorkspaceId,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -184,6 +186,71 @@ export async function listOwnConnectionAccountsForGrant(
     includeInactive: options.includeInactive === true,
   });
   return [...workspace, ...personal];
+}
+
+/** One origin workspace's share of a Personal workspace owner's own accounts. */
+export type PersonalWorkspaceOriginConnections = {
+  originWorkspaceId: string;
+  connections: ConnectionMetadata[];
+};
+
+/**
+ * The Personal workspace as an extension of its organization for its one
+ * owner: the owner's own active subject-scoped ("Only me") connections that
+ * were made in OTHER workspaces of the same organization, grouped by origin
+ * workspace, keeping only origins where the owner still holds live authority.
+ *
+ * Empty unless `workspaceId` is exactly `subjectId`'s own Personal workspace in
+ * `accountId` (the active organization membership's `personal_workspace_id`
+ * pointer): shared workspaces, another member's Personal workspace and other
+ * organizations never receive anything. Workspace-owned connections are never
+ * included (the owned-account read lists only user-scope authorities).
+ *
+ * The same entitlement rule as the rest of this module applies: pass only a
+ * grant-derived subject or the frozen owner of a delegation already held for
+ * `workspaceId`. The pointer check means even a wrongly named subject can only
+ * ever resolve the workspace's own owner, but it is still not an
+ * authentication of the caller. Everything is read live; nothing is copied, so
+ * removing a connection or losing origin membership leaves nothing behind.
+ */
+export async function personalWorkspaceOwnerOriginConnections(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<PersonalWorkspaceOriginConnections[]> {
+  const personalWorkspaceId = input.subjectId.startsWith("user:")
+    ? await namedSubjectPersonalWorkspaceId(db, input)
+    : input.subjectId.startsWith("external_user:")
+      ? await externalPersonPersonalWorkspaceId(db, input)
+      : null;
+  if (!personalWorkspaceId || personalWorkspaceId !== input.workspaceId) return [];
+  const byOrigin = new Map<string, ConnectionMetadata[]>();
+  for (const connection of await listOwnConnectionMetadata(db, input)) {
+    if (
+      connection.workspaceId === input.workspaceId ||
+      connection.accountId !== input.accountId ||
+      connection.subjectId !== input.subjectId ||
+      connection.status !== "active"
+    )
+      continue;
+    byOrigin.set(connection.workspaceId, [
+      ...(byOrigin.get(connection.workspaceId) ?? []),
+      connection,
+    ]);
+  }
+  const origins: PersonalWorkspaceOriginConnections[] = [];
+  // `db` may be one bounded transaction: these reads must not overlap.
+  for (const originWorkspaceId of [...byOrigin.keys()].sort()) {
+    if (
+      !(await ownerStillBelongsToWorkspace(db, {
+        accountId: input.accountId,
+        workspaceId: originWorkspaceId,
+        subjectId: input.subjectId,
+      }))
+    )
+      continue;
+    origins.push({ originWorkspaceId, connections: byOrigin.get(originWorkspaceId)! });
+  }
+  return origins;
 }
 
 async function listOwnConnectionMetadata(

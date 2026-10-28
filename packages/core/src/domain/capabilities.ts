@@ -1,4 +1,9 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
+import {
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+  type PersonalWorkspaceExtensionMcpServer,
+} from "./personal-workspace-connectors";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -228,10 +233,75 @@ export async function buildCapabilityCatalog(input: {
       );
     })
     .sort(compareCatalogItems);
+  // A Personal workspace also shows the connectors its owner's "Only me"
+  // connections carry in from the organization's other workspaces.
+  const carried = input.subjectId
+    ? await personalWorkspaceExtensionMcpServers(input.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        accountId: input.accountId,
+        ownServers: [...input.settings.mcpServers, ...runnableMcpServers],
+      })
+    : [];
   return {
-    items,
+    items: carried.length
+      ? (await withPersonalWorkspaceCarriedItems(input.db, items, carried)).sort(
+          compareCatalogItems,
+        )
+      : items,
     installations: catalogInstallations,
   };
+}
+
+/**
+ * Carried connectors are enabled here but managed where their connection was
+ * made: they are labelled with that workspace and offer only inspection, since
+ * this workspace has no installation to configure or disconnect.
+ */
+async function withPersonalWorkspaceCarriedItems(
+  db: Database,
+  items: CapabilityCatalogItem[],
+  carried: readonly PersonalWorkspaceExtensionMcpServer[],
+): Promise<CapabilityCatalogItem[]> {
+  const result = [...items];
+  for (const server of carried) {
+    const index = result.findIndex((item) => item.id === server.capabilityId);
+    if (index >= 0 && result[index]!.enabled) continue;
+    const item =
+      index >= 0
+        ? result[index]!
+        : await getCapabilityCatalogItem(
+            db,
+            server.personalExtension.originWorkspaceId,
+            server.capabilityId,
+          );
+    if (!item || item.kind !== "mcp") continue;
+    const origin = server.personalExtension;
+    const detail = `From ${origin.originWorkspaceName}`;
+    const projected: CapabilityCatalogItem = {
+      ...item,
+      enabled: true,
+      enabledReason: detail,
+      connectionRef: {
+        providerDomain: server.connectionRef.providerDomain,
+        kind: server.connectionRef.kind ?? "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { ...item.runtime, available: true, mcpServerId: server.id },
+      lifecycle: { status: "ready", readiness: "ready", detail, managedBy: "workspace" },
+      actions: ["inspect"],
+      metadata: {
+        ...item.metadata,
+        personalExtension: {
+          originWorkspaceId: origin.originWorkspaceId,
+          originWorkspaceName: origin.originWorkspaceName,
+        },
+      },
+    };
+    if (index >= 0) result[index] = projected;
+    else result.push(projected);
+  }
+  return result;
 }
 
 /**
@@ -1146,6 +1216,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
      * its RLS scopes must not overlap.
      */
     oneReadAtATime?: boolean;
+    /** The workspace's organization, when the caller knows it (skips a lookup). */
+    accountId?: string;
   },
 ): Promise<Settings> {
   const readApiIntegrations = () =>
@@ -1180,6 +1252,25 @@ export async function settingsWithEnabledCapabilityMcpServers(
       apiIntegrationsPromise,
       readCodexAppsDesignation(),
     ]);
+  }
+  // A Personal workspace also carries its owner's "Only me" connectors from
+  // the organization's other workspaces. Read after the reads above so no RLS
+  // scope overlaps on a caller's transaction.
+  const extensionSubject = personalWorkspaceExtensionSubject(options ?? {});
+  if (extensionSubject) {
+    enabled = [
+      ...enabled,
+      ...(await personalWorkspaceExtensionMcpServers(db, {
+        workspaceId,
+        subjectId: extensionSubject,
+        accountId:
+          options?.accountId ??
+          (options?.codexApps && !(options.codexApps instanceof Promise)
+            ? options.codexApps.accountId
+            : undefined),
+        ownServers: [...settings.mcpServers, ...enabled],
+      })),
+    ];
   }
   apiIntegrations = apiIntegrations.filter((integration) =>
     apiIntegrationIsExecutable(integration, settings, workspaceId),
@@ -1228,6 +1319,27 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     })
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
+  // The fence re-derives a Personal workspace's carried connectors live: a
+  // lost origin membership or removed connection drops them here too.
+  const resolvedIds = new Set([...settings.mcpServers, ...enabled].map((server) => server.id));
+  if ([...serverIds].some((id) => !resolvedIds.has(id))) {
+    enabled.push(
+      ...(
+        await personalWorkspaceExtensionMcpServers(db, {
+          workspaceId,
+          subjectId: options.subjectId,
+          accountId: options.accountId,
+          // Duplicate checks need the workspace's complete own set, not only
+          // the targets; read it only once the workspace is a Personal one.
+          ownServers: async () => [
+            ...settings.mcpServers,
+            ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
+          ],
+        })
+      ).filter((server) => serverIds.has(server.id)),
+    );
+    options.signal?.throwIfAborted();
+  }
   const apiIntegrations = (
     await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
   ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
