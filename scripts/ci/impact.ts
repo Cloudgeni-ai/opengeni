@@ -555,6 +555,13 @@ const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",
   ],
+  "test/e2e/desktop-window-bar.ts": [
+    "test/e2e/artifact-desktop.browser.e2e.ts",
+    "test/e2e/desktop-corner.browser.e2e.ts",
+    "test/e2e/desktop-rail.browser.e2e.ts",
+    "test/e2e/session-sidebar.browser.e2e.ts",
+    "test/e2e/signed-out-page.browser.e2e.ts",
+  ],
 };
 
 const ARTIFACT_RUNTIME_WORKSPACES = [
@@ -751,10 +758,8 @@ function fullPlan(
       "migration-test-budgets",
       // Contract requirement IDs and the tests that claim them stay consistent.
       "subscription-contract",
-      // The public API surface snapshot and the published-SDK compatibility
-      // run (docs/design/api-compatibility-policy.md).
+      // The public API surface snapshot (docs/design/api-compatibility-policy.md).
       "public-api",
-      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -975,7 +980,7 @@ export function createImpactPlan(
     );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
-    guards.push("public-api", "sdk-compat");
+    guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");

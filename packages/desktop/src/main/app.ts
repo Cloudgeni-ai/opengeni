@@ -1117,7 +1117,6 @@ export class DesktopShell {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
       fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
-      onDeprecation: false as const,
       apiContract: "compatible" as const,
     };
   }

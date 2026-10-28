@@ -425,9 +425,7 @@ function SessionsIndexRouteContent({
   const draftSecretsOn =
     agentAvailability.isAvailable("secrets") &&
     capabilityOn(composerAgentCapabilities.draft.values, "secrets");
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const draftVaults = useVaults({
     client: context.client,
     workspaceId,

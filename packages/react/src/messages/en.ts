@@ -528,8 +528,6 @@ export const englishMessages = {
   "automations.run.error.unknown": "Something went wrong with this run.",
   "automations.run.error.usageLimit":
     "It reached its usage limit. Raise or remove the limit to let later runs start.",
-  "automations.run.error.variableSetUnavailable":
-    "A variable set it uses no longer exists or can't be used.",
   "automations.run.error.workspacePaused":
     "Skipped because agent activity in this workspace was paused. Skipped runs aren't replayed.",
   "automations.run.status.dispatched": "Started",
@@ -1913,6 +1911,7 @@ export const englishMessages = {
   "humanInputModel.savesToThisTask": "Saves to this task",
   "humanInputModel.savesToYourPrivateVault": "Saves to your private vault",
   "humanInputModel.saveTo": "Save to",
+  "humanInputModel.sendAnswer": "Send answer",
   "humanInputModel.sendAnswers": "Send answers",
   "humanInputModel.show": "Show",
   "humanInputModel.skip": "Skip",

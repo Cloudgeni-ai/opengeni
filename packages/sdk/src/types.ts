@@ -1911,12 +1911,6 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetIds?: string[] | undefined;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
@@ -3608,17 +3602,17 @@ export type IncidentTelemetrySeriesMetadata = {
 export type IncidentTelemetryDataRoute =
   | { kind: "mcp"; serverId: string }
   | { kind: "first_party"; tool: FirstPartyMcpToolName }
-  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "vault"; vaultName: string; secretNames: string[] }
   | { kind: "rig_credential_hook"; credentialHookId: string };
 
 export type IncidentTelemetryPreflight = {
   requiredResources: ResourceRef[];
   requiredMcpServerIds: string[];
   requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
-  requiredFirstPartyMcpPermissions: Permission[];
+  requiredFirstPartyMcpPermissions: KnownPermission[];
   requiredRig: { name: string; credentialHookIds: string[] } | null;
-  requiredVariableSetNames: string[];
-  requiredVariableNames: string[];
+  requiredVaultNames: string[];
+  requiredSecretNames: string[];
   dataSource: {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
@@ -3637,16 +3631,16 @@ export type IncidentTelemetryPreflightInput = Omit<
   | "requiredFirstPartyMcpTools"
   | "requiredFirstPartyMcpPermissions"
   | "requiredRig"
-  | "requiredVariableSetNames"
-  | "requiredVariableNames"
+  | "requiredVaultNames"
+  | "requiredSecretNames"
 > & {
   requiredResources?: ResourceRef[] | undefined;
   requiredMcpServerIds?: string[] | undefined;
   requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
-  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredFirstPartyMcpPermissions?: KnownPermission[] | undefined;
   requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
-  requiredVariableSetNames?: string[] | undefined;
-  requiredVariableNames?: string[] | undefined;
+  requiredVaultNames?: string[] | undefined;
+  requiredSecretNames?: string[] | undefined;
 };
 
 export type ScheduledTaskAgentConfig = {
@@ -3751,10 +3745,6 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
   /** Vaults every run may resolve secret references from (the task vault is always included). */
@@ -3984,7 +3974,7 @@ export type CreateSessionRequest = {
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  /** Atomically attach the server-derived personal rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -4194,6 +4184,8 @@ export type FirstPartyMcpToolName =
   | "secret_get"
   | "secret_move"
   | "secret_delete"
+  | "secret_profile_get"
+  | "secret_profile_set"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -5671,94 +5663,6 @@ export type ClientResumableVoiceInputConfig = {
   maxSizeBytes: number;
   maxChunkSizeBytes: number;
   providerSegmentSeconds: number;
-};
-
-export type TranscriptionRecordingErrorCode =
-  | "permission_denied"
-  | "not_supported"
-  | "network"
-  | "provider"
-  | "policy_blocked"
-  | "timeout"
-  | "cancelled"
-  | "unavailable"
-  | "too_large"
-  | "invalid_audio"
-  | "unknown"
-  | "insufficient_credits"
-  | "allowance_exhausted"
-  | "monthly_model_cost_limit"
-  | "region_restricted";
-
-export type TranscriptionRecordingState =
-  | "uploading"
-  | "segmenting"
-  | "ready"
-  | "transcribing"
-  | "complete"
-  | "failed"
-  | "discarded";
-
-export type TranscriptionRecordingSegmentState =
-  | "preparing"
-  | "pending"
-  | "transcribing"
-  | "complete"
-  | "failed";
-
-export type TranscriptionRecordingSegment = {
-  segmentNumber: number;
-  state: TranscriptionRecordingSegmentState;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  byteLength: number;
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-};
-
-export type TranscriptionRecording = {
-  id: string;
-  workspaceId: string;
-  mimeType: string;
-  state: TranscriptionRecordingState;
-  nextChunkNumber: number;
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  segmentCount: number;
-  completedSegmentCount: number;
-  transcriptText: string | null;
-  languages: string[];
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-  objectsCleaned: boolean;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-};
-
-export type TranscriptionRecordingResponse = {
-  recording: TranscriptionRecording;
-  segments: TranscriptionRecordingSegment[];
-  retryAfterMilliseconds?: number;
-};
-
-export type TranscriptionRecordingListResponse = {
-  recordings: TranscriptionRecording[];
-};
-
-export type TranscriptionRecordingChunk = {
-  chunkNumber: number;
-  byteLength: number;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  deduplicated: boolean;
-};
-
-export type UploadTranscriptionRecordingChunkResponse = {
-  recording: TranscriptionRecording;
-  chunk: TranscriptionRecordingChunk;
 };
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
@@ -8037,8 +7941,6 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
-  defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
@@ -8929,120 +8831,6 @@ export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" 
   description?: string | undefined;
 };
 export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
-
-// --- Opengeni Review Bot ------------------------------------------------------------
-
-export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
-export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
-
-export type CreatePrReviewAppRegistrationRequest = {
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl?: string | undefined;
-  appId?: string | undefined;
-  credentialKind: PrReviewCredentialKind;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret: string;
-  webhookUsername?: string | undefined;
-};
-
-export type UpdatePrReviewAppRegistrationRequest = {
-  name?: string | undefined;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret?: string | undefined;
-  webhookUsername?: string | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewAppRegistration = {
-  id: string;
-  sourceId: string;
-  accountId: string;
-  workspaceId: string;
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl: string;
-  appId: string | null;
-  installationId: string | null;
-  providerAccountLogin: string | null;
-  providerAccountType: "User" | "Organization" | null;
-  credentialKind: PrReviewCredentialKind;
-  hasCredential: boolean;
-  accessTokenExpiresAt: string | null;
-  webhookAuthKind: PrReviewWebhookAuthKind;
-  hasWebhookSecret: boolean;
-  webhookUsername: string | null;
-  webhookPath: string;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CreatePrReviewRepositoryBindingRequest = {
-  registrationId: string;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string | number;
-  installationId?: string | number | undefined;
-  projectId?: string | number | undefined;
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type UpdatePrReviewRepositoryBindingRequest = {
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewRepositoryBinding = {
-  id: string;
-  triggerId: string;
-  accountId: string;
-  workspaceId: string;
-  registrationId: string;
-  provider: PrReviewProvider;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string;
-  installationId: string | null;
-  projectId: string | null;
-  model: string | null;
-  additionalInstructions: string | null;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ListPrReviewConfigurationResponse = {
-  registrations: PrReviewAppRegistration[];
-  repositories: PrReviewRepositoryBinding[];
-};
-
-export type PrReviewManagedGitHubInstallation = {
-  registrationId: string;
-  installationId: string;
-  accountLogin: string | null;
-  configureUrl: string | null;
-  repositoryCount: number;
-};
-
-export type PrReviewManagedGitHubSetup = {
-  configured: boolean;
-  status: "unavailable" | "not_connected" | "connected";
-  appName: "Opengeni Lens" | "OpenGeni Lens";
-  connectUrl: string | null;
-  installations: PrReviewManagedGitHubInstallation[];
-  missing: string[];
-};
 
 // --- Capabilities ---------------------------------------------------------------
 

@@ -30,6 +30,13 @@
 import { formatSecretReference, parseSecretReference } from "./secret-references";
 import type { ResolvedSecretValue, SecretResolver } from "./secret-resolution";
 import { isBase64DataUrl, isTextMediaType, mapSecretMaskableStrings } from "./secret-mask-strings";
+import {
+  collectSecretShapes,
+  maskSecretShapes,
+  maskSecretShapesInText,
+  secretShapeMaskLabel,
+  type SecretShapeMatch,
+} from "./secret-shape-masking";
 
 export { isBase64DataUrl, isTextMediaType, mapSecretMaskableStrings };
 
@@ -105,6 +112,8 @@ export type SecretValueMaskDiagnostic = {
 
 /** The marker that replaces a credential Opengeni itself put into the attempt. */
 const CREDENTIAL_LABEL_OPEN = "[opengeni credential: ";
+/** How a `[masked <kind>]` marker (a shape value that has no reference) starts. */
+const SHAPE_MARKER_OPEN = "[masked ";
 
 export function secretCredentialMaskLabel(kind: string): string {
   const safe = kind.replace(/[^A-Za-z0-9 ._-]/gu, "").slice(0, 60) || "credential";
@@ -582,9 +591,43 @@ export function firstPartySecretValuesFromMeta(meta: unknown): SecretValueMaskEn
   );
 }
 
+/**
+ * Whether a secret-shaped value is distinctive enough to search for in any
+ * text: at least 16 characters with three kinds of characters (lower case,
+ * upper case, digits, others), or 24 with two, and not the user name beside it.
+ */
+function isDistinctiveSecret(value: string, username?: string): boolean {
+  if (username !== undefined && value === username) return false;
+  const kinds =
+    Number(/[a-z]/.test(value)) +
+    Number(/[A-Z]/.test(value)) +
+    Number(/[0-9]/.test(value)) +
+    Number(/[^A-Za-z0-9]/.test(value));
+  return (value.length >= 16 && kinds >= 3) || (value.length >= 24 && kinds >= 2);
+}
+
+/** A revealed value as it appears in text: as written and JSON-escaped. */
+function revealedForms(value: string): string[] {
+  if (value.length === 0) return [];
+  const escaped = JSON.stringify(value).slice(1, -1);
+  return escaped === value ? [value] : [value, escaped];
+}
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------
+
+/**
+ * Saves detected secret-shaped values somewhere they can be used by
+ * reference (the task vault) and returns, per value it saved, the reference
+ * to write instead. Values it leaves out are masked with a fixed marker.
+ */
+export type SecretShapeCapturer = (
+  matches: readonly SecretShapeMatch[],
+) => Promise<ReadonlyMap<string, string>>;
+
+/** Distinct new values captured from one tool result; the rest get a marker. */
+export const SECRET_SHAPE_CAPTURES_PER_RESULT = 16;
 
 /**
  * The secret values one owner (an agent attempt, a browser session) knows
@@ -596,6 +639,8 @@ export class SecretValueMemory {
   private readonly values = new Map<string, string>();
   private readonly operations = new Map<string, SecretValueMaskEntry[]>();
   private compiled: CompiledSecretValueMasks | null = null;
+  /** Masks without values that only have a `[masked <kind>]` marker, by version. */
+  private compiledReferenced: { version: number; masks: CompiledSecretValueMasks } | null = null;
   private changes = 0;
   private readonly options: SecretValueMaskOptions;
   private readonly maxEntries: number;
@@ -604,6 +649,9 @@ export class SecretValueMemory {
   /** Values an explicit, audited reveal (`secret_get`) handed to the agent. */
   private readonly revealed = new Set<string>();
   private disposed = false;
+  /** Secret-shaped values seen in tool output, with what replaces them (any length). */
+  private readonly shapes = new Map<string, string>();
+  private shapeCapturer: SecretShapeCapturer | undefined;
 
   constructor(
     options: SecretValueMaskOptions & {
@@ -670,7 +718,7 @@ export class SecretValueMemory {
   remember(value: string, label: string): boolean {
     try {
       if (typeof value !== "string" || typeof label !== "string") return false;
-      if (this.disposed || value.length < this.minChars || this.revealed.has(value)) return false;
+      if (this.disposed || value.length < this.minChars || this.isRevealed(value)) return false;
       const existing = this.values.get(value);
       const keep =
         existing !== undefined &&
@@ -720,13 +768,38 @@ export class SecretValueMemory {
     try {
       if (typeof value !== "string" || value.length === 0) return;
       this.revealed.add(value);
-      if (this.values.delete(value)) {
+      // A value inside the revealed one (the password of a revealed URL) was
+      // handed over with it, so it is released too; Opengeni's own
+      // credentials stay masked.
+      let changed = false;
+      for (const [known, label] of this.values) {
+        if (label.startsWith(CREDENTIAL_LABEL_OPEN) || !value.includes(known)) continue;
+        this.values.delete(known);
+        changed = true;
+      }
+      for (const known of this.shapes.keys()) {
+        if (value.includes(known)) this.shapes.delete(known);
+      }
+      if (changed) {
         this.compiled = null;
         this.changes += 1;
       }
     } catch (error) {
       this.report("reveal", error);
     }
+  }
+
+  /**
+   * Whether `value` is, or lies within, a value `secret_get` revealed. Only a
+   * value of at least the minimum length counts as lying within one, so a
+   * short value is not released by a chance match.
+   */
+  private isRevealed(value: string): boolean {
+    if (this.revealed.size === 0) return false;
+    if (this.revealed.has(value)) return true;
+    if (value.length < this.minChars) return false;
+    for (const revealed of this.revealed) if (revealed.includes(value)) return true;
+    return false;
   }
 
   /**
@@ -738,8 +811,11 @@ export class SecretValueMemory {
     this.values.clear();
     this.operations.clear();
     this.revealed.clear();
+    this.shapes.clear();
+    this.shapeCapturer = undefined;
     this.refresher = undefined;
     this.compiled = null;
+    this.compiledReferenced = null;
     this.changes += 1;
   }
 
@@ -797,6 +873,34 @@ export class SecretValueMemory {
     }
   }
 
+  /** `mask` without the values whose label is only a `[masked <kind>]` marker. */
+  private maskReferenced<T>(value: T, stage: string): T {
+    if (this.values.size === 0) return value;
+    let markers = false;
+    for (const label of this.values.values()) {
+      if (label.startsWith(SHAPE_MARKER_OPEN)) {
+        markers = true;
+        break;
+      }
+    }
+    if (!markers) return this.mask(value, stage);
+    try {
+      if (this.compiledReferenced?.version !== this.changes) {
+        this.compiledReferenced = {
+          version: this.changes,
+          masks: compileSecretValueMasks(
+            this.entries().filter((entry) => !entry.label.startsWith(SHAPE_MARKER_OPEN)),
+            this.options,
+          ),
+        };
+      }
+      return maskSecretValues(value, this.compiledReferenced.masks);
+    } catch (error) {
+      this.report(stage, error);
+      return value;
+    }
+  }
+
   /** Mask one text; never throws. */
   maskText(text: string, stage = "mask"): string {
     if (this.values.size === 0 || typeof text !== "string") return text;
@@ -819,6 +923,162 @@ export class SecretValueMemory {
     }
   }
 
+  /**
+   * Attach the capturer that saves secret-shaped values found in tool output
+   * (normally into the task vault). Without one they are masked with a marker.
+   */
+  setShapeCapturer(capturer: SecretShapeCapturer | undefined): void {
+    this.shapeCapturer = capturer;
+  }
+
+  /**
+   * Remember a secret-shaped value from tool output: it is replaced wherever
+   * a shape detector finds it, and (when long enough) searched for as a known
+   * value everywhere else. A reference replaces an earlier marker.
+   */
+  rememberShape(value: string, label: string, username?: string): void {
+    try {
+      if (typeof value !== "string" || typeof label !== "string" || value.length === 0) return;
+      // An ended attempt keeps nothing; a value `secret_get` revealed stays readable.
+      if (this.disposed || this.isRevealed(value)) return;
+      const existing = this.shapes.get(value);
+      if (
+        existing === undefined ||
+        (!isSecretReferenceMaskLabel(existing) && isSecretReferenceMaskLabel(label))
+      ) {
+        this.shapes.set(value, label);
+        while (this.shapes.size > this.maxEntries) {
+          const oldest = this.shapes.keys().next().value;
+          if (oldest === undefined) break;
+          this.shapes.delete(oldest);
+        }
+      }
+      // Searched everywhere else only when it is distinctive: a weak or
+      // common password (`postgres`, the URL's own user name) would mask
+      // ordinary words. Where a detector finds it, it is masked regardless.
+      if (isDistinctiveSecret(value, username)) {
+        this.remember(value, this.shapes.get(value) ?? label);
+      }
+    } catch (error) {
+      this.report("remember_shape", error);
+    }
+  }
+
+  /**
+   * Find secret-shaped values in tool output that are not known yet and
+   * capture them, waiting at most `maxWaitMs`. Values the capturer does not
+   * return a reference for (or all of them, without a capturer or on any
+   * failure) are remembered with a `[masked <kind>]` marker. Never throws.
+   */
+  async captureShapes(value: unknown, stage = "tool_result", maxWaitMs = 5_000): Promise<void> {
+    let pending: SecretShapeMatch[];
+    try {
+      // Known values are masked first (a detected part of a vault secret is
+      // not captured again), except values that only have a marker: those
+      // are detected again, so a failed or skipped capture is retried.
+      const known = this.maskReferenced(value, stage);
+      // Values that already have a reference are done; markers are retried.
+      pending = collectSecretShapes(known, 256, {
+        ...(this.options.skipKey ? { skipKey: this.options.skipKey } : {}),
+        keep: (match, text) => !this.insideRevealed(match, text) && !this.isRevealed(match.value),
+      }).filter((match) => !isSecretReferenceMaskLabel(this.shapes.get(match.value) ?? ""));
+    } catch (error) {
+      this.report(stage, error);
+      return;
+    }
+    if (pending.length === 0) return;
+    const capturable = pending.slice(0, SECRET_SHAPE_CAPTURES_PER_RESULT);
+    const usernames = new Map(pending.map((match) => [match.value, match.username]));
+    let captured: ReadonlyMap<string, string> = new Map();
+    const capturer = this.shapeCapturer;
+    if (capturer) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const late = capturer(capturable);
+        // A capture that finishes after the wait still upgrades the markers.
+        late.then(
+          (references) => {
+            for (const [secret, reference] of references) {
+              if (!isSecretReferenceMaskLabel(reference)) continue;
+              this.rememberShape(secret, reference, usernames.get(secret));
+            }
+          },
+          () => {},
+        );
+        captured =
+          (await Promise.race([
+            late,
+            new Promise<null>((resolve) => {
+              timer = setTimeout(() => resolve(null), maxWaitMs);
+            }),
+          ])) ?? new Map();
+      } catch (error) {
+        this.report("shape_capture", error);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }
+    for (const match of pending) {
+      const reference = captured.get(match.value);
+      this.rememberShape(
+        match.value,
+        reference && isSecretReferenceMaskLabel(reference)
+          ? reference
+          : secretShapeMaskLabel(match.kind),
+        match.username,
+      );
+    }
+  }
+
+  /**
+   * Whether a detected part lies within a value `secret_get` revealed (as
+   * written or JSON-escaped), for example the password of a revealed URL.
+   */
+  private insideRevealed(match: SecretShapeMatch, text: string): boolean {
+    if (this.revealed.size === 0) return false;
+    for (const value of this.revealed) {
+      for (const form of revealedForms(value)) {
+        const at = text.indexOf(form, Math.max(0, match.start - form.length + 1));
+        if (at >= 0 && at < match.end) return true;
+      }
+    }
+    return false;
+  }
+
+  /** What replaces a detected shape: its capture, a known label, a marker, or nothing when revealed. */
+  private shapeLabel = (match: SecretShapeMatch, text: string): string | null =>
+    this.insideRevealed(match, text) || this.isRevealed(match.value)
+      ? null
+      : (this.shapes.get(match.value) ??
+        this.values.get(match.value) ??
+        secretShapeMaskLabel(match.kind));
+
+  /**
+   * Mask tool output: known values first, then every secret-shaped part
+   * (with its captured reference, or a marker). Never throws.
+   */
+  maskToolOutput<T>(value: T, stage = "tool_result"): T {
+    const known = this.mask(value, stage);
+    try {
+      return maskSecretShapes(known, this.shapeLabel, this.options.skipKey);
+    } catch (error) {
+      this.report(stage, error);
+      return known;
+    }
+  }
+
+  /** `maskToolOutput` for one text. */
+  maskToolOutputText(text: string, stage = "tool_result"): string {
+    const known = this.maskText(text, stage);
+    if (typeof known !== "string") return known;
+    try {
+      return maskSecretShapesInText(known, this.shapeLabel);
+    } catch (error) {
+      this.report(stage, error);
+      return known;
+    }
+  }
+
   private report(stage: string, error: unknown): void {
     try {
       this.onDiagnostic?.({ stage, error: error instanceof Error ? error.name : typeof error });
@@ -831,21 +1091,28 @@ export class SecretValueMemory {
 /**
  * Mask an error's message, stack, causes and inner errors (`AggregateError`)
  * in place with `memory` (bounded depth) and return it, so a rethrown error
- * carries references, not values.
+ * carries references, not values. In "tool_output" mode secret-shaped parts
+ * are masked too.
  * Never throws: on failure the original error is returned as it is.
  */
 export function maskSecretValuesInError<E>(
   error: E,
   memory: SecretValueMemory | null | undefined,
+  mode: "known" | "tool_output" = "known",
   depth = 0,
 ): E {
-  if (!memory || memory.size === 0 || !(error instanceof Error) || depth > 4) return error;
+  // Tool output also masks secret-shaped parts (with or without known values).
+  if (!memory || !(error instanceof Error) || depth > 4) return error;
+  if (mode === "known" && memory.size === 0) return error;
   // Each part on its own, so one read-only field does not stop the rest.
   const field = (name: "message" | "stack") => {
     try {
       const text = error[name];
       if (typeof text !== "string") return;
-      const masked = memory.maskText(text, "tool_error");
+      const masked =
+        mode === "tool_output"
+          ? memory.maskToolOutputText(text, "tool_error")
+          : memory.maskText(text, "tool_error");
       if (masked !== text) error[name] = masked;
     } catch {
       // The original text stays.
@@ -854,14 +1121,16 @@ export function maskSecretValuesInError<E>(
   field("message");
   field("stack");
   try {
-    if (error.cause !== undefined) maskSecretValuesInError(error.cause, memory, depth + 1);
+    if (error.cause !== undefined) maskSecretValuesInError(error.cause, memory, mode, depth + 1);
   } catch {
     // The cause stays as it is.
   }
   try {
     const inner = (error as { errors?: unknown }).errors;
     if (Array.isArray(inner)) {
-      for (const item of inner.slice(0, 32)) maskSecretValuesInError(item, memory, depth + 1);
+      for (const item of inner.slice(0, 32)) {
+        maskSecretValuesInError(item, memory, mode, depth + 1);
+      }
     }
   } catch {
     // The inner errors stay as they are.

@@ -1,5 +1,4 @@
-import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
-import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
+import { getSessionRootId } from "@opengeni/db";
 import {
   materializeRunCredentials,
   repositoryHasExplicitGitConnection,
@@ -214,7 +213,6 @@ async function prepareRunCredentialsObserved(
                 turn,
                 attemptId: input.attemptId,
                 effectiveSandboxBackend: effectiveRunCredentialBackend,
-                variableSet: null,
               }),
           ),
           cancellationSignal,
@@ -280,34 +278,6 @@ async function prepareRunCredentialsObserved(
     : undefined;
   throwIfTurnOperationCancelled(cancellationSignal);
   const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
-    const registrationId = prReviewRegistrationIdFromCredentialBinding(
-      selection.credentialBindingId,
-    );
-    if (registrationId) {
-      await resolvePrReviewGitCredential(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        registrationId,
-        provider: "github",
-        sessionId: input.sessionId,
-        rootSessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        repositoryRefs: selection.repositoryRefs.map((reference) => ({
-          uri: reference.uri,
-          ...(reference.expectedCommitSha !== undefined
-            ? { expectedCommitSha: reference.expectedCommitSha }
-            : {}),
-          ...(reference.repositoryId !== undefined ? { repositoryId: reference.repositoryId } : {}),
-          ...(reference.installationId !== undefined
-            ? { installationId: reference.installationId }
-            : {}),
-          ...(reference.projectId !== undefined ? { projectId: reference.projectId } : {}),
-        })),
-      });
-      return;
-    }
     await assertGitHubTokenMintSelectionAuthorized(
       db,
       input.workspaceId,

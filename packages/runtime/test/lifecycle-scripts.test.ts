@@ -1582,6 +1582,28 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
         "AZ=azdo-wrapper-1\n",
       );
+      // A credential profile that delivered GH_TOKEN to the command wins over
+      // the binding token file; one that delivered other names does not.
+      expect(
+        execFileSync("gh", [], {
+          env: {
+            ...wrapperEnv,
+            GH_TOKEN: "profile-fake-token",
+            OPENGENI_CREDENTIAL_PROFILE_VARS: "AZURE_CLIENT_ID,GH_TOKEN",
+          },
+          encoding: "utf8",
+        }),
+      ).toBe("GH=profile-fake-token\n");
+      expect(
+        execFileSync("gh", [], {
+          env: {
+            ...wrapperEnv,
+            GH_TOKEN: "stale-ambient-token",
+            OPENGENI_CREDENTIAL_PROFILE_VARS: "AZURE_CLIENT_ID,GH_TOKENS",
+          },
+          encoding: "utf8",
+        }),
+      ).toBe("GH=ghs-wrapper-1\n");
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
       rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), {

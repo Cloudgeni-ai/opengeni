@@ -3675,7 +3675,6 @@ type SlackNewSessionDefaults = {
   excludedMcpServerIds?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   firstPartyMcpPermissions?: NonNullable<Session["firstPartyMcpPermissions"]>;
-  variableSetIds?: string[];
   rigId?: string;
   sandboxBackend?: Session["sandboxBackend"];
   targetSandboxId?: string;
@@ -3686,9 +3685,9 @@ type SlackNewSessionDefaults = {
  * What a new Slack task starts with.
  *
  * A Slack message is not the website composer, so the person's last composer
- * selection (an explicit connector list, a Variable Set, a compute target)
- * never narrows it. Connectors, first-party tools, Variable Sets, Sandbox
- * Environment and compute are left to session creation, which applies the
+ * selection (an explicit connector list, a compute target) never narrows
+ * it. Connectors, first-party tools, Sandbox Environment and compute are left
+ * to session creation, which applies the
  * workspace defaults and freezes the person's own connections through the
  * ordinary delegation snapshot. Repositories are the person's own recently
  * used repositories that the workspace GitHub App still offers them, attached
@@ -3744,7 +3743,6 @@ async function slackNewSessionDefaults(
     ...(pending.firstPartyMcpPermissions
       ? { firstPartyMcpPermissions: pending.firstPartyMcpPermissions }
       : {}),
-    variableSetIds: pending.variableSetIds,
     ...(pending.rigId ? { rigId: pending.rigId } : {}),
     sandboxBackend: pending.sandboxBackend,
     ...(pending.sandboxBackend === "selfhosted" && pending.activeSandboxId

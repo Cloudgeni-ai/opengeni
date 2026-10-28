@@ -5,8 +5,7 @@
 // guard. Live instance: session 0566bad3 (2026-07-02) — the open session page's
 // viewer attach won the cold-create race against the first turn.
 //
-// DB-free: sessionAttachEnvironment only touches the db when the session has an
-// environmentId (loadWorkspaceEnvironmentForRun returns early on null).
+// DB-free: sessionAttachEnvironment derives the environment from settings only.
 
 import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
@@ -26,7 +25,6 @@ const settings = testSettings({
 function sessionWith(resources: Session["resources"], sandboxBackend = "modal"): Session {
   return {
     id: "11111111-1111-1111-1111-111111111111",
-    environmentId: null,
     sandboxBackend,
     resources,
   } as unknown as Session;

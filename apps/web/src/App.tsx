@@ -11,7 +11,6 @@
 //                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
-//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
@@ -579,22 +578,6 @@ const workspaceSecretsItemRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
     search.view === "edit" ? { view: "edit" } : {},
 });
-// Variable sets became Secrets (Q-48): old links land on the same place.
-const workspaceVariableSetsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets",
-  component: SecretsRedirect,
-});
-const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets/$variableSetId",
-  component: SecretsRedirect,
-});
-const workspaceEnvironmentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "environments",
-  component: SecretsRedirect,
-});
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs",
@@ -1062,9 +1045,6 @@ const routeTree = rootRoute.addChildren([
       workspaceSecretsVaultRoute,
       workspaceSecretsItemRoute,
     ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
@@ -1225,21 +1205,6 @@ function Secrets() {
       connectionId={connection}
       owner={owner}
     />
-  );
-}
-
-function SecretsRedirect() {
-  const { workspaceId, variableSetId } = useParams({ strict: false });
-  if (!workspaceId) return null;
-  // A variable set's id is kept by its vault, so its page maps one to one.
-  return variableSetId ? (
-    <Navigate
-      to="/workspaces/$workspaceId/secrets/$vaultId"
-      params={{ workspaceId, vaultId: variableSetId }}
-      replace
-    />
-  ) : (
-    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
   );
 }
 

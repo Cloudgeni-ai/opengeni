@@ -98,10 +98,8 @@ type RunGitCredentialOptions = {
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
 
-// W1 (secrets delivery): the worker no longer loads or decrypts Variable Sets
-// for a turn, and the `sandboxSecrets` leg is gone. User secrets reach a
-// command only through `{{secret:…}}` references resolved at the exec
-// boundary; the manifest carries deployment constants only.
+// User secrets reach a sandbox command only through `{{secret:…}}` references
+// resolved at the exec boundary; the manifest carries deployment constants only.
 
 // Workspace-scope cross-check. A credential provider echoes the workspace it scoped
 // the credential to; we ASSERT it equals the run's workspace BEFORE the caller

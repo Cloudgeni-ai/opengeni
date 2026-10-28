@@ -203,7 +203,6 @@ export type ForkSessionContentInput = {
 };
 
 export type ForkSessionRuntimeRequest = {
-  variableSetIds: string[];
   rigId: string | null;
 };
 
@@ -890,12 +889,7 @@ export async function forkSessionContent(
   if (Boolean(input.runtimeRequest) !== Boolean(input.runtimeConfiguration)) {
     throw new Error("A fresh session fork runtime request requires its resolved configuration");
   }
-  if (
-    input.runtimeRequest &&
-    (input.runtimeRequest.rigId !== input.runtimeConfiguration?.rigId ||
-      JSON.stringify(input.runtimeRequest.variableSetIds) !==
-        JSON.stringify(input.runtimeConfiguration?.variableSetIds))
-  ) {
+  if (input.runtimeRequest && input.runtimeRequest.rigId !== input.runtimeConfiguration?.rigId) {
     throw new Error("Resolved session fork runtime configuration does not match its request");
   }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
@@ -933,7 +927,7 @@ export async function forkSessionContent(
             ${input.operationKey},
             ${requestHash},
             ${SESSION_TENANCY_ACTIVATION_VERSION},
-            ${JSON.stringify(input.runtimeConfiguration.variableSetIds)}::jsonb,
+            '[]'::jsonb,
             ${input.runtimeConfiguration.rigId}::uuid,
             ${input.runtimeConfiguration.rigVersionId}::uuid,
             ${runtimeDigest}

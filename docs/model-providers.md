@@ -626,8 +626,8 @@ continuation can still resolve its retained definition. Re-adding the same slug
 creates a fresh row identity; stale mutations against an older generation
 cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, a new
-or materially reaccepted scheduled task, automation trigger, or PR-review
-repository binding, and a fresh generated-session scheduled occurrence recheck
+or materially reaccepted scheduled task, and a fresh generated-session scheduled
+occurrence recheck
 the active row under the custom-model shared transaction lock in the same commit
 that inserts the session, accepts the turn, writes the task/trigger/binding, or
 accepts the occurrence. A committed keyed session shell or exact producer

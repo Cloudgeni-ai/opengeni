@@ -18,10 +18,9 @@ const params = new URLSearchParams(location.search);
 const platform = params.get("platform") ?? "macos";
 if (platform !== "browser") document.documentElement.dataset.desktop = platform;
 if (platform === "windows") {
-  // Chromium has no native Windows overlay. Supply the same CSS
-  // environment-derived values the Electron host exposes.
-  document.documentElement.style.setProperty("--og-caption-buttons-width", "138px");
-  document.documentElement.style.setProperty("--og-caption-row-height", "56px");
+  // Chromium has no native Windows overlay: stand in for the 44px title bar
+  // area the desktop shell asks for.
+  document.documentElement.style.setProperty("--og-window-bar-height", "44px");
 }
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.classList.toggle("dark", theme === "dark");

@@ -196,7 +196,7 @@ export function SiteViewRoute({
       data-workspace-scroll-owner="self-managed"
     >
       {/* The Site's column, not its chat: the Site's toolbar is this page's
-          top row (desktop window-control clearance in apps/web/src/styles.css). */}
+          top row. */}
       <div ref={siteColumn} data-site-column className="flex min-h-0 min-w-0 flex-1 flex-col">
         {publishingSite ? (
           <Suspense fallback={<div className="min-h-0 flex-1 bg-bg" />}>

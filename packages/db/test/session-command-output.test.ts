@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { CommandReadResult } from "@opengeni/contracts";
+import { CommandReadResult, SecretValueMemory } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
   createSession,
   settleConnectedMachineSessionBackgroundCommand,
   settleClaimedConnectedMachineBackgroundCommand,
+  withSecretValueMasking,
   type DbClient,
 } from "../src";
 import { appendSessionCommandOutput } from "../src/session-command-output";
@@ -304,6 +305,29 @@ test("captured frames are idempotent, pageable while running, and do not observe
   const [count] =
     await shared.admin`select count(*)::int as n from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId}`;
   expect(count!.n).toBe(3);
+});
+
+test("a retry whose masking changed keeps the stored masked output", async () => {
+  const identity = await connected();
+  const password = "FAKE-pw-0000-not-real";
+  const chunk = `OPENGENI_DATABASE_URL=postgres://user:${password}@host:5432/db\n`;
+  const input = { ...identity, chunkId: "op-frame:1", stream: "stdout" as const, chunk };
+  // First write: no capture yet, so the password gets a marker.
+  expect(await appendSessionCommandOutput(client.db, input)).toHaveLength(1);
+  // The retry runs after capture landed: the same value now has a reference.
+  const memory = new SecretValueMemory();
+  memory.rememberShape(
+    password,
+    "\u007B\u007Bsecret:Task/url-password-0000000000000000/password}}",
+  );
+  expect(
+    await withSecretValueMasking(memory, () => appendSessionCommandOutput(client.db, input)),
+  ).toEqual([]);
+  const rows =
+    await shared.admin`select payload->>'chunk' as chunk from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId}`;
+  expect(rows.map((row) => row.chunk)).toEqual([
+    "OPENGENI_DATABASE_URL=postgres://user:[masked url password]@host:5432/db\n",
+  ]);
 });
 
 test("unknown and cross-session command identities cannot publish output", async () => {

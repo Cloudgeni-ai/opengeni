@@ -44,10 +44,6 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   const search = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   expect(search).toBeDefined();
   expect(appActionCallChangesState({ id: search!.id })).toBe(false);
-  // A retired action runs nothing (it only names its replacement), so it never asks.
-  const retired = findAppAction("POST /v1/workspaces/:workspaceId/knowledge/search");
-  expect(retired?.retired).toBeDefined();
-  expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
 });
 
 test("opening a checkout needs no confirmation in the chat; a billing portal link still does", () => {

@@ -248,11 +248,11 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Durable wait: none. User sees: fallback to another provider or `unavailable`.
 - Gaps: per-request shard means no stickiness; a dead credential stays `active` and keeps being selected. Uses shared selection but **bypasses the lease**.
 
-##### EP-N04 — Transcription HTTP routes (one-shot and resumable recordings)
-- Refs: `apps/api/src/routes/transcriptions.ts:20` POST `/transcriptions` (grant `sessions:create`, `requestId` from `x-opengeni-correlation-id` `:59`); `apps/api/src/routes/transcription-recordings.ts:431-511` segment processing (provider pinned per segment via `claim.segment.providerId`, `requestId = attemptId` `:475-486`), `:513-531` fallback provider chosen with `selectProvider` and persisted by `failTranscriptionRecordingSegment`.
+##### EP-N04 — Transcription HTTP routes (one-shot)
+- Refs: `apps/api/src/routes/transcriptions.ts:20` POST `/transcriptions` (grant `sessions:create`, `requestId` from `x-opengeni-correlation-id` `:59`). Dictation recordings are transcribed by the recordings worker (`apps/worker/src/activities/recordings.ts`).
 - Authority: request grant (`grant.subjectId`); recordings carry a durable `authority` (subject, attribution).
 - Pin: the **provider** (not account) is durably pinned per recording segment; the account is reselected on every attempt.
-- Durable wait/recovery: recording segments are durable (start fence `startTranscriptionRecordingSegmentProviderCall`), retries re-run selection.
+- Durable wait/recovery: dictation recordings are durable recordings; retries re-run selection.
 - User sees: per-segment error codes; billing refusal 402-shaped body (`apps/api/src/transcription/billing-refusal.ts:9`), irrelevant for subscriptions.
 
 #### Realtime voice

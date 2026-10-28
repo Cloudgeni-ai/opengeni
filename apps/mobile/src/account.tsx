@@ -83,7 +83,6 @@ function newClient(baseUrl: string, token?: string | null): OpenGeniClient {
     baseUrl,
     // Failed requests are remembered (in memory) so a feedback report can show them.
     fetch: recordingFailedRequests(expoStreamingFetch),
-    onDeprecation: false,
     ...(token ? { apiKey: token } : {}),
   });
 }

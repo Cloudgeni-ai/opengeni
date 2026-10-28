@@ -386,6 +386,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
               <Dialog.Content
                 asChild
                 forceMount
+                data-window-layer
                 aria-label={state.label}
                 onOpenAutoFocus={(event) => event.preventDefault()}
               >

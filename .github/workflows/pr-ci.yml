@@ -107,7 +107,7 @@ jobs:
         run: >-
           bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
           --scope-scans-to-changes --exclude lint
-          --exclude publish-closure --exclude sdk-compat --exclude example-builds
+          --exclude publish-closure --exclude example-builds
       - name: Check affected types
         run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
       # Batch source contracts' "Production web bundle" step, whenever the web

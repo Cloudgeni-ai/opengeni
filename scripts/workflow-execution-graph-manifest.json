@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "936ca957af545fa96970d3213d3afbb53429f4dd518406a8a8bdf49014e042fc"
+      "sha256": "a21dab8a570bf280fa86f8931c3a809349e6230b866bae92070751514e8ae9a8"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -43,10 +43,6 @@
     {
       "path": ".github/workflows/compute-release.yml",
       "sha256": "bb110865c8785d3d906761b6f5be4168c814bb0886de9eb83b0dfd2af589f3cb"
-    },
-    {
-      "path": ".github/workflows/deprecate-pre-1.0.yml",
-      "sha256": "8b901e666887c644b0be477cd3d15e7018353762fc354f3a61500a269169c910"
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
@@ -70,7 +66,7 @@
     },
     {
       "path": ".github/workflows/merge-queue.yml",
-      "sha256": "63be54d765e92bbd8e542f926f341e87ea3a17b5459ea36c5f787face87374f2"
+      "sha256": "9528e10ad52923afbb48b0093bee8c7751aefa6c3a2e1dabe921c9d00a986023"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -82,7 +78,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "f7a875306e381fdabf9dfaa507c2dc6b93520af2593696ea8d0d3079ba54a0cc"
+      "sha256": "c2507e52ef41c3ceb89a24503d6fe5a8134d3a83e43fee3208afb7437802fd75"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -1284,24 +1280,6 @@
       "sha256": "d23c21c84cda264ab643ec9c7ac46360d9a0bbd3af103a9fb09d12015d4e88f0"
     },
     {
-      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
-      "job": "deprecate",
-      "step": "Admit protected main",
-      "sha256": "998e6f15f48d9a3c324a267201fc87783b0cc31396ec6d2161a60b0b755f9c4b"
-    },
-    {
-      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
-      "job": "deprecate",
-      "step": "Deprecate",
-      "sha256": "a1fccaa054353c5a8919d2a44d485b336a081085ee6be63f91ecf212bb870f86"
-    },
-    {
-      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
-      "job": "deprecate",
-      "step": "Install dependencies",
-      "sha256": "d4d8249940209553aac5a8bfba42fe6d8023806d37f3042bfd080c271d851584"
-    },
-    {
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "homebrew",
       "step": "Update the cask",
@@ -1473,7 +1451,7 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "contracts",
       "step": "Check impacted static contracts",
-      "sha256": "0038f7e1f78ea88c0d7b707a7d34301c2a345949f0975aa3111fe332181b73a6"
+      "sha256": "1d182fb43dac544f7e5091d150b925e66c612f60ea143c6f92873d7857df348e"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
@@ -1557,7 +1535,7 @@
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "fast",
       "step": "Check impacted source guards",
-      "sha256": "dec37a730cbf160c591296c674c00ddbe5657cbdcb1166cfa4b1819fd4ebaf48"
+      "sha256": "730b68edb4981e1bea4ff6796ac5189cdbcd6884d5e0a2596494453c089d502e"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
