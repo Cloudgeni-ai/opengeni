@@ -4,8 +4,10 @@ import {
   UpdateOrganizationModelAccountSettingsRequest,
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
+  type Permission,
 } from "@opengeni/contracts";
 import {
+  MissingPermissionRefusal,
   requireAccessGrant,
   requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
@@ -65,9 +67,9 @@ export function subscriptionSettingsLockedHttpError(error: unknown): ApiHttpErro
 }
 
 /** Typed refusals to HTTP: 403, 409 (locked, Personal workspace, version), 422 or 503 (busy). */
-function refused(error: unknown): never {
+function refused(error: unknown, permission: Permission): never {
   if (error instanceof SubscriptionSettingsForbiddenError) {
-    throw new HTTPException(403, { message: error.message });
+    throw new MissingPermissionRefusal(permission, { message: error.message });
   }
   const locked = subscriptionSettingsLockedHttpError(error);
   if (locked) throw locked;
@@ -139,7 +141,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
@@ -165,7 +167,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       await wake(deps, result.wake);
       return c.json(OrganizationModelAccountSettings.parse(result.settings));
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
@@ -194,7 +196,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
@@ -215,7 +217,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "workspace:admin");
     }
   });
 
@@ -243,7 +245,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       await wake(deps, result.wake);
       return c.json(WorkspaceModelAccountSettings.parse(result.settings));
     } catch (error) {
-      refused(error);
+      refused(error, "workspace:admin");
     }
   });
 }

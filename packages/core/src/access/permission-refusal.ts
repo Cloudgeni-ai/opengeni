@@ -83,7 +83,11 @@ export class MissingPermissionRefusal extends HTTPException {
     this.permission = permission;
   }
 
-  /** The public `ErrorEnvelope.details` for this refusal. */
+  /**
+   * The public `ErrorEnvelope.details` for this refusal. When a check accepts
+   * any of several permissions, `permission` is the primary one, the one a
+   * caller would normally be given; it is not a complete list.
+   */
   get details(): { code: typeof MISSING_PERMISSION_DETAIL_CODE; permission: Permission } {
     return { code: MISSING_PERMISSION_DETAIL_CODE, permission: this.permission };
   }

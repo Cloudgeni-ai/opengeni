@@ -78,6 +78,14 @@ export async function requireConnectOwnerAuthority(
   state: ConnectOwner,
   permission: Permission = "connections:write",
   origin: ExternalActorContinuation | null = null,
+  options: {
+    /**
+     * Accept the verified owner of a Personal workspace for `workspace:admin`.
+     * Only for setups whose start step ran the full settings check
+     * (requireWorkspaceSettingsGrant): workspace-owned social accounts.
+     */
+    personalOwnerSettings?: boolean;
+  } = {},
 ): Promise<void> {
   async function requireExternal(continuation: ExternalActorContinuation) {
     try {
@@ -119,11 +127,14 @@ export async function requireConnectOwnerAuthority(
         ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
         : null;
     // A Personal workspace's settings are its verified owner's, who never holds
-    // workspace:admin there (requireWorkspaceSettingsGrant). The step that
-    // minted this owner already passed that full check; here the owner only
-    // has to still own the workspace.
+    // workspace:admin there (requireWorkspaceSettingsGrant). Callers that opt in
+    // minted this owner in a step that already passed that full check; here the
+    // owner only has to still own the workspace.
     const personalOwnerSettings =
-      permission === "workspace:admin" && !ownMembership && grant !== null;
+      options.personalOwnerSettings === true &&
+      permission === "workspace:admin" &&
+      !ownMembership &&
+      grant !== null;
     if (
       !grant ||
       grant.accountId !== state.accountId ||

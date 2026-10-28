@@ -2666,7 +2666,7 @@ async function validateScheduledTaskAgentConfig(input: {
       !hasPermission(input.grant.permissions, "workspace:admin")
     ) {
       throw new HTTPException(403, {
-        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; only a workspace admin can raise it`,
       });
     }
   }

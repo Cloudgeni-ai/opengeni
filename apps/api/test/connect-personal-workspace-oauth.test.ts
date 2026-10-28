@@ -468,6 +468,61 @@ describe("OAuth connectors in the owner's Personal workspace", () => {
     expect(rows).toEqual([{ subjectId: human.subjectId }]);
   });
 
+  test("a workspace-owned X account is the owner's setting: OAuth start, callback and Connect", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const app = buildApp();
+    const provider = fakeX();
+    // The start runs the full settings check; the callback re-checks that the
+    // verified owner still owns the Personal workspace.
+    const state = await startedState(
+      await app.request(`/v1/workspaces/${human.personalWorkspaceId}/social/oauth/start`, {
+        method: "POST",
+        headers: jsonHeaders(human),
+        body: JSON.stringify({ provider: "x", ownership: "workspace" }),
+      }),
+    );
+    const result = await completeSocialOAuthCallback(
+      { db: client.db, settings, providerFetch: provider.fetch },
+      {
+        code: "provider-code",
+        state,
+        requestUrl: "https://app.example.test/v1/social/oauth/callback",
+      },
+    );
+    const location = new URL(result.redirectTo, "https://app.example.test");
+    expect(location.searchParams.get("reason")).toBeNull();
+    const rows = await shared.admin<Array<{ subjectId: string | null }>>`
+      select subject_id as "subjectId" from social_connections
+      where workspace_id = ${human.personalWorkspaceId} and provider = 'x'`;
+    expect(rows).toEqual([{ subjectId: null }]);
+
+    // The native Connect flow begins and cancels the same workspace-owned setup.
+    const base = `/v1/workspaces/${human.personalWorkspaceId}/connect/attempts`;
+    const begin = await app.request(base, {
+      method: "POST",
+      headers: jsonHeaders(human),
+      body: JSON.stringify({
+        providerId: "x",
+        ownership: "workspace",
+        returnUrl: `https://HOST.example:443/settings#x`,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begin.status, await begin.clone().text()).toBe(200);
+    const attempt = (await begin.json()) as { id: string; revision: number };
+    const cancelled = await app.request(`${base}/${attempt.id}/cancel`, {
+      method: "POST",
+      headers: jsonHeaders(human),
+      body: JSON.stringify({
+        expectedRevision: attempt.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(cancelled.status, await cancelled.clone().text()).toBe(200);
+    expect(((await cancelled.json()) as { state: string }).state).toBe("cancelled");
+  });
+
   test("a state without the signed personal-owner claim still fails closed", async () => {
     if (!shared) return;
     const human = await provisionManagedHuman();

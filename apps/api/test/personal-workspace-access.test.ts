@@ -484,25 +484,48 @@ describe("managed personal workspace access", () => {
       ownership: string;
     };
     expect(connection.ownership).toBe("workspace");
+    const post = await app.request(`${base}/social/posts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connectionId: connection.id,
+        text: "Owner post",
+        publishedAt: new Date().toISOString(),
+      }),
+    });
+    expect(post.status, await post.clone().text()).toBe(201);
     const disconnected = await app.request(`${base}/social/connections/${connection.id}`, {
       method: "DELETE",
       headers,
     });
     expect(disconnected.status, await disconnected.clone().text()).toBe(200);
 
-    // The OAuth and Connect callbacks re-check the verified owner of the
-    // Personal workspace for workspace:admin; nobody else gains it.
+    // The social OAuth and Connect callbacks opt in to re-checking the
+    // verified owner of the Personal workspace for workspace:admin; nobody else
+    // gains it, and callers that don't opt in (SuperGrok) still need a real admin.
     const owner = { accountId, workspaceId: personalWorkspaceId, subjectId };
+    const optIn = { personalOwnerSettings: true };
     await requireConnectOwnerAuthority(
       client.db,
       { ...owner, personalOwnerVerified: true },
       "workspace:admin",
+      null,
+      optIn,
     );
+    await expect(
+      requireConnectOwnerAuthority(
+        client.db,
+        { ...owner, personalOwnerVerified: true },
+        "workspace:admin",
+      ),
+    ).rejects.toThrow("Connection owner authority changed");
     await expect(
       requireConnectOwnerAuthority(
         client.db,
         { ...owner, personalOwnerVerified: false },
         "workspace:admin",
+        null,
+        optIn,
       ),
     ).rejects.toThrow("Connection owner authority changed");
     await expect(
@@ -514,6 +537,8 @@ describe("managed personal workspace access", () => {
           personalOwnerVerified: true,
         },
         "workspace:admin",
+        null,
+        optIn,
       ),
     ).rejects.toThrow("Connection owner authority changed");
 
@@ -530,17 +555,28 @@ describe("managed personal workspace access", () => {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
     };
-    for (const [method, path, body] of [
+    const refusedBodies = [
       ["PATCH", "/model-account-settings", { crossProviderFailover: true }],
       ["POST", "/social/connections", { provider: "x", accountHandle: "lookalike" }],
-    ] as const) {
+      ["POST", "/social/oauth/start", { provider: "x", ownership: "workspace" }],
+      [
+        "POST",
+        "/social/posts",
+        {
+          connectionId: connection.id,
+          text: "Lookalike post",
+          publishedAt: new Date().toISOString(),
+        },
+      ],
+    ] as const;
+    for (const [method, path, body] of refusedBodies) {
       const response = await app.request(`${base}${path}`, {
         method,
         headers: delegated,
         body: JSON.stringify(body),
       });
-      expect(response.status).toBe(403);
-      expect(await response.text()).toContain(
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toContain(
         "Only a workspace admin, or the owner of a Personal workspace, can do this.",
       );
     }
@@ -555,16 +591,13 @@ describe("managed personal workspace access", () => {
       select permissions from workspace_memberships where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
     try {
       await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
-      for (const [method, path, body] of [
-        ["PATCH", "/model-account-settings", { crossProviderFailover: true }],
-        ["POST", "/social/connections", { provider: "x", accountHandle: "member" }],
-      ] as const) {
+      for (const [method, path, body] of refusedBodies) {
         const response = await app.request(`http://x/v1/workspaces/${sharedWorkspaceId}${path}`, {
           method,
           headers,
           body: JSON.stringify(body),
         });
-        expect(response.status).toBe(403);
+        expect(response.status, path).toBe(403);
       }
       await expect(
         requireConnectOwnerAuthority(
@@ -576,6 +609,8 @@ describe("managed personal workspace access", () => {
             personalOwnerVerified: true,
           },
           "workspace:admin",
+          null,
+          optIn,
         ),
       ).rejects.toThrow("Connection owner authority changed");
     } finally {

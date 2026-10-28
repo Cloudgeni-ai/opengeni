@@ -115,16 +115,23 @@ type ConnectPermission = Parameters<typeof requireAccessGrantAuthorization>[3] &
  * account (`workspace:admin`) is a workspace setting, which the owner of a
  * Personal workspace manages too (requireWorkspaceSettingsGrant).
  */
-async function connectPermissionHeld(
-  deps: ApiRouteDeps,
+/**
+ * Whether a Connect step's permission is held. `workspace:admin` is the
+ * workspace settings decision ({@link workspaceSettingsAuthorized}), worked out
+ * before the Connect transaction so it never queries while that holds locks.
+ */
+function connectPermissionHeld(
   authorization: AccessGrantAuthorization,
-  workspaceId: string,
+  settingsAuthorized: boolean,
   permission: ConnectPermission,
-): Promise<boolean> {
+): boolean {
   return permission === "workspace:admin"
-    ? await workspaceSettingsAuthorized(deps, authorization, workspaceId)
+    ? settingsAuthorized
     : hasPermission(authorization.grant.permissions, permission);
 }
+
+/** For the setups whose start step ran the full workspace settings check. */
+const PERSONAL_OWNER_SETTINGS = { personalOwnerSettings: true } as const;
 
 /** {@link requireAccessGrantAuthorization} for a Connect step's permission. */
 async function requireConnectAuthorization(
@@ -777,9 +784,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             ? "connections:personal"
             : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
-      throw new HTTPException(403, { message: `${advancePermission} required` });
+      throw new MissingPermissionRefusal(advancePermission);
     if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new HTTPException(403, { message: "capabilities:manage required" });
+      throw new MissingPermissionRefusal("capabilities:manage");
     if (before.providerId === "mcp-install") {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "Choose an MCP capability" });
@@ -1422,6 +1429,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const actor = await connectRequestActor(deps, authorization);
     const scope = actor.scope;
+    const settingsAuthorized = await workspaceSettingsAuthorized(deps, authorization, workspaceId);
     return c.json(
       await executeConnectOperation({
         db: deps.db,
@@ -1448,11 +1456,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   : attempt.providerId === "slack-bot"
                     ? "capabilities:manage"
                     : connectSetupPermission(attempt);
-          if (!(await connectPermissionHeld(deps, authorization, workspaceId, permission)))
-            throw new HTTPException(403, {
-              message: "Connect management permission required",
-            });
-          await requireConnectOwnerAuthority(tx, scope, permission, origin);
+          if (!connectPermissionHeld(authorization, settingsAuthorized, permission))
+            throw new MissingPermissionRefusal(
+              permission,
+              permission === "workspace:admin" ? { message: WORKSPACE_SETTINGS_REFUSAL } : {},
+            );
+          await requireConnectOwnerAuthority(
+            tx,
+            scope,
+            permission,
+            origin,
+            permission === "workspace:admin" ? PERSONAL_OWNER_SETTINGS : {},
+          );
         },
         execute: async () => ({
           commit: async (_tx, current) => ({
@@ -1503,13 +1518,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               ? "capabilities:manage"
               : connectSetupPermission(input);
     const authorization = await requireConnectAuthorization(c, deps, workspaceId, setupPermission);
+    // requireConnectAuthorization ran the full settings check for workspace:admin.
+    const setupOwnerOptions = setupPermission === "workspace:admin" ? PERSONAL_OWNER_SETTINGS : {};
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
     if (input.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
-      throw new HTTPException(403, { message: "capabilities:manage required" });
+      throw new MissingPermissionRefusal("capabilities:manage");
     if (input.providerId === "atlassian")
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     if (
@@ -1546,7 +1563,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
-                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                await requireConnectOwnerAuthority(
+                  actorTx,
+                  scope,
+                  setupPermission,
+                  null,
+                  setupOwnerOptions,
+                );
                 if (input.mcpSetup)
                   await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 const replay = await getConnectBeginReplay(actorTx, scope, {
@@ -1578,7 +1601,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
-                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                await requireConnectOwnerAuthority(
+                  actorTx,
+                  scope,
+                  setupPermission,
+                  null,
+                  setupOwnerOptions,
+                );
                 if (input.mcpSetup)
                   await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 return persistConnectAttempt(actorTx, scope, {
