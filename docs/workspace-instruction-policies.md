@@ -180,6 +180,29 @@ Rollback never mutates history. Its target must be a revision that was previousl
 active for the same target, and rollback creates a new activation event and a new
 head version.
 
+### Clearing a policy
+
+A target is cleared by activating an empty revision. A draft request with empty
+or blank content stores exactly `''`; migration
+`1085_workspace_instruction_policy_clear.sql` relaxes the revision content check
+to "exactly empty, or not blank" (whitespace-only content is still refused at
+the database), and `1086_validate_workspace_instruction_policy_content.sql`
+validates it. The clear then uses the ordinary activation: it is CAS-fenced,
+records the actor and reason, advances the activation version, and stays in
+history, so rollback can restore any earlier version.
+
+An active empty revision means no policy. Accepted-turn snapshots leave it out,
+so that target composes nothing, exactly as when it has no head. The agent
+instruction tools read it as no text: an append saves only the new rule and an
+exact edit has nothing to match. Clearing deliberately does not remove the
+head. Head removal stays limited to the governed-learning compensation above,
+so no new privileged routine is needed.
+
+When every charter and policy for the workspace is empty, a stored legacy
+`workspaces.agent_instructions` override applies again, as before any policy
+was activated. Knowledge > Instructions therefore also clears that override
+when it saves empty text.
+
 ## HTTP and SDK surface
 
 The API and `OpenGeniClient` expose:

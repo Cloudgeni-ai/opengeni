@@ -109,6 +109,23 @@ describe("workspace instruction-policy contracts", () => {
     ).toBe(false);
   });
 
+  test("empty draft text clears a policy, and blank text normalizes to empty", () => {
+    const draft = {
+      kind: "policy" as const,
+      scope: "global" as const,
+      roleKey: null,
+    };
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: "" }),
+    ).toMatchObject({ content: "" });
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: " \n\t " }),
+    ).toMatchObject({ content: "" });
+    expect(
+      CreateWorkspaceInstructionPolicyDraftRequest.parse({ ...draft, content: "  Be brief.\n" }),
+    ).toMatchObject({ content: "  Be brief.\n" });
+  });
+
   test("normalizes onboarding provenance while preserving typed content validation", () => {
     const request = CreateWorkspaceInstructionPolicyOnboardingProposalRequest.parse({
       operationId: "00000000-0000-4000-8000-000000000010",

@@ -145,7 +145,13 @@ export const WorkspaceInstructionPolicyRevision = /* @__PURE__ */ defineSchema((
     accountId: primitives.uuid,
     workspaceId: primitives.uuid,
     ...targetShape,
-    content: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
+    /** Empty text is a cleared policy: active, it adds nothing to prompts. */
+    content: primitives.string
+      .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
+      .refine(
+        (value) => value === "" || value.trim().length > 0,
+        "instruction policy content is either empty or not blank",
+      ),
     provenance: WorkspaceInstructionPolicyProvenance,
     supersedesRevisionId: primitives.nullableUuid,
     createdBySubjectId: primitives.nonEmptyString,
@@ -288,9 +294,11 @@ export const CreateWorkspaceInstructionPolicyDraftRequest = /* @__PURE__ */ defi
       kind: WorkspaceInstructionPolicyKind,
       scope: WorkspaceInstructionPolicyScope,
       roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
-      content: primitives.nonEmptyString
+      // Empty (or blank) text clears the policy: it is stored as "" and, once
+      // activated, the target adds nothing to prompts.
+      content: primitives.string
         .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
-        .refine((value) => value.trim().length > 0, "instruction policy content must not be blank"),
+        .transform((value) => (value.trim().length > 0 ? value : "")),
       provenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource.default("human"),
       provenanceSourceId: primitives.nonEmptyString
         .max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS)

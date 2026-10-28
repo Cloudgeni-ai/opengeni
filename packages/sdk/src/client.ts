@@ -6895,6 +6895,11 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Creates an inactive draft revision. Empty (or blank) content is stored as
+   * "" and, once activated, clears the target: prompts get no policy for it,
+   * history keeps the earlier versions, and rollback can restore one.
+   */
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
