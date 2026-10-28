@@ -28,7 +28,7 @@ An action is plain data plus two functions:
 type AppAction = {
   id: string; // "chat.copyLink"
   title: string; // "Copy link"
-  group: "navigate" | "chat" | "create" | "view" | "help";
+  group: "navigate" | "chat" | "meetings" | "view" | "help";
   keywords?: string[]; // extra words ⌘K matches, e.g. ["share", "url"]
   icon?: LucideIcon;
   chord?: Chord | { web?: Chord; desktop?: Chord }; // per-surface when the browser reserves a key
@@ -67,6 +67,7 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | --- | --- | --- | --- |
 | Command menu | ⌘K | Ctrl+K | Chats, Sites and actions in one list |
 | New chat | ⌘N on desktop, ⇧⌘O everywhere | Ctrl+N on desktop, Ctrl+Shift+O everywhere | Browsers reserve ⌘N |
+| Start recording (a meeting) | ⌃⌘N | Ctrl+Alt+N | Beside New chat's ⌘N, the same shape as Archive; see below |
 | Copy chat link | ⇧⌘, | Ctrl+Shift+, | Linear's key for copying an issue URL |
 | Pin or unpin chat | ⌥⌘P | Ctrl+Alt+P | Clear of the common browser shortcuts |
 | Archive or restore chat | ⌃⌘A | Ctrl+Alt+A | Apple Mail's Archive key; browsers on Windows and Linux use Ctrl+Shift+A for tab search |
@@ -81,6 +82,29 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | Shortcut cheat sheet | ⌘/ | Ctrl+/ | Slack's key |
 
 Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
+
+**Start recording** is the Meetings page's Start recording button, from
+anywhere: it shows Meetings and starts recording with that page's defaults
+(the meeting is named after when it starts), asking for the microphone the
+same way. While a recording is going it reads "Go to recording" and shows
+Meetings instead of starting a second one, as a desktop call notification's
+Record does; "Stop recording" (⌘K and the desktop File menu, no key, so a
+stray press never ends a meeting) stops it and opens the meeting. Both are
+hidden where nothing records meetings (an embedded chat without the recorder)
+and in a browser that can't record, where the page shows "This browser can't
+record" instead of the button.
+
+Why ⌃⌘N and Ctrl+Alt+N: N sits beside New chat's ⌘N, and the per-platform
+shape is Archive's (⌃⌘A, Ctrl+Alt+A). Neither macOS nor Safari, Chrome, Edge
+or Firefox uses ⌃⌘N, and Ctrl+Alt+N is free in those browsers and in the
+Windows, GNOME and KDE defaults. On Nordic and other Windows layouts AltGr
+reports as Ctrl+Alt, and AltGr+N types nothing on Norwegian, Swedish, Danish
+and Finnish layouts; where a layout does type a character with AltGr+N, the
+key is ignored, as for every Ctrl+Alt chord. Turned down: ⌥⌘N (Safari's New
+Window when tabs are preferred), ⌥⌘R and Ctrl+Alt+R (Firefox Reader View,
+Safari's Reload from origin), ⇧⌘M and Ctrl+Shift+M (Chrome's profile menu,
+Firefox's responsive design mode), ⌥⌘M (macOS Minimize All) and Ctrl+Alt+M
+(AltGr+M types µ on Nordic Windows layouts).
 
 **Control+Tab** switches between recently viewed chats in the desktop app.
 Browsers keep Control+Tab for switching tabs, so on the web it never reaches
@@ -117,8 +141,8 @@ Opening it is instant: no request is made before it appears.
 - **Empty query:** recent chats you opened (most recent first, topped up from
   the top of the sidebar), then actions for the chat you are in (copy link,
   pin, rename, fork, mark unread, archive) with their keys, then general
-  actions (new chat, find, inbox, search messages, switch workspace, sidebar,
-  shortcuts). Recent chats include other workspaces, tagged with their
+  actions (new chat, start recording, find, inbox, search messages, switch
+  workspace, sidebar, shortcuts). Recent chats include other workspaces, tagged with their
   workspace. Between recent chats and the chat's actions, "Recent Sites"
   lists at most three of this workspace's Sites, most recent activity first
   (conversations, a new version, or the person opening it), from the Site

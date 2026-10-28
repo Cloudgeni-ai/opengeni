@@ -129,6 +129,15 @@ function capturing(state: MeetingRecorder["state"] | null | undefined): boolean 
   );
 }
 
+/**
+ * States in which Start recording starts a new recording: nothing recorded
+ * yet, the last one stopped, or the last start failed. Null is a recorder
+ * whose capture code hasn't loaded yet.
+ */
+export function canStartRecording(state: MeetingRecorder["state"] | null | undefined): boolean {
+  return !capturing(state);
+}
+
 /** True when this browser still holds recording chunks from an earlier visit. */
 async function hasLocalRecordings(): Promise<boolean> {
   if (typeof indexedDB === "undefined" || typeof indexedDB.databases !== "function") return false;
@@ -277,7 +286,7 @@ function useDesktopMeetingRequests(
         // signs in next, a call that may be long over.
         if (latest.current.signedOut) return;
         // Already recording shows that recording rather than start a second one.
-        if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
+        if (canStartRecording(recorder?.state)) store.requestStart({ title: request.title });
         latest.current.onOpenMeetings?.();
         return;
       }
@@ -347,6 +356,60 @@ export function useMeetingRecorderState(): MeetingRecorder["state"] | null {
     () => store?.get()?.state ?? null,
     () => null,
   );
+}
+
+/**
+ * The recorder's Start and Stop, for the app's actions (⌘K, keys, the desktop
+ * menu bar). Null without a recorder provider. Re-renders on state changes,
+ * not on every tick.
+ */
+export type MeetingRecorderControls = {
+  /** The recorder's state; null until its capture code loads. */
+  state: MeetingRecorder["state"] | null;
+  /** Whether this browser can record; null until the capture code loads. */
+  supported: boolean | null;
+  /**
+   * Start recording as the Meetings page's Start recording button does, once
+   * that page's recorder is ready; the caller shows Meetings next. Does
+   * nothing while a recording is going.
+   */
+  requestStart: () => void;
+  /** Stop the recording and open it, as a desktop call notification's Stop does. */
+  stop: () => Promise<void>;
+};
+
+export function useMeetingRecorderControls(): MeetingRecorderControls | null {
+  const store = useContext(MeetingRecorderContext);
+  const state = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.state ?? null,
+    () => null,
+  );
+  const supported = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.supported ?? null,
+    () => null,
+  );
+  return useMemo(() => {
+    if (!store) return null;
+    return {
+      state,
+      supported,
+      requestStart: () => {
+        if (canStartRecording(store.get()?.state)) store.requestStart({ title: "" });
+      },
+      stop: async () => {
+        const recorder = store.get();
+        if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
+        const recordingId = recorder.recordingId;
+        const recordingWorkspaceId = store.workspaceId?.() ?? null;
+        await recorder.stop();
+        if (recordingId && recordingWorkspaceId) {
+          store.openMeeting?.(recordingId, recordingWorkspaceId);
+        }
+      },
+    };
+  }, [store, state, supported]);
 }
 
 function noopSubscribe(): () => void {

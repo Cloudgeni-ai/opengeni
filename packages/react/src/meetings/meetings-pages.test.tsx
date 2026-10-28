@@ -30,6 +30,7 @@ const {
   MeetingRecorderProvider,
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
+  useMeetingRecorderControls,
 } = await import("./recorder-context");
 const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
   await import("../testing/meetings-fixture");
@@ -414,6 +415,139 @@ describe("Recorder provider", () => {
       await settle(50);
       expect(openedElsewhere).toEqual(["workspace-elsewhere/recording-elsewhere"]);
       expect(openedHere).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Start recording from the app's actions starts what the button starts, after a stopped recording too", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "stopped" | "recording" = "stopped";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-earlier",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const page = (
+      <MeetingRecorderStoreProvider value={store}>
+        <Controls />
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />
+      </MeetingRecorderStoreProvider>
+    );
+    try {
+      await act(async () => root.render(page));
+      await waitForText(container, "Start recording");
+      expect(controls).not.toBeNull();
+      expect(controls!.state).toBe("stopped");
+      expect(controls!.supported).toBe(true);
+
+      // The button's start...
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      await waitFor(() => starts.length === 1);
+
+      // ...and the action's, through the same panel, with the same options.
+      await act(async () => controls!.requestStart());
+      await waitFor(() => starts.length === 2);
+      expect(store.pendingStart()).toBeNull();
+      const { title: buttonTitle, ...buttonOptions } = starts[0]!;
+      const { title: actionTitle, ...actionOptions } = starts[1]!;
+      expect(actionOptions).toEqual(buttonOptions);
+      // Both are named after when they start.
+      expect(typeof buttonTitle).toBe("string");
+      expect(typeof actionTitle).toBe("string");
+      expect((actionTitle as string).length).toBeGreaterThan(0);
+
+      // While one records, the action asks for no second start.
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await act(async () => controls!.requestStart());
+      expect(store.pendingStart()).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Stop recording from the app's actions stops and opens the meeting in its workspace", async () => {
+    const opened: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        opened.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let stops = 0;
+    const recorder = {
+      state: "paused",
+      recordingId: "recording-now",
+      supported: true,
+      stop: async () => {
+        stops += 1;
+      },
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-recorded");
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      // Without a recorder provider there is nothing to control.
+      await act(async () => root.render(<Controls />));
+      expect(controls).toBeNull();
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      await act(async () => controls!.stop());
+      expect(stops).toBe(1);
+      expect(opened).toEqual(["workspace-recorded/recording-now"]);
     } finally {
       await act(async () => root.unmount());
       container.remove();

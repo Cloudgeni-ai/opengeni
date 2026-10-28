@@ -17,7 +17,8 @@ import {
   SWITCHER_LIMIT,
 } from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
-import { appActions, stepWorkspace } from "./registry";
+import { actionTitle, appActions, stepWorkspace, type ActionEnv } from "./registry";
+import { englishMessages } from "../../../messages/en";
 
 function key(
   code: string,
@@ -396,5 +397,105 @@ describe("workspace keys", () => {
       applicableChords(next.chords, "desktop", "other").map((chord) => chordLabel(chord, "other")),
     ).toEqual(["Ctrl+Alt+↓", "Ctrl+Shift+PgDn"]);
     expect(chordAccelerator(mac[0]!)).toBe("CmdOrCtrl+Alt+Down");
+  });
+});
+
+describe("meeting actions", () => {
+  const start = () => appActions().find((action) => action.id === "meetings.start")!;
+  const stop = () => appActions().find((action) => action.id === "meetings.stop")!;
+  function meetingEnv(state: ActionEnv["meetings"]) {
+    const calls: string[] = [];
+    const env = {
+      meetings:
+        state === null
+          ? null
+          : {
+              ...state,
+              start: () => calls.push("start"),
+              show: () => calls.push("show"),
+              stop: () => calls.push("stop"),
+            },
+    } as unknown as ActionEnv;
+    return { env, calls };
+  }
+  const recorder = (recorderState: NonNullable<ActionEnv["meetings"]>["state"]) =>
+    ({ state: recorderState }) as NonNullable<ActionEnv["meetings"]>;
+
+  test("Start recording reads as the Meetings page's button and sits in the File menu", () => {
+    const { env } = meetingEnv(recorder("idle"));
+    expect(actionTitle(start(), env, null)).toBe(
+      englishMessages["meetings.recorderPanel.startRecording"],
+    );
+    expect(start().group).toBe("meetings");
+    expect(start().desktopMenu).toBe("file");
+    expect(stop().desktopMenu).toBe("file");
+    expect(start().keywords).toContain("meeting");
+  });
+
+  test("⌃⌘N on Mac and Ctrl+Alt+N elsewhere, on the web and in the desktop app", () => {
+    for (const surface of ["web", "desktop"] as const) {
+      const mac = applicableChords(start().chords, surface, "mac");
+      expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌃⌘N"]);
+      expect(matchesChord(key("KeyN", { meta: true, ctrl: true }), mac[0]!, "mac")).toBe(true);
+      // ⌘N alone is New chat; ⌥⌘N is Safari's New Window.
+      expect(matchesChord(key("KeyN", { meta: true }), mac[0]!, "mac")).toBe(false);
+      expect(matchesChord(key("KeyN", { meta: true, alt: true }), mac[0]!, "mac")).toBe(false);
+      const other = applicableChords(start().chords, surface, "other");
+      expect(other.map((chord) => chordLabel(chord, "other"))).toEqual(["Ctrl+Alt+N"]);
+      expect(matchesChord(key("KeyN", { ctrl: true, alt: true }), other[0]!, "other")).toBe(true);
+      // Ctrl+Shift+N is the browsers' private window.
+      expect(matchesChord(key("KeyN", { ctrl: true, shift: true }), other[0]!, "other")).toBe(
+        false,
+      );
+    }
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "mac")[0]!)).toBe(
+      "Ctrl+CmdOrCtrl+N",
+    );
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "other")[0]!)).toBe(
+      "CmdOrCtrl+Alt+N",
+    );
+    // Stopping a meeting has no key, so a stray press never ends one.
+    expect(stop().chords ?? []).toEqual([]);
+  });
+
+  test("AltGr+N typing on Windows never starts a recording", () => {
+    const chord = applicableChords(start().chords, "web", "other")[0]!;
+    const altGr = {
+      ...key("KeyN", { ctrl: true, alt: true, key: "ń" }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    };
+    expect(matchesChord(altGr, chord, "other")).toBe(false);
+  });
+
+  test("hidden where meetings don't record; while one records it goes there and Stop joins", () => {
+    expect(start().available(meetingEnv(null).env, null)).toBe(false);
+    expect(stop().available(meetingEnv(null).env, null)).toBe(false);
+
+    // Before the capture code loads, Start starts as soon as it has.
+    const loading = meetingEnv(recorder(null));
+    expect(start().available(loading.env, null)).toBe(true);
+    void start().run(loading.env, null);
+    expect(loading.calls).toEqual(["start"]);
+
+    // After a recording stopped or failed, it starts the next one.
+    for (const state of ["idle", "stopped", "failed"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(actionTitle(start(), view.env, null)).toBe("Start recording");
+      expect(stop().available(view.env, null)).toBe(false);
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["start"]);
+    }
+
+    for (const state of ["starting", "recording", "paused", "stopping"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(start().available(view.env, null)).toBe(true);
+      expect(actionTitle(start(), view.env, null)).toBe("Go to recording");
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["show"]);
+      expect(stop().available(view.env, null)).toBe(state === "recording" || state === "paused");
+    }
+    const recording = meetingEnv(recorder("recording"));
+    void stop().run(recording.env, null);
+    expect(recording.calls).toEqual(["stop"]);
   });
 });

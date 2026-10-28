@@ -17,6 +17,7 @@ import { Keycaps } from "./keycaps";
 
 const GROUPS: ReadonlyArray<{ group: ActionGroup; label: string }> = [
   { group: "chat", label: "Chats" },
+  { group: "meetings", label: "Meetings" },
   { group: "navigate", label: "Move around" },
   { group: "view", label: "View" },
   { group: "help", label: "Help" },
@@ -30,6 +31,7 @@ const SHEET_TITLES: Record<string, string> = {
   "go.previousChat": "Previous chat",
   "go.nextChat": "Next chat",
   "go.pinnedChat": "Pinned chats 1 to 9",
+  "meetings.start": "Start recording",
   "commandMenu.open": "Search chats, Sites and actions",
 };
 
