@@ -85,26 +85,31 @@ Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and f
 
 **Start recording** is the Meetings page's Start recording button, from
 anywhere: it shows Meetings and starts recording with that page's defaults
-(the meeting is named after when it starts), asking for the microphone the
-same way. While a recording is going it reads "Go to recording" and shows
-Meetings instead of starting a second one, as a desktop call notification's
-Record does; "Stop recording" (⌘K and the desktop File menu, no key, so a
-stray press never ends a meeting) stops it and opens the meeting. Both are
-hidden where nothing records meetings (an embedded chat without the recorder)
-and in a browser that can't record, where the page shows "This browser can't
-record" instead of the button.
+and any title already typed there (otherwise the meeting is named after when
+it starts), asking for the microphone the same way. A recording started with
+the button meanwhile uses up the waiting start. While a recording is going it
+reads "Go to recording" and shows Meetings in the workspace on screen, where
+the recording bar is, instead of starting a second one, as a desktop call
+notification's Record does. "Stop recording" (⌘K and the desktop File menu,
+no key, so a stray press never ends a meeting) stops it and opens the meeting
+in the workspace it was recorded in. Where nothing records meetings (an
+embedded chat without the recorder) or the browser can't record (the page
+shows "This browser can't record" instead of the button), ⌘K and the cheat
+sheet leave both out and the desktop File menu greys them out; the menu also
+greys out Stop recording while nothing records.
 
 Why ⌃⌘N and Ctrl+Alt+N: N sits beside New chat's ⌘N, and the per-platform
 shape is Archive's (⌃⌘A, Ctrl+Alt+A). Neither macOS nor Safari, Chrome, Edge
 or Firefox uses ⌃⌘N, and Ctrl+Alt+N is free in those browsers and in the
 Windows, GNOME and KDE defaults. On Nordic and other Windows layouts AltGr
 reports as Ctrl+Alt, and AltGr+N types nothing on Norwegian, Swedish, Danish
-and Finnish layouts; where a layout does type a character with AltGr+N, the
-key is ignored, as for every Ctrl+Alt chord. Turned down: ⌥⌘N (Safari's New
-Window when tabs are preferred), ⌥⌘R and Ctrl+Alt+R (Firefox Reader View,
-Safari's Reload from origin), ⇧⌘M and Ctrl+Shift+M (Chrome's profile menu,
-Firefox's responsive design mode), ⌥⌘M (macOS Minimize All) and Ctrl+Alt+M
-(AltGr+M types µ on Nordic Windows layouts).
+and Finnish layouts. Where a layout does type a character with AltGr+N (ń on
+Polish), the page ignores the key, as for every Ctrl+Alt chord; in the
+desktop app the menu bar owns the key, as for Archive. Turned down: ⌥⌘N
+(Safari's New Window when tabs are preferred), ⌥⌘R and Ctrl+Alt+R (Firefox
+Reader View, Safari's Reload from origin), ⇧⌘M and Ctrl+Shift+M (Chrome's
+profile menu, Firefox's responsive design mode), ⌥⌘M (macOS Minimize All) and
+Ctrl+Alt+M (AltGr+M types µ on Nordic Windows layouts).
 
 **Control+Tab** switches between recently viewed chats in the desktop app.
 Browsers keep Control+Tab for switching tabs, so on the web it never reaches
@@ -142,11 +147,11 @@ Opening it is instant: no request is made before it appears.
   the top of the sidebar), then actions for the chat you are in (copy link,
   pin, rename, fork, mark unread, archive) with their keys, then general
   actions (new chat, start recording, find, inbox, search messages, switch
-  workspace, sidebar, shortcuts). Recent chats include other workspaces, tagged with their
-  workspace. Between recent chats and the chat's actions, "Recent Sites"
-  lists at most three of this workspace's Sites, most recent activity first
-  (conversations, a new version, or the person opening it), from the Site
-  rows the sidebar has loaded; the Site on screen is left out.
+  workspace, sidebar, shortcuts). Recent chats include other workspaces,
+  tagged with their workspace. Between recent chats and the chat's actions,
+  "Recent Sites" lists at most three of this workspace's Sites, most recent
+  activity first (conversations, a new version, or the person opening it),
+  from the Site rows the sidebar has loaded; the Site on screen is left out.
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
   title search runs alongside and merges in chats the sidebar has not loaded,

@@ -31,7 +31,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { SessionListRow } from "../../../session-list-model";
-import { canStartRecording, type MeetingRecorder } from "../../../meetings/recorder-context";
+import type { RecorderState } from "@opengeni/sdk/recordings";
+import { canStartRecording } from "../../../meetings/recorder-state";
 import type { ActionSurface, Chord, ChordPlatform } from "./chords";
 import type { ChatOperations } from "./chat-operations";
 
@@ -53,7 +54,7 @@ export type WorkspaceChoice = {
 /** The meeting recorder, as the actions use it. */
 export type MeetingActions = {
   /** The recorder's state; null until its capture code loads. */
-  state: MeetingRecorder["state"] | null;
+  state: RecorderState | null;
   /** Start recording as the Meetings page's button does, and show Meetings. */
   start(): void;
   /** Show Meetings, where the recording going is. */

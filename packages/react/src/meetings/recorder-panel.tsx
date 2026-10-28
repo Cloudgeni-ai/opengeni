@@ -47,7 +47,8 @@ import { Notice } from "../ui/notice";
 import { cn } from "../app/lib/utils";
 
 import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
-import { canStartRecording, type MeetingRecorder } from "./recorder-context";
+import type { MeetingRecorder } from "./recorder-context";
+import { canStartRecording } from "./recorder-state";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 import { MeetingsOverlayScope } from "./overlay-scope";
@@ -668,8 +669,9 @@ function RecorderPanelContent({
     if (!autoStartReady) return;
     const request = autoStart?.take();
     if (!request) return;
-    setTitle(request.title);
-    void startRef.current(request.title);
+    // A start without a title (the Start recording key) keeps one already typed, as the button does.
+    if (request.title) setTitle(request.title);
+    void startRef.current(request.title || undefined);
   }, [autoStart, autoStartReady]);
 
   if (recorder && !recorder.supported) {

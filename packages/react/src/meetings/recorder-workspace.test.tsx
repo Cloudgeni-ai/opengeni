@@ -370,4 +370,25 @@ describe("A recording and the person who made it", () => {
       removeDesktop();
     }
   });
+
+  test("the desktop app's Record starts the next recording after one stopped, never during one", async () => {
+    events.length = 0;
+    const desktop = installDesktop();
+    const view = mountProvider();
+    try {
+      await view.render("workspace-a");
+      await until(() => view.seen.recorder !== null);
+      await settle();
+      await act(async () => setStates.get("workspace-a")!("recording"));
+      await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
+      expect(view.takePendingStart()).toBe(false);
+      await act(async () => setStates.get("workspace-a")!("stopped"));
+      await act(async () => desktop.listener!({ kind: "record", title: "Call" }));
+      expect(view.takePendingStart()).toBe(true);
+      expect(view.meetingsOpened).toEqual(["workspace-a", "workspace-a"]);
+    } finally {
+      await view.unmount();
+      removeDesktop();
+    }
+  });
 });

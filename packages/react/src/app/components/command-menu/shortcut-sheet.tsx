@@ -56,6 +56,8 @@ export default function ShortcutSheet(props: {
   const menuAction = findAction("commandMenu.open");
   const menuChord = menuAction ? actions.chordsFor(menuAction)[0] : undefined;
   const rows: SheetRow[] = appActions().flatMap((action) => {
+    // Meeting keys only where meetings record, as ⌘K and the menu bar show them.
+    if (action.group === "meetings" && !actions.env.meetings) return [];
     const here = applicableChords(action.chords, surface, platform);
     const desktop = surface === "web" ? applicableChords(action.chords, "desktop", platform) : [];
     if (here.length === 0 && desktop.length === 0) return [];

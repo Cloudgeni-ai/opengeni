@@ -216,7 +216,16 @@ export function ActionsProvider(props: { children: ReactNode }) {
         showMeetings();
       },
       show: showMeetings,
-      stop: () => recorder.stop(),
+      stop: async () => {
+        const stopped = await recorder.stop();
+        // Hosts that give the recorder no way to open a meeting get the console's route.
+        if (stopped && !stopped.opened) {
+          void navigate({
+            to: "/workspaces/$workspaceId/meetings/$recordingId",
+            params: { workspaceId: stopped.workspaceId, recordingId: stopped.recordingId },
+          });
+        }
+      },
     };
   }, [recorder, rail, navigate, workspaceId]);
 

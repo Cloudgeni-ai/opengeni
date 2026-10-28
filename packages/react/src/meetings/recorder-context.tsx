@@ -32,6 +32,9 @@ import {
 } from "react";
 import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
+import { canStartRecording, capturing } from "./recorder-state";
+
+export { canStartRecording } from "./recorder-state";
 
 export type MeetingRecorder = UseRecorderResult;
 
@@ -87,6 +90,9 @@ export function createMeetingRecorderStore(
     set: (recorder, workspaceId = null) => {
       current = recorder;
       currentWorkspaceId = recorder ? workspaceId : null;
+      // A recording that started some other way (the Start button) uses up a
+      // start still waiting, so it can't begin a second one after Stop.
+      if (pending && capturing(recorder?.state)) pending = null;
       notify();
     },
     workspaceId: () => currentWorkspaceId,
@@ -121,22 +127,6 @@ export const MeetingRecorderStoreProvider = MeetingRecorderContext.Provider;
 const LazyRecorderHost = lazy(() => import("./recorder-host"));
 
 const RECORDING_DATABASE = "opengeni-recordings";
-
-/** States in which the recorder holds a capture that unmounting its host would end. */
-function capturing(state: MeetingRecorder["state"] | null | undefined): boolean {
-  return (
-    state === "starting" || state === "recording" || state === "paused" || state === "stopping"
-  );
-}
-
-/**
- * States in which Start recording starts a new recording: nothing recorded
- * yet, the last one stopped, or the last start failed. Null is a recorder
- * whose capture code hasn't loaded yet.
- */
-export function canStartRecording(state: MeetingRecorder["state"] | null | undefined): boolean {
-  return !capturing(state);
-}
 
 /** True when this browser still holds recording chunks from an earlier visit. */
 async function hasLocalRecordings(): Promise<boolean> {
@@ -375,8 +365,11 @@ export type MeetingRecorderControls = {
    */
   requestStart: () => void;
   /** Stop the recording and open it, as a desktop call notification's Stop does. */
-  stop: () => Promise<void>;
+  stop: () => Promise<StoppedMeeting | null>;
 };
+
+/** The meeting a Stop ended; `opened` is false when the host gave no way to open it. */
+export type StoppedMeeting = { recordingId: string; workspaceId: string; opened: boolean };
 
 export function useMeetingRecorderControls(): MeetingRecorderControls | null {
   const store = useContext(MeetingRecorderContext);
@@ -400,13 +393,15 @@ export function useMeetingRecorderControls(): MeetingRecorderControls | null {
       },
       stop: async () => {
         const recorder = store.get();
-        if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
+        if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) {
+          return null;
+        }
         const recordingId = recorder.recordingId;
         const recordingWorkspaceId = store.workspaceId?.() ?? null;
         await recorder.stop();
-        if (recordingId && recordingWorkspaceId) {
-          store.openMeeting?.(recordingId, recordingWorkspaceId);
-        }
+        if (!recordingId || !recordingWorkspaceId) return null;
+        const opened = store.openMeeting?.(recordingId, recordingWorkspaceId) ?? false;
+        return { recordingId, workspaceId: recordingWorkspaceId, opened };
       },
     };
   }, [store, state, supported]);
