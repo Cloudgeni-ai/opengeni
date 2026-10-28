@@ -232,6 +232,33 @@ export const SiteSidebarStateResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteSidebarStateResponse = z.infer<typeof SiteSidebarStateResponse>;
 
+/**
+ * Move a Site's sidebar row from one project to another, like moving a chat.
+ * null is Default (no project). The row's conversations move with it, and the
+ * Site itself moves for everyone when the row is its own project's.
+ */
+export const UpdateSiteProjectRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      fromChannelId: primitives.nullableUuid,
+      channelId: primitives.nullableUuid,
+    })
+    .strict(),
+);
+export type UpdateSiteProjectRequest = z.infer<typeof UpdateSiteProjectRequest>;
+
+export const SiteProjectResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    channelId: z.string().uuid().nullable(),
+    /** The Site itself moved: the row was its own project's. */
+    siteMoved: z.boolean(),
+    /** The row's conversations that moved with it. */
+    movedSessionIds: z.array(z.string().uuid()),
+  }),
+);
+export type SiteProjectResponse = z.infer<typeof SiteProjectResponse>;
+
 export const WorkspaceArtifactListQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
     limit: z.coerce

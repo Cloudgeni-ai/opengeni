@@ -387,6 +387,37 @@ export const siteSidebarStates = pgTable(
 );
 
 /**
+ * A Site's project in the sidebar, chosen by a person (migration 1066). Without
+ * a row a Site sits in the project of the chat that created it. Shared like a
+ * chat's project; a null channel is Default (no project). Grants nothing.
+ */
+export const siteProjectPlacements = pgTable(
+  "site_project_placements",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    // Composite FK to channels(workspace_id, id) ON DELETE SET NULL (channel_id),
+    // owned by the migration.
+    channelId: uuid("channel_id"),
+    placedBySubjectId: text("placed_by_subject_id").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_project_placements_channel_idx").on(table.workspaceId, table.channelId),
+  ],
+);
+
+/**
  * "Always allow for this Site" (migration 1031): one person's standing consent
  * for one Site to run one tool on one of their own connections. Personal;
  * consulted only for that Site's calls; never overrides Block and never

@@ -455,6 +455,8 @@ export type SessionSidebarEvidence = {
   siteOpens: string[];
   /** Site sidebar changes, in order. */
   siteSidebarCalls: { siteId: string; pinned?: boolean; archived?: boolean }[];
+  /** Site rows moved to another project, in order. */
+  siteProjectCalls: { siteId: string; fromChannelId: string | null; channelId: string | null }[];
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -473,6 +475,7 @@ export const evidence: SessionSidebarEvidence = {
   archiveCalls: [],
   siteOpens: [],
   siteSidebarCalls: [],
+  siteProjectCalls: [],
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -836,6 +839,28 @@ if (sitesScenario) {
         archived: state.archived,
         archivedAt: state.archived ? new Date().toISOString() : null,
       };
+    },
+    // As the server does: the row's conversations move with it, and the Site
+    // itself when the row is its own project's.
+    updateSiteProject: async (
+      _workspace: string,
+      siteId: string,
+      request: { fromChannelId: string | null; channelId: string | null },
+    ) => {
+      evidence.siteProjectCalls.push({ siteId, ...request });
+      const movedSessionIds: string[] = [];
+      for (const row of rows) {
+        if (!siteConversationIds.has(row.id) || row.parentSessionId) continue;
+        const origin = row.metadata._opengeniSiteOrigin as { siteId?: string } | undefined;
+        if (origin?.siteId !== siteId || (row.channelId ?? null) !== request.fromChannelId)
+          continue;
+        row.channelId = request.channelId;
+        movedSessionIds.push(row.id);
+      }
+      const created = createdSites.find((candidate) => candidate.siteId === siteId);
+      const siteMoved = created?.channelId === request.fromChannelId;
+      if (created && siteMoved) created.channelId = request.channelId;
+      return { siteId, channelId: request.channelId, siteMoved, movedSessionIds };
     },
     tools: {
       forWorkspace: () => ({
