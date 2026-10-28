@@ -88,6 +88,17 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The chat route lists the workspace's machines. Settings,
+              // schedules and the chat beside a Site read the same hooks, so
+              // entry-aware grouping can fold them in with the meeting
+              // settings, and a direct chat load then downloads the meeting
+              // and management UI for nothing. Keep the hooks in a leaf.
+              name: "workspace-machines-list",
+              test: /packages[\\/]react[\\/]src[\\/](?:app[\\/]lib[\\/]use-workspace-machines|hooks[\\/]shared-machines-list)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Relative times, disabled-control reasons and section variants
               // are shared by settings, sign-in methods and the session
               // retention control, never by the first page. The web host's
