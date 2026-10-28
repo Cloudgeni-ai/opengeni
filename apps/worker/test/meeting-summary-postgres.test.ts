@@ -9,6 +9,7 @@ import {
   updateSessionToolPolicy,
 } from "@opengeni/core";
 import {
+  claimSessionWorkForAttempt,
   claimRecordingTranscriptVersion,
   completeRecordingTranscriptVersion,
   createDb,
@@ -19,6 +20,7 @@ import {
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
   finalizeRecording,
+  freezeAgentLearningPolicy,
   getSessionForSubject,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
@@ -91,6 +93,39 @@ function services(overrides: Partial<typeof settings> = {}): ControlActivityServ
     signalSessionAttemptQuiesced: null,
     inspectSessionAttemptActivity: null,
   } as unknown as ControlActivityServices;
+}
+
+/** Claims the summary chat's first turn as the worker does and freezes its
+ * learning policy, the first thing a run does before the model is called. */
+async function freezeFirstTurnLearning(
+  scope: { accountId: string; workspaceId: string },
+  sessionId: string,
+) {
+  const [turn] = await shared!.admin<{ human: string | null; workflowId: string }[]>`
+    select initiating_human_subject_id as human, temporal_workflow_id as "workflowId"
+    from session_turns where session_id = ${sessionId}::uuid`;
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId,
+    workflowId: turn!.workflowId,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`Claim failed: ${claim.reason}`);
+  const policy = await freezeAgentLearningPolicy(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    actor: {
+      kind: "agent",
+      sessionId,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    },
+  });
+  return { human: turn!.human, policy };
 }
 
 async function workspace(options: { subscription: boolean }) {
@@ -274,6 +309,14 @@ describe("built-in meeting summary", () => {
     const [row] = await shared!.admin<{ visibility: string; owner: string | null }[]>`
       select visibility, owner_subject_id as owner from sessions where id = ${first.sessionId}::uuid`;
     expect(row).toEqual({ visibility: "user_private", owner: scope.owner });
+
+    // The service starts it, but the turn runs for the meeting's owner, like
+    // their own Only me automation: the run's first step, freezing what it may
+    // learn, gets their personal layer instead of refusing a human-less turn
+    // in their private chat.
+    const run = await freezeFirstTurnLearning(scope, first.sessionId);
+    expect(run.human).toBe(scope.owner);
+    expect(run.policy).toMatchObject({ defaultScope: "personal", subjectId: scope.owner });
   }, 180_000);
 
   test("a shared meeting gets a workspace chat", async () => {
@@ -286,6 +329,10 @@ describe("built-in meeting summary", () => {
     const [row] = await shared!.admin<{ visibility: string; owner: string | null }[]>`
       select visibility, owner_subject_id as owner from sessions where id = ${started.sessionId}::uuid`;
     expect(row).toEqual({ visibility: "workspace_shared", owner: null });
+    // No one person's: it learns into the workspace, for no human.
+    const run = await freezeFirstTurnLearning(scope, started.sessionId);
+    expect(run.human).toBeNull();
+    expect(run.policy).toMatchObject({ defaultScope: "workspace" });
   }, 180_000);
 
   test("nothing starts when the setting is off, notes exist, or the owner's own automation writes them", async () => {
