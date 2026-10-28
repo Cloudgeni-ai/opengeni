@@ -22,6 +22,20 @@ type ReplayableRequestInit = RequestInit & {
   [REPLAYABLE_REQUEST_BODY_FACTORY]?: () => ReadableStream<Uint8Array>;
 };
 
+/** The JSON object each replayable body stream encodes, by stream identity. */
+const replayableBodySources = new WeakMap<object, unknown>();
+
+/**
+ * The object a request body stream encodes, when the stream is one this
+ * client produced; lets a transport check read a field without consuming or
+ * buffering the body. A replaced or wrapped stream is not recognized.
+ */
+export function replayableJsonBodySource(body: unknown): { source: unknown } | null {
+  return body !== null && typeof body === "object" && replayableBodySources.has(body)
+    ? { source: replayableBodySources.get(body) }
+    : null;
+}
+
 type OpenAIPostOptions = NonNullable<Parameters<OpenAI["post"]>[1]>;
 type ResolvedOpenAIPostOptions = Awaited<OpenAIPostOptions>;
 type OpenAIBuildOptions = Parameters<OpenAI["buildRequest"]>[0];
@@ -72,7 +86,7 @@ export class ReplayableJsonBody implements AsyncIterable<Uint8Array> {
 
   createStream(): ReadableStream<Uint8Array> {
     const iterator = this[Symbol.asyncIterator]();
-    return new ReadableStream<Uint8Array>({
+    const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
           const next = await iterator.next();
@@ -86,6 +100,8 @@ export class ReplayableJsonBody implements AsyncIterable<Uint8Array> {
         await iterator.return?.(reason).catch(() => undefined);
       },
     });
+    replayableBodySources.set(stream, this.source);
+    return stream;
   }
 }
 
@@ -174,6 +190,9 @@ export class ReplayableJsonOpenAI extends OpenAI {
       };
     }
     const request = built.req as ReplayableRequestInit;
+    if (request.body && typeof request.body === "object") {
+      replayableBodySources.set(request.body, replayable.source);
+    }
     request[REPLAYABLE_REQUEST_BODY_FACTORY] = () => replayable.createStream();
     return built;
   }
