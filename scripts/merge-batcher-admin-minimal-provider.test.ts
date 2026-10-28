@@ -7,7 +7,7 @@ import {
 } from "../docs/merge-batcher-admin/minimal-watchdog-provider";
 const sha = (v: string) => createHash("sha256").update(v).digest("hex");
 
-test("image mode loads only pinned image code and forwards contract digest to OFF", async () => {
+test("image mode loads only pinned code and never invokes OFF", async () => {
   const f = fixture();
   const originalRead = f.deps.read;
   const contract = JSON.parse(await originalRead("/work/admin/stop-contract.json"));
@@ -28,7 +28,7 @@ test("image mode loads only pinned image code and forwards contract digest to OF
     f.calls.push("OFF");
   };
   await run(f.config, f.deps);
-  expect(f.calls).toContain("OFF");
+  expect(f.calls).toEqual(["GET"]);
   f.config.contractSha256 = "a".repeat(64);
   const before = f.calls.length;
   await expect(run(f.config, f.deps)).rejects.toThrow("contract changed");
@@ -124,7 +124,7 @@ function fixture() {
     },
   };
 }
-test("consumed claim resume receives the pinned image contract and saved plan", async () => {
+test("a consumed claim never invokes resume even with a pinned image contract", async () => {
   const f = fixture();
   const originalRead = f.deps.read;
   const contract = JSON.parse(await originalRead("/work/admin/stop-contract.json"));
@@ -142,22 +142,23 @@ test("consumed claim resume receives the pinned image contract and saved plan", 
     expect(planPin).toBe(f.config.planSha256);
     f.calls.push("RESUME");
   };
-  expect(await run(f.config, f.deps)).toBe("manual");
-  expect(f.calls).toContain("RESUME");
+  expect(await run(f.config, f.deps)).toBe("held");
+  expect(f.calls).not.toContain("RESUME");
   expect(f.calls).not.toContain("OFF");
 });
-test("real wrapper uses authenticated status and create-only claim before unchanged OFF", async () => {
+test("real wrapper uses authenticated status without provider mutations", async () => {
   const f = fixture();
-  expect(await run(f.config, f.deps)).toBe("manual");
   expect(await run(f.config, f.deps)).toBe("held");
-  expect(f.calls).toEqual(["GET", "POST", "OFF", "GET", "POST"]);
+  expect(await run(f.config, f.deps)).toBe("held");
+  expect(f.calls).toEqual(["GET", "GET"]);
   expect(JSON.stringify(f.events)).not.toContain("secret-test-token");
 });
-test("indeterminate claim cannot invoke OFF, including timeout after possible creation", async () => {
+test("claim storage failures do not affect read-only alerting", async () => {
   for (const status of [403, 408, 500]) {
     const f = fixture();
     f.conflict(status);
-    await expect(run(f.config, f.deps)).rejects.toThrow("Claim outcome unavailable");
+    expect(await run(f.config, f.deps)).toBe("held");
+    expect(f.calls).toEqual(["GET"]);
     expect(f.calls).not.toContain("OFF");
   }
 });
@@ -190,7 +191,7 @@ test("OFF uncertainty remains held without claim release or later retry", async 
   };
   expect(await run(f.config, f.deps)).toBe("held");
   expect(await run(f.config, f.deps)).toBe("held");
-  expect(f.calls.filter((x) => x === "OFF")).toHaveLength(1);
+  expect(f.calls.filter((x) => x === "OFF")).toHaveLength(0);
   expect(f.calls).not.toContain("DELETE");
 });
 
@@ -232,13 +233,24 @@ test("operator directory pin is checked before loading or calling provider", asy
   await expect(run(f.config, f.deps)).rejects.toThrow("Unexpected OFF package");
   expect(f.calls).toEqual([]);
 });
-test("non-OK healthy-shaped status cannot suppress proven OFF", async () => {
+test("non-OK healthy-shaped status emits an unavailable alert without OFF", async () => {
   const f = fixture();
   f.deps.request = (async (_url, _init) =>
     Response.json(
       { state: "running", controlObservedAt: 2_000_000, consecutiveUnclassifiedFailures: 0 },
       { status: 503 },
     )) as typeof fetch;
-  expect(await run(f.config, f.deps)).toBe("manual");
-  expect(f.calls).toEqual(["GET", "POST", "OFF"]);
+  expect(await run(f.config, f.deps)).toBe("held");
+  expect(f.calls).toEqual(["GET"]);
+});
+
+test("pinned grace changes alert severity, never provider writes", async () => {
+  const f = fixture();
+  f.config.graceUntil = f.deps.now() + 60_000;
+  expect(await run(f.config, f.deps)).toBe("held");
+  expect(f.events.at(-1)).toMatchObject({ severity: "INFO", suppressedUntil: f.config.graceUntil });
+  f.config.graceUntil = f.deps.now();
+  expect(await run(f.config, f.deps)).toBe("held");
+  expect(f.events.at(-1)).toMatchObject({ severity: "WARNING", reason: "stopped" });
+  expect(f.calls).toEqual(["GET", "GET"]);
 });

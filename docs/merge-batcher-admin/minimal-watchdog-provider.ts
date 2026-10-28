@@ -1,4 +1,4 @@
-/** Provider wrapper around unchanged OFF; no automatic claim recovery or ON. */
+/** Authenticated read-only watchdog. Retained OFF bindings are identity evidence only. */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ export type Configuration = {
   planSha256: string;
   operatorDirectory?: "/opt/batcher-operator";
   contractSha256?: string;
+  /** Pinned by the rollout owner after a deployment or control-plane landing. */
+  graceUntil?: number;
 };
 const files = [
   "control.ts",
@@ -96,6 +98,7 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
     throw Error("Missing pinned deployment identity");
   return tick({
     now: deps.now,
+    graceUntil: config.graceUntil,
     async verifyBinding() {
       const live = await cloud.api(`https://run.googleapis.com/v2/${config.service}`);
       if (
@@ -156,7 +159,12 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
         }
       : {}),
     async record(event) {
-      deps.record({ event: "minimal-watchdog", ...event, planSha256: config.planSha256 });
+      deps.record({
+        event: "minimal-watchdog",
+        severity: event.outcome === "held" && event.suppressedUntil === undefined ? "WARNING" : "INFO",
+        ...event,
+        planSha256: config.planSha256,
+      });
     },
   });
 }

@@ -147,7 +147,7 @@ test("deferral timestamp and count must agree in both directions", () => {
   ).toBeNull();
 });
 
-test("progress-triggered OFF still requires proven restoration and never repeats unknown effects", async () => {
+test("progress stalls never invoke OFF or repeat unknown effects", async () => {
   let claimed = false;
   let calls = 0;
   const events: string[] = [];
@@ -170,6 +170,6 @@ test("progress-triggered OFF still requires proven restoration and never repeats
   };
   expect(await tick(ports)).toBe("held");
   expect(await tick(ports)).toBe("held");
-  expect(calls).toBe(1);
+  expect(calls).toBe(0);
   expect(events).not.toContain("manual");
 });

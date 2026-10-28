@@ -1,4 +1,26 @@
-# Minimal provider watchdog — not deployed
+# Minimal provider watchdog — alert-only policy
+
+## Current policy
+
+Every unhealthy observation emits a structured `held` monitoring event only.
+The watchdog never claims an OFF operation, invokes STOP/OFF, resumes a previous
+OFF, changes rules, or releases/disarms native auto-merge. Existing claims,
+receipts and rollback materials remain untouched for the owning operator.
+
+The rollout owner may pin `graceUntil` (Unix milliseconds) in the watchdog
+configuration after a deployment or control-plane landing. Before that fixed
+deadline, held events include `suppressedUntil` and INFO severity; afterwards,
+they use WARNING severity. Grace does not fabricate healthy observations and
+ticks never extend it. Configure the alert destination to page on unsuppressed
+held events; missing-run monitoring remains independent. A deployment must
+verify this alert routing using the actual Job output before claiming success.
+
+The historical OFF qualification below describes retained operator evidence,
+not actions performed or authorized by the current watchdog. New qualification
+must prove that status failures and all stall reasons cause no provider writes,
+including when an old claim exists. Do not perform a live OFF drill for this change.
+
+## Historical operator contract (not automatic watchdog behavior)
 
 This lane deliberately excludes the expanded watchdog, new App, rules split,
 Git heartbeat refs, durable-core migration, sweep and generic hydration framework.

@@ -63,11 +63,11 @@ test("healthy polls never claim or invoke OFF", async () => {
   expect(await tick(ports)).toBe("healthy");
   expect(calls).toEqual(["binding", "healthy"]);
 });
-test("OFF success is necessary for Manual; subsequent execution never repeats it", async () => {
+test("stopped observations never invoke OFF, including subsequent executions", async () => {
   const { ports, calls } = fixture();
-  expect(await tick(ports)).toBe("manual");
   expect(await tick(ports)).toBe("held");
-  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(await tick(ports)).toBe("held");
+  expect(calls.filter((x) => x === "off")).toHaveLength(0);
 });
 test("unknown write/drain failure remains held across a later invocation", async () => {
   const { ports, calls } = fixture();
@@ -77,10 +77,10 @@ test("unknown write/drain failure remains held across a later invocation", async
   };
   expect(await tick(ports)).toBe("held");
   expect(await tick(ports)).toBe("held");
-  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(calls.filter((x) => x === "off")).toHaveLength(0);
   expect(calls).not.toContain("manual");
 });
-test("consumed claim may finish proven reverse stages without another OFF", async () => {
+test("a previous claim never authorizes automatic reverse stages", async () => {
   const { ports, calls } = fixture();
   ports.off = async () => {
     calls.push("off");
@@ -90,9 +90,9 @@ test("consumed claim may finish proven reverse stages without another OFF", asyn
     calls.push("resume-proof-only");
   };
   expect(await tick(ports)).toBe("held");
-  expect(await tick(ports)).toBe("manual");
-  expect(calls.filter((x) => x === "off")).toHaveLength(1);
-  expect(calls.filter((x) => x === "resume-proof-only")).toHaveLength(1);
+  expect(await tick(ports)).toBe("held");
+  expect(calls.filter((x) => x === "off")).toHaveLength(0);
+  expect(calls.filter((x) => x === "resume-proof-only")).toHaveLength(0);
 });
 test("unproven resumed drain remains held without replay", async () => {
   const { ports, calls } = fixture();
@@ -110,15 +110,14 @@ test("unproven resumed drain remains held without replay", async () => {
   };
   expect(await tick(ports)).toBe("held");
   expect(await tick(ports)).toBe("held");
-  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(calls.filter((x) => x === "off")).toHaveLength(0);
   expect(events).toContainEqual({
     outcome: "held",
     reason: "stopped",
-    recoveryError: "no current matching drain",
   });
 });
-test("binding or indeterminate claim failure never reaches OFF", async () => {
-  for (const target of ["verifyBinding", "claim"] as const) {
+test("binding failure never reaches OFF", async () => {
+  for (const target of ["verifyBinding"] as const) {
     const { ports, calls } = fixture();
     ports[target] = async () => {
       throw Error("indeterminate");
@@ -127,12 +126,13 @@ test("binding or indeterminate claim failure never reaches OFF", async () => {
     expect(calls).not.toContain("off");
   }
 });
-test("concurrent ticks share the durable claim contract; only winner invokes OFF", async () => {
+test("concurrent ticks neither acquire a claim nor invoke OFF", async () => {
   const { ports, calls } = fixture();
-  expect((await Promise.all([tick(ports), tick(ports)])).sort()).toEqual(["held", "manual"]);
-  expect(calls.filter((x) => x === "off")).toHaveLength(1);
+  expect(await Promise.all([tick(ports), tick(ports)])).toEqual(["held", "held"]);
+  expect(calls.filter((x) => x === "off")).toHaveLength(0);
+  expect(calls).not.toContain("claim");
 });
-test("unreachable status attempts proven OFF, not assumed Manual", async () => {
+test("unreachable status only alerts, never attempts OFF", async () => {
   const { ports, calls } = fixture();
   ports.status = async () => {
     throw Error("unreachable");
@@ -143,4 +143,5 @@ test("unreachable status attempts proven OFF, not assumed Manual", async () => {
   };
   expect(await tick(ports)).toBe("held");
   expect(calls).not.toContain("manual");
+  expect(calls).not.toContain("off");
 });

@@ -1,4 +1,4 @@
-/** Small liveness trigger. OFF remains the sole authority for drain and restoration. */
+/** Read-only liveness monitor. No health condition authorizes automatic OFF. */
 export type Status = {
   state: "running" | "holding" | "draining" | "stopped";
   controlObservedAt: number | null;
@@ -82,6 +82,8 @@ export type Ports = {
   verifyBinding(): Promise<void>;
   status(): Promise<unknown>;
   now(): number;
+  /** Fixed deployment/control-plane handoff deadline; never renewed by a tick. */
+  graceUntil?: number;
   // Durable, create-only per-activation exclusion. Never release after claiming:
   // a lost process/result must not cause automatic repeat of an unknown OFF.
   claim(): Promise<boolean>;
@@ -92,6 +94,7 @@ export type Ports = {
     outcome: "healthy" | "held" | "manual";
     reason?: Reason;
     recoveryError?: string;
+    suppressedUntil?: number;
   }): Promise<void>;
 };
 export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual"> {
@@ -102,38 +105,24 @@ export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual">
   } catch {
     status = null;
   }
-  const cause = reason(status, ports.now());
+  const now = ports.now();
+  if (ports.graceUntil !== undefined &&
+      (!Number.isSafeInteger(ports.graceUntil) || ports.graceUntil < 0))
+    throw Error("Invalid pinned watchdog grace deadline");
+  const cause = reason(status, now);
   if (!cause) {
     await ports.record({ outcome: "healthy" });
     return "healthy";
   }
-  if (!(await ports.claim())) {
-    if (ports.resumeOff) {
-      try {
-        await ports.resumeOff();
-        await ports.record({ outcome: "manual", reason: cause });
-        return "manual";
-      } catch (error) {
-        await ports.record({
-          outcome: "held",
-          reason: cause,
-          recoveryError:
-            error instanceof Error ? error.message.slice(0, 500) : "Unknown recovery failure",
-        });
-        return "held";
-      }
-    }
-    await ports.record({ outcome: "held", reason: cause });
-    return "held";
-  }
-  try {
-    // No classification of a status response can authorize Manual. The unchanged
-    // OFF implementation must obtain real STOP/drain/settlement and exact rules.
-    await ports.off();
-  } catch {
-    await ports.record({ outcome: "held", reason: cause });
-    return "held";
-  }
-  await ports.record({ outcome: "manual", reason: cause });
-  return "manual";
+  // Keep the existing held event/exit contract for monitoring, but never claim,
+  // stop, resume an earlier OFF, or modify policy/readiness. Historical claims
+  // and receipts belong to the separately coordinated operator workflow.
+  await ports.record({
+    outcome: "held",
+    reason: cause,
+    ...(ports.graceUntil !== undefined && now < ports.graceUntil
+      ? { suppressedUntil: ports.graceUntil }
+      : {}),
+  });
+  return "held";
 }
