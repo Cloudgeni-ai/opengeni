@@ -50,7 +50,7 @@ export function agentActingAsPerson(
   }
   if (!proof.permissions.includes(permission)) {
     throw new MissingPermissionRefusal(permission, {
-      message: "This connection's access doesn't cover this action.",
+      message: "This agent's access doesn't cover this action.",
     });
   }
   return { subjectId: proof.subjectId };
