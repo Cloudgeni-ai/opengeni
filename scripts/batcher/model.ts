@@ -12,6 +12,60 @@ export const MANIFEST_TRAILER = "Batch-Manifest: ";
 /** Changes to CI or to the batcher itself are tested and landed alone. */
 export const CONTROL_PLANE = [/^\.github\//, /^scripts\/ci\//, /^scripts\/batcher\//];
 
+/**
+ * Directories whose files carry a number that must be unique, such as database
+ * migrations. Two changes that add the same number merge cleanly in Git but
+ * fail CI together, so the batcher compares numbers before it tests anything.
+ */
+export const NUMBERED_FILES: {
+  directory: string;
+  pattern: RegExp;
+  fix: (file: string) => string;
+}[] = [
+  {
+    directory: "packages/db/drizzle/",
+    pattern: /^(\d+)_[^/]+\.sql$/,
+    fix: (file) =>
+      `Merge main into the branch and move it to the next free number: \`bun scripts/renumber-migration.ts ${file.replace(/\.sql$/, "")} --next\`.`,
+  },
+];
+
+export interface NumberedFile {
+  /** Directory and number, like "packages/db/drizzle/1072". */
+  slot: string;
+  /** The number as the file name writes it, like "1072". */
+  number: string;
+  path: string;
+}
+
+/** The numbered files among these paths. */
+export function numberedFiles(paths: string[]): NumberedFile[] {
+  const found: NumberedFile[] = [];
+  for (const path of paths)
+    for (const { directory, pattern } of NUMBERED_FILES) {
+      if (!path.startsWith(directory)) continue;
+      const match = pattern.exec(path.slice(directory.length));
+      if (match) found.push({ slot: `${directory}${Number(match[1])}`, number: match[1]!, path });
+    }
+  return found;
+}
+
+/**
+ * Why a change's added numbered files cannot land on main: the first one whose
+ * number main already uses for another file, or null.
+ */
+export function numberTaken(added: NumberedFile[], onMain: NumberedFile[]): string | null {
+  const taken = new Map(onMain.map((file) => [file.slot, file.path]));
+  for (const file of added) {
+    const other = taken.get(file.slot);
+    if (other === undefined || other === file.path) continue;
+    const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+    const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
+    return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
+  }
+  return null;
+}
+
 export interface Settings {
   /** Once the oldest ready PR has waited this long, build a batch. */
   windowMs: number;
@@ -34,8 +88,10 @@ export interface QueuedPull {
   queuedAt: number;
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
-  /** GitHub says the PR conflicts with main. */
-  conflicting: boolean;
+  /** Why the PR cannot land on main as it is (a Git conflict, a number main already uses), or null. */
+  conflict: string | null;
+  /** Numbered slots its added files use; two members of one batch never share one. */
+  slots: string[];
   priority: boolean;
   version: boolean;
   controlPlane: boolean;
@@ -139,7 +195,7 @@ export function nextBatch(
   now: number,
   settings: Settings,
 ): Action | null {
-  const ready = pulls.filter((p) => p.greenAt !== null && !p.conflicting).sort(fifo);
+  const ready = pulls.filter((p) => p.greenAt !== null && p.conflict === null).sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.version || p.controlPlane;
 
@@ -148,7 +204,10 @@ export function nextBatch(
     const first = urgent[0]!;
     const members = alone(first)
       ? [first]
-      : urgent.filter((p) => !alone(p)).slice(0, settings.maxBatch);
+      : compatible(
+          urgent.filter((p) => !alone(p)),
+          settings,
+        );
     return { kind: "build", members, pending };
   }
 
@@ -167,18 +226,29 @@ export function nextBatch(
   }
 
   if (alone(ready[0]!)) return { kind: "build", members: [ready[0]!], pending: [] };
-  const members: QueuedPull[] = [];
-  for (const pull of ready) {
-    if (pull.controlPlane) continue;
-    members.push(pull);
-    if (members.length === settings.maxBatch) break;
-  }
+  const members = compatible(
+    ready.filter((p) => !p.controlPlane),
+    settings,
+  );
   if (members.length < settings.maxBatch) {
     const oldest = Math.min(...members.map(readyAt));
     if (now - oldest < settings.windowMs)
       return { kind: "wait", until: oldest + settings.windowMs };
   }
   return { kind: "build", members, pending: [] };
+}
+
+/** Up to maxBatch PRs in order, skipping any that adds a number an earlier one adds. */
+function compatible(candidates: QueuedPull[], settings: Settings): QueuedPull[] {
+  const members: QueuedPull[] = [];
+  const taken = new Set<string>();
+  for (const pull of candidates) {
+    if (pull.slots.some((slot) => taken.has(slot))) continue;
+    members.push(pull);
+    for (const slot of pull.slots) taken.add(slot);
+    if (members.length === settings.maxBatch) break;
+  }
+  return members;
 }
 
 function split<T>(items: T[]): [T[], T[]] {
@@ -195,12 +265,8 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
   for (const pull of pulls)
-    if (pull.conflicting)
-      actions.push({
-        kind: "eject",
-        number: pull.number,
-        reason: "it conflicts with main. Merge main into the branch, then queue it again.",
-      });
+    if (pull.conflict !== null)
+      actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
 
   const batches = [...observation.batches].sort((a, b) => b.createdAt - a.createdAt);
   for (const extra of batches.slice(1))
@@ -259,7 +325,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   }
 
   const next = nextBatch(
-    pulls.filter((p) => !p.conflicting),
+    pulls.filter((p) => p.conflict === null),
     pending,
     now,
     settings,

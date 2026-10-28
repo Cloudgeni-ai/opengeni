@@ -5,6 +5,8 @@ import {
   decide,
   isControlPlane,
   nextBatch,
+  numberTaken,
+  numberedFiles,
   parseManifest,
   renderManifest,
   squashTitle,
@@ -27,7 +29,8 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     headSha: sha(number),
     queuedAt: NOW - 30 * MINUTE + number,
     greenAt: NOW - 20 * MINUTE,
-    conflicting: false,
+    conflict: null,
+    slots: [],
     priority: false,
     version: false,
     controlPlane: false,
@@ -165,12 +168,27 @@ describe("nextBatch", () => {
     expect(action).toMatchObject({ kind: "build", pending: [[4]] });
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([3]);
   });
+
+  test("keeps PRs that add the same numbered file out of one batch", () => {
+    const slot = "packages/db/drizzle/1072";
+    const action = nextBatch(
+      [pull(1, { slots: [slot] }), pull(2, { slots: [slot] }), pull(3)],
+      [],
+      NOW,
+      DEFAULT_SETTINGS,
+    );
+    expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([1, 3]);
+  });
 });
 
 describe("decide", () => {
   test("ejects conflicting PRs", () => {
-    const actions = decide(observe([pull(1, { conflicting: true }), pull(2)]));
-    expect(actions[0]).toMatchObject({ kind: "eject", number: 1 });
+    const actions = decide(observe([pull(1, { conflict: "it conflicts with main." }), pull(2)]));
+    expect(actions[0]).toMatchObject({
+      kind: "eject",
+      number: 1,
+      reason: "it conflicts with main.",
+    });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
   });
 
@@ -256,5 +274,29 @@ describe("manifest and titles", () => {
     expect(isControlPlane(["packages/a/x.ts", ".github/workflows/ci.yml"])).toBe(true);
     expect(isControlPlane(["scripts/batcher/pass.ts"])).toBe(true);
     expect(isControlPlane(["packages/a/x.ts", "docs/x.md"])).toBe(false);
+  });
+
+  test("a migration number main already uses for another file is taken", () => {
+    const main = numberedFiles([
+      "packages/db/drizzle/1071_site_project_placements.sql",
+      "packages/db/drizzle/README.md",
+    ]);
+    expect(main).toEqual([
+      {
+        slot: "packages/db/drizzle/1071",
+        number: "1071",
+        path: "packages/db/drizzle/1071_site_project_placements.sql",
+      },
+    ]);
+    const taken = numberTaken(
+      numberedFiles(["packages/db/drizzle/1071_usage_residency.sql", "packages/db/src/x.ts"]),
+      main,
+    );
+    expect(taken).toBe(
+      "`1071_usage_residency.sql` uses number 1071, which main already uses for `1071_site_project_placements.sql`. Merge main into the branch and move it to the next free number: `bun scripts/renumber-migration.ts 1071_usage_residency --next`.",
+    );
+    // The same file already on main, and a free number, are fine.
+    expect(numberTaken(main, main)).toBeNull();
+    expect(numberTaken(numberedFiles(["packages/db/drizzle/1072_x.sql"]), main)).toBeNull();
   });
 });

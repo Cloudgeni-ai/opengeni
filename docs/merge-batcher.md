@@ -19,6 +19,14 @@ A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
 Pushing a new head while queued simply restarts its batch.
 
+Database migrations need unique numbers, and two PRs can add the same number
+without a Git conflict. A queued PR that adds a migration whose number `main`
+already uses for another migration leaves the queue right away, with the
+`scripts/renumber-migration.ts` command that fixes it, instead of failing a
+whole batch. Two queued PRs that add the same number never share a batch.
+The numbered directories are listed in `NUMBERED_FILES`
+(`scripts/batcher/model.ts`).
+
 ## How a batch lands
 
 1. **Collect.** Once the oldest ready PR has waited the batching window
