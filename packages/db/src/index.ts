@@ -52238,6 +52238,9 @@ export type MarkWarmLeaseInstanceLostResult =
       /** Terminal events of linked background commands, already durable in
        * this commit; present only when a command settled. */
       backgroundCommandEvents?: SessionEvent[];
+      /** Committed wakes of sessions waiting on those commands; signal them
+       * after commit (see `signalBackgroundCommandWakes`). */
+      backgroundCommandWakes?: SessionWorkflowWake[];
     }
   | { status: "stale"; lease: LeaseSnapshot | null };
 
@@ -52432,6 +52435,8 @@ async function settleExactLostProviderWorkspaceBlockersTx(
       activityTx: SessionActivityDatabase;
       idleContainmentMinutes: number | null;
       events: SessionEvent[];
+      /** Receives the committed wake of each session waiting on a command. */
+      wakes?: SessionWorkflowWake[];
     };
   } = {},
 ): Promise<LostProviderWorkspaceSettlement> {
@@ -52585,6 +52590,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+      delivery.wakes?.push(...mutation.wakes);
     }
   }
 
@@ -52694,10 +52700,12 @@ export async function markWarmLeaseInstanceLost(
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
+  const backgroundCommandWakes: SessionWorkflowWake[] = [];
   // Settling a linked command appends its terminal event and agent input, so
   // the loss commit runs inside the session activity gate.
   const result = await withLostProviderCommandSessionRetry(async () => {
     backgroundCommandEvents.length = 0;
+    backgroundCommandWakes.length = 0;
     return await withSessionActivityRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -52759,6 +52767,7 @@ export async function markWarmLeaseInstanceLost(
             activityTx: tx,
             idleContainmentMinutes: null,
             events: backgroundCommandEvents,
+            wakes: backgroundCommandWakes,
           },
         });
 
@@ -52873,7 +52882,11 @@ export async function markWarmLeaseInstanceLost(
     );
   });
   return result.status === "marked" && backgroundCommandEvents.length
-    ? { ...result, backgroundCommandEvents }
+    ? {
+        ...result,
+        backgroundCommandEvents,
+        ...(backgroundCommandWakes.length ? { backgroundCommandWakes } : {}),
+      }
     : result;
 }
 
@@ -56286,12 +56299,16 @@ export async function confirmDrainCold(
    *  recorded no lost workspace (see `unpublishedWarmingLoss`). */
   unpublishedProviderLost?: boolean;
   backgroundCommandEvents?: SessionEvent[];
+  /** Committed wakes of sessions waiting on those commands. */
+  backgroundCommandWakes?: SessionWorkflowWake[];
 }> {
   const backgroundCommandEvents: SessionEvent[] = [];
+  const backgroundCommandWakes: SessionWorkflowWake[] = [];
   // Settling a command appends its terminal session event and agent input, so
   // the cold commit runs inside the session activity gate.
   const result = await withLostProviderCommandSessionRetry(async () => {
     backgroundCommandEvents.length = 0;
+    backgroundCommandWakes.length = 0;
     return await withSessionActivityRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -56461,6 +56478,7 @@ export async function confirmDrainCold(
                   ? null
                   : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
               events: backgroundCommandEvents,
+              wakes: backgroundCommandWakes,
             },
           });
         }
@@ -56675,7 +56693,13 @@ export async function confirmDrainCold(
       },
     );
   });
-  return backgroundCommandEvents.length ? { ...result, backgroundCommandEvents } : result;
+  return backgroundCommandEvents.length
+    ? {
+        ...result,
+        backgroundCommandEvents,
+        ...(backgroundCommandWakes.length ? { backgroundCommandWakes } : {}),
+      }
+    : result;
 }
 
 // §4.8b — persist the /workspace snapshot archive onto the lease BEFORE the
@@ -59503,6 +59527,8 @@ export async function settleRetainedProcess(
   settled: boolean;
   process: SandboxRetainedProcess;
   backgroundCommandEvents: SessionEvent[];
+  /** Committed wakes to signal after commit; see `signalBackgroundCommandWakes`. */
+  backgroundCommandWakes: SessionWorkflowWake[];
 }> {
   return settleRetainedProcessWithAuthority(db, input);
 }
@@ -59660,6 +59686,7 @@ async function settleRetainedProcessWithAuthority(
           settled: false,
           process: terminalProcess,
           backgroundCommandEvents: [...commandMutation.events],
+          backgroundCommandWakes: [...commandMutation.wakes],
         };
       }
       if (
@@ -59909,6 +59936,7 @@ async function settleRetainedProcessWithAuthority(
         settled: true,
         process: settledProcess,
         backgroundCommandEvents: [...commandMutation.events],
+        backgroundCommandWakes: [...commandMutation.wakes],
       };
     },
   );
@@ -88391,13 +88419,16 @@ function backgroundCommandTerminalMutation(input: {
   idleContainmentMinutes?: number | null;
 }): {
   events: SessionEvent[];
+  wakes: SessionWorkflowWake[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
   commit: (tx: SessionActivityDatabase, command: SessionBackgroundCommand) => Promise<void>;
 } {
   let controlActive = false;
   const events: SessionEvent[] = [];
+  const wakes: SessionWorkflowWake[] = [];
   return {
     events,
+    wakes,
     prepare: async (tx: SessionActivityDatabase): Promise<void> => {
       const locks = await lockSessionEventWriteRows(tx, {
         workspaceId: input.workspaceId,
@@ -88701,11 +88732,23 @@ function backgroundCommandTerminalMutation(input: {
         controlActive &&
         !realtimeActive;
       if (shouldWake) {
-        await registerInternalUpdateWakeInTransaction(tx, {
+        const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+        const wake = await registerInternalUpdateWakeInTransaction(tx, {
           accountId: session.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+          temporalWorkflowId,
+        });
+        // The caller signals this after commit; the dispatcher remains the
+        // repair path when it cannot. The wake is a passive queue change: this
+        // branch requires an idle session, so there is no turn to interrupt.
+        wakes.push({
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId,
+          wakeRevision: wake.wakeRevision,
+          interruptionRequested: false,
         });
       }
       await tx
@@ -88728,6 +88771,9 @@ function backgroundCommandTerminalMutation(input: {
 export type SessionBackgroundCommandTerminalSettlement = {
   command: SessionBackgroundCommand;
   events: SessionEvent[];
+  /** Committed wakes of a session waiting on this result. Signal them after
+   * commit so the wait resumes now instead of on the dispatcher's next tick. */
+  wakes: SessionWorkflowWake[];
 };
 
 export async function settleConnectedMachineSessionBackgroundCommand(
@@ -88754,13 +88800,13 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     input,
     mutation,
   );
-  return command ? { command, events: [...mutation.events] } : null;
+  return command ? { command, events: [...mutation.events], wakes: [...mutation.wakes] } : null;
 }
 
 export async function settleClaimedConnectedMachineBackgroundCommand(
   db: Database,
   input: { claim: ConnectedMachineBackgroundCommandClaim },
-): Promise<{ settled: boolean; events: SessionEvent[] }> {
+): Promise<{ settled: boolean; events: SessionEvent[]; wakes: SessionWorkflowWake[] }> {
   const mutation = backgroundCommandTerminalMutation({
     accountId: input.claim.accountId,
     workspaceId: input.claim.workspaceId,
@@ -88771,7 +88817,11 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     input,
     mutation,
   );
-  return { settled, events: settled ? [...mutation.events] : [] };
+  return {
+    settled,
+    events: settled ? [...mutation.events] : [],
+    wakes: settled ? [...mutation.wakes] : [],
+  };
 }
 
 /** Shared push/reaper terminal commit after output capture. A concurrent attached
@@ -88783,6 +88833,8 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     proof: ConnectedMachineBackgroundCommandProof;
     receipt?: ConnectedCommandOutputReceipt | undefined;
     publish?: ((events: SessionEvent[]) => Promise<void>) | undefined;
+    /** Signals a committed wake of a session waiting on this result. */
+    wake?: ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined;
   },
 ): Promise<boolean> {
   const terminal = async () => {
@@ -88799,7 +88851,7 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   }
   const settlement = alreadyTerminal
-    ? { settled: false, events: [] }
+    ? { settled: false, events: [], wakes: [] }
     : await settleClaimedConnectedMachineBackgroundCommand(db, input);
   const command = settlement.settled ? null : await terminal();
   if (!settlement.settled && !command)
@@ -88820,9 +88872,73 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   } finally {
     // A custody-checkpoint error must never suppress already committed fanout.
-    if (settlement.events.length) await input.publish?.(settlement.events);
+    try {
+      if (settlement.events.length) await input.publish?.(settlement.events);
+    } finally {
+      await signalBackgroundCommandWakes(settlement.wakes, input.wake);
+    }
   }
   return settlement.settled;
+}
+
+/** How long a settlement caller waits for its wake signals before it moves on. */
+export const BACKGROUND_COMMAND_WAKE_SIGNAL_TIMEOUT_MS = 5_000;
+
+/**
+ * Signal the committed wakes of a terminal background-command settlement, one
+ * per session and revision, concurrently and for at most `timeoutMs`. A failed,
+ * slow or missing signal is not an error: the outbox row stays undelivered and
+ * the periodic wake dispatcher delivers it. `onError` sees each failure.
+ */
+export async function signalBackgroundCommandWakes(
+  wakes: readonly SessionWorkflowWake[] | undefined,
+  wake: ((wake: SessionWorkflowWake) => Promise<unknown>) | null | undefined,
+  options: {
+    timeoutMs?: number;
+    onError?: (error: unknown, wake: SessionWorkflowWake) => void;
+  } = {},
+): Promise<void> {
+  if (!wake || !wakes?.length) return;
+  const unique = new Map<string, SessionWorkflowWake>();
+  for (const pending of wakes) {
+    const key = `${pending.workspaceId}:${pending.sessionId}`;
+    const seen = unique.get(key);
+    if (!seen || seen.wakeRevision < pending.wakeRevision) unique.set(key, pending);
+  }
+  const timeoutMs = options.timeoutMs ?? BACKGROUND_COMMAND_WAKE_SIGNAL_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  const report = (error: unknown, pending: SessionWorkflowWake) => {
+    try {
+      options.onError?.(error, pending);
+    } catch {
+      // Reporting is best effort too.
+    }
+  };
+  const unsettled = new Set(unique.values());
+  try {
+    await Promise.race([
+      Promise.all(
+        [...unique.values()].map((pending) =>
+          Promise.resolve()
+            .then(() => wake(pending))
+            .then(
+              () => undefined,
+              (error: unknown) => report(error, pending),
+            )
+            .finally(() => unsettled.delete(pending)),
+        ),
+      ),
+      timedOut,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  for (const pending of unsettled) {
+    report(new Error(`wake signal still pending after ${timeoutMs} ms`), pending);
+  }
 }
 
 /**

@@ -732,6 +732,7 @@ export async function startApi(options: StartApiOptions = {}) {
       db: dbClient.db,
       bus,
       observability,
+      wakeSessionWorkflow: workflowClient.client.wakeSessionWorkflow,
       agentUpdates: createAutomaticAgentUpdater({
         db: dbClient.db,
         bus,
