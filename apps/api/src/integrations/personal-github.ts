@@ -36,6 +36,7 @@ import {
   getConnectionMetadata,
   listConnectionsMetadata,
   persistProviderOAuthConnection,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
@@ -160,6 +161,8 @@ export async function disconnectPersonalGitHub(
     subjectId: string;
     connectionId: string;
     payload: PersonalGitHubDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const existing = await getConnectionMetadata(
@@ -190,6 +193,7 @@ export async function disconnectPersonalGitHub(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
   } catch (error) {
     if (error instanceof ConnectionDisconnectIdempotencyError) {

@@ -101,6 +101,7 @@ import {
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
@@ -450,6 +451,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
       installationId,
       eventRouteSecret: eventRouteSecret(settings),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     return c.body(null, 204);
   });

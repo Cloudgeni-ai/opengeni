@@ -30,6 +30,7 @@ import {
   SubscriptionCoreCodexSourceRefusedError,
   type SubscriptionCoreCodexCredentialInput,
   type SubscriptionCoreCodexDisconnectOutcome,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import type { CodexFetch, CodexUsagePayload } from "@opengeni/codex";
 import {
@@ -156,7 +157,14 @@ function disconnectRefused(outcome: SubscriptionCoreCodexDisconnectOutcome): voi
 export async function coreCodexDisconnect(
   c: Context,
   deps: ApiRouteDeps,
-  input: { accountId: string; workspaceId: string | null; subjectId: string; connectionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string | null;
+    subjectId: string;
+    connectionId: string;
+    /** Who disconnects: the removal is audited in its transaction. */
+    audit: DisconnectAuditActor;
+  },
 ) {
   let result: Awaited<ReturnType<typeof disconnectSubscriptionCoreCodexConnection>>;
   try {
@@ -191,7 +199,7 @@ export async function coreCodexDisconnect(
 export async function coreCodexDisconnectAll(
   c: Context,
   deps: ApiRouteDeps,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: { accountId: string; workspaceId: string; subjectId: string; audit: DisconnectAuditActor },
 ) {
   const result = await disconnectAllSubscriptionCoreCodexConnections(deps.db, input);
   if (result.refused) {

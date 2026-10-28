@@ -32,6 +32,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -102,6 +103,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
       credentialEncrypted: null,
       status: "disabled",
       tokenMetadata: {},
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     if (!connection) {
       throw new HTTPException(404, { message: "social connection not found" });

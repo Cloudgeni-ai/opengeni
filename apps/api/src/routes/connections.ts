@@ -194,6 +194,7 @@ import {
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1504,12 +1505,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
+    // Each writer records the disconnect in its own transaction.
+    const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
     const connection = isGoogleDrive
       ? await disconnectGoogleDrive(deps, {
           workspaceId,
           subjectId: grant.subjectId,
           connection: existing,
           payload: googleDriveDisconnect!.data,
+          audit,
         })
       : isAtlassian
         ? await disconnectAtlassian(deps, {
@@ -1517,6 +1521,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             subjectId: grant.subjectId,
             connection: existing,
             payload: atlassianDisconnect!.data,
+            audit,
           })
         : isPersonalGitHub
           ? await disconnectPersonalGitHub(deps, {
@@ -1524,6 +1529,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               subjectId: grant.subjectId,
               connectionId,
               payload: personalGitHubDisconnect!.data,
+              audit,
             })
           : isOpenGeniSlackBotConnection(existing)
             ? await revokeConnectionWithSlackBotSuccessAudit(db, {
@@ -1535,6 +1541,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
                 credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
                 slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+                audit,
               })
             : workspaceProviderKind
               ? await revokeWorkspaceProviderApiKeyConnections(db, workspaceProviderKind, {
@@ -1543,6 +1550,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   connectionId,
                   expectedVersion: existing.version,
                   updatedBySubjectId: grant.subjectId,
+                  audit,
                 })
               : await revokeConnection(
                   db,
@@ -1550,6 +1558,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   connectionId,
                   grant.subjectId,
                   existing.version,
+                  { audit },
                 );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });

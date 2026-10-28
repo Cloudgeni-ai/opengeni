@@ -111,6 +111,7 @@ import {
   withWorkspaceSubjectRls,
   recordKnowledgeLifecycleEvent,
   type PermanentConnectionRefreshFailure,
+  type DisconnectAuditActor,
 } from "@opengeni/db";
 import { googleDriveKnowledgeSourceIdentity } from "@opengeni/documents/google-drive";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -848,6 +849,8 @@ export async function disconnectGoogleDrive(
     subjectId: string;
     connection: GoogleDriveConnectionRecord;
     payload: GoogleDriveDisconnectRequest;
+    /** Who disconnects: audited in the disconnect's transaction. */
+    audit?: DisconnectAuditActor | null;
   },
 ) {
   const metadata = requireGoogleDriveConnection(input.connection, input.subjectId);
@@ -872,6 +875,7 @@ export async function disconnectGoogleDrive(
       }),
       lastError: null,
       updatedBySubjectId: input.subjectId,
+      audit: input.audit ?? null,
     });
     await setGoogleDriveScheduleStatus(deps, input.workspaceId, input.connection.id, "paused");
     return disconnected;
