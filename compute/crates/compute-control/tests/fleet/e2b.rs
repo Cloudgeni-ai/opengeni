@@ -481,6 +481,46 @@ async fn an_e2b_create_reaches_the_offers_its_team_is_given() {
     assert_eq!(reach_of(&other["sandboxID"]), Vec::<String>::new());
 }
 
+/// A sandbox killed at its timeout is never resumed, so it is not
+/// checkpointed while it runs; one that pauses at its timeout is, like any
+/// fleet sandbox. Both sleep the fleet's way otherwise.
+#[tokio::test]
+async fn only_e2b_sandboxes_that_pause_at_their_timeout_are_checkpointed() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.sleep.checkpoint_every_ms = Some(600_000);
+    })
+    .await;
+    let seen = Arc::new(Seen::default());
+    let (host, _levels) = host_offering(&fleet, &seen, &[]).await;
+    let door = Door::start(&fleet).await;
+    let sleep_of = |id: &Value| {
+        let id: Id = id.as_str().unwrap().parse().unwrap();
+        host.seen()
+            .into_iter()
+            .find_map(|seen| match seen.envelope.request {
+                Request::Create {
+                    id: created,
+                    config,
+                    ..
+                } if created == id => Some(config.sleep),
+                _ => None,
+            })
+            .expect("the host was asked to create it")
+    };
+    let killed = sleep_of(&door.create(json!({"templateID": "base"})).await["sandboxID"]);
+    let paused = sleep_of(
+        &door
+            .create(json!({"templateID": "base", "autoPause": true}))
+            .await["sandboxID"],
+    );
+    assert_eq!(killed.checkpoint_every_ms, None);
+    assert_eq!(paused.checkpoint_every_ms, Some(600_000));
+    assert_eq!(
+        killed.pause_after_ms, paused.pause_after_ms,
+        "both still sleep when idle"
+    );
+}
+
 #[tokio::test]
 async fn an_e2b_sandbox_is_created_listed_for_its_team_and_killed() {
     let (_fleet, _host, levels, seen, door) = fleet_with_guest().await;
