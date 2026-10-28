@@ -9440,14 +9440,17 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/approvals",
       "sdk": [
-        "OpenGeniToolsClient.forWorkspace"
+        "OpenGeniToolsClient.forWorkspace",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayApprovalResponse",
         "ToolGatewayCallResponse",
         "ToolGatewayCatalog",
-        "ToolGatewayDeclarationsResponse"
+        "ToolGatewayDeclarationsResponse",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
       ]
     },
     {
@@ -9455,14 +9458,17 @@
       "path": "/v1/workspaces/:workspaceId/tools/calls",
       "sdk": [
         "OpenGeniClient.callWorkspaceSiteTool",
-        "OpenGeniToolsClient.forWorkspace"
+        "OpenGeniToolsClient.forWorkspace",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayApprovalResponse",
         "ToolGatewayCallResponse",
         "ToolGatewayCatalog",
-        "ToolGatewayDeclarationsResponse"
+        "ToolGatewayDeclarationsResponse",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
       ]
     },
     {
@@ -9497,13 +9503,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/invoke",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9511,13 +9519,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/manifest",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9525,13 +9535,27 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/resolve",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/tools/site-consent",
+      "sdk": [
+        "createSiteToolBridge"
+      ],
+      "request": [],
+      "response": [
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9539,13 +9563,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -18715,6 +18741,7 @@
         "$.occurredAt": "string!",
         "$.payer": "ref(InsightsUsagePayer)!",
         "$.personKey": "string! null",
+        "$.processingGeography": "ref(ModelProcessingGeography)! null",
         "$.provider": "string!",
         "$.sessionId": "string! null",
         "$.sessionKind": "enum!=[\"\\\"deleted\\\"\",\"\\\"private\\\"\",\"\\\"visible\\\"\"]",
@@ -24122,6 +24149,9 @@
         "$.metadata{}": "unknown",
         "$.ownerSubjectId": "string!",
         "$.purpose": "ref(RecordingPurpose)!",
+        "$.sourceWorkspace": "object? null",
+        "$.sourceWorkspace.id": "string!",
+        "$.sourceWorkspace.name": "string!",
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
@@ -24496,6 +24526,7 @@
         "$": "object",
         "$.available": "boolean!",
         "$.capabilities": "ref(RecordingTranscriptionCapabilities)!",
+        "$.chargedInCredits": "boolean?",
         "$.funding": "ref(RecordingTranscriptionFunding)!",
         "$.model": "string!",
         "$.name": "string!",
@@ -29456,6 +29487,50 @@
         "$.entry.source": "enum!=[\"\\\"codex_apps\\\"\",\"\\\"docs\\\"\",\"\\\"files\\\"\",\"\\\"interaction\\\"\",\"\\\"mcp\\\"\",\"\\\"opengeni\\\"\"]",
         "$.entry.title": "string?",
         "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ToolGatewaySiteConsentAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.account": "string!",
+        "$.connector": "string!",
+        "$.identity": "ref(AttemptToolIdentity)!"
+      }
+    },
+    "ToolGatewaySiteConsentResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ToolGatewaySiteConsentAccount)",
+        "$.connect": "object! null",
+        "$.connect.capabilityId": "string! null",
+        "$.connect.name": "string!",
+        "$.connect.providerDomain": "string!",
+        "$.review": "ref(ToolGatewaySiteConsentReview)! null",
+        "$.selected": "ref(AttemptToolIdentity)! null",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ToolGatewaySiteConsentReview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.email": "object?",
+        "$.email.attachments": "integer!",
+        "$.email.bcc": "string!",
+        "$.email.cc": "string!",
+        "$.email.from": "string!",
+        "$.email.subject": "string!",
+        "$.email.to": "string!",
+        "$.kind": "enum!=[\"\\\"generic\\\"\",\"\\\"gmail\\\"\"]"
       }
     },
     "ToolGatewayTargetApprovalResponse": {
@@ -34760,6 +34835,11 @@
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
       "SiteToolCallRequest": "type",
+      "SiteToolConnectionRequiredError": "value",
+      "SiteToolConnectPrompt": "type",
+      "SiteToolConsentDecision": "type",
+      "SiteToolConsentDeclinedError": "value",
+      "SiteToolConsentPrompt": "type",
       "SiteViewAs": "type",
       "SiteViewer": "type",
       "SiteViewerCapabilities": "type",
@@ -34862,6 +34942,10 @@
       "ToolGatewayResolvedTool": "type",
       "ToolGatewayResolveRequest": "type",
       "ToolGatewayResult": "type",
+      "ToolGatewaySiteConsentAccount": "type",
+      "ToolGatewaySiteConsentRequest": "type",
+      "ToolGatewaySiteConsentResponse": "type",
+      "ToolGatewaySiteConsentReview": "type",
       "ToolGatewayTarget": "type",
       "ToolGatewayTargetApprovalRequest": "type",
       "ToolGatewayTargetApprovalResponse": "type",
@@ -36255,14 +36339,19 @@
       "createOpenGeniSiteClient": "value",
       "createSiteToolBridge": "value",
       "CreateSiteToolBridgeOptions": "type",
+      "isOpenGeniReservedSitePath": "value",
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
+      "isOpenGeniSiteBridgeEventMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
       "isSiteCatalogStaleError": "value",
       "isSiteHttpRequest": "value",
       "OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL": "value",
       "OPENGENI_SITE_BRIDGE_CANCEL": "value",
       "OPENGENI_SITE_BRIDGE_CONNECT": "value",
+      "OPENGENI_SITE_BRIDGE_EVENT": "value",
+      "OPENGENI_SITE_BRIDGE_LOCATION_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_READY": "value",
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
@@ -36270,6 +36359,7 @@
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
       "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
       "OPENGENI_SITE_LOCAL_CODEMODE_PATH": "value",
+      "OPENGENI_SITE_LOCATION_MAX_LENGTH": "value",
       "OpenGeniSiteAi": "type",
       "OpenGeniSiteAiOptions": "type",
       "OpenGeniSiteAiRequest": "type",
@@ -36277,6 +36367,7 @@
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
       "OpenGeniSiteBridgeError": "value",
+      "OpenGeniSiteBridgeEventMessage": "type",
       "OpenGeniSiteBridgeReadyMessage": "type",
       "OpenGeniSiteBridgeRequestMessage": "type",
       "OpenGeniSiteBridgeResponseMessage": "type",
@@ -36297,6 +36388,13 @@
       "OpenGeniSiteDataWriteResult": "type",
       "OpenGeniSiteFile": "type",
       "OpenGeniSiteFiles": "type",
+      "openGeniSiteLinkTarget": "value",
+      "OpenGeniSiteLocation": "type",
+      "openGeniSiteLocationHref": "value",
+      "openGeniSiteLocationValue": "value",
+      "OpenGeniSiteLocationValue": "type",
+      "OpenGeniSiteNavigateOptions": "type",
+      "openGeniSitePath": "value",
       "OpenGeniSiteSignInResult": "type",
       "OpenGeniSiteSql": "type",
       "OpenGeniSiteSqlError": "value",
@@ -36307,6 +36405,7 @@
       "OpenGeniSiteToolCatalog": "type",
       "OpenGeniSiteViewer": "type",
       "OpenGeniSiteWorkspaceTools": "type",
+      "resolveOpenGeniSiteLocation": "value",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "sanitizeOpenGeniSiteToolInvokeRequest": "value",
       "serveSiteHttp": "value",
@@ -36315,17 +36414,29 @@
       "siteSessionPath": "value",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
-      "SiteToolCallRequest": "type"
+      "SiteToolCallRequest": "type",
+      "SiteToolConnectionRequiredError": "value",
+      "SiteToolConnectPrompt": "type",
+      "SiteToolConsentDecision": "type",
+      "SiteToolConsentDeclinedError": "value",
+      "SiteToolConsentPrompt": "type"
     },
     "@opengeni/sdk/site-bridge-host": {
       "handleSiteBridgeRequest": "value",
       "injectSiteBridgeBootstrap": "value",
+      "isOpenGeniReservedSitePath": "value",
       "openGeniSiteBridgePortFromBootstrap": "value",
+      "openGeniSiteLocationHref": "value",
+      "openGeniSiteLocationValue": "value",
+      "OpenGeniSiteLocationValue": "type",
+      "openGeniSitePath": "value",
+      "resolveOpenGeniSiteLocation": "value",
       "SITE_BRIDGE_BOOTSTRAP_SCRIPT": "value",
       "SiteBridgeDocumentLease": "value",
       "siteBridgeError": "value",
       "SiteBridgeHost": "value",
       "SiteBridgeHostSource": "type",
+      "SiteBridgeLocationHandlers": "type",
       "siteBridgeReadyMessage": "value",
       "SiteBridgeRequestRegistry": "value",
       "SiteBridgeRequestValue": "type",
@@ -38311,6 +38422,7 @@
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
       "meetingTitle": "value",
+      "meetingUploadFailure": "value",
       "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
@@ -38319,7 +38431,10 @@
       "speakerIsNamed": "value",
       "tidyLiveText": "value",
       "tidyPartialText": "value",
+      "transcribingText": "value",
       "transcriptErrorText": "value",
+      "transcriptFixModel": "value",
+      "transcriptNeedsCredits": "value",
       "TranscriptTurn": "type",
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
@@ -38776,6 +38891,7 @@
     },
     "@opengeni/react/testing/meetings": {
       "createMeetingsFixture": "value",
+      "ELSEWHERE_RECORDING_ID": "value",
       "FAILED_RECORDING_ID": "value",
       "LIVE_LINES": "value",
       "LIVE_RECORDING_ID": "value",
@@ -42361,6 +42477,7 @@
       "finish",
       "rename",
       "resume",
+      "retry",
       "status",
       "subscribe"
     ],
@@ -42379,7 +42496,8 @@
     ],
     "SiteBridgeHost": [
       "close",
-      "load"
+      "load",
+      "notifyLocation"
     ],
     "SiteBridgeRequestRegistry": [
       "addPort",
@@ -42387,7 +42505,18 @@
       "closeAll",
       "closePort",
       "complete",
+      "ports",
       "start"
+    ],
+    "SiteToolConnectionRequiredError": [
+      "code",
+      "outcomeUnknown",
+      "retryable"
+    ],
+    "SiteToolConsentDeclinedError": [
+      "code",
+      "outcomeUnknown",
+      "retryable"
     ],
     "ToolRequestError": [
       "status",
@@ -45273,6 +45402,28 @@
       ],
       "update": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateSiteAuthConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteAuthConnectionMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolConnectionRequiredError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolConsentDeclinedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
       ]
     },
     "@opengeni/sdk:ToolRequestError": {
@@ -55279,6 +55430,9 @@
       "resume": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"only\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"params\":[{\"name\":\"recording\",\"optional\":false,\"type\":\"Identifier\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StoredRecording\",\"optional\":false,\"type\":\"Identifier\"}}}],\"returnType\":{\"type\":\"TSBooleanKeyword\"},\"type\":\"TSFunctionType\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSStringKeyword\"},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "retry": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
       "status": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingUploadStatus\",\"optional\":false,\"type\":\"Identifier\"}}]}}"
       ],
@@ -55300,6 +55454,9 @@
       ],
       "load": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "notifyLocation": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteLocationValue\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ]
     },
     "@opengeni/sdk/site-bridge-host:SiteBridgeRequestRegistry": {
@@ -55318,6 +55475,9 @@
       "complete": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ],
+      "ports": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}}"
+      ],
       "start": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}}]}}"
       ]
@@ -55325,6 +55485,28 @@
     "@opengeni/sdk/site:OpenGeniSiteBridgeError": {},
     "@opengeni/sdk/site:OpenGeniSiteDataError": {},
     "@opengeni/sdk/site:OpenGeniSiteSqlError": {},
+    "@opengeni/sdk/site:SiteToolConnectionRequiredError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk/site:SiteToolConsentDeclinedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
     "@opengeni/sdk/tool-auth:ToolRequestError": {
       "status": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"

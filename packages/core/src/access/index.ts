@@ -988,7 +988,9 @@ export async function requireAccessGrantAuthorization(
  * never acquires the admin wildcard (and its membership/delegation powers).
  * Delegated owners also need workspace:admin in their verified dispatch/key
  * ceiling: a read-only delegation cannot turn ownership into a settings write.
- * Only use this boundary for workspace configuration, not access management.
+ * Use this boundary for every admin-only workspace surface the owner of a
+ * Personal workspace should keep (configuration, instructions, automations,
+ * Insights), never for access management (members, keys, delegation).
  */
 export async function requireWorkspaceSettingsGrant(
   c: Context,
@@ -999,7 +1001,7 @@ export async function requireWorkspaceSettingsGrant(
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
   if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
   throw new HTTPException(403, {
-    message: "workspace settings require a workspace administrator or Personal workspace owner",
+    message: "Only a workspace admin, or the owner of a Personal workspace, can do this",
   });
 }
 

@@ -93,6 +93,7 @@ import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-dis
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import { currentAttemptSecretValues } from "./secret-values";
 import {
   attemptQuestionVaultValidator,
   createAttemptSecretResolver,
@@ -814,6 +815,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           agent: session.agent,
           vaultAccess: deps.vaultAccess,
         }),
+        // Every tool result is masked with the attempt's known secret values.
+        secretValueMemory: currentAttemptSecretValues() ?? null,
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },

@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext } from "./database";
+import { maskSecretValuesForStorage } from "./secret-value-masking";
 
 export type TaskNoteAttemptClaims = {
   accountId: string;
@@ -137,6 +138,7 @@ function derivedTaskNoteOperationId(operationId: string, label: "archive" | "cre
 }
 
 export async function createTaskNote(db: Database, input: CreateTaskNoteInput) {
+  input = maskSecretValuesForStorage(input, "note");
   assertAttemptClaims(input);
   TaskNoteKind.parse(input.kind);
   TaskNoteText.parse(input.text);
@@ -203,6 +205,7 @@ export async function archiveTaskNote(db: Database, input: ArchiveTaskNoteInput)
  * Exact retries return the original linked receipt; changed input or authority fails.
  */
 export async function replaceTaskNote(db: Database, input: ReplaceTaskNoteInput) {
+  input = maskSecretValuesForStorage(input, "note");
   assertAttemptClaims(input);
   TaskNoteKind.parse(input.replacementKind);
   TaskNoteText.parse(input.replacementText);

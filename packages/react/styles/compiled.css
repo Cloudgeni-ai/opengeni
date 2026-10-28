@@ -10147,6 +10147,11 @@
       padding-top: calc(var(--spacing) * 16);
     }
   }
+:where(.og-root).sm\:pr-6,:where(.og-root) .sm\:pr-6 {
+    @media (width >= 40rem) {
+      padding-right: calc(var(--spacing) * 6);
+    }
+  }
 :where(.og-root).sm\:pr-14,:where(.og-root) .sm\:pr-14 {
     @media (width >= 40rem) {
       padding-right: calc(var(--spacing) * 14);
@@ -10175,6 +10180,11 @@
 :where(.og-root).sm\:pl-4,:where(.og-root) .sm\:pl-4 {
     @media (width >= 40rem) {
       padding-left: calc(var(--spacing) * 4);
+    }
+  }
+:where(.og-root).sm\:pl-\[var\(--og-content-page-start\,1\.5rem\)\],:where(.og-root) .sm\:pl-\[var\(--og-content-page-start\,1\.5rem\)\] {
+    @media (width >= 40rem) {
+      padding-left: var(--og-content-page-start,1.5rem);
     }
   }
 :where(.og-root).sm\:text-left,:where(.og-root) .sm\:text-left {

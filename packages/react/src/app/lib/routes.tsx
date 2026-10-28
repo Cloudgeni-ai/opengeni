@@ -114,6 +114,11 @@ export type SiteViewSearch = {
   conversation?: string | undefined;
   /** Open with a new conversation, its composer focused (Edit with Opengeni). Dropped once used. */
   new?: true | undefined;
+  /**
+   * The Site's own address (`/unsubscribe?t=abc#done`), answered to the
+   * Site's `site.location`; the Site's root when omitted.
+   */
+  page?: string | undefined;
 };
 
 export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch {
@@ -123,6 +128,10 @@ export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch 
         ? search.conversation
         : undefined,
     new: search.new === true || search.new === "true" || search.new === 1 ? true : undefined,
+    page:
+      typeof search.page === "string" && search.page.startsWith("/") && search.page !== "/"
+        ? search.page
+        : undefined,
   };
 }
 
