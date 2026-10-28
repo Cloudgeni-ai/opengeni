@@ -549,6 +549,11 @@ export async function listFleet(
     ),
     ...scopedSandboxes,
   ];
+  // One running agent can serve several enrollments of the same computer, for
+  // example its owner's personal (Only me) enrollment and the same computer
+  // shared with this workspace. They share the agent's live connection
+  // instance. They are one computer, so they are listed once.
+  const machines = new Map<string, { index: number; shared: boolean }>();
   for (const sandbox of sandboxes) {
     if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
       continue;
@@ -573,7 +578,7 @@ export async function listFleet(
           consented: false,
           hasDisplay: false,
         };
-    entries.push({
+    const entry: FleetSandboxEntry = {
       id: sandbox.id,
       kind: "selfhosted",
       name: sandbox.name,
@@ -608,7 +613,21 @@ export async function listFleet(
       workspaceGeneration: null,
       archiveGeneration: null,
       archiveComplete: false,
-    });
+    };
+    const shared = enrollment.scope !== "user";
+    const instance = liveConnection?.connectionInstanceId ?? null;
+    const twin = instance ? machines.get(instance) : undefined;
+    if (!instance || !twin) {
+      if (instance) machines.set(instance, { index: entries.length, shared });
+      entries.push(entry);
+      continue;
+    }
+    // Keep the entry the chat is already on; otherwise the shared enrollment,
+    // which the chat can use without its owner allowing each chat.
+    const kept = entries[twin.index]!;
+    if (kept.active || (!entry.active && (twin.shared || !shared))) continue;
+    entries[twin.index] = entry;
+    machines.set(instance, { index: twin.index, shared });
   }
 
   return {
