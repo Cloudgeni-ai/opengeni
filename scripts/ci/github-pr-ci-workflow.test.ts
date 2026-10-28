@@ -64,17 +64,6 @@ test("actual concurrency expression isolates PRs and matches dispatch", () => {
   expect(workflow("pr-ci").jobs.fast.strategy).toBeUndefined();
 });
 
-test("Queue ready entry and labeling do not wait for PR CI", () => {
-  const queue = workflow("merge-queue");
-  expect(queue.on.pull_request.types).toContain("labeled");
-  const entry = Object.values(queue.jobs).find((j: any) =>
-    String(j.name).includes("Queue ready"),
-  ) as any;
-  expect(entry).toBeDefined();
-  expect(entry.needs).toBeUndefined();
-  expect(entry.steps.map((s: any) => s.run ?? "").join("\n")).toContain("exact-head PR CI");
-});
-
 test("required aggregate covers docs and every selected job at exact head", () => {
   const { jobs } = workflow("pr-ci");
   expect(jobs.fast.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
