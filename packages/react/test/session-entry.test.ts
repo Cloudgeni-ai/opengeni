@@ -196,7 +196,9 @@ describe("session-only entry", () => {
     expect(
       reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
     ).toBe(true);
-    expect(reactSources.length).toBe(60);
+    // Pure region-restriction reason helper the model policy reads; types only.
+    expect(reactSources.some((id) => id.endsWith("/src/inference-region.ts"))).toBe(true);
+    expect(reactSources.length).toBe(61);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
