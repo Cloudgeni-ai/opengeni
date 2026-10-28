@@ -98,7 +98,7 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
     throw Error("Missing pinned deployment identity");
   return tick({
     now: deps.now,
-    graceUntil: config.graceUntil,
+    ...(config.graceUntil === undefined ? {} : { graceUntil: config.graceUntil }),
     async verifyBinding() {
       const live = await cloud.api(`https://run.googleapis.com/v2/${config.service}`);
       if (
@@ -161,7 +161,8 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
     async record(event) {
       deps.record({
         event: "minimal-watchdog",
-        severity: event.outcome === "held" && event.suppressedUntil === undefined ? "WARNING" : "INFO",
+        severity:
+          event.outcome === "held" && event.suppressedUntil === undefined ? "WARNING" : "INFO",
         ...event,
         planSha256: config.planSha256,
       });

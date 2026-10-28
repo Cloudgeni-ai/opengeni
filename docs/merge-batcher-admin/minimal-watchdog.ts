@@ -106,8 +106,10 @@ export async function tick(ports: Ports): Promise<"healthy" | "held" | "manual">
     status = null;
   }
   const now = ports.now();
-  if (ports.graceUntil !== undefined &&
-      (!Number.isSafeInteger(ports.graceUntil) || ports.graceUntil < 0))
+  if (
+    ports.graceUntil !== undefined &&
+    (!Number.isSafeInteger(ports.graceUntil) || ports.graceUntil < 0)
+  )
     throw Error("Invalid pinned watchdog grace deadline");
   const cause = reason(status, now);
   if (!cause) {
