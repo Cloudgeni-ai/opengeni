@@ -55,11 +55,6 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
-import {
-  armCodexCapacityWait,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
-} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -1973,60 +1968,6 @@ describe("durable active-goal wake", () => {
     if (next.action !== "claimed") return;
     expect(next.turn.id).toBe(submitted.turn.id);
     expect(next.turn.source).toBe("user");
-  });
-
-  test("a frozen legacy waiter never supplies the runtime retry deadline", async () => {
-    const ctx = await runningGoalFixture();
-    await ensureCodexRotationSettings(client.db, ctx.grant.accountId, ctx.grant.workspaceId!);
-    await updateCodexRotationSettings(client.db, ctx.grant.workspaceId!, {
-      rotationEnabled: true,
-    });
-    const goal = await getSessionGoalWithContinuation(
-      client.db,
-      ctx.grant.workspaceId!,
-      ctx.session.id,
-    );
-    if (!goal) throw new Error("goal fixture was not created");
-    const resetAt = new Date(Date.now() + 5 * 60_000);
-    const armed = await armCodexCapacityWait(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      turnId: ctx.turn.id,
-      attemptId: ctx.attemptId,
-      workflowId: `session-${ctx.session.id}`,
-      goalId: goal.id,
-      goalVersion: 1,
-      earliestResetAt: resetAt,
-      resetKind: "authoritative",
-      failurePayload: {
-        error: "all connected Codex subscriptions are unavailable",
-        code: "codex_usage_limit_reached",
-      },
-    });
-    expect(armed.action).toBe("waiting");
-    if (armed.action !== "waiting") throw new Error("capacity wait was not armed");
-
-    expect(
-      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
-        ?.continuation,
-    ).toMatchObject({
-      state: "blocked",
-      reason: "provider_backpressure",
-    });
-    expect(
-      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
-        ?.continuation?.nextAttemptAt,
-    ).not.toBe(armed.waiter.nextCheckAt.toISOString());
-    expect((await materialize(ctx)).action).toBe("none");
-    expect(await counts(ctx)).toEqual({
-      autoContinuations: 0,
-      wakeRevision: 0,
-      observedRevision: 0,
-      updates: 0,
-      usage: 0,
-      events: 0,
-    });
   });
 
   test("a shared-core Codex capacity wait blocks synthesis and exposes its durable retry time", async () => {

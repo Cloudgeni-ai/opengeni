@@ -2071,7 +2071,6 @@ describe("createSessionProxyHandler pass-through", () => {
       ["PUT", `${chat}/agent`],
       ["PUT", `${chat}/tool-policy`],
       ["PUT", `${chat}/skills`],
-      ["PUT", `${chat}/variable-sets`],
       ["PUT", `${chat}/usage-limit`],
       ["PUT", `${chat}/visibility`],
       ["POST", `${chat}/active-sandbox`],

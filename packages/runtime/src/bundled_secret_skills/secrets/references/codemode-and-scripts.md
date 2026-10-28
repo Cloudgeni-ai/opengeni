@@ -19,6 +19,11 @@ the tool gateway resolves it when the tool runs, and the Codemode journal
 keeps the reference. Without the backslash the shell splices the value into
 the arguments and it lands in the Codemode journal.
 
+Opengeni's own tools that store or hand on text (`opengeni.session_create`,
+messages, schedules, goals, notes, Knowledge) keep the reference as text
+instead of resolving it. Escape it in the shell command for them too: without
+the backslash the shell has already put the value into the arguments.
+
 Use one backslash even though the reference sits inside JSON (`ogtool` also
 accepts a doubled one). Never spell the backslash as `\u005c`: the shell does
 not see that as an escape and splices the value in.

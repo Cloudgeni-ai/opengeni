@@ -66,6 +66,18 @@ class FakeChromeProfile {
     });
   }
 
+  /** A navigation of a tab's page starts; Chrome keeps listing the address it
+   * shows until the new page commits. */
+  startNavigation(tabId: string, url: string): void {
+    this.events.push({
+      sequence: this.events.length + 1,
+      tabId,
+      sessionId: null,
+      method: "Page.frameStartedNavigating",
+      params: { frameId: `frame-${tabId}`, url, navigationType: "differentDocument" },
+    });
+  }
+
   bridge(
     options: Pick<AttachedBrowserBridgeOptions, "connectionGeneration">,
   ): AttachedBrowserBridgeTransport {
@@ -350,6 +362,24 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         selectedTab: "1",
         closedBlankTabs: [start],
       });
+    });
+  });
+
+  test("an empty tab on its way to a page stays when the session moves away from it", async () => {
+    await withChrome(async ({ chrome, open }) => {
+      const supervisor = await open();
+      const session = reference(8);
+      const start = (
+        await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
+      ).observation.target.id;
+      // A navigation started in the empty tab; Chrome still lists it blank.
+      chrome.startNavigation(start, "https://slow.example.test/");
+      await Bun.sleep(300);
+      expect(chrome.tabs.get(start)?.url).toBe(BLANK);
+
+      await supervisor.selectTarget(session, "1");
+      expect(chrome.closed("tabs.close")).toEqual([]);
+      expect(chrome.tabs.has(start)).toBe(true);
     });
   });
 

@@ -19,12 +19,16 @@
 // The same route admits closed operational signals discriminated by a
 // `signal` field: key requests that failed before any HTTP response
 // (`opengeni_client_request_failures_total{action,reason}`), live-stream health
-// (`opengeni_client_stream_events_total{stream,event}`), and web vitals
-// (`opengeni_client_web_vital{metric,page}`). They carry the same closed-value
+// (`opengeni_client_stream_events_total{stream,event}`), web vitals
+// (`opengeni_client_web_vital{metric,page}`), and desktop app pages without
+// the shell's bridge (`opengeni_client_desktop_bridge_missing_total{platform}`).
+// They carry the same closed-value
 // guarantees and have their own per-key admission buckets, so a burst of one
 // signal never spends the error kinds' budget.
 import type { Settings } from "@opengeni/config";
 import {
+  CLIENT_DESKTOP_APP_VERSION_PATTERN,
+  CLIENT_DESKTOP_PLATFORMS,
   CLIENT_ERROR_KINDS,
   CLIENT_ERROR_REPORT_MAX_BYTES,
   CLIENT_ERROR_REVISION_PATTERN,
@@ -123,6 +127,18 @@ export const ClientSignalReport = z.discriminatedUnion("signal", [
     })
     .strict()
     .refine((report) => report.value <= CLIENT_WEB_VITAL_MAX_VALUE[report.metric]),
+  z
+    .object({
+      signal: z.literal("desktop_bridge_missing"),
+      platform: z.enum(CLIENT_DESKTOP_PLATFORMS),
+      appVersion: z.union([
+        z.literal("unknown"),
+        z.string().regex(CLIENT_DESKTOP_APP_VERSION_PATTERN),
+      ]),
+      route,
+      revision,
+    })
+    .strict(),
 ]);
 export type ClientSignalReport = z.infer<typeof ClientSignalReport>;
 export type ClientBeaconReport = ClientErrorReport | ClientSignalReport;
@@ -147,6 +163,10 @@ const CLIENT_STREAM_EVENTS_METRIC = {
 const CLIENT_WEB_VITAL_METRIC = {
   name: "opengeni_client_web_vital",
   help: "Web vitals reported by browsers, by metric and closed page label. lcp, inp and ttfb are seconds; cls is the unitless layout-shift score.",
+} as const;
+const CLIENT_DESKTOP_BRIDGE_MISSING_METRIC = {
+  name: "opengeni_client_desktop_bridge_missing_total",
+  help: "Page loads in the Opengeni desktop app's own window (by its user agent) without the shell's bridge, by platform (macos, windows, linux). Admission is bounded per API process, so this is a lower bound.",
 } as const;
 /**
  * Bucket bounds cover the published good/poor thresholds of every metric:
@@ -186,6 +206,8 @@ function signalAdmissionKey(report: ClientSignalReport): string {
       return `stream:${report.stream}:${report.event}`;
     case "web_vital":
       return `web_vital:${report.metric}`;
+    case "desktop_bridge_missing":
+      return `desktop_bridge_missing:${report.platform}`;
   }
 }
 
@@ -276,6 +298,13 @@ export function registerClientErrorRoutes(
         amount: 0,
       });
     }
+  }
+  for (const platform of CLIENT_DESKTOP_PLATFORMS) {
+    observability.incrementCounter({
+      ...CLIENT_DESKTOP_BRIDGE_MISSING_METRIC,
+      labels: { platform },
+      amount: 0,
+    });
   }
   // A rate-limited signal report is counted under its signal name as `kind`.
   for (const signal of CLIENT_SIGNALS) {
@@ -388,6 +417,21 @@ function recordClientSignal(observability: Observability, report: ClientSignalRe
         labels: { metric: report.metric, page: report.page },
         value: report.value,
         buckets: CLIENT_WEB_VITAL_BUCKETS,
+      });
+      return;
+    case "desktop_bridge_missing":
+      observability.incrementCounter({
+        ...CLIENT_DESKTOP_BRIDGE_MISSING_METRIC,
+        labels: { platform: report.platform },
+      });
+      // The version stays out of the metric labels; the log line carries it.
+      observability.warn("Desktop app page without the shell bridge", {
+        surface: "desktop",
+        op: report.platform,
+        reason: "bridge_missing",
+        clientAppVersion: report.appVersion,
+        clientRoute: report.route,
+        clientRevision: report.revision,
       });
       return;
   }

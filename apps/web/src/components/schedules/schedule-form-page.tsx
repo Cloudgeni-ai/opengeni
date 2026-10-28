@@ -1007,9 +1007,7 @@ function AgentScheduleForm({
     draft.overlapPolicy === "skip" ? "skip" : draft.overlapPolicy === "steer" ? "steer" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
   // Secrets: shown while this schedule's agent can use secrets.
-  const canListSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const canListSecrets = hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
   const scheduleSecretsOn =
     !inheritsChatSettings &&
     canListSecrets &&

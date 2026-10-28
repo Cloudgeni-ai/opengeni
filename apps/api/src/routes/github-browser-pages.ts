@@ -199,42 +199,6 @@ export function githubConnectFailureHtml(
   );
 }
 
-// Opengeni Lens (pull-request review) installs its own GitHub App through the
-// same owner-proof flow, so its pages share this design and GitHub lockup.
-export function prReviewInstallationChooserHtml(
-  candidates: GitHubInstallationBindingCandidate[],
-  state: string,
-  action: string,
-): string {
-  const options = candidates
-    .map(({ installation, authorityKind }) => {
-      const account = escapeHtml(
-        installation.accountLogin ?? `installation ${installation.installationId}`,
-      );
-      const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
-      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span class="option-text"><strong>${account}</strong><small>${label}</small></span></label>`;
-    })
-    .join("");
-  return page(
-    "Connect Opengeni Lens",
-    `<h1>Connect Opengeni Lens</h1><p class="intro">Choose an account where GitHub proved you are the owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset><div class="actions"><button class="button" type="submit">Connect selected</button><button class="button secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></div></form>`,
-  );
-}
-
-export function prReviewSetupSuccessHtml(account: string, returnUrl: string): string {
-  return page(
-    "Opengeni Lens connected",
-    `<h1>Opengeni Lens connected</h1><p class="intro"><strong>${escapeHtml(account)}</strong> and its selected repositories are ready for pull-request review.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a>`,
-  );
-}
-
-export function prReviewSetupPendingHtml(): string {
-  return page(
-    "Opengeni Lens requested",
-    `<h1>Installation requested</h1><p class="intro">A GitHub organization owner must approve Opengeni Lens. No repository was connected yet.</p>`,
-  );
-}
-
 export function githubSuccessHtml(envLines: string[]): string {
   const escaped = escapeHtml(envLines.join("\n"));
   return page(

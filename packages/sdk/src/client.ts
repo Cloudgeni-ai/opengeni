@@ -41,6 +41,11 @@ import type {
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   AutomationTemplateResponse,
+  BotTemplateResponse,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -177,7 +182,6 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
-import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import {
   abortableReadRetryDelay,
   isSafeReadMethod,
@@ -723,9 +727,6 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   TranscribeAudioResponse,
-  TranscriptionRecordingListResponse,
-  TranscriptionRecordingResponse,
-  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   RefreshScheduledTaskAccessRequest,
   UpdateScheduledTaskRequest,
@@ -985,12 +986,6 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** Opengeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
-  /**
-   * Receives a notice (once per route per client) when the API advertises a
-   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
-   * `console.warn` per route; pass `false` to silence notices.
-   */
-  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -1235,28 +1230,6 @@ export type TranscribeAudioInput = {
   signal?: AbortSignal | undefined;
 };
 
-export type CreateTranscriptionRecordingInput = {
-  recordingId: string;
-  mimeType: string;
-  signal?: AbortSignal | undefined;
-};
-
-export type UploadTranscriptionRecordingChunkInput = {
-  audio: Blob | File | Uint8Array;
-  mimeType: string;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
-export type FinalizeTranscriptionRecordingInput = {
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  signal?: AbortSignal | undefined;
-};
-
 function normalizeScheduledTaskMachineTarget<
   T extends CreateScheduledTaskRequest | UpdateScheduledTaskRequest,
 >(request: T): T {
@@ -1357,11 +1330,8 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = withDeprecationNotices<FetchResponse>(
-      options.fetch ?? ((input, init) => fetch(input, init)),
-      options.onDeprecation,
-    );
+    // Bind lazily so environments that polyfill fetch after module load work.
+    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
@@ -1439,164 +1409,6 @@ export class OpenGeniClient {
       });
     }
     return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async createTranscriptionRecording(
-    workspaceId: string,
-    input: CreateTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings`,
-        { recordingId: input.recordingId, mimeType: input.mimeType },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async getTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "GET",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async listTranscriptionRecordings(
-    workspaceId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingListResponse> {
-    const body = await this.requestJson<unknown>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/transcription-recordings`,
-      undefined,
-      {},
-      options.signal ? { signal: options.signal } : {},
-    );
-    if (!isTranscriptionRecordingListResponse(body)) {
-      throw invalidApiResponseError("Invalid transcription recording list response.", {
-        code: "invalid_response",
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async uploadTranscriptionRecordingChunk(
-    workspaceId: string,
-    recordingId: string,
-    chunkNumber: number,
-    input: UploadTranscriptionRecordingChunkInput,
-  ): Promise<UploadTranscriptionRecordingChunkResponse> {
-    const correlationId = crypto.randomUUID();
-    let response: FetchResponse;
-    try {
-      response = await this.fetchImpl(
-        this.url(
-          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
-        ),
-        {
-          method: "PUT",
-          headers: {
-            ...this.headers(correlationId),
-            Accept: "application/json",
-            "Content-Type": input.mimeType,
-            "x-opengeni-chunk-sha256": input.sha256,
-            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
-            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
-          },
-          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
-          ...(input.signal ? { signal: input.signal } : {}),
-        },
-      );
-    } catch (error) {
-      if (input.signal?.aborted) throw error;
-      throw mutationTransportError(correlationId);
-    }
-    assertApiContractResponse(response, this.apiContractStrict);
-    if (!response.ok)
-      throw await apiErrorFromResponse(response, {
-        method: "PUT",
-        correlationId,
-      });
-    await assertJsonResponse(response, { method: "PUT", correlationId });
-    const body = await response.json().catch(() => null);
-    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
-      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
-        code: "invalid_response",
-        mutation: true,
-        correlationId,
-      });
-    }
-    return body;
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async finalizeTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    input: FinalizeTranscriptionRecordingInput,
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
-        {
-          chunkCount: input.chunkCount,
-          totalBytes: input.totalBytes,
-          totalDurationMilliseconds: input.totalDurationMilliseconds,
-        },
-        {},
-        input.signal ? { signal: input.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async processNextTranscriptionRecordingSegment(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "POST",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
-        {},
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
-  }
-
-  /** @deprecated Record a dictation with `OpenGeniRecordingsClient.createRecording({ purpose: "dictation" })` instead; see https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings. */
-  async discardTranscriptionRecording(
-    workspaceId: string,
-    recordingId: string,
-    options: { signal?: AbortSignal | undefined } = {},
-  ): Promise<TranscriptionRecordingResponse> {
-    return transcriptionRecordingResponse(
-      await this.requestJson<unknown>(
-        "DELETE",
-        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
-        undefined,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      ),
-    );
   }
 
   async createSession(
@@ -6874,21 +6686,6 @@ export class OpenGeniClient {
           await this.disconnectSocialConnection(workspaceId, connectionId);
           return;
         }
-        if (id.startsWith("lens-registration:")) {
-          const registrationId = id.slice("lens-registration:".length);
-          if (
-            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(registrationId)
-          )
-            throw new Error("Invalid Lens registration ID");
-          await this.requestJson(
-            "DELETE",
-            `/v1/workspaces/${encodeURIComponent(workspaceId)}/pr-review/registrations/${registrationId}`,
-            undefined,
-            undefined,
-            options,
-          );
-          return;
-        }
         if (id.startsWith("github-installation:")) {
           const installationId = id.slice("github-installation:".length);
           if (
@@ -7860,6 +7657,60 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Bot templates ----------------------------------------------------------
+  // A bot is a long-lived chat with a name, description and avatar. A bot
+  // template is a saved starting point for one: starting from it opens a new
+  // chat whose first message is the template's setup instructions. Whoever
+  // saved one, or an admin, can change it.
+
+  async listBotTemplates(workspaceId: string): Promise<WorkspaceBotTemplate[]> {
+    const response = await this.requestJson<ListBotTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+    );
+    return response.templates;
+  }
+
+  async getBotTemplate(workspaceId: string, templateId: string): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+    return response.template;
+  }
+
+  async createBotTemplate(
+    workspaceId: string,
+    request: CreateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateBotTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteBotTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+  }
+
   // --- Vaults ---------------------------------------------------------------
   // Metadata reads never carry values; `revealField` is the one audited
   // plaintext route. `{{secret:…}}` references resolve at execution time.
@@ -8793,8 +8644,6 @@ export class OpenGeniClient {
       request,
     );
   }
-
-  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
 
   // --- Capabilities -------------------------------------------------------------------------
 
@@ -12131,91 +11980,6 @@ function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResp
     typeof record.text === "string" &&
     Array.isArray(record.languages) &&
     record.languages.every((language) => typeof language === "string")
-  );
-}
-
-function isUploadTranscriptionRecordingChunkResponse(
-  value: unknown,
-): value is UploadTranscriptionRecordingChunkResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (
-    !isTranscriptionRecordingResponse({
-      recording: record.recording,
-      segments: [],
-    })
-  ) {
-    return false;
-  }
-  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
-    return false;
-  }
-  const chunk = record.chunk as Record<string, unknown>;
-  return (
-    typeof chunk.chunkNumber === "number" &&
-    typeof chunk.byteLength === "number" &&
-    typeof chunk.sha256 === "string" &&
-    typeof chunk.startMilliseconds === "number" &&
-    typeof chunk.durationMilliseconds === "number" &&
-    typeof chunk.deduplicated === "boolean"
-  );
-}
-
-function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const response = value as Record<string, unknown>;
-  if (
-    !response.recording ||
-    typeof response.recording !== "object" ||
-    Array.isArray(response.recording)
-  ) {
-    return false;
-  }
-  const recording = response.recording as Record<string, unknown>;
-  return (
-    typeof recording.id === "string" &&
-    typeof recording.workspaceId === "string" &&
-    typeof recording.mimeType === "string" &&
-    typeof recording.state === "string" &&
-    typeof recording.nextChunkNumber === "number" &&
-    typeof recording.chunkCount === "number" &&
-    typeof recording.totalBytes === "number" &&
-    typeof recording.totalDurationMilliseconds === "number" &&
-    typeof recording.segmentCount === "number" &&
-    typeof recording.completedSegmentCount === "number" &&
-    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
-    Array.isArray(recording.languages) &&
-    (recording.errorCode === null || typeof recording.errorCode === "string") &&
-    typeof recording.retryable === "boolean" &&
-    typeof recording.objectsCleaned === "boolean" &&
-    typeof recording.createdAt === "string" &&
-    typeof recording.updatedAt === "string" &&
-    typeof recording.expiresAt === "string" &&
-    (response.retryAfterMilliseconds === undefined ||
-      (typeof response.retryAfterMilliseconds === "number" &&
-        Number.isInteger(response.retryAfterMilliseconds) &&
-        response.retryAfterMilliseconds > 0 &&
-        response.retryAfterMilliseconds <= 60_000)) &&
-    Array.isArray(response.segments)
-  );
-}
-
-function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
-  if (isTranscriptionRecordingResponse(value)) return value;
-  throw invalidApiResponseError("Invalid transcription recording response.", {
-    code: "invalid_response",
-  });
-}
-
-function isTranscriptionRecordingListResponse(
-  value: unknown,
-): value is TranscriptionRecordingListResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const recordings = (value as Record<string, unknown>).recordings;
-  return (
-    Array.isArray(recordings) &&
-    recordings.length <= 50 &&
-    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
   );
 }
 

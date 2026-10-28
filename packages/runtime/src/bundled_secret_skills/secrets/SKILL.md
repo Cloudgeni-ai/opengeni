@@ -20,11 +20,11 @@ task allows it, enroll 2FA, fetch codes and solve CAPTCHAs yourself.
 | `{{secretfile:Item}}` | a temporary file path holding the value (shell commands) |
 | `\{{secret:Item}}` | the literal text, left unresolved |
 
-A reference resolves wherever it is used: shell commands, typing, file writes
-and every tool call, including built-in tools. To hand one on for later
-work (a schedule prompt, a message to another session, a goal, a note or
-comment), escape it as `\{{secret:Item}}`; it arrives as `{{secret:Item}}`.
-The `secret_*` tools take references as names and never resolve them.
+A reference resolves where something runs: shell commands, typing, files,
+`run_on` and connector calls. Opengeni tools that store or send text
+(messages, goals, notes, Slack posts) keep it as text for later work. Escape
+it (`\{{secret:Item}}`) where something runs first, such as `ogtool call`.
+`secret_*` tools take references as names.
 
 ## Tools
 

@@ -172,19 +172,6 @@ export async function createTemporalWorkflowClient(
     },
   });
   const client: SessionWorkflowClient = {
-    triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
-      try {
-        await temporal.workflow.start("automationRunWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `automation-run:${runId}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [{ accountId, workspaceId, runId }],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },

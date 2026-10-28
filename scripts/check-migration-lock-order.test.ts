@@ -1,13 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
-  GRANDFATHERED_LOCK_ORDER_MIGRATIONS,
   MIGRATIONS_DIR,
   analyzeMigrationLockOrder,
   analyzeMigrationSql,
-  staleLockOrderAllowlistEntries,
   tableLockOf,
   takesAdvisoryLock,
-  unreviewedLockOrderFindings,
 } from "./migration-lock-order";
 
 const FENCES = `DO $fences$
@@ -86,13 +83,7 @@ $patch$;`;
     expect(takesAdvisoryLock("SELECT pg_advisory_xact_lock(7)")).toBe(true);
   });
 
-  test("shipped migrations add no new inversion and the frozen list is exact", () => {
-    const findings = analyzeMigrationLockOrder(MIGRATIONS_DIR);
-    expect(unreviewedLockOrderFindings(findings)).toEqual([]);
-    expect(staleLockOrderAllowlistEntries(MIGRATIONS_DIR)).toEqual([]);
-    // Every frozen entry is still a real finding, so the list cannot hide a new file.
-    expect(findings.map((finding) => finding.file)).toEqual([
-      ...GRANDFATHERED_LOCK_ORDER_MIGRATIONS,
-    ]);
+  test("shipped migrations take no lock-order inversion", () => {
+    expect(analyzeMigrationLockOrder(MIGRATIONS_DIR)).toEqual([]);
   });
 });

@@ -377,24 +377,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
         .identityRevision,
     ).toBe(user.revision);
   });
-  test("maintenance drain aborts on a live runtime login and helper ACLs stay closed", async () => {
-    await appSql`select 1`;
-    const migration = await Bun.file(
-      new URL("../../../packages/db/drizzle/0477_managed_sign_in_methods.sql", import.meta.url),
-    ).text();
-    await expect(
-      (async () =>
-        await admin.begin(async (tx) => {
-          await tx`select set_config('opengeni.migration_application_roles','["opengeni_app"]',true)`;
-          await tx.unsafe(migration);
-        }))(),
-    ).rejects.toThrow("requires stopped application roles");
-    const [privileges] =
-      await admin`select has_function_privilege('opengeni_app','managed_sign_in_method_authority(text,text,jsonb)','EXECUTE') helper,
-      has_function_privilege('opengeni_app','guard_managed_social_account()','EXECUTE') trigger,
-      has_function_privilege('opengeni_app','mutate_managed_sign_in_method(text,text,jsonb)','EXECUTE') command`;
-    expect(privileges).toEqual({ helper: false, trigger: false, command: true });
-  });
+
   test("runtime role retains the reviewed FORCE-RLS and no-direct-DML posture", async () => {
     await assertRuntimeDatabasePosture(client.db, { rlsStrategy: "force" });
     await expect(

@@ -55,33 +55,4 @@ describe("usage allowance projections and validation", () => {
       status: "ok",
     });
   });
-  test("rolling migration uses INSERT trigger, protected capabilities, no event sums", async () => {
-    const source = await Bun.file(
-      new URL("../drizzle/0552_usage_allowances.sql", import.meta.url),
-    ).text();
-    expect(source).toStartWith("-- deployment-mode: rolling");
-    expect(source).toContain("AFTER INSERT ON credit_ledger_entries");
-    expect(source).toContain("guard_scheduled_admission_refusal()");
-    expect(source).toContain("''allowance_exhausted''");
-    expect(source).toContain("initiating_human_subject_id");
-    expect(source).toContain("accepted_execution_snapshot->>'causalHumanSubjectId'");
-    expect(source).not.toMatch(/sum\([^)]*(amount_micros|quantity)/);
-    expect(source).toContain("transaction_id=pg_current_xact_id_if_assigned()");
-    expect(source).toContain("period_row.period_key:=p_input->>'period';");
-    expect(source).toContain("CREATE TABLE opengeni_private.usage_allowance_attribution_receipts");
-    expect(source).toContain("source_kind='schedule'");
-    expect(source).not.toMatch(/(?:ALTER|DROP|CREATE) POLICY session_visibility/iu);
-    const usageBranch = source.slice(
-      source.indexOf("ELSIF action IN ('usage','check')"),
-      source.indexOf("RAISE EXCEPTION 'invalid allowance action'"),
-    );
-    expect(usageBranch).not.toContain("PERFORM capture_usage_allowance_period");
-    expect(usageBranch).not.toContain("PERFORM emit_usage_allowance_notifications");
-    expect(source).toContain("CREATE FUNCTION maintain_usage_allowances");
-    expect(source).toContain(
-      "ALTER FUNCTION opengeni_private.enqueue_workspace_webhook_deliveries_v1()",
-    );
-    expect(source).toContain("SET search_path=pg_catalog,%I,pg_temp");
-    expect(source).toContain("om.personal_workspace_id=p_workspace");
-  });
 });

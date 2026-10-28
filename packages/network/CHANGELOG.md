@@ -1,5 +1,7 @@
 # @opengeni/network
 
+## 5.5.1
+
 ## 5.4.2
 
 ### Patch Changes

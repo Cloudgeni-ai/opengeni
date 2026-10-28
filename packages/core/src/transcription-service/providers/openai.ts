@@ -7,6 +7,7 @@ import type { RecordingTranscriptionProvider } from "../../recording-transcripti
 import { TranscriptionServiceError } from "../../transcription";
 import {
   deploymentTextModel,
+  keytermsPrompt,
   requestIdOf,
   textRequestAudio,
   textTranscriptionResult,
@@ -63,6 +64,8 @@ export function createOpenAiTranscriptionProvider(input: {
       form.append("model", input.model);
       const language = openAiLanguage(request.language);
       if (language) form.append("language", language);
+      const prompt = keytermsPrompt(request);
+      if (prompt) form.append("prompt", prompt);
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(input.model)) {
         form.append("response_format", "verbose_json");

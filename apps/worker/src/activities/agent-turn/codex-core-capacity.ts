@@ -2,8 +2,7 @@
  * Codex chat-turn placement on the shared subscription core (M3 PR 1,
  * inventory EP-T01..T05): the provider-neutral placement
  * (`subscription-core-capacity.ts`) bound to Codex, under the names M3
- * shipped. Reached only when the organization's Codex cutover row is
- * enabled; missing or disabled cutover state fails closed.
+ * shipped.
  */
 import {
   assertModelConnectionAllowsTurn,

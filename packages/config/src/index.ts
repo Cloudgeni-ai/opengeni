@@ -75,6 +75,7 @@ import {
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  isEuResidency,
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
@@ -995,12 +996,6 @@ const SettingsSchema = z.object({
   sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
-  voiceInputResumableRetentionSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(7 * 24 * 60 * 60)
-    .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   /**
    * Our own CPU speaker models for meeting recordings (apps/worker/speakers):
@@ -1174,6 +1169,10 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Per-run only, never read from the environment: set by the execution
+  // overlay when the workspace is EU-only. Every model route the run resolves
+  // must then have an EU residency record. See docs/eu-only-inference.md.
+  requiredModelGeography: z.enum(["eu"]).optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -1298,8 +1297,10 @@ const SettingsSchema = z.object({
     })
     .default("gpt-6-luna"),
   // Preferred effort for the credits default. Clamped to the highest effort
-  // the selected model supports at or below this value.
-  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
+  // the selected model supports at or below this value. Medium, the model's
+  // own default: most first chats are everyday questions that should answer
+  // quickly; anyone can raise it per chat or save a higher workspace default.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("medium"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
@@ -2151,12 +2152,6 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
-  prReviewGithubAppId: z.string().optional(),
-  prReviewGithubClientId: z.string().optional(),
-  prReviewGithubClientSecret: z.string().optional(),
-  prReviewGithubAppSlug: z.string().optional(),
-  prReviewGithubWebhookSecret: z.string().optional(),
-  prReviewGithubAppPrivateKey: z.string().optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
@@ -5710,9 +5705,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     sessionArchiveEnabled: optional("OPENGENI_SESSION_ARCHIVE_ENABLED"),
     sessionArchiveIdleDays: optional("OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"),
-    voiceInputResumableRetentionSeconds: optional(
-      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
-    ),
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
@@ -6140,12 +6132,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
-    prReviewGithubAppId: optional("OPENGENI_PR_REVIEW_GITHUB_APP_ID"),
-    prReviewGithubClientId: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID"),
-    prReviewGithubClientSecret: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET"),
-    prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
-    prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
-    prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
@@ -8388,10 +8374,18 @@ function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, M
   return declarations;
 }
 
-/** The built-in provider's endpoint, for the residency route check. */
+/**
+ * The built-in provider's endpoint, for the residency route check. Without a
+ * base URL, Azure calls `azureOpenaiDeployment` through its deployment path
+ * for every model, so only that model can be EU there.
+ */
 function builtinResidencyBaseUrl(settings: Settings): string | undefined {
   if (settings.openaiProvider === "azure") {
-    return settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    if (settings.azureOpenaiBaseUrl) return settings.azureOpenaiBaseUrl;
+    const endpoint = settings.azureOpenaiEndpoint?.replace(/\/+$/u, "");
+    return endpoint && settings.azureOpenaiDeployment
+      ? `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`
+      : endpoint;
   }
   return settings.openaiBaseUrl ?? "https://api.openai.com/v1";
 }
@@ -8448,6 +8442,49 @@ const BuiltinModelResidencyDeclarations = z.record(
   z.string().trim().min(1),
   ModelResidencyDeclaration,
 );
+
+/**
+ * Whether a route with this residency may run under the settings' residency
+ * requirement. Without a requirement every route may run; under `eu` only a
+ * route whose live record is EU may.
+ */
+export function modelRouteMeetsResidencyRequirement(
+  settings: Pick<Settings, "requiredModelGeography">,
+  residency: unknown,
+): boolean {
+  return settings.requiredModelGeography !== "eu" || isEuResidency(residency);
+}
+
+// Settings objects are immutable snapshots; every client build and request
+// check for one run reads the same routes.
+const euModelRoutesCache = new WeakMap<Settings, ReadonlyMap<string, ReadonlySet<string>>>();
+
+/**
+ * The routes that may carry requests under an EU requirement: provider id to
+ * the upstream model ids whose every configured route is EU. An upstream id
+ * listed by any non-EU route of the same provider is excluded.
+ */
+export function euModelRoutes(settings: Settings): ReadonlyMap<string, ReadonlySet<string>> {
+  const cached = euModelRoutesCache.get(settings);
+  if (cached) return cached;
+  const verdicts = new Map<string, Map<string, boolean>>();
+  for (const model of configuredModels(settings)) {
+    const provider = verdicts.get(model.providerId) ?? new Map<string, boolean>();
+    provider.set(
+      model.upstreamModelId,
+      (provider.get(model.upstreamModelId) ?? true) && isEuResidency(model.residency),
+    );
+    verdicts.set(model.providerId, provider);
+  }
+  const routes: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+    [...verdicts].map(([providerId, models]) => [
+      providerId,
+      new Set([...models].filter(([, eu]) => eu).map(([upstreamModelId]) => upstreamModelId)),
+    ]),
+  );
+  euModelRoutesCache.set(settings, routes);
+  return routes;
+}
 
 /** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
 export function parseBuiltinModelResidencyJson(

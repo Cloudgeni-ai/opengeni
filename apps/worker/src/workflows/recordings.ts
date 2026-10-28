@@ -32,12 +32,17 @@ export function browserRecordingVideoWorkflowId(recordingId: string): string {
 }
 
 /**
- * Transcribing an hour of audio can take several minutes at the provider.
- * The activity heartbeats while it waits, so a lost worker is noticed in
- * minutes; retryable provider failures back off for up to about an hour.
+ * Transcribing an hour of audio can take several minutes at the provider,
+ * and about an hour more on a small worker when a text-only model's words
+ * are aligned on its CPU. The activity heartbeats while it works, so a lost
+ * worker is noticed in minutes; retryable provider failures back off for up
+ * to about an hour. One attempt may run as long as the transcript's own time
+ * budget (recordingTranscriptBudgetMilliseconds, at most twelve hours), which
+ * the activity enforces by failing the version as timed_out, so a long
+ * meeting isn't cut off and started over every two hours.
  */
 const transcriptActivity = proxyActivities<Pick<typeof activities, "transcribeRecordingVersion">>({
-  startToCloseTimeout: "2 hours",
+  startToCloseTimeout: "12 hours",
   heartbeatTimeout: "3 minutes",
   retry: {
     initialInterval: "30 seconds",

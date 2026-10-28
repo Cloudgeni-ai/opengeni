@@ -4,9 +4,6 @@ import { recordRetiredChildNotice, retireInterruptedSessionTurn } from "./index"
 import { repairEmptyQueuedSessionProjection } from "./empty-session-queue";
 import { retireUnstartedSessionQueue } from "./unstarted-queue-retirement";
 
-export const INTERRUPTED_TURN_RETIREMENT_MARKER = "-- OPENGENI_INTERRUPTED_TURN_RETIREMENT_STAGE";
-export const INTERRUPTED_TURN_RETIREMENT_MIGRATION = "0764_interrupted_turn_recovery.sql";
-
 const manifestSchema = z
   .object({
     operationId: z.uuid(),

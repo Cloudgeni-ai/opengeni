@@ -151,7 +151,16 @@ impl DiskGauge {
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn sample(&mut self) {
         let huge = self.engine.memory_profile().pages == PageSize::Huge;
-        self.available_memory = crate::host_memory::available(huge);
+        // A new guest gets no more than the VMs' limit leaves, however
+        // much the host has free: at the limit, relief runs.
+        self.available_memory =
+            crate::host_memory::available(huge).map(|available| match self.engine.memory_room() {
+                Ok(room) => room.map_or(available, |room| available.min(room)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read what the VMs hold together");
+                    available
+                }
+            });
         #[cfg(target_os = "linux")]
         if let Some(fetcher) = &self.fetcher {
             fetcher.forget_old();

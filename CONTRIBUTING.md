@@ -184,6 +184,14 @@ rerun the old controller or replay any partially published version.
 It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
 publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
 or moving an existing `latest` tag. Registry first-publication behavior is unchanged.
+Each canary manifest records its exact source commit as `gitHead`
+(`npm view @opengeni/sdk@canary gitHead`). `canary` only moves forward through main
+history: when the source does not descend from the source of the version `canary`
+names now (a staging deploy of an earlier commit, a late dispatch or a re-run
+attempt), the run still publishes its exact versions for pinning, but under
+dist-tag `canary-backfill`, and `canary` stays on the newer source. A canary
+published before sources were recorded does not hold the tag back; a source order
+Git cannot establish fails before any write.
 
 All archives are packed and frozen before the first write. Each topological
 publication retains an intent and a positive library HTTP acknowledgement before
@@ -203,7 +211,8 @@ minute) for one 30-minute window, treating timeouts, 429 and 5xx as "not yet".
 Once every version has been seen it rereads the complete cohort, preserving the
 latest, archive integrity, canary tag and provenance checks, and only then uploads
 `site-package-versions-<source_sha>`. A canary tag already moved to a later canary
-is accepted; an older one is still pending. Waiting reads keep one observation
+is accepted; an older one is still pending. A backfill publication is confirmed the
+same way through `canary-backfill`. Waiting reads keep one observation
 record each; the final complete-cohort reread retains full response custody in
 `canary-confirmation-receipts-<source_sha>-<attempt>`. If npm needs longer than
 one window, re-run the failed `confirm` job: it reuses the publish job's output,
@@ -256,7 +265,7 @@ rejects a superseded attempt: dispatch a new workflow instead of retrying the
 older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
 overwriting or removing any partially published versions.
 
-**Lockstep versions.** Every published `@opengeni/*` package is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand. After the 1.0.0 publication, an operator runs `bun scripts/release/deprecate-pre-1.0.ts` (dry run) and then `--execute` once to check `latest` and deprecate every pre-reset version.
+**Lockstep versions.** Every published `@opengeni/*` package is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand.
 
 A publish-coherence rule learned the hard way:
 

@@ -415,7 +415,6 @@ OPENGENI_REQUIRE_REAL_DB=1 bun test --max-concurrency=4 \
   apps/api/test/published-sites-postgres.test.ts
 bun test packages/sdk/test/site-ai.test.ts apps/api/test/sse-stream-bounds.test.ts
 bun scripts/public-api/check.ts
-OPENGENI_REQUIRE_REAL_DB=1 bun scripts/public-api/sdk-compat.ts
 ```
 
 Use the repository's pinned Bun/Node and an explicitly configured

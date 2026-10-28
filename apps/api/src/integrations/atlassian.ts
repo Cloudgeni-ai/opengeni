@@ -1039,8 +1039,6 @@ async function materializeSchedules(
           runMode: "new_session_per_run",
           targetSessionId: null,
           agentConfig: knowledgeSourceAgentConfig(action),
-          variableSetId: null,
-          environmentId: null,
           rigId: null,
           metadata: {
             connectorKind: "atlassian",

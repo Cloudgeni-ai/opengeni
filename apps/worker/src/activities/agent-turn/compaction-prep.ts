@@ -65,6 +65,7 @@ import {
 import {
   createCompactionModelUsageEventState,
   processCompactionModelUsageEvent,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
@@ -287,6 +288,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
+  // The summarizer runs on the turn's route (or the built-in fallback for it).
+  const compactionProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
   let compactionCreditPolicyRevision: number | undefined;
   // Wire fingerprint of the latest compaction request; its usage callback runs
   // after that request's response, before the next compaction request.
@@ -330,6 +337,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         latestCompactionPromptCacheRequest = null;
         return request;
       },
+      processingResidency: compactionProcessingResidency,
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {

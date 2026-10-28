@@ -17,6 +17,8 @@ export const e2bProvider: ProviderRegistration = {
       ? REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE
       : REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.e2b,
+  // The SDK session offers stdin through the E2B PTY API.
+  sessionSupportsPty: true,
   validateCredentials(settings) {
     // build() hands the key to the SDK; checking it here makes a misconfigured
     // deployment fail fast instead of deep in the SDK at create() time.

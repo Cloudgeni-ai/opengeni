@@ -83,7 +83,6 @@ import {
   subscriptionCoreProviderId,
   type SubscriptionCoreProvider,
 } from "./provider";
-import { readSubscriptionProviderCutoverState } from "../subscription-core-repository";
 import { usageReadTransportJoin } from "../usage-read-transport";
 import { recordSubscriptionUsageReading } from "./usage-reading";
 
@@ -226,13 +225,6 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                   sql`select opengeni_private.subscription_organization_admin(${scope.accountId}::uuid) as admin`,
                 );
                 if (admin?.admin !== true) throw new NotVisible();
-                if (
-                  (await readSubscriptionProviderCutoverState(tx, {
-                    accountId: scope.accountId,
-                    provider: providerId,
-                  })) !== "enabled"
-                )
-                  throw new NotVisible();
                 return { value: await use(tx) };
               },
             );

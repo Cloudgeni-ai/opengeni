@@ -40,6 +40,7 @@ import {
   type VaultFieldKind,
   type VaultFieldVersionMeta,
   type VaultItem,
+  type VaultItemReferences,
   type VaultItemSummary,
   type VaultItemType,
   type VaultPolicy,
@@ -122,6 +123,20 @@ import {
 } from "./secret-resolver";
 import { prepareTypedFields, standardFieldKind } from "./typed-fields";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
+
+/** A secret found in tool output, saved into the run's task vault. */
+export type SecretCaptureInput = {
+  /** Item name; a stable name reuses the item that already holds the value. */
+  item: string;
+  type: "login" | "api_key" | "note";
+  /** The concealed field that holds the value. */
+  field: string;
+  value: string;
+  /** Saved as the login's username when given. */
+  username?: string;
+  /** False reuses an existing item but never creates one (a capture limit is reached). */
+  createAllowed?: boolean;
+};
 
 export interface VaultService {
   list(actor: VaultRequestActor, workspaceId: string): Promise<VaultSummary[]>;
@@ -207,6 +222,24 @@ export interface VaultService {
   // Agent paths (the secret_* tools).
   searchForAgent(principal: SecretPrincipal, input: SecretSearchInput): Promise<SecretSearchOutput>;
   saveForAgent(principal: SecretPrincipal, input: SecretSaveInput): Promise<SecretSaveOutput>;
+  /**
+   * Save a secret found in tool output into the run's task vault (hosted,
+   * encrypted, audited like any item write) and return its references. An
+   * item with the same name is reused as it is, so a stable name dedupes.
+   */
+  captureForAgent(
+    principal: SecretPrincipal,
+    input: SecretCaptureInput,
+  ): Promise<VaultItemReferences & { created: boolean }>;
+  /**
+   * How many items in the run's task vault have a name `isCaptured` accepts,
+   * counting at most `max`. For the capture limit; reads names only.
+   */
+  countTaskVaultItemsForAgent(
+    principal: SecretPrincipal,
+    isCaptured: (name: string) => boolean,
+    max: number,
+  ): Promise<number>;
   moveForAgent(principal: SecretPrincipal, input: SecretMoveInput): Promise<SecretMoveOutput>;
   archiveForAgent(
     principal: SecretPrincipal,
@@ -1411,6 +1444,113 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       );
       const summary = toVaultItemSummary(row, key());
       return { item: summary, references: vaultItemReferences(row), generatedFields: generated };
+    },
+
+    async captureForAgent(principal, input) {
+      if (principal.kind !== "attempt") {
+        throw new VaultError("secret_save_forbidden", "only agent runs have a task vault");
+      }
+      const context = principalContext(principal);
+      const vault = await ensureTaskVault(deps.db, context, {
+        workspaceId: principal.workspaceId,
+        sessionId: principal.sessionId,
+      });
+      const findExisting = async () => {
+        const page = await listVaultItems(deps.db, context, {
+          vaultId: vault.id,
+          q: input.item,
+          limit: VAULT_LIMITS.searchResultsMax,
+        });
+        return (
+          page.items.find((item) => secretNameKey(item.name) === secretNameKey(input.item)) ?? null
+        );
+      };
+      // Reuse an item only while it still holds this value; an item edited
+      // since it was captured would make the reference point elsewhere.
+      const reuse = async (item: VaultItemRow) => {
+        const found = await resolveSecretReferenceCandidates(deps.db, context, {
+          refs: [
+            {
+              index: 0,
+              form: "id",
+              itemId: item.id,
+              field: input.field,
+              otp: false,
+              previous: false,
+            },
+          ],
+        });
+        const candidate = found.candidates.find(
+          (entry) =>
+            entry.itemId === item.id &&
+            !entry.archived &&
+            entry.fieldName === input.field &&
+            entry.valueEncrypted !== null,
+        );
+        const current = candidate?.valueEncrypted
+          ? decryptEnvironmentValue(requireKey(deps), candidate.valueEncrypted)
+          : null;
+        if (current !== input.value) {
+          throw new VaultError(
+            "vault_item_name_conflict",
+            "a task vault item with this name holds another value",
+          );
+        }
+        return { ...vaultItemReferences(item), created: false };
+      };
+      const existing = await findExisting();
+      if (existing) return await reuse(existing);
+      if (input.createAllowed === false) {
+        throw new VaultError("vault_limit_reached", "the task vault holds enough captured values");
+      }
+      const fields: FieldSource[] = [];
+      if (input.username !== undefined && input.type === "login") {
+        fields.push({ name: "username", kind: "text", value: input.username });
+      }
+      fields.push({ name: input.field, kind: "concealed", value: input.value });
+      const write = await itemWrite(
+        { type: input.type, name: input.item, fields },
+        null,
+        (raw) => resolveTextReference(principal, raw, "secret_save"),
+        "agent",
+      );
+      try {
+        const row = await upsertVaultItem(deps.db, context, {
+          ...write,
+          vaultId: vault.id,
+          mode: "create",
+        });
+        return { ...vaultItemReferences(row), created: true };
+      } catch (error) {
+        // Another call captured the same value first.
+        const raced = await findExisting().catch(() => null);
+        if (raced) return await reuse(raced);
+        throw error;
+      }
+    },
+
+    async countTaskVaultItemsForAgent(principal, isCaptured, max) {
+      if (principal.kind !== "attempt") return 0;
+      const context = principalContext(principal);
+      const vault = await ensureTaskVault(deps.db, context, {
+        workspaceId: principal.workspaceId,
+        sessionId: principal.sessionId,
+      });
+      let count = 0;
+      let cursor: string | undefined;
+      // The task vault holds at most VAULT_LIMITS.itemsPerVault items.
+      for (let page = 0; page < 20 && count < max; page += 1) {
+        const listed = await listVaultItems(deps.db, context, {
+          vaultId: vault.id,
+          limit: 200,
+          includeArchived: true,
+          ...(cursor ? { cursor } : {}),
+        });
+        count += listed.items.filter((item) => isCaptured(item.name)).length;
+        if (!listed.nextCursor) break;
+        cursor = listed.nextCursor;
+      }
+      return Math.min(count, max);
     },
 
     async moveForAgent(principal, input) {

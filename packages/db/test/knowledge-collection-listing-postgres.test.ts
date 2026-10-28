@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { readFile } from "node:fs/promises";
+
 import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   installListingBaseline,
@@ -75,31 +75,12 @@ describe("Knowledge relationship projection", () => {
     }
   }, 180_000);
 
-  test("the migration pins the actual embedded schema, not public or an implicit temp path", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0468_knowledge_relationship_projection.sql", import.meta.url),
-      "utf8",
-    );
-    const schema = `Knowledge_embedded_${crypto.randomUUID().replaceAll("-", "")}`;
-    const rollback = new Error("rollback metadata-only embedded fixture");
-    try {
-      await shared.admin.begin(async (tx) => {
-        await tx`CREATE SCHEMA ${tx(schema)}`;
-        await tx`SET LOCAL search_path = ${tx(schema)}, public`;
-        // This test checks migration metadata only. The app-role test above
-        // executes the real migrated routines, tables and recursive ACL checks.
-        await tx`SET LOCAL check_function_bodies = off`;
-        await tx.unsafe(migration);
-        const [row] =
-          await tx`SELECT p.proconfig,format('search_path=%I, pg_catalog, pg_temp',${schema}::text) AS expected
-          FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-          WHERE n.nspname=${schema} AND p.proname='knowledge_entry_visible_body'`;
-        expect(row!.proconfig).toEqual([row!.expected]);
-        throw rollback;
-      });
-    } catch (error) {
-      if (error !== rollback) throw error;
-    }
+  test("the migrated routine pins its own schema, not an implicit temp path", async () => {
+    const [row] =
+      await shared.admin`SELECT p.proconfig,format('search_path=%I, pg_catalog, pg_temp',n.nspname) AS expected
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE p.proname='knowledge_entry_visible_body'`;
+    expect(row!.proconfig).toEqual([row!.expected]);
   }, 180_000);
 
   test("exact JSON parity for root/collection lists, search, history, details and cursor boundaries", async () => {

@@ -23,8 +23,6 @@ const connectedMachineProtocolPaths = new Set([
   "/v1/enrollments/renew",
 ]);
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
-const prReviewGithubBrowserPathPattern =
-  /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
 
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
@@ -86,9 +84,6 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path === "/v1/webhooks/stripe") {
     return true;
   }
-  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
-    return true;
-  }
   // Event source webhooks are authenticated by the sender's signature, which
   // the intake verifies over the raw body before reading anything.
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
@@ -98,21 +93,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path === "/v1/webhooks/github") {
     return true;
   }
-  if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
-    return true;
-  }
   if (
     path === "/v1/github/setup" ||
     path === "/v1/github/install/callback" ||
     path === "/v1/github/oauth/callback" ||
     path === "/v1/github/app-manifest/callback"
-  ) {
-    return true;
-  }
-  if (
-    path === "/v1/pr-review/github/setup" ||
-    path === "/v1/pr-review/github/install/callback" ||
-    path === "/v1/pr-review/github/oauth/callback"
   ) {
     return true;
   }
@@ -149,9 +134,6 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // The GitHub owner-consent entry remains public like the callbacks above; it
   // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
-    return true;
-  }
-  if (prReviewGithubBrowserPathPattern.test(path)) {
     return true;
   }
   // Compatibility endpoint for stale chooser submissions. It remains public

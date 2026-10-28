@@ -664,9 +664,11 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
   // previous block's bottom margin on and yank tip-follow. Copy is overlay-only.
   // Fixed leading + overflow-x:auto with stable block chrome so wide ASCII lines
   // don't pop a scrollbar gutters mid-stream (another tip bob).
+  // On touch the label and copy button are always shown, so they sit beside
+  // the code (which scrolls in the space left) instead of on top of it.
   return (
-    <div className="group/copy relative mt-3 first:mt-0">
-      <div className="pointer-events-none absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
+    <div className="group/copy relative mt-3 first:mt-0 pointer-coarse:flex pointer-coarse:items-start pointer-coarse:rounded-og-md pointer-coarse:bg-og-surface-1/70">
+      <div className="pointer-events-none absolute top-1.5 right-1.5 z-10 flex items-center gap-1 pointer-coarse:static pointer-coarse:order-last pointer-coarse:shrink-0 pointer-coarse:py-0 pointer-coarse:pr-0.5">
         {language ? (
           <span className="rounded px-1 py-0.5 font-og-mono text-[10px] uppercase tracking-wide text-og-fg-subtle/80 opacity-0 transition-opacity group-hover/copy:opacity-100 pointer-coarse:opacity-70">
             {language}
@@ -678,7 +680,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
       </div>
       <pre
         tabIndex={0}
-        className="overflow-x-auto overflow-y-hidden rounded-og-md bg-og-surface-1/70 px-3 py-2.5 font-og-mono text-og-sm leading-5 text-og-fg-muted [scrollbar-gutter:stable] [&>code]:block [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:leading-5 [&>code]:text-inherit"
+        className="overflow-x-auto overflow-y-hidden rounded-og-md bg-og-surface-1/70 px-3 py-2.5 font-og-mono text-og-sm leading-5 text-og-fg-muted [scrollbar-gutter:stable] pointer-coarse:min-w-0 pointer-coarse:flex-1 pointer-coarse:bg-transparent [&>code]:block [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:leading-5 [&>code]:text-inherit"
       >
         {children}
       </pre>

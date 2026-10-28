@@ -33,7 +33,7 @@ import {
   upsertCapabilityCatalogItem,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
   getSlackBotUserLink,
@@ -53,6 +53,8 @@ import {
   updateSlackTaskPolicy,
   updateWorkspaceSettings,
   withWorkspaceSessionActivityRls,
+  enqueueSlackInteractionInbox,
+  listSlackThreadMessagesSinceLastInvocation,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -697,7 +699,7 @@ function fakeSlack(
 function encryptedBotCredential(settings: Settings): string {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) throw new Error("test connection encryption key was not configured");
-  return encryptVariableSetValue(
+  return encryptEnvironmentValue(
     key,
     JSON.stringify({
       headers: {
@@ -1427,7 +1429,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
             channel: channelId,
             ts,
             ...(thread_ts ? { thread_ts } : {}),
-            text: thread_ts ? "Refuse this work" : `<@${value.botUserId}> Refuse this work`,
+            // In a channel thread only a mention continues the task.
+            text: `<@${value.botUserId}> Refuse this work`,
           },
         });
         await drainAll(value.deps);
@@ -3324,7 +3327,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // The reaction first message is one linked sentence plus its how-to: no
     // button, no separate link, no list of what the task started with.
     expect(value.slack.posts[0]!.text).toMatch(
-      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Opengeni started this task> from the :genie: reaction\. If the request is unclear, Opengeni will ask in this thread\. Reply here to continue, or reply `stop` to stop\.$/u,
+      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Opengeni started this task> from the :genie: reaction\. If the request is unclear, Opengeni will ask in this thread\. Mention Opengeni in this thread to continue, or reply `stop` to stop\.$/u,
     );
     expect(value.slack.posts[0]!.blocks).toBeNull();
     expect(value.slack.posts[0]!.text).not.toContain("Open in Opengeni");
@@ -5681,7 +5684,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
   });
 
-  test("channel mentions adopt existing threads and any linked workspace participant can continue", async () => {
+  test("channel mentions adopt existing threads; only a mention continues, with untagged messages as context", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
     const rootTimestamp = "1720000000.000001";
@@ -5740,32 +5743,387 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     );
     expect(initialMessage!.model_context).not.toContain("Can check this out?");
 
+    const sendThreadMessage = async (user: string, ts: string, text: string) => {
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_THREAD_${crypto.randomUUID()}`,
+            event: {
+              type: "message",
+              user,
+              channel: "C_TEAM",
+              ts,
+              thread_ts: rootTimestamp,
+              text,
+            },
+          })
+        ).status,
+      ).toBe(200);
+      await drainAll(value.deps);
+    };
+    const userMessages = async () =>
+      await shared!.admin<{ text: string; model_context: string | null }[]>`
+        select
+          event.payload ->> 'text' as text,
+          event.payload ->> 'modelContext' as model_context
+        from session_events event
+        where event.workspace_id = ${value.owner.workspaceId}
+          and event.session_id = ${route!.session_id}
+          and event.type = 'user.message'
+        order by event.sequence asc`;
+
+    // Untagged thread messages, including one addressed to someone else and
+    // one telling the bot to stop answering, start no turn, call no Slack API
+    // and post nothing.
+    const callsBefore = value.slack.calls.length;
+    const postsBefore = value.slack.posts.length;
+    await sendThreadMessage(
+      value.ownerSlackUserId,
+      "1720000000.000003",
+      "<@U_DAVLET> Did you create this integration?",
+    );
+    await sendThreadMessage(value.otherSlackUserId, "1720000000.000004", "Stop answering");
+    expect(await userMessages()).toHaveLength(1);
+    expect(value.slack.calls.length).toBe(callsBefore);
+    expect(value.slack.posts.length).toBe(postsBefore);
+    const [recorded] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and trigger_kind = 'thread_reply' and status = 'processed'`;
+    expect(recorded!.count).toBe(2);
+
+    // Another linked participant's mention continues the same session, with the
+    // untagged messages since the last invocation attached as context.
+    await sendThreadMessage(
+      value.otherSlackUserId,
+      "1720000000.000005",
+      `<@${value.botUserId}> Continue as another authorized participant`,
+    );
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+    const afterSecondMention = await userMessages();
+    expect(afterSecondMention).toHaveLength(2);
+    const continued = afterSecondMention[1]!;
+    expect(continued.text).toBe(`<@${value.botUserId}> Continue as another authorized participant`);
+    expect(continued.model_context).toContain("since Opengeni was last invoked (oldest to newest)");
+    const davlet = continued.model_context!.indexOf(
+      `1720000000.000003 ${value.ownerSlackUserId}: <@U_DAVLET> Did you create this integration?`,
+    );
+    const stop = continued.model_context!.indexOf(
+      `1720000000.000004 ${value.otherSlackUserId}: Stop answering`,
+    );
+    expect(davlet).toBeGreaterThan(0);
+    expect(stop).toBeGreaterThan(davlet);
+    // The session already holds the thread up to its last turn: neither the
+    // first invocation nor the root is repeated.
+    expect(continued.model_context).not.toContain("Can check this out?");
+    expect(continued.model_context).not.toContain("Google Drive");
+
+    // The next mention gets only what was said after the previous mention.
+    await sendThreadMessage(value.ownerSlackUserId, "1720000000.000006", "Thanks, that helps");
+    await sendThreadMessage(
+      value.ownerSlackUserId,
+      "1720000000.000007",
+      `<@${value.botUserId}> One more question`,
+    );
+    const afterThirdMention = await userMessages();
+    expect(afterThirdMention).toHaveLength(3);
+    expect(afterThirdMention[2]!.model_context).toContain("Thanks, that helps");
+    expect(afterThirdMention[2]!.model_context).not.toContain("Stop answering");
+    expect(afterThirdMention[2]!.model_context).not.toContain("authorized participant");
+
+    // A mention right after a mention has nothing new to attach.
+    await sendThreadMessage(
+      value.ownerSlackUserId,
+      "1720000000.000008",
+      `<@${value.botUserId}> And another`,
+    );
+    const afterFourthMention = await userMessages();
+    expect(afterFourthMention).toHaveLength(4);
+    expect(afterFourthMention[3]!.model_context).toBeNull();
+  });
+
+  test("a channel task can end a turn without posting, and stop works with or without a mention", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "C_QUIET";
+    const rootTimestamp = "1722000000.000001";
+    const send = async (ts: string, text: string, threaded = true) => {
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_QUIET_${crypto.randomUUID()}`,
+            event: {
+              type: threaded ? "message" : "app_mention",
+              user: value.ownerSlackUserId,
+              channel: channelId,
+              ts,
+              ...(threaded ? { thread_ts: rootTimestamp } : {}),
+              text,
+            },
+          })
+        ).status,
+      ).toBe(200);
+      await drainAll(value.deps);
+    };
+    await send(rootTimestamp, `<@${value.botUserId}> Watch this thread`, false);
+    const [route] = await interactions(value.owner.workspaceId);
+    expect(value.slack.posts).toHaveLength(1);
+    const updatesBefore = value.slack.calls.filter((call) => call.method === "chat.update").length;
+
+    // The agent decided nothing needed saying: no post, and the task settles
+    // exactly as after a posted result (its first message drops the button).
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "NO_REPLY" } },
+      { type: "turn.completed", payload: { output: "NO_REPLY" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.calls.filter((call) => call.method === "chat.update").length).toBe(
+      updatesBefore + 1,
+    );
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe(
+      "completed",
+    );
+
+    // A later mention reopens the same task; a Markdown-wrapped token is still
+    // silent, and an ordinary result is still posted.
+    await send("1722000000.000002", `<@${value.botUserId}> Are you still there?`);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "`NO_REPLY`" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(1);
+    await send("1722000000.000003", `<@${value.botUserId}> What is 2 + 2?`);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "4" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(2);
+    expect(value.slack.posts[1]!.text).toMatch(/(^|> )4$/u);
+
+    // A recorded reply or a progress message that is the token is skipped too,
+    // without settling the task.
+    await send("1722000000.000004", `<@${value.botUserId}> Status?`);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "", reply: "NO_REPLY" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(2);
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe("open");
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "**NO_REPLY**" } },
+      { type: "turn.completed", payload: { output: "Done." } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(3);
+    expect(value.slack.posts[2]!.text).toMatch(/(^|> )Done\.$/u);
+
+    const userMessages = async (sessionId: string) =>
+      (
+        await shared!.admin<{ count: number }[]>`
+          select count(*)::int as count from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${sessionId}
+            and type = 'user.message'`
+      )[0]!.count;
+    const paused = async (sessionId: string) =>
+      (
+        await shared!.admin<{ count: number }[]>`
+          select count(*)::int as count from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${sessionId}
+            and type = 'session.control.paused'`
+      )[0]!.count;
+    expect(await userMessages(route!.session_id)).toBe(4);
+    // A mentioned `stop` is the pause control rather than a new message.
+    expect(await paused(route!.session_id)).toBe(0);
+    await send("1722000000.000005", `<@${value.botUserId}> stop`);
+    expect(await paused(route!.session_id)).toBe(1);
+    expect(await userMessages(route!.session_id)).toBe(4);
+    expect(value.slack.posts).toHaveLength(3);
+
+    // The exact `stop` reply stays a pause control without a mention.
+    const secondRoot = "1722000001.000001";
     expect(
       (
         await postEvent(value.app, {
           teamId: value.teamId,
-          eventId: `E_OTHER_REPLY_${crypto.randomUUID()}`,
+          eventId: `E_QUIET_${crypto.randomUUID()}`,
           event: {
-            type: "message",
-            user: value.otherSlackUserId,
-            channel: "C_TEAM",
-            ts: "1720000000.000003",
-            thread_ts: "1720000000.000001",
-            text: "Continue as another authorized participant",
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: secondRoot,
+            text: `<@${value.botUserId}> A second task`,
           },
         })
       ).status,
     ).toBe(200);
     await drainAll(value.deps);
-    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
-    const [messages] = await shared!.admin<{ count: number }[]>`
-      select count(*)::int as count
-      from session_events
-      where workspace_id = ${value.owner.workspaceId}
-        and session_id = ${route!.session_id}
-        and type = 'user.message'`;
-    expect(messages!.count).toBe(2);
-  });
+    const second = (await interactions(value.owner.workspaceId)).find(
+      (interaction) => interaction.session_id !== route!.session_id,
+    )!;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_QUIET_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1722000001.000002",
+            thread_ts: secondRoot,
+            text: "stop",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await paused(second.session_id)).toBe(1);
+    expect(await userMessages(second.session_id)).toBe(1);
+  }, 60_000);
+
+  test("a channel task keeps the previous continuation wording an older image bound", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "C_COPY_OLDER_IMAGE";
+    const rootTimestamp = "1723000000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_COPY_OLDER_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: rootTimestamp,
+            text: `<@${value.botUserId}> a task that fails`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    value.slack.failuresByText.set("could not complete this task", {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.failed", payload: {} },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toContain(
+      "Mention Opengeni in this thread to retry or ask for details.",
+    );
+    const operationId = attempted.clientMessageId!;
+    const previous = attempted.text.replace(
+      "Mention Opengeni in this thread",
+      "Reply in this thread",
+    );
+    // Seed the claim an older image would have left for this same operation:
+    // bound to the wording every conversation used before mention-only.
+    await shared!.admin`
+      update slack_bot_post_operations
+      set request_digest = ${slackPostDigest(value, {
+        operationId,
+        targetId: channelId,
+        threadTimestamp: rootTimestamp,
+        text: previous,
+        blocks: null,
+      })}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await expireSlackProviderCooldown(value);
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    await drainAll(value.deps);
+    // The retry keeps the bound bytes under the same operation instead of
+    // conflicting on every attempt, and the task settles.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({ text: previous, clientMessageId: operationId }),
+    ]);
+    const [delivery] = await shared!.admin<
+      { delivery_last_error_code: string | null; terminal_delivery_state: string | null }[]
+    >`
+      select delivery_last_error_code, terminal_delivery_state
+      from slack_interactions where id = ${route!.id}`;
+    expect(delivery).toEqual({ delivery_last_error_code: null, terminal_delivery_state: "failed" });
+  }, 60_000);
+
+  test("thread context reads only the thread's untagged messages before the mention", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "C_CONTEXT_READ";
+    const threadTs = "1724000000.000001";
+    const base = Date.parse("2026-01-01T00:00:00Z");
+    const ts = (index: number) => `1724000000.${String(100 + index).padStart(6, "0")}`;
+    const record = async (input: {
+      index: number;
+      kind: "thread_reply" | "app_mention";
+      thread?: string;
+      channel?: string;
+    }) => {
+      const { entry } = await enqueueSlackInteractionInbox(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        connectionId: value.connectionId,
+        providerEventId: `E_CONTEXT_${crypto.randomUUID()}`,
+        providerMessageId: `M_CONTEXT_${crypto.randomUUID()}`,
+        slackTeamId: value.teamId,
+        slackUserId: value.ownerSlackUserId,
+        slackChannelId: input.channel ?? channelId,
+        slackMessageTs: ts(input.index),
+        slackThreadTs: input.thread ?? threadTs,
+        triggerKind: input.kind,
+        text: `message ${input.index}`,
+        hasFiles: false,
+      });
+      const createdAt = new Date(base + input.index * 1_000);
+      // Recorded as already handled, so later drains do not process them.
+      await shared!.admin`
+        update slack_interaction_inbox
+        set created_at = ${createdAt}, status = 'processed', processed_at = now()
+        where id = ${entry.id}`;
+      return createdAt;
+    };
+    // The previous invocation, 35 untagged replies, the invoking mention, then
+    // a backlog recorded after it that is larger than the read window.
+    await record({ index: 0, kind: "app_mention" });
+    for (let index = 1; index <= 35; index += 1) await record({ index, kind: "thread_reply" });
+    await record({ index: 20, kind: "thread_reply", thread: "1724000000.999999" });
+    await record({ index: 21, kind: "thread_reply", channel: "C_CONTEXT_OTHER" });
+    const mentionAt = await record({ index: 40, kind: "app_mention" });
+    for (let index = 41; index <= 120; index += 1) await record({ index, kind: "thread_reply" });
+    const read = async (limit: number) =>
+      await listSlackThreadMessagesSinceLastInvocation(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        connectionId: value.connectionId,
+        slackChannelId: channelId,
+        slackThreadTs: threadTs,
+        beforeMessageTs: ts(40),
+        notBefore: new Date(base - 60_000),
+        notAfter: mentionAt,
+        limit,
+      });
+    const limited = await read(30);
+    expect(limited.truncated).toBe(true);
+    expect(limited.messages.map((message) => message.slackMessageTs)).toEqual(
+      Array.from({ length: 30 }, (_, offset) => ts(6 + offset)),
+    );
+    const all = await read(100);
+    expect(all.truncated).toBe(false);
+    expect(all.messages.map((message) => message.text)).toEqual(
+      Array.from({ length: 35 }, (_, offset) => `message ${offset + 1}`),
+    );
+    expect(all.messages.filter((message) => message.text === "message 20")).toHaveLength(1);
+  }, 60_000);
 
   test("top-level mentions receive bounded preceding channel context", async () => {
     if (!available) return;
@@ -7558,7 +7916,8 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(body.response_type).toBe("ephemeral");
     expect(body.unfurl_links).toBe(false);
     expect(body.blocks.map((block) => block.type)).toEqual(["section"]);
-    expect(body.text).toContain("*Continue a task:* reply in its Slack thread.");
+    expect(body.text).toContain("*Continue a task:* mention @Opengeni in its Slack thread.");
+    expect(body.text).toContain("In a direct message with Opengeni, any reply in the thread");
     expect(body.text).toContain("reply `stop` in its thread");
     expect(body.text).toContain("*Start a new task:*");
     expect(body.text).toContain("send a new top-level direct message");

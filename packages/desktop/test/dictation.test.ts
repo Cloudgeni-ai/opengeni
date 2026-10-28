@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,7 @@ mock.module("electron", () => electronStub);
 
 import {
   DESKTOP_IPC,
+  type DesktopDictationAudio,
   type DesktopDictationHistoryEntry,
   type DesktopDictationRequest,
   type DesktopDictationSettings,
@@ -38,6 +39,15 @@ const { hudAction } = await import("../src/main/dictation/hud");
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+/**
+ * Only the owner may read the file. Windows has no such file mode: there the
+ * app's data folder in the person's own profile is what keeps it private.
+ */
+function expectOnlyThePersonCanRead(path: string) {
+  if (process.platform === "win32") return;
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+}
+
 function harness(
   options: {
     settings?: Partial<DesktopDictationSettings>;
@@ -52,17 +62,30 @@ function harness(
     ...options.settings,
   };
   const history: DesktopDictationHistoryEntry[] = [];
+  const audio = new Map<string, DesktopDictationAudio>();
   const store = {
     read: () => settings,
     write: (next: DesktopDictationSettings) => {
       settings = next;
     },
     history: () => history,
-    remember: (entry: DesktopDictationHistoryEntry) => {
-      history.unshift(entry);
+    remember: (entry: DesktopDictationHistoryEntry, speech?: DesktopDictationAudio | null) => {
+      if (speech) audio.set(entry.id, speech);
+      history.unshift({
+        ...entry,
+        audio: speech
+          ? { mimeType: speech.mimeType, durationMilliseconds: speech.durationMilliseconds }
+          : null,
+      });
     },
+    replaceText: (id: string, text: string) => {
+      const entry = history.find((item) => item.id === id);
+      if (entry) entry.text = text;
+    },
+    audio: (id: string) => audio.get(id) ?? null,
     clearHistory: () => {
       history.splice(0);
+      audio.clear();
     },
   };
   const shortcuts = new Map<string, () => void>();
@@ -198,7 +221,7 @@ describe("dictation", () => {
     h.dictation.listen(h.target, true);
     tap(h.keys);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null },
+      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
     ]);
     expect(h.last()).toEqual({ kind: "starting", label: null });
     expect(h.shortcuts.has("Escape")).toBe(true);
@@ -261,7 +284,7 @@ describe("dictation", () => {
     h.keys.onDown("default");
     await wait(200);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null },
+      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
     ]);
     h.dictation.report(h.target, {
       dictationId: "d1",
@@ -310,7 +333,7 @@ describe("dictation", () => {
     expect(h.sent).toEqual([]);
     h.dictation.listen(h.target, true);
     expect(h.sent).toEqual([
-      { kind: "start", dictationId: "d1", profileId: "default", language: null },
+      { kind: "start", dictationId: "d1", profileId: "default", language: null, vocabulary: [] },
     ]);
     h.dictation.stop();
   });
@@ -542,7 +565,9 @@ describe("dictation", () => {
     await tick();
     h.dictation.listen(h.target, true);
     h.shortcuts.get("Control+Shift+Space")!();
-    expect(h.sent).toEqual([{ kind: "start", dictationId: "d1", profileId: "nb", language: "nb" }]);
+    expect(h.sent).toEqual([
+      { kind: "start", dictationId: "d1", profileId: "nb", language: "nb", vocabulary: [] },
+    ]);
     expect(h.last()).toEqual({ kind: "starting", label: "Norwegian" });
     h.dictation.stop();
   });
@@ -580,6 +605,129 @@ describe("dictation", () => {
     expect(status.settings.enabled).toBe(false);
     expect(status.ready).toBe(true);
   });
+
+  test("a finished dictation keeps its speech, and the retry shortcut transcribes it again and types it", async () => {
+    const h = harness({
+      settings: {
+        vocabulary: ["Kubernetes"],
+        retryShortcut: { kind: "accelerator", accelerator: "Control+Shift+2" },
+      },
+    });
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    tap(h.keys);
+    expect(h.sent[0]).toMatchObject({ kind: "start", vocabulary: ["Kubernetes"] });
+    h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
+    tap(h.keys);
+    const speech = {
+      mimeType: "audio/webm",
+      bytes: new Uint8Array([1, 2, 3]),
+      durationMilliseconds: 900,
+    };
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "done",
+      text: "Cubernetis",
+      audio: speech,
+    });
+    await wait(10);
+    expect(h.history[0]).toMatchObject({ id: "d1", audio: { mimeType: "audio/webm" } });
+    expect(h.dictation.historyAudio("d1")).toEqual(speech);
+
+    h.shortcuts.get("Control+Shift+2")!();
+    expect(h.sent.at(-1)).toEqual({
+      kind: "transcribe",
+      dictationId: "d2",
+      profileId: "default",
+      language: null,
+      vocabulary: ["Kubernetes"],
+      audio: speech,
+    });
+    expect(h.last()).toEqual({ kind: "transcribing", label: null });
+    expect(h.paste.prepared).toBe(2);
+    h.dictation.report(h.target, { dictationId: "d2", phase: "transcribing" });
+    h.dictation.report(h.target, { dictationId: "d2", phase: "done", text: "Kubernetes" });
+    await wait(10);
+    // The kept dictation's text is replaced, not added again, and typed.
+    expect(h.history).toHaveLength(1);
+    expect(h.history[0]).toMatchObject({ id: "d1", text: "Kubernetes" });
+    expect(h.paste.pasted).toBe(2);
+    expect(h.board.text).toBe("Kubernetes");
+  });
+
+  test("transcribing again from the settings replaces the kept text without typing it", async () => {
+    const h = harness();
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    tap(h.keys);
+    h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
+    tap(h.keys);
+    const speech = { mimeType: "audio/webm", bytes: new Uint8Array([1]), durationMilliseconds: 1 };
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "done",
+      text: "first",
+      audio: speech,
+    });
+    await wait(10);
+    const pasted = h.paste.pasted;
+
+    h.dictation.transcribeAgain("d1");
+    expect(h.sent.at(-1)).toMatchObject({ kind: "transcribe", dictationId: "d2" });
+    h.dictation.report(h.target, { dictationId: "d2", phase: "done", text: "second" });
+    await wait(10);
+    expect(h.history[0]).toMatchObject({ id: "d1", text: "second" });
+    expect(h.paste.pasted).toBe(pasted);
+    expect(h.last()).toEqual({ kind: "hidden" });
+  });
+
+  test("the retry shortcut retries a failed dictation, says when there's nothing, and cancel throws one away", async () => {
+    const h = harness({
+      settings: {
+        retryShortcut: { kind: "accelerator", accelerator: "Control+Shift+2" },
+        cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+3" },
+      },
+    });
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    h.shortcuts.get("Control+Shift+2")!();
+    expect(h.last()).toMatchObject({
+      kind: "notice",
+      message: ENGLISH_DICTATION_WORDS.nothingToRetry,
+    });
+
+    tap(h.keys);
+    h.dictation.report(h.target, { dictationId: "d1", phase: "recording", startedAt: 1, level: 0 });
+    tap(h.keys);
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "failed",
+      message: "Transcription failed.",
+      retryable: true,
+    });
+    h.shortcuts.get("Control+Shift+2")!();
+    expect(h.sent.at(-1)).toEqual({ kind: "retry", dictationId: "d1" });
+    expect(h.last()).toEqual({ kind: "transcribing", label: null });
+
+    h.shortcuts.get("Control+Shift+3")!();
+    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
+    expect(h.last()).toEqual({ kind: "hidden" });
+  });
+
+  test("a retry or cancel shortcut another app holds is reported", async () => {
+    const h = harness({
+      settings: { cancelShortcut: { kind: "accelerator", accelerator: "Control+Alt+T" } },
+    });
+    h.dictation.start();
+    await tick();
+    const status = await h.dictation.status();
+    expect(status.actionShortcutErrors).toEqual([{ action: "cancel", problem: "taken" }]);
+    await h.dictation.update({ enabled: false });
+    expect(h.shortcuts.size).toBe(0);
+  });
 });
 
 describe("dictation settings", () => {
@@ -596,6 +744,9 @@ describe("dictation settings", () => {
       ],
       output: "paste",
       mode: "toggle",
+      vocabulary: [],
+      retryShortcut: null,
+      cancelShortcut: null,
     });
     expect(defaultDictationSettings("win32").profiles[0]!.shortcut.kind).toBe("accelerator");
   });
@@ -613,6 +764,24 @@ describe("dictation settings", () => {
       expect(new DictationSettingsStore(dir, "darwin", "nb").read().profiles[0]!.language).toBe(
         null,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an app that learns its language later gives the first shortcut that language", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
+    try {
+      let appLanguage: string | null = null;
+      const store = new DictationSettingsStore(dir, "darwin", () => appLanguage);
+      expect(store.read().profiles[0]!.language).toBeNull();
+      // Signing in tells the app its language; nothing was saved yet, so the default follows.
+      appLanguage = "nb";
+      expect(store.read().profiles[0]!.language).toBe("nb");
+      // Once saved, the language stays, whatever the app says next.
+      store.write({ ...store.read(), enabled: true });
+      appLanguage = "en";
+      expect(store.read().profiles[0]!.language).toBe("nb");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -660,6 +829,102 @@ describe("dictation settings", () => {
     ).toEqual(current);
   });
 
+  test("vocabulary is trimmed, without repeats, and within the limits", () => {
+    const current = defaultDictationSettings("darwin");
+    const merged = mergeDictationSettings(current, {
+      vocabulary: [" Ada  Lovelace ", "ada lovelace", "", 7, "x".repeat(51), "Kubernetes"],
+    });
+    expect(merged.vocabulary).toEqual(["Ada Lovelace", "Kubernetes"]);
+    const many = Array.from({ length: 150 }, (_, index) => `term ${index}`);
+    expect(mergeDictationSettings(current, { vocabulary: many }).vocabulary).toHaveLength(100);
+    expect(mergeDictationSettings(merged, { vocabulary: "nope" }).vocabulary).toEqual(
+      merged.vocabulary,
+    );
+  });
+
+  test("retry and cancel take key combinations no other shortcut uses", () => {
+    const current = {
+      ...defaultDictationSettings("win32"),
+      retryShortcut: { kind: "accelerator" as const, accelerator: "Control+Shift+2" },
+    };
+    // Not the dictation shortcut's keys, nor each other's, nor modifier keys alone.
+    expect(
+      mergeDictationSettings(current, {
+        cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+Space" },
+      }).cancelShortcut,
+    ).toBeNull();
+    expect(
+      mergeDictationSettings(current, {
+        cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+2" },
+      }).cancelShortcut,
+    ).toBeNull();
+    expect(
+      mergeDictationSettings(current, {
+        cancelShortcut: { kind: "modifierPair", modifier: "option" },
+      }).cancelShortcut,
+    ).toBeNull();
+    const both = mergeDictationSettings(current, {
+      cancelShortcut: { kind: "accelerator", accelerator: "Control+Shift+3" },
+    });
+    expect(both.cancelShortcut).toEqual({ kind: "accelerator", accelerator: "Control+Shift+3" });
+    expect(mergeDictationSettings(both, { retryShortcut: null }).retryShortcut).toBeNull();
+    // A dictation shortcut moved onto retry's keys wins.
+    const moved = mergeDictationSettings(both, {
+      profiles: [
+        {
+          ...both.profiles[0]!,
+          shortcut: { kind: "accelerator", accelerator: "Control+Shift+2" },
+        },
+      ],
+    });
+    expect(moved.retryShortcut).toBeNull();
+    expect(moved.cancelShortcut).toEqual(both.cancelShortcut);
+  });
+
+  test("keeps each recent dictation's speech beside it, and deletes it with it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
+    try {
+      const store = new DictationSettingsStore(dir, "darwin");
+      const speech = (byte: number) => ({
+        mimeType: "audio/webm;codecs=opus",
+        bytes: new Uint8Array([byte, byte]),
+        durationMilliseconds: 1_200,
+      });
+      for (let index = 0; index < DICTATION_HISTORY_MAX + 2; index += 1) {
+        store.remember(
+          {
+            id: `d${index}`,
+            text: `text ${index}`,
+            at: new Date(index).toISOString(),
+            profileName: "Dictate",
+            language: null,
+          },
+          speech(index),
+        );
+      }
+      const newest = `d${DICTATION_HISTORY_MAX + 1}`;
+      expect(store.history()[0]).toMatchObject({
+        id: newest,
+        audio: { mimeType: "audio/webm;codecs=opus", durationMilliseconds: 1_200 },
+      });
+      expect(store.audio(newest)).toEqual({
+        ...speech(DICTATION_HISTORY_MAX + 1),
+        bytes: new Uint8Array([DICTATION_HISTORY_MAX + 1, DICTATION_HISTORY_MAX + 1]),
+      });
+      // Speech goes when its dictation is no longer kept.
+      expect(store.audio("d0")).toBeNull();
+      expect(readdirSync(join(dir, "dictation-audio"))).toHaveLength(DICTATION_HISTORY_MAX);
+      expectOnlyThePersonCanRead(join(dir, "dictation-audio", `${newest}.audio`));
+
+      store.replaceText(newest, "better text");
+      expect(store.history()[0]).toMatchObject({ id: newest, text: "better text" });
+      store.clearHistory();
+      expect(readdirSync(join(dir, "dictation-audio"))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("are kept in the app's data folder, readable only by the person, with recent dictations", () => {
     const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
     try {
@@ -679,7 +944,7 @@ describe("dictation settings", () => {
       expect(again.read().enabled).toBe(true);
       expect(again.history()).toHaveLength(DICTATION_HISTORY_MAX);
       expect(again.history()[0]!.id).toBe(`d${DICTATION_HISTORY_MAX + 4}`);
-      expect(statSync(join(dir, "dictation.json")).mode & 0o777).toBe(0o600);
+      expectOnlyThePersonCanRead(join(dir, "dictation.json"));
       again.clearHistory();
       expect(again.history()).toEqual([]);
     } finally {
@@ -743,6 +1008,29 @@ describe("dictation platforms", () => {
     });
     expect(parseDictationReport({ phase: "cancelled" })).toBeNull();
     expect(parseDictationReport({ dictationId: "d1", phase: "elsewhere" })).toBeNull();
+    // Speech comes with the text when it is audio; anything else is dropped, not the text.
+    const bytes = new Uint8Array([1, 2]);
+    expect(
+      parseDictationReport({
+        dictationId: "d1",
+        phase: "done",
+        text: "hi",
+        audio: { mimeType: "audio/webm;codecs=opus", bytes, durationMilliseconds: 12.4 },
+      }),
+    ).toEqual({
+      dictationId: "d1",
+      phase: "done",
+      text: "hi",
+      audio: { mimeType: "audio/webm;codecs=opus", bytes, durationMilliseconds: 12 },
+    });
+    expect(
+      parseDictationReport({
+        dictationId: "d1",
+        phase: "done",
+        text: "hi",
+        audio: { mimeType: "text/html", bytes, durationMilliseconds: 1 },
+      }),
+    ).toEqual({ dictationId: "d1", phase: "done", text: "hi" });
   });
 
   test("the window's buttons name an action", () => {
