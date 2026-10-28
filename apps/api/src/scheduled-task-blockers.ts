@@ -168,9 +168,10 @@ function streakBlocker(streak: readonly ScheduledTaskBlockerRun[], laterRuns: bo
   const keepsTrying = laterRuns ? "The schedule keeps trying." : "It has no more runs scheduled.";
   // A chat parked on a model account (for example a Codex plan out of usage
   // or no longer connected) stays busy until capacity returns or the chat
-  // moves to another model.
+  // moves to another model. The newest skip must still say so: an older wait
+  // followed by plain busy skips means the chat has moved on.
   if (
-    streak.some((run) => run.error === "scheduled_session_waiting_capacity") &&
+    streak[0]?.error === "scheduled_session_waiting_capacity" &&
     streak.every(
       (run) =>
         run.error === "scheduled_session_waiting_capacity" ||

@@ -190,6 +190,18 @@ describe("decideScheduledTaskBlocker", () => {
     expect(decision.message).toContain("Pick another model in that chat");
   });
 
+  test("an older model-account wait followed by plain busy skips is not named", () => {
+    const skipped = Array.from({ length: SCHEDULED_TASK_BLOCKER_STREAK }, (_, index) =>
+      run("skipped", {
+        error: index === 0 ? "scheduled_session_waiting_capacity" : "scheduled_session_not_idle",
+      }),
+    );
+    const decision = decideScheduledTaskBlocker(facts([run("succeeded"), ...skipped]));
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.reason).not.toBe("scheduled_session_waiting_capacity");
+    expect(decision.message).not.toContain("waiting for a model account");
+  });
+
   test("a daily, weekly or one-time schedule tells the owner on its first failed run", () => {
     for (const schedule of [
       daily,
