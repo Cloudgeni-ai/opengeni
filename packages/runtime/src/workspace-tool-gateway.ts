@@ -4,6 +4,8 @@
  * RunState, sandbox, or inference API.
  */
 export {
+  // A connection that cannot serve an approved call; nothing reached the provider.
+  ConnectionApprovalPreflightError,
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,

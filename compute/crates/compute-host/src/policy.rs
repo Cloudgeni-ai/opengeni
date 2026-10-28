@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy};
 use compute_engine::MemoryProfile;
+use compute_engine::firecracker::Firecracker;
 use compute_host::cpu_share::ProcessorShare;
 
 use crate::ServeArgs;
@@ -217,6 +218,80 @@ pub(super) fn memory_policy(
     }))
 }
 
+/// The host's memory, `MemTotal` in `/proc/meminfo`, in bytes.
+fn memory_total() -> anyhow::Result<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    Ok(meminfo_field(&meminfo, "MemTotal:") << 10)
+}
+
+/// Lets `engine`'s VMs hold together what [`vms_memory_high`] allows on
+/// this host under `policy`, or lifts any earlier limit where none
+/// applies, and says which.
+pub(super) fn limit_vm_memory(
+    engine: Firecracker,
+    profile: MemoryProfile,
+    policy: &HostPolicy,
+) -> anyhow::Result<Firecracker> {
+    let high = vms_memory_high(profile, policy.memory, memory_total()?);
+    let engine = engine
+        .with_memory_high(high)
+        .context("limiting the memory the VMs hold together")?;
+    log_memory_high(high, policy);
+    Ok(engine)
+}
+
+/// What the VMs may hold together before the kernel slows them down (their
+/// group's `memory.high`), on a host of `total` bytes that relieves
+/// pressure with `memory` on 4 KiB pages: all of it but the high
+/// watermark, the memory relief keeps available for the host.
+///
+/// Sandboxes in use may go above their request into whatever is free, and
+/// running guests are never swapped, so without it the kernel takes what
+/// they reach for from everything else instead: the agent's own memory and
+/// code, and the guard's and the rest of the host's, leaving the agent too
+/// slow to renew its lease or pause anyone (measured: eight guests growing
+/// together took a 32 GiB host from 12 GiB available to none in 17 s; the
+/// lease ran out and the guard ended every VM). With it, a guest reaching
+/// past it waits on its own allocations, and the host keeps the rest. Not
+/// the low watermark: the kernel's own memory, page tables and compressed
+/// pages took most of a gigabyte beside the VMs on that host, and with
+/// the VMs a low watermark short of all of it, under 350 MiB was available
+/// and the lease still ran out. The agent counts what the limit leaves as
+/// the most that is available, so before the limit available memory is
+/// below the low watermark and relief is already pausing and saving the
+/// sandboxes above their request. `None` (no limit) without relief or on
+/// huge pages, where guests take their memory from the pool, which their
+/// groups do not count, and every awake sandbox is booked whole.
+pub(super) fn vms_memory_high(
+    profile: MemoryProfile,
+    memory: Option<MemoryPolicy>,
+    total: u64,
+) -> Option<u64> {
+    let memory = memory?;
+    (profile.pages == compute_engine::PageSize::Base)
+        .then(|| total.saturating_sub(memory.high_watermark))
+}
+
+/// Says what the VMs may hold together, and warns when the capacity
+/// promised to their requests is more than that: requests within it could
+/// then be slowed down at the limit.
+fn log_memory_high(memory_high: Option<u64>, policy: &HostPolicy) {
+    let Some(high) = memory_high else {
+        return;
+    };
+    let capacity = policy.admission.map_or(0, |admission| admission.budget);
+    if capacity > high {
+        tracing::warn!(
+            capacity_mib = capacity >> 20,
+            high_mib = high >> 20,
+            "the memory capacity is more than the VMs may hold together before the kernel \
+             slows them down: sandboxes within their request may be slowed at that limit"
+        );
+    } else {
+        tracing::info!(high_mib = high >> 20, "memory the VMs may hold together");
+    }
+}
+
 /// The local disk kept back from saves on the filesystem holding `root`:
 /// as given, or a twentieth of its bytes (at least 1 GiB) and inodes (at
 /// least 1024).
@@ -307,6 +382,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(given.low_watermark, given.high_watermark);
+    }
+
+    /// The VMs together leave the host its high watermark where they take
+    /// their memory from the host and relief runs, which by default is
+    /// what the capacity leaves too; nothing limits them on huge pages or
+    /// without relief.
+    #[test]
+    fn the_vms_leave_the_host_its_high_watermark() {
+        let base = MemoryProfile::bare_metal();
+        let relief = memory_policy(base, None, None, 32 * GIB).unwrap();
+        assert_eq!(vms_memory_high(base, relief, 32 * GIB), Some(30 * GIB));
+        let meminfo = format!("MemTotal: {} kB\n", (32 * GIB) >> 10);
+        assert_eq!(
+            admission_budget(&meminfo, base, None, None),
+            30 * GIB,
+            "the default capacity is what the limit leaves"
+        );
+        let given = memory_policy(base, Some(2048), Some(4096), 32 * GIB).unwrap();
+        assert_eq!(vms_memory_high(base, given, 32 * GIB), Some(28 * GIB));
+        assert_eq!(vms_memory_high(base, None, 32 * GIB), None);
+        let nested = MemoryProfile::nested();
+        let asked = memory_policy(nested, Some(1024), Some(1536), 32 * GIB).unwrap();
+        assert_eq!(vms_memory_high(nested, asked, 32 * GIB), None);
     }
 
     /// The capacity a host offers: the huge-page pool, or its memory less

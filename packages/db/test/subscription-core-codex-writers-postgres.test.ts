@@ -171,18 +171,6 @@ async function person(
   };
 }
 
-async function setCutover(accountId: string, enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
-
 function credential(label: string): SubscriptionCoreCodexCredentialInput {
   return {
     credentialEncrypted: encryptEnvironmentValue(
@@ -274,7 +262,6 @@ function accessToken(encrypted: string): string {
 
 async function disconnectDesignationCase() {
   const org = await organization();
-  await setCutover(org.accountId, true);
   const connected = await connect(org, org.ownerSubjectId, null, "designation-drain");
   if (connected.kind !== "connected") throw new Error("connect failed");
   await shared!.admin.begin(async (tx) => {
@@ -388,7 +375,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("shared-workspace projection clears disconnected local and inherited organization primaries", async () => {
     for (const organizationScope of [false, true]) {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const workspaceId = organizationScope ? null : org.sharedWorkspaceId;
       const connected = await connect(org, org.ownerSubjectId, workspaceId, "primary-drain");
       if (connected.kind !== "connected") throw new Error("connect failed");
@@ -417,7 +403,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("Apps designation versus disconnect is serialized in both lock orders", async () => {
     for (const first of ["designate", "disconnect"] as const) {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const connected = await connect(org, org.ownerSubjectId, null, `designation-race-${first}`);
       if (connected.kind !== "connected") throw new Error("connect failed");
       const entered = Promise.withResolvers<void>();
@@ -488,7 +473,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   );
   test("one-shot nonturn reservation, unknown crash outcome, reconnect and RLS isolation", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, null, "request-custody");
     if (connected.kind !== "connected") throw new Error("connect failed");
     const scope = {
@@ -567,7 +551,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("reserve versus disconnect linearizes in both lock orders", async () => {
     for (const first of ["reserve", "disconnect"] as const) {
       const org = await organization();
-      await setCutover(org.accountId, true);
       const connected = await connect(org, org.ownerSubjectId, null, `race-${first}`);
       if (connected.kind !== "connected") throw new Error("connect failed");
       const scope = {
@@ -647,7 +630,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("refresh serialization scrubs the winning token and cannot resurrect a disconnected generation", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, null, "refresh-drain");
     if (connected.kind !== "connected") throw new Error("connect failed");
     const entered = Promise.withResolvers<void>();
@@ -718,7 +700,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("personal extra-credit consent is owner-only, OCC-fenced, preserved and immediately revocable", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const member = await person(org, "member");
     const connected = await connect(
       org,
@@ -906,43 +887,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     });
   });
 
-  test("without a cutover row, and with a disabled one, nothing is written or read", async () => {
-    const org = await organization();
-    const owner = org.ownerSubjectId;
-    for (const state of [null, false] as const) {
-      await setCutover(org.accountId, state);
-      expect(await connect(org, owner, null, "gate-org")).toEqual({
-        kind: "refused",
-        reason: "unavailable",
-      });
-      expect(await connect(org, owner, org.sharedWorkspaceId, "gate-ws")).toEqual({
-        kind: "refused",
-        reason: "unavailable",
-      });
-      expect(await connect(org, owner, org.personalWorkspaceId, "gate-personal")).toEqual({
-        kind: "refused",
-        reason: "unavailable",
-      });
-      expect(
-        (await personalAccounts(org, owner, org.personalWorkspaceId)).personalAccountIds,
-      ).toBeUndefined();
-    }
-    const [count] = await shared!.admin<{ total: number }[]>`
-      select count(*)::int as total from subscription_connections
-      where account_id = ${org.accountId}::uuid`;
-    expect(count!.total).toBe(0);
-    // A connection written while enabled cannot be removed once disabled.
-    await setCutover(org.accountId, true);
-    const connected = await connect(org, owner, null, "gate-then-disabled");
-    if (connected.kind !== "connected") throw new Error("connect failed");
-    await setCutover(org.accountId, false);
-    expect((await disconnect(org, owner, null, connected.id)).outcome).toBe("not_found");
-    expect(await row(connected.id)).not.toBeNull();
-  });
-
   test("organization route: an administrator connects and reconnects an organization account", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const first = await connect(org, org.ownerSubjectId, null, "org-account");
     expect(first).toMatchObject({
       kind: "connected",
@@ -995,7 +941,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("two people's logins of one ChatGPT workspace stay distinct shared connections", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     // Both members of one ChatGPT Team workspace: same account id, different person.
     const login = (loginPerson: string): SubscriptionCoreCodexCredentialInput => ({
       ...credential(`team-${loginPerson}`),
@@ -1041,7 +986,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("a workspace reconnect cannot silently replace another workspace's login, even as org admin", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "elsewhere");
     if (connected.kind !== "connected") throw new Error("connect failed");
     expect(await connect(org, org.ownerSubjectId, org.otherWorkspaceId, "elsewhere")).toEqual({
@@ -1053,7 +997,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("unidentified migrated logins are never guessed, merged, or silently duplicated", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, org.sharedWorkspaceId, "unidentified");
     if (connected.kind !== "connected") throw new Error("connect failed");
     await shared!
@@ -1073,7 +1016,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("concurrent reconnect rechecks a disconnected identity under the lifecycle lock", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const first = await connect(org, org.ownerSubjectId, null, "reconnect-drain-race");
     if (first.kind !== "connected") throw new Error("connect failed");
     const entered = Promise.withResolvers<void>();
@@ -1120,7 +1062,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("credential replacement waits behind an in-flight refresh and invalidates its old generation", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const first = await connect(org, org.ownerSubjectId, null, "serialized");
     if (first.kind !== "connected") throw new Error("connect failed");
     const locked = Promise.withResolvers<void>();
@@ -1160,7 +1101,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("workspace route: SUB-OWN-04 and SUB-OWN-09 workspace administrators create, reconnect and remove only the workspace's own account", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const manager = await person(org, "admin");
     const plain = await person(org, "member");
     // An organization administrator connects a workspace account.
@@ -1309,8 +1249,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
   test("organization route: canonical and aliased ids, and another organization's admin", async () => {
     const org = await organization();
     const other = await organization();
-    await setCutover(org.accountId, true);
-    await setCutover(other.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, null, "alias-target");
     if (connected.kind !== "connected") throw new Error("connect failed");
     const alias = crypto.randomUUID();
@@ -1348,7 +1286,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("disconnect scrubs secrets with a live exact request and unknown redemption, then preserves response custody", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connected = await connect(org, org.ownerSubjectId, null, "guarded");
     if (connected.kind !== "connected") throw new Error("connect failed");
     const attempt = crypto.randomUUID();
@@ -1649,7 +1586,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("personal identity preserves distinct upstream people and refuses unresolved identities", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const write = (
       providerSubjectId: string | null,
       workspaceId: string | null = org.personalWorkspaceId,
@@ -1704,7 +1640,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
   test("canonical and aliased resolve and repeated personal disconnect never change unrelated settings", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const a = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-A");
     const b = await connect(org, org.ownerSubjectId, org.personalWorkspaceId, "resolve-B");
     if (a.kind !== "connected" || b.kind !== "connected") throw new Error("connect failed");
@@ -1822,7 +1757,6 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
 
 async function personalCase(): Promise<void> {
   const org = await organization();
-  await setCutover(org.accountId, true);
   const member = await person(org, "member");
   // The member connects in their own Personal workspace.
   const first = await connect(org, member.subjectId, member.personalWorkspaceId, "personal-one");
@@ -2162,7 +2096,6 @@ async function personalCase(): Promise<void> {
 
 async function organizationRedemptionCase(): Promise<void> {
   const org = await organization();
-  await setCutover(org.accountId, true);
   const manager = await person(org, "admin");
   const connected = await connect(org, org.ownerSubjectId, null, "org-redeem");
   if (connected.kind !== "connected") throw new Error("connect failed");

@@ -1,22 +1,17 @@
 /**
  * Claude on the shared subscription core (design 5.3, Claude track C1a): the
- * provider-neutral chat placement and request custody bound to Claude, and
- * the turn's route. The route is `core` only after the Claude drained cutover
- * commits its receipt (C3); the legacy Claude path is deleted (C4), so any
- * other route fails closed.
+ * provider-neutral chat placement and request custody bound to Claude.
  */
 import {
   buildSubscriptionCoreClaudeTokenResolver,
   CodexCredentialLeaseAttemptFencedError,
   decodeSubscriptionCoreClaudeQuota,
-  readSubscriptionCoreProviderRoute,
   SUBSCRIPTION_CORE_CLAUDE,
   SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   SubscriptionCoreError,
   subscriptionCoreRequests,
   subscriptionCoreTurns,
-  withRlsContext,
   type Database,
   type SubscriptionCoreClaudeTokenSnapshot,
   type SubscriptionCoreProvider,
@@ -24,7 +19,6 @@ import {
 import { parseClaudeUsageHeaders, parseModelProvidersJson, type Settings } from "@opengeni/config";
 import type { PreparedUsageRequest } from "@opengeni/runtime";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
-import { subscriptionCoreCutoverDisabledFailure } from "./codex-core-errors";
 import type { ClaudeTurnLease } from "./credential-leases";
 import { classifyClaudeProviderError } from "./errors";
 import {
@@ -105,23 +99,12 @@ export const CLAUDE_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
   isAttemptFenced: (error) => error instanceof CodexCredentialLeaseAttemptFencedError,
 };
 
-/**
- * The Claude capacity phase by the Claude route: `core` places on the shared
- * core; `maintenance` and `legacy` (no committed receipt) fail closed, since
- * the legacy Claude selection is deleted.
- */
-export async function selectClaudeTurnCapacityByRoute(
+/** The Claude capacity phase: Claude-billed turns are placed on the shared core. */
+export async function selectClaudeTurnCapacity(
   deps: CapacityPhaseDeps,
 ): Promise<CapacityPhaseOutcome> {
   if (!deps.billingState.isClaudeTurn) return { ok: true };
   const { input } = deps;
-  const route = await withRlsContext(
-    deps.db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    (scoped) =>
-      readSubscriptionCoreProviderRoute(scoped, { accountId: input.accountId, provider: "claude" }),
-  );
-  if (route !== "core") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
   const turnId = deps.attempt.turnId;
   if (!turnId) throw new Error("Turn id was not initialized");
   deps.leases.claude.holderId ??= subscriptionTurnLeaseHolderId(

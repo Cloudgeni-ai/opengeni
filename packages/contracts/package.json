@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.4.2",
+  "version": "5.5.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -77,6 +77,10 @@
     "./passkey-only-account": {
       "types": "./src/passkey-only-account.ts",
       "default": "./src/passkey-only-account.ts"
+    },
+    "./secret-value-masking": {
+      "types": "./src/secret-value-masking.ts",
+      "default": "./src/secret-value-masking.ts"
     },
     "./client-error-report": {
       "types": "./src/client-error-report.ts",

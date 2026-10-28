@@ -168,6 +168,17 @@ export interface ProviderRegistration {
   renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;
   descriptor: CapabilityDescriptor;
   /**
+   * What this provider's live session answers from `supportsPty()`: whether
+   * the agent gets the `write_stdin` tool. A lazily provisioned turn binds its
+   * tools before the box exists and answers with this value, so it must equal
+   * the live session's answer. Otherwise the tool list changes depending on
+   * whether something touched the box before the tools were bound (an attached
+   * file, a resumed box), and every such change costs a full prompt-cache
+   * miss. This is the agent's command-input capability, not the human
+   * terminal's PTY in `descriptor.capabilities.Terminal`.
+   */
+  sessionSupportsPty: boolean;
+  /**
    * Validate that the settings carry the credentials/config this provider
    * REQUIRES. Throw SandboxConfigError on any missing/contradictory field.
    * Pure — no network. Called by both the factory and a deploy-time preflight.

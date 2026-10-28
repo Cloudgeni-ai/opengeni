@@ -35,6 +35,7 @@ import {
 import type {
   McpConnectionAccountSelection,
   PersonalGitHubRepositorySelectionInput,
+  UpdateSessionRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
@@ -1290,6 +1291,37 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  // Name, description and avatar from the profile dialog: one PATCH as the
+  // person, then the open session shows it at once (the rail and other
+  // clients follow through session.title_set / session.profile_set).
+  async function updateSessionProfile(
+    workspaceId: string,
+    sessionId: string,
+    change: UpdateSessionRequest,
+  ): Promise<Session | null> {
+    // Failures reach the dialog, which shows them inside the form.
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
+    const update = await runCurrentTransitionInvocation({
+      isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+      request: async () => await client.updateSession(workspaceId, sessionId, change),
+    });
+    if (update.status === "stale") return null;
+    const updated = update.value;
+    setSession((current) =>
+      current && current.id === updated.id
+        ? {
+            ...current,
+            title: updated.title,
+            titleSource: updated.titleSource,
+            description: updated.description ?? null,
+            avatar: updated.avatar ?? null,
+          }
+        : current,
+    );
+    return updated;
+  }
+
   // Personal session pinning never changes shared session activity. Keep the
   // header immediate on this device, use its known revision when available, and
   // restore the authoritative prior state if the request (including a stale-tab
@@ -1811,6 +1843,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           submission: effectiveSubmission,
           instructions: options?.instructions,
           installedSkillIds: options?.installedSkillIds,
+          bot: options?.bot,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,
@@ -2462,6 +2495,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
   const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
+  const contextUpdateSessionProfile = useLatestCallback(updateSessionProfile);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
@@ -2581,6 +2615,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           updateWorkspaceSettings: contextUpdateWorkspaceSettings,
           setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
           updateSessionTitle: contextUpdateSessionTitle,
+          updateSessionProfile: contextUpdateSessionProfile,
           updateSessionPin: contextUpdateSessionPin,
           deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
@@ -2624,6 +2659,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
+    contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,
     contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,

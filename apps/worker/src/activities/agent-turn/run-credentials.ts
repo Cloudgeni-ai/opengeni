@@ -73,6 +73,11 @@ import type { ClaimTurnOk } from "./claim";
 import { turnCredentialRestriction } from "./credential-restriction";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
+import {
+  currentAttemptSecretValues,
+  rememberAttemptCredential,
+  rememberRunCredentialMaterial,
+} from "./secret-values";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -262,6 +267,7 @@ async function prepareRunCredentialsObserved(
   );
   renewals.runMcpCredentials = runMcpCredentials;
   runMcpCredentials.replace(initialRunCredentialMaterial);
+  rememberRunCredentialMaterial(currentAttemptSecretValues(), initialRunCredentialMaterial);
   let currentRunCredentialMaterial = initialRunCredentialMaterial;
   if (initialRunCredentialMaterial) {
     for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
@@ -415,6 +421,17 @@ async function prepareRunCredentialsObserved(
   const sandboxEnvironment = sandboxArtifactRuntime.available
     ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
     : baseSandboxEnvironment;
+  // Opengeni's own credentials in this attempt are masked wherever they
+  // appear in tool output or stored text (docs/secrets.md, Masking).
+  const secretValues = currentAttemptSecretValues();
+  rememberAttemptCredential(secretValues, sandboxCodemodeToken, "codemode token");
+  rememberAttemptCredential(secretValues, sandboxGitToken, "git token");
+  for (const [provider, token] of Object.entries(sandboxGitTokens ?? {})) {
+    rememberAttemptCredential(secretValues, token, `git token ${provider}`);
+  }
+  for (const binding of sandboxGitCredentialBindings ?? []) {
+    rememberAttemptCredential(secretValues, binding.token, `git token ${binding.provider}`);
+  }
 
   // One mutable in-memory bearer cell serves every Connected Machine route
   // in this attempt. SelfhostedSession snapshots it into each exact exec
@@ -458,14 +475,22 @@ async function prepareRunCredentialsObserved(
           provider: turnExecutionPolicy.providerId,
           backend: effectiveRunCredentialBackend,
         },
-        () =>
-          mintRunGitCredentials(runSettings, platformGitResources, {
+        async () => {
+          const minted = await mintRunGitCredentials(runSettings, platformGitResources, {
             scope: connectionScope,
             ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             personalGitHubCredentials: personalGitHubCredentials ?? undefined,
             authorizeGitHubTokenMint,
-          }),
+          });
+          for (const [provider, token] of Object.entries(minted?.gitTokens ?? {})) {
+            rememberAttemptCredential(secretValues, token, `git token ${provider}`);
+          }
+          for (const binding of minted?.bindings ?? []) {
+            rememberAttemptCredential(secretValues, binding.token, `git token ${binding.provider}`);
+          }
+          return minted;
+        },
       ),
       cancellationSignal,
       undefined,
@@ -507,6 +532,7 @@ async function prepareRunCredentialsObserved(
           );
           if (binding) {
             assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
+            rememberAttemptCredential(secretValues, binding.token, `git token ${binding.provider}`);
           }
           pendingBinding = binding;
           return binding
@@ -592,6 +618,7 @@ async function prepareRunCredentialsObserved(
         connectionScope,
         codemodeAuthority,
       );
+      rememberAttemptCredential(secretValues, material?.token, "codemode token");
       return material;
     };
     const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
@@ -715,6 +742,7 @@ async function prepareRunCredentialsObserved(
       pruneOtherAttempts = false,
     ): Promise<void> => {
       throwIfTurnOperationCancelled(cancellationSignal);
+      rememberRunCredentialMaterial(secretValues, material);
       const applyMcpCredentials = runMcpCredentials.prepare(material);
       if (!material) {
         if (credentialSession)

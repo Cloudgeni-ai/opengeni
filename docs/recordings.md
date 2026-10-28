@@ -18,6 +18,27 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
+A recording is stored in the workspace it was recorded in, and a shared one
+stays there. A signed-in person's (`user:`) own Only me meetings are theirs
+across their organization: every workspace of the same organization they
+belong to, their Personal workspace included, lists them in
+`GET …/recordings` (and agents acting for them find them with
+`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). They open in place: every
+`…/recordings/:recordingId` route reads and changes them in the storing
+workspace, as the person, so transcript, notes, speakers and re-runs work from
+any of those workspaces, and the React Meetings pages label them with where
+they were recorded. The request must hold the same access in the storing
+workspace that the route needs (the person's role there, and an API key's or
+delegated token's workspace scope); without it the meeting is not found.
+Re-runs are billed and checked against the allowance of the storing workspace.
+Sharing one (`visibility: "workspace"`) is done in the storing workspace and
+returns 409 elsewhere. An app's own users (external users) keep their meetings
+in the workspace that stores them, and `externalRef` lists only this
+workspace. Nobody else's Only me meetings and no shared ones cross
+workspaces, nothing crosses organizations, and a person who leaves the
+storing workspace or the organization no longer sees them elsewhere.
+
 ## Language
 
 A meeting is transcribed in `transcription.language` when the create request
@@ -47,7 +68,20 @@ never loses audio.
    `POST …/recordings/:recordingId/chunks/complete`. The server checks each
    object and answers which chunks are uploaded and which are still missing.
 4. When capture ends, `POST …/recordings/:recordingId/finalize` with every
-   track's chunk count. Finishing again is harmless.
+   track's chunk count. Finishing again is harmless. Finishing always ends
+   capture, even when the transcript can't be paid for: when the workspace
+   picked no model and the automatic one would be refused for credits, a
+   model that costs the payer nothing (a connected subscription or the
+   workspace's own key) transcribes it instead; otherwise version 1 fails at
+   once with the refusal's code (`insufficient_credits`,
+   `allowance_exhausted` or `monthly_model_cost_limit`), and
+   the meeting can be transcribed again once that is fixed.
+
+The SDK's `RecordingUploader` keeps a recording's chunks on the device until
+the server has them, and resumes on the next start of the app, or when a
+page creates the uploader again. A failure retrying can't fix stays in its
+status as `failed`, with the chunks kept; `retry(recordingId)` tries it again,
+and the React recorder offers that as **Try again** on the meeting's page.
 
 Chunk start times are milliseconds from the recording's start. A new capture
 session on the same track (after a reload, say) simply continues the chunk
@@ -333,6 +367,14 @@ All processing runs in the background worker. It joins each track's chunks
 into one seekable file (kept for playback and re-runs), transcribes each
 track and stores transcript version 1.
 
+Each transcript has a time budget, counted from when it was asked for and
+including waiting and retries: half an hour plus three times the audio's
+length, at most twelve hours. Past it the version fails as `timed_out`
+rather than staying in progress, and can be transcribed again.
+A transcript that is already made and being charged and saved when the
+budget runs out is still saved, and a brief database error while saving it
+is retried at once.
+
 When a recording has computer or tab audio (a `system` track), the
 microphone track is the person recording and the system track is everyone
 else, so only the system track needs diarization. A microphone alone (a
@@ -599,9 +641,9 @@ version. A microphone alone keeps diarized `Speaker 1`, `Speaker 2`, ….
 A meeting has two Markdown documents beside its transcript. The `notepad` is
 what people jot down while it is recorded. The `notes` are the written-up
 summary, decisions and action items, by a person or by an agent afterwards
-(an automation that runs when `recording.transcript.ready` arrives is the
-usual way). Anyone who can see the meeting can read and replace both, as with
-its title and speakers; deleting the meeting deletes them.
+(Opengeni writes them itself, see "Built-in summary" below). Anyone who can
+see the meeting can read and replace both, as with its title and speakers;
+deleting the meeting deletes them.
 
 - `GET …/recordings/:recordingId/notes` returns the notes saved so far, each
   with its `revision`, `updatedAt` and who saved it (`updatedBy.sessionId` is
@@ -614,6 +656,14 @@ its title and speakers; deleting the meeting deletes them.
 
 Saving the `notes` is a `recording.notes.updated` event; the notepad, which
 saves as people type, is not.
+
+Agents read a meeting with the `meeting_read` tool. Its details give each
+speaker's `label` (and `personId` for a person from the workspace's
+directory), the `notepad` and the `notes` with their `revision`. The
+`meeting_notes_save` tool saves the `notes` through the same path as the
+`PUT` above, for the person the agent acts for, with `expectedRevision`; a
+newer save answers `notes_changed`. The meeting page shows notes an agent's
+chat saved as "Written by an agent".
 
 ### Mentions in the notes
 
@@ -644,6 +694,56 @@ on `MeetingDetailPage`.
 A summary usually opens with a short overview paragraph, then a heading per
 topic with nested bullets, then `## Decisions` and `## Action items`
 (`- [ ] [Name](speaker:speaker_1) does what, by when`).
+
+### Built-in summary
+
+When a meeting's shown transcript first becomes ready, Opengeni starts one
+ordinary chat that writes its notes. A re-run of the transcript starts
+another only while the meeting still has no notes, and one transcript
+version never starts two (the chat is keyed by the version).
+
+- **Whose chat.** The meeting owner's: an Only me chat owned by them for an
+  Only me meeting, or a workspace chat for a meeting shared with the
+  workspace. Opengeni starts it ("Opengeni meeting notes"); the owner never
+  has to ask.
+- **What it may do.** Only read that one meeting and save that meeting's
+  notes. The chat has no sandbox, resources, Skills or other servers, and
+  its only tools are `meeting_read` and `meeting_notes_save`. Session
+  creation refuses any other chat that claims to be a meeting summary, and
+  the database's private-chat guard (migration 1005) accepts an Only me one
+  only for the owner of that Only me meeting. It keeps that shape for its
+  whole life: changing its tools, Skills, agent, resources, sandbox,
+  Connected Machine or variable sets answers 409, and the database refuses
+  the same change (or an added server) whoever makes it. In the chat, `meetings_search`
+  is refused and every other meeting is not found. An Only me summary reads
+  its meeting as its owner; a workspace one sees only shared meetings.
+- **How it is paid for.** Like any background chat, on the workspace's
+  shared Codex or Claude subscription accounts, never a person's own. It
+  uses the model a new chat would get when a subscription account serves
+  it, else the first model one serves. When no subscription account can
+  serve a model, it does not start, so it never spends Opengeni credits or
+  an API key. Its turns are placed like any other subscription turn
+  ([subscription accounts](subscription-accounts.md)).
+- **Notes come first.** It writes nothing over saved notes: it does not start
+  when the meeting has notes, even cleared ones, and its
+  `meeting_notes_save` writes only the first notes or revises the notes
+  that same chat saved; anything else answers `notes_changed`.
+- **Automations.** When the meeting's owner has an active automation of
+  their own that runs on `recording.transcript.ready` (such as the
+  "Meeting notes" template) and event triggers are on, that automation
+  writes the notes and the built-in summary does not start.
+- **Failures are quiet.** If it can't start, the worker only logs why; the
+  meeting keeps its transcript and shows "No notes yet", and anyone can
+  still ask an agent to write notes.
+- **Turning it off.** It is on unless the workspace sets
+  `settings.recordings.autoSummary: false`, which admins change with the
+  "Write notes after each meeting" switch in the meeting settings.
+
+The notes follow one format: a one-paragraph overview, a `##` heading per
+topic with nested bullets, `## Decisions`, then `## Action items` as a
+checklist with each owner and due date when one was said, in the names,
+terms and language people used, without small talk. Speakers and people are
+written as the mentions above, with the labels and ids `meeting_read` gives.
 
 ## Recognizing people by voice
 

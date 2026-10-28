@@ -22,6 +22,7 @@ import {
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
   CodemodeOperation,
   isSecretReferenceError,
+  revealSecretGetResult,
   type SessionEvent,
   type ToolDisplayMetadata,
   type ToolFamily,
@@ -40,8 +41,10 @@ import {
   markCodemodeOperationExecutionStarted,
   renewCodemodeOperationClaim,
   settleCodemodeOperationWithOutput,
+  maskSecretValuesForStorage,
   type Database,
 } from "@opengeni/db";
+import { currentAttemptSecretValues } from "./agent-turn/secret-values";
 import {
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
@@ -630,12 +633,24 @@ export class CodemodeAttemptDispatcher {
     claimId: string,
     settlement: Parameters<CodemodeAttemptDispatcher["settleWithOutput"]>[2],
   ): Promise<void> {
+    // `secret_get` is the explicit, audited plaintext read: a script that
+    // calls it gets the value, not its reference (docs/secrets.md, Masking).
+    // Only Opengeni's own `secret_get`, not a connector tool of that name.
+    if (settlement.state === "completed" && operation.identity.serverId === "opengeni") {
+      revealSecretGetResult(
+        currentAttemptSecretValues(),
+        operation.identity.toolName,
+        settlement.result,
+      );
+    }
     const result = await settleCodemodeOperationWithOutput(this.db, {
       ...this.scope,
       operationId: operation.operationId,
       claimId,
       producerId: operation.caller.subjectId,
-      settlement,
+      // The journal row and its timeline event store known secret values as
+      // their references; a script can pass a reference on to its next call.
+      settlement: maskSecretValuesForStorage(settlement, "codemode_journal"),
     });
     if (!result.committed || result.events.length === 0) return;
     recordToolApproval(settlement.state === "outcome_unknown" ? "unknown" : settlement.state);

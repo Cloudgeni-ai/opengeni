@@ -461,7 +461,14 @@ export class MockOpenGeniClient implements SessionClientLike {
       this.bus(sessionId).status,
       "Ops channel — manager session",
     );
-    return { ...session, title: request.title, titleSource: "user" };
+    return {
+      ...session,
+      ...(request.title !== undefined
+        ? { title: request.title, titleSource: "user" as const }
+        : {}),
+      ...(request.description !== undefined ? { description: request.description || null } : {}),
+      ...(request.avatar !== undefined ? { avatar: request.avatar } : {}),
+    };
   }
 
   async updateSessionMcpApprovalPolicy(

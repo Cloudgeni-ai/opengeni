@@ -177,6 +177,18 @@ export type AppContextValue = {
     sessionId: string,
     title: string,
   ) => Promise<Session | null>;
+  /**
+   * Change a chat's name, description or avatar as the person (what makes a
+   * chat a bot). Only the named fields change; null clears one. Absent in
+   * hosts that predate bots.
+   */
+  updateSessionProfile?:
+    | ((
+        workspaceId: string,
+        sessionId: string,
+        change: import("@opengeni/sdk").UpdateSessionRequest,
+      ) => Promise<Session | null>)
+    | undefined;
   /** Optimistically set the current member's personal session pin. */
   updateSessionPin: (
     workspaceId: string,
@@ -217,6 +229,8 @@ export type AppContextValue = {
       instructions?: string | undefined;
       /** Installed session-selected Skills to freeze onto this exact session. */
       installedSkillIds?: string[] | undefined;
+      /** Start the chat as a bot: its name, description and avatar, kept live. */
+      bot?: import("./lib/session-create").NewSessionBotProfile | undefined;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[] | undefined;
       newSessionDraftToolPolicy?:

@@ -483,7 +483,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayApprovalResponse",
       "ToolGatewayCallResponse",
       "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayDeclarationsResponse",
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
     "secretFields": [
@@ -948,6 +950,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CreateBillingPortalResponse"
+    ]
+  },
+  {
+    "id": "createBotTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/bot-templates",
+    "request": [
+      "CreateBotTemplateRequest"
+    ],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
     ]
   },
   {
@@ -1695,6 +1709,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteAutomationTemplate",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/automation-templates/:templateId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteBotTemplate",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
     "request": [],
     "response": []
   },
@@ -3134,6 +3155,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "workspaceId"
     ],
     "response": []
+  },
+  {
+    "id": "getBotTemplate",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+    "request": [],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
+    ]
   },
   {
     "id": "getBrowserActionReceipt",
@@ -4913,6 +4944,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "AvailableOpenGeniSlackBots"
     ],
     "permission": "connections:read"
+  },
+  {
+    "id": "listBotTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/bot-templates",
+    "request": [],
+    "response": [
+      "ListBotTemplatesResponse",
+      "WorkspaceBotTemplate"
+    ]
   },
   {
     "id": "listBrowserDiagnostics",
@@ -6983,7 +7024,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayApprovalResponse",
       "ToolGatewayCallResponse",
       "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayDeclarationsResponse",
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
     "secretFields": [
@@ -6999,6 +7042,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayInvokeResponse",
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
+      "ToolGatewaySiteConsentResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7015,6 +7059,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayInvokeResponse",
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
+      "ToolGatewaySiteConsentResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7031,6 +7076,23 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayInvokeResponse",
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewayTargetApprovalResponse"
+    ],
+    "permission": "workspace:read",
+    "secretFields": [
+      "response.approvalToken"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/site-consent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/site-consent",
+    "request": [
+      "ToolGatewaySiteConsentRequest"
+    ],
+    "response": [
+      "ToolGatewaySiteConsentResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7047,6 +7109,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayInvokeResponse",
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
+      "ToolGatewaySiteConsentResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -8975,6 +9038,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SubscriptionDeviceSignInStart"
     ],
+    "permission": "workspace:read",
     "secretFields": [
       "response.userCode"
     ]
@@ -9252,6 +9316,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "updateBotTemplate",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/bot-templates/:templateId",
+    "request": [
+      "UpdateBotTemplateRequest"
+    ],
+    "response": [
+      "BotTemplateResponse",
+      "WorkspaceBotTemplate"
     ]
   },
   {

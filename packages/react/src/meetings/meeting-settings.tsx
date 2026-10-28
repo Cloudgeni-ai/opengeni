@@ -1,7 +1,7 @@
 // Workspace settings → General → Meetings: who sees new meetings, which
-// model transcribes them, and whether people are recognized by voice. All
-// live under the workspace's `recordings` settings, which a patch replaces as
-// a whole.
+// model transcribes them, whether an agent writes their notes, and whether
+// people are recognized by voice. All live under the workspace's
+// `recordings` settings, which a patch replaces as a whole.
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { regionRestrictedText } from "../inference-region";
 import { useState, type ComponentProps } from "react";
@@ -278,6 +278,19 @@ function MeetingDefaultsViewContent({
     );
   };
 
+  // On unless turned off, so only `false` is ever saved.
+  const autoSummary = current.autoSummary !== false;
+  const chooseAutoSummary = (next: boolean) => {
+    if (next === autoSummary) return;
+    const { autoSummary: _previous, ...rest } = current;
+    void save(
+      next ? rest : { ...rest, autoSummary: false },
+      next
+        ? msg("meetings.settings.anAgentWritesTheNotes")
+        : msg("meetings.settings.meetingsNoLongerGetNotes"),
+    );
+  };
+
   const retention = current.retention;
   const [pendingRetention, setPendingRetention] = useState<{
     next: RecordingRetention;
@@ -429,6 +442,20 @@ function MeetingDefaultsViewContent({
             onValueChange={chooseLanguage}
             disabled={saving || !canManage}
             {...(reason ? { disabledReason: reason } : {})}
+          />
+        }
+      />
+      <SettingRow
+        label={msg("meetings.settings.writeNotesAfterEachMeeting")}
+        description={msg("meetings.settings.whenATranscriptIsReady")}
+        control={
+          <Switch
+            aria-label={msg("meetings.settings.writeNotesAfterEachMeeting")}
+            checked={autoSummary}
+            pending={saving}
+            disabled={!canManage}
+            {...(reason ? { disabledReason: reason } : {})}
+            onCheckedChange={chooseAutoSummary}
           />
         }
       />

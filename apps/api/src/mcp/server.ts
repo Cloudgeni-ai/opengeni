@@ -104,6 +104,10 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  firstPartySecretValuesFromMeta,
+  maskSecretValuesInError,
+  rememberingSecretResolver,
+  SecretValueMemory,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -185,6 +189,12 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import {
+  SESSION_PROFILE_TOOL_GUIDANCE,
+  registerBotTemplateTools,
+  sessionProfileToolInputShape,
+  setSessionProfileFromTool,
+} from "./session-profile-tools";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
@@ -319,7 +329,6 @@ import {
   sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
-  updateSessionTitle,
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -365,6 +374,7 @@ import {
   hasPendingSteerForTurn,
   listOutstandingSessionSystemUpdatesForAttempt,
   recordConsumedChildAnswers,
+  withSecretValueMasking,
 } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
@@ -989,10 +999,25 @@ class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) =>
-      dispatchWithSessionAuthorizationReadReuse(() =>
-        handler(...args),
-      )) as ToolCallback<InputArgs>);
+    return super.registerTool(name, config, ((...args: unknown[]) => {
+      const dispatch = () => dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      // A worker call whose arguments carried resolved secret values names
+      // them in `_meta`: everything this call stores and returns has them
+      // replaced by their references (docs/secrets.md, Masking).
+      // Only an agent attempt's worker sends them.
+      const memory =
+        this.grant.principalKind === "agent_attempt"
+          ? firstPartyCallSecretValues(args.at(-1))
+          : null;
+      if (!memory) return dispatch();
+      return withSecretValueMasking(memory, async () => {
+        try {
+          return memory.mask(await dispatch(), "first_party_result");
+        } catch (error) {
+          throw maskSecretValuesInError(error, memory);
+        }
+      });
+    }) as ToolCallback<InputArgs>);
   }
 
   ensureToolsListHandler(): void {
@@ -1009,6 +1034,23 @@ class PolicyMcpServer extends McpServer {
         }),
       )
       .disable();
+  }
+}
+
+/** The masking memory for one first-party call's resolved values, if it has any. */
+function firstPartyCallSecretValues(extra: unknown): SecretValueMemory | null {
+  try {
+    const meta =
+      extra !== null && typeof extra === "object"
+        ? (extra as { _meta?: unknown })._meta
+        : undefined;
+    const entries = firstPartySecretValuesFromMeta(meta);
+    if (entries.length === 0) return null;
+    const memory = new SecretValueMemory();
+    for (const entry of entries) memory.remember(entry.value, entry.label);
+    return memory.size > 0 ? memory : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1239,20 +1281,30 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description:
-          "Set this session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once on a new session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
-        inputSchema: { title: z4.string().min(1).max(200) },
+        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        inputSchema: {
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
+        },
       },
-      async ({ title }) => {
+      async (input) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
-        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, sessionId, input));
       },
     );
+  }
+  // A bot saves itself as a template people can start new bots from.
+  if (sessionId !== null) {
+    registerBotTemplateTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
@@ -4609,6 +4661,7 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
+      const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
         const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
@@ -4616,27 +4669,38 @@ function registerFleetTools(
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
           claims && claims.sessionId === sessionId && typedOp.kind !== "read"
-            ? await createRunOnSecretResolver(
-                deps,
-                { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
-                (subjectId) =>
-                  vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+            ? rememberingSecretResolver(
+                await createRunOnSecretResolver(
+                  deps,
+                  { accountId: grant.accountId, workspaceId: grant.workspaceId, ...claims },
+                  (subjectId) =>
+                    vaultProviderRegistryFor(deps, { workspaceId: grant.workspaceId, subjectId }),
+                ),
+                resolvedValues,
               )
             : null;
-        return json(
-          await withUserSetupCard(
-            await runOnSandbox(services, await fleetContext(), target, typedOp, {
-              ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
-              ...(secretResolver ? { secretResolver } : {}),
-            }),
-            userSetupCard("run_on", target),
+        // Output that shows a value this call resolved shows its reference
+        // instead, here and in anything the call stores (docs/secrets.md, Masking).
+        return await withSecretValueMasking(resolvedValues, async () =>
+          json(
+            resolvedValues.mask(
+              await withUserSetupCard(
+                await runOnSandbox(services, await fleetContext(), target, typedOp, {
+                  ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+                  ...(secretResolver ? { secretResolver } : {}),
+                }),
+                userSetupCard("run_on", target),
+              ),
+              "run_on_result",
+            ),
           ),
         );
       } catch (error) {
         if (isSecretReferenceError(error)) {
           return { isError: true, content: [{ type: "text", text: error.toModelOutput() }] };
         }
-        throw error;
+        // A failure that quotes a value this call resolved shows its reference.
+        throw maskSecretValuesInError(error, resolvedValues);
       }
     },
   );
@@ -6828,22 +6892,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "set_other_session_title",
       {
-        description:
-          "Set another session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. The target session must belong to this workspace. Replaces an existing automatic title unless a human has manually set it.",
+        description: `Name a chat other than this one, by its session_id, or set its description and avatar. A title is a concise 3-7 word topic label with the same rules as set_session_title, unless the person gave the name. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           session_id: z4.string().uuid(),
-          title: z4.string().min(1).max(200),
+          title: z4.string().min(1).max(200).optional(),
+          ...sessionProfileToolInputShape,
         },
       },
-      async ({ session_id, title }) => {
+      async ({ session_id, ...input }) => {
         await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
-        return json({
-          ok: true,
-          updated: result.updated,
-          title: result.title ?? title,
-        });
+        return json(await setSessionProfileFromTool(deps, grant, session_id, input));
       },
     );
 

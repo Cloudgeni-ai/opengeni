@@ -225,20 +225,15 @@ function OperationalWorkspaceSettingsRoute({
       ) : null}
 
       {section === "usage" ? (
-        personal ? (
-          <Notice tone="muted" title="Budgets apply to shared workspaces">
-            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
-          </Notice>
-        ) : (
-          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
-            <LazyWorkspaceUsagePage
-              key={workspaceId}
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name ?? "this workspace"}
-              organizationId={accountId}
-            />
-          </Suspense>
-        )
+        <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+          <LazyWorkspaceUsagePage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationId={accountId}
+            personalOrganizationLabel={personal ? organizationLabel : undefined}
+          />
+        </Suspense>
       ) : null}
 
       {section === "api-keys" ? (

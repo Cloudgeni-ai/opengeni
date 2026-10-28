@@ -542,10 +542,24 @@ export const ToolGatewayTargetApprovalRequest = /* @__PURE__ */ defineSchema(() 
       operationId: primitives.uuid,
       arguments: jsonObject,
       expectedDefinitionDigest: sha256,
+      /**
+       * "Always allow for this Site": this person's standing consent for this
+       * Site to run this tool on this connection. Site context only; it never
+       * changes the connection-wide permission.
+       */
+      rememberForSite: z.boolean().optional(),
       ...targetContext,
     })
     .strict()
-    .superRefine(requireCompleteSiteToolContext),
+    .superRefine(requireCompleteSiteToolContext)
+    .superRefine((value, ctx) => {
+      if (value.rememberForSite && !value.siteArtifactId)
+        ctx.addIssue({
+          code: "custom",
+          path: ["rememberForSite"],
+          message: "rememberForSite requires a Site context",
+        });
+    }),
 );
 export type ToolGatewayTargetApprovalRequest = z.infer<typeof ToolGatewayTargetApprovalRequest>;
 export const ToolGatewayTargetApprovalResponse = /* @__PURE__ */ defineSchema(() =>
@@ -560,6 +574,89 @@ export const ToolGatewayTargetApprovalResponse = /* @__PURE__ */ defineSchema(()
     .strict(),
 );
 export type ToolGatewayTargetApprovalResponse = z.infer<typeof ToolGatewayTargetApprovalResponse>;
+
+/**
+ * What the Opengeni frame needs to ask a Site's viewer before a call: the
+ * viewer's own accounts that may run the declared tool, or how to connect one.
+ * Host code only; Site code never reaches this operation.
+ */
+export const ToolGatewaySiteConsentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identity: ToolGatewayIdentity,
+      siteArtifactId: primitives.uuid,
+      siteVersionId: primitives.uuid,
+      /**
+       * The call's exact arguments. With them, the response reviews what the
+       * call would do on the selected account, as the provider reads it.
+       */
+      arguments: jsonObject.optional(),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteConsentRequest = z.infer<typeof ToolGatewaySiteConsentRequest>;
+export const ToolGatewaySiteConsentAccount = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** The viewer's own account route for the tool. */
+      identity: ToolGatewayIdentity,
+      connector: primitives.string.max(200),
+      account: primitives.string.max(320),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteConsentAccount = z.infer<typeof ToolGatewaySiteConsentAccount>;
+/**
+ * The provider's own reading of the exact arguments (for Gmail, the message
+ * as it would be sent: a raw message, a draft or a reply), never the Site's
+ * description of them.
+ */
+export const ToolGatewaySiteConsentReview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.enum(["generic", "gmail"]),
+      email: z
+        .object({
+          from: z.string().max(4096),
+          to: z.string().max(32768),
+          cc: z.string().max(32768),
+          bcc: z.string().max(32768),
+          subject: z.string().max(32768),
+          attachments: primitives.nonnegativeInteger,
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteConsentReview = z.infer<typeof ToolGatewaySiteConsentReview>;
+export const ToolGatewaySiteConsentResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      /** Empty when the tool runs without an account, or when none is connected. */
+      accounts: z.array(ToolGatewaySiteConsentAccount).max(64),
+      /** The account route the Site asked for, when it is one of `accounts`. */
+      selected: ToolGatewayIdentity.nullable(),
+      /**
+       * With `arguments`: the review on `selected` (else the first account, or
+       * the tool itself when it needs no account). Null when the provider has
+       * no review of its own for this tool.
+       */
+      review: ToolGatewaySiteConsentReview.nullable(),
+      /** Set when the viewer must connect an account first. */
+      connect: z
+        .object({
+          capabilityId: primitives.string.max(200).nullable(),
+          name: primitives.string.max(200),
+          providerDomain: primitives.string.max(200),
+        })
+        .strict()
+        .nullable(),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteConsentResponse = z.infer<typeof ToolGatewaySiteConsentResponse>;
 
 /** Bounded compatibility manifest, not workspace discovery. */
 export const ToolGatewayManifestRequest = /* @__PURE__ */ defineSchema(() =>

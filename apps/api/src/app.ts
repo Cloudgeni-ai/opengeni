@@ -20,6 +20,7 @@ import {
   resolveWorkspaceToolTarget,
   invokeWorkspaceToolTarget,
   approveWorkspaceToolTarget,
+  describeWorkspaceSiteToolConsent,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
 import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
@@ -89,6 +90,7 @@ import {
   ToolGatewayResolveRequest,
   ToolGatewayInvokeRequest,
   ToolGatewayTargetApprovalRequest,
+  ToolGatewaySiteConsentRequest,
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
@@ -362,6 +364,7 @@ import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
 import { registerAutomationTemplateRoutes } from "./routes/automation-templates";
+import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import {
@@ -2170,6 +2173,28 @@ export function createAppComposition(deps: AppDependencies): {
       }
     });
   }
+  // The Opengeni frame's consent prompt for a Site call: the viewer's own
+  // accounts for the declared tool, or what to connect. Never Site code.
+  app.post("/v1/workspaces/:workspaceId/tools/site-consent", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const body = parseRequestBody(
+      ToolGatewaySiteConsentRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid Site consent request" },
+    );
+    c.header("cache-control", "no-store");
+    return c.json(
+      await describeWorkspaceSiteToolConsent(routeDeps, authorization, body, {
+        signal: c.req.raw.signal,
+      }),
+    );
+  });
   // Legacy calls retain their content-free, per-process catalog attestations.
   const toolGatewayCatalogAttestations = createWorkspaceToolGatewayCatalogAttestations();
   app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
@@ -2461,6 +2486,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerEventSourceRoutes(app, routeDeps);
   registerAutomationTemplateRoutes(app, routeDeps);
+  registerBotTemplateRoutes(app, routeDeps);
   registerRecordingRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
@@ -3341,7 +3367,8 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/tools/catalog",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/(resolve|invoke|target-approvals|manifest)$/,
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/tools\/(resolve|invoke|target-approvals|manifest|site-consent)$/,
     label: (match) => `/v1/workspaces/:workspaceId/tools/${match[1]}`,
   },
   {

@@ -109,7 +109,6 @@ import {
   updateWorkspace,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
-  readCodexCutoverDisposition,
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceVercelAiGatewayConnectionActive,
@@ -305,17 +304,15 @@ export function externalWorkspaceAccountId(
 }
 
 /**
- * Codex Live readiness: the legacy active subscription without a cutover
- * row; on the shared core, any shared connection that could serve a
- * realtime operation here; never ready during maintenance.
+ * Codex Live readiness: any shared core connection that could serve a
+ * realtime operation here.
  */
 async function workspaceCodexRealtimeReady(
   routeDeps: ApiRouteDeps,
   grant: { accountId: string; subjectId: string },
   workspaceId: string,
 ): Promise<boolean> {
-  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
-  if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
+  if (!routeDeps.settings.codexSubscriptionEnabled) return false;
   const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
     kind: "workspace",
     accountId: grant.accountId,

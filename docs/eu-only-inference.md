@@ -49,7 +49,11 @@ Rules:
   such a claim as unknown. The path is read the way the provider reads it
   (`modelEndpointDeployment`): segments percent-decoded, empty segments
   dropped, `deployments` in any case. A deployment path whose name can't be
-  read (missing, undecodable, or two different names) is never EU.
+  read is never EU. Once a segment holds or hides `deployments` (in any case,
+  percent-encoded, or inside a longer segment), the name and every later
+  segment must be plain `[A-Za-z0-9._-]+` and not `.` or `..`, with no second
+  marker; anything else (a missing name, `..%2F`, `%5C`, `;`, `deployments;`)
+  is unknown.
   `OPENGENI_MODEL_PROVIDERS_JSON`,
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
   stored database document is never refused for it, so a later release that
@@ -164,6 +168,29 @@ EU route, and nothing falls back to a route that is not EU.
 A refusal is `InferenceRegionRestrictedError` (code `region_restricted`), whose
 message says the model is not supported in EU.
 
+## Recorded region
+
+Every agent-session model call that writes a model-call fact (turn responses,
+the aggregate billing fallback, compaction and session titles) records where
+the route that served it processes data. Side-feature calls (decision models,
+transcription, embeddings, web search and the standalone model-call API) record
+it on `usage_events.processing_residency` instead (#6221). The worker resolves
+the record from the route that actually served the call (the resolved
+`ConfiguredModel.residency`, or `builtinModelResidency` for the built-in
+fallback), never from a name, and stores its claim
+(`ModelCallProcessingResidencyV1`: `geography`, `deploymentType`, `regions`,
+never evidence) on the call's `model_call_facts.processing_residency` and its
+durable `agent.model.usage` event as `processingResidency`. The independent
+title freezes its accepted route's record in its request; a title whose route
+was never resolved records `unknown`, not the turn's record. Facts rebuilt from
+usage events keep the event's value. A new call whose route has no readable
+record is recorded as `unknown`; null means only that the call was recorded
+before calls carried one (migration 1030). A stored `eu` claim reads back as
+`eu` only under the same rules as the route record (an EU-capable deployment
+type and, for Azure and Bedrock, EU regions only); anything else reads as
+`unknown`. Insights calls expose each call's `processingGeography`; it is
+undefined in responses from servers older than this release.
+
 ## Side features
 
 Every server feature that sends content to a model or AI provider outside the
@@ -187,11 +214,22 @@ integration, never a region, and is never read for EU status.
   an OpenAI-compatible decision model. Each declaration describes one
   endpoint: it applies only when the call sends to that same origin, so a
   changed base URL, an Azure resource other than the declared one, or a
-  missing endpoint is unknown. Without a matching declaration a route is
+  missing endpoint is unknown. One Azure resource can hold an EU Data Zone
+  deployment and a global one, so the Azure deployment routes
+  (`realtime_voice.azure_live`, `transcription.azure-openai` and
+  `transcription.azure-openai-realtime`) also name the `deployment`: the
+  declaration applies only when the call names that same deployment
+  (`OPENGENI_AZURE_LIVE_DEPLOYMENT`, `OPENGENI_VOICE_INPUT_AZURE_DEPLOYMENT`).
+  The check reads the configured deployment, never a model in the request
+  body or a `?deployment=` query. Without a matching declaration a route is
   unknown, so not EU. `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` maps route ids to
-  `{ endpoint, residency }` and is validated at boot; it rejects unknown
-  routes, routes with a code-owned rule, non-http(s) endpoints and vendor
-  default hosts:
+  `{ endpoint, deployment?, residency }` and is validated at boot; it rejects
+  unknown routes, routes with a code-owned rule, non-http(s) endpoints and
+  vendor default hosts. A missing deployment never stops the service: an Azure
+  deployment route declared without a plain `[A-Za-z0-9._-]+` deployment
+  boots, logs a warning once and stays unknown (EU-only workspaces see
+  `region_restricted`), and a `deployment` on any other route is ignored with
+  a warning:
 
   ```json
   {
@@ -240,6 +278,7 @@ added later, is refused unless its route's record is EU. Non-empty
 | Feature | Under EU |
 | --- | --- |
 | Session titles | Use the chat model's route checks (see Enforcement). |
+| Meeting summaries | An ordinary chat on a subscription model. In an EU-only workspace only a model whose route is EU is chosen, before any session exists; with none, nothing starts (`region_restricted`). |
 | Image generation | Off: no route is EU. The tool is not offered and refuses if called. |
 | Video generation | Off. Funding options report "Not supported in EU"; the video Skill is hidden. |
 | Web search | Hosted search is off. Provider search keeps only declared-EU providers, and failover skips the rest. Self-hosted SearXNG with a declaration stays on. |
@@ -313,4 +352,6 @@ embeddings, decision models, credit-funded image generation) and for the
 standalone model-call API (`/v1/chat/completions`, which has no model call
 fact) record `processing_residency`: the route's geography, deployment type
 and regions, never its evidence. A route whose record cannot be read is
-recorded as unknown.
+recorded as unknown. The claim is the model-call fact's
+(`modelCallProcessingResidency`, `ModelCallProcessingResidencyV1`), so the
+same eu rules apply.

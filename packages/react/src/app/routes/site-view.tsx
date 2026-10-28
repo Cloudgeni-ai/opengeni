@@ -113,6 +113,7 @@ export function SiteViewRoute({
   siteId,
   conversation,
   startNew = false,
+  page,
 }: {
   workspaceId: string;
   siteId: string;
@@ -120,9 +121,27 @@ export function SiteViewRoute({
   conversation?: string | undefined;
   /** Open with a new conversation in the panel, its composer focused (Edit with Opengeni). */
   startNew?: boolean | undefined;
+  /** The Site's own address (`?page=/admin`), answered to its `site.location`; its root when omitted. */
+  page?: string | undefined;
 }) {
   const { client, accessContext } = useAppContext();
+  const navigate = useNavigate();
   const viewer = useConsoleSiteViewer();
+  // The Site's address lives in this page's URL, so Back/Forward, reloads
+  // and copied links keep the Site where it was.
+  const onSiteLocationChange = useCallback(
+    (href: string, options: { replace: boolean }) =>
+      void navigate({
+        to: SITE_ROUTE,
+        params: { workspaceId, siteId },
+        search: {
+          ...(conversation ? { conversation } : {}),
+          ...(href === "/" ? {} : { page: href }),
+        },
+        ...(options.replace ? { replace: true } : {}),
+      }),
+    [conversation, navigate, siteId, workspaceId],
+  );
   // Anyone who can open the Site sees whether it is published and its
   // address; Publish and the publish form are for people who can publish.
   const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
@@ -212,6 +231,8 @@ export function SiteViewRoute({
               siteId={siteId}
               toolBridge={toolBridge}
               viewer={viewer}
+              siteLocation={page ?? "/"}
+              onSiteLocationChange={onSiteLocationChange}
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={
@@ -254,6 +275,7 @@ export function SiteViewRoute({
         canPublish={canPublish}
         conversation={conversation}
         startNew={startNew}
+        page={page}
         onEvent={(event) => {
           // A publish or restore from this conversation shows at once.
           if (siteMayHaveChanged(event)) check();
@@ -354,6 +376,7 @@ function SiteChatPanel({
   canPublish,
   conversation,
   startNew: startNewRequested,
+  page,
   onEvent,
 }: {
   workspaceId: string;
@@ -364,6 +387,8 @@ function SiteChatPanel({
   canPublish: boolean;
   conversation?: string | undefined;
   startNew: boolean;
+  /** The Site's own address, kept when another conversation is chosen. */
+  page?: string | undefined;
   /** Each new event in the open conversation, so the Site can follow its edits. */
   onEvent: (event: SessionEvent) => void;
 }) {
@@ -418,10 +443,11 @@ function SiteChatPanel({
       void navigate({
         to: SITE_ROUTE,
         params: { workspaceId, siteId },
-        search,
+        // Choosing a conversation keeps the Site where it is.
+        search: page ? { ...search, page } : search,
         ...(replace ? { replace: true } : {}),
       }),
-    [navigate, siteId, workspaceId],
+    [navigate, page, siteId, workspaceId],
   );
 
   // A link may name a conversation that isn't this Site's, or one since

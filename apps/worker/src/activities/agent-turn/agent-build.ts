@@ -8,9 +8,7 @@ import {
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
-  readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   turnCanChangeWorkspaceSettings,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
@@ -95,6 +93,7 @@ import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-dis
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import { currentAttemptSecretValues } from "./secret-values";
 import {
   decisionModelProcessingResidency,
   gateImageGenerationOption,
@@ -403,7 +402,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       // A SuperGrok turn placed by the shared core generates images on its own
       // placed connection under an `image` operation lease; the session
       // binding is never touched. A turn without a core placement offers no
-      // image tool (SuperGrok has no legacy path after its cutover).
+      // image tool.
       const core = providerTurn.xaiSubscriptionCore;
       if (core) {
         const executionGeneration = leases.xai.generation;
@@ -550,12 +549,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ? { fundingSource: "workspace_gateway", ...workspaceCredential }
         : null;
     }
-    const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
-    });
-    if (route !== "core" || !eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
+    if (!eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
     // After the receipt: a shared connection for the session's owner,
     // referenced (never copied) by the operation (EP-T17/EP-N12), only while
     // the deployment enables SuperGrok subscriptions.
@@ -846,6 +840,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           agent: session.agent,
           vaultAccess: deps.vaultAccess,
         }),
+        // Every tool result is masked with the attempt's known secret values.
+        secretValueMemory: currentAttemptSecretValues() ?? null,
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },

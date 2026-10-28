@@ -2235,11 +2235,6 @@ describe("Codex reset credits and overview on the shared core (M3 PR 2c)", () =>
         }),
       ]);
       expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
-
-      // A disabled cutover row fails closed with the typed 503.
-      await admin`update subscription_provider_cutovers set enabled = false
-        where account_id = ${accountId}::uuid and provider = 'codex'`;
-      expect((await prepare(api, workspaceId, alias, "credit-reset")).response.status).toBe(503);
     } finally {
       await admin`delete from subscription_provider_cutovers
         where account_id = ${accountId}::uuid and provider = 'codex'`;

@@ -460,10 +460,17 @@ The Site's managers (outside a Site frame) may run every query.
 `:viewer` (the viewer's stable, opaque principal: for a person, `user:`
 followed by their subject id, such as
 `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or `guest:<visitor>`; the
-same string as a Site Data record's `owner`), `:viewer_kind` and
-`:viewer_signed_in` (1 or 0) are bound by the API from the verified caller. A
-request that supplies one is refused with `validation`, so a Site cannot
-impersonate another viewer:
+same string as a Site Data record's `owner`), `:viewer_kind` (the principal's
+kind: `user` for any signed-in person, `guest`), `:viewer_signed_in` (1 or 0),
+`:viewer_access` (`member`, `invited`, `user` or `guest`; NULL for callers with
+no person, such as a service key) and `:viewer_email` (the verified email in
+lowercase, or NULL) are bound by the API from the verified caller. Published
+viewers carry access and email from their Site session; callers through the
+workspace are `member`, and their email is read only for statements that name
+`:viewer_email`; an embedding host's `userProfileLookup` address counts only
+when the profile sets `emailVerified: true`. A member previewing the Site as a
+visitor binds that role with their own email. A request that supplies one is refused with `validation`, so
+a Site cannot impersonate another viewer:
 
 ```sql
 -- define with site_sql_define_query, audience signed_in

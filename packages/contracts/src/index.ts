@@ -7,6 +7,7 @@ export * from "./workspace-control-event";
 export * from "./secret-value";
 export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
+import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
@@ -172,6 +173,7 @@ export * from "./product-analytics";
 export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
+export * from "./bots";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -182,6 +184,7 @@ import {
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
+export * from "./secret-value-masking";
 export * from "./secret-resolution";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
@@ -1087,6 +1090,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_steer",
   "session_human_input_respond",
   "set_other_session_title",
+  "bot_template_save",
   "interaction_discover",
   "browser_open",
   "browser_tabs",
@@ -8481,10 +8485,22 @@ export const UpdateSessionGoalRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
+/**
+ * Rename a chat or change its description or avatar. Only what is named
+ * changes; null clears a description or avatar.
+ */
 export const UpdateSessionRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    title: z.string().min(1).max(200),
-  }),
+  z
+    .object({
+      title: z.string().min(1).max(200).optional(),
+      description: SessionDescription.nullable().optional(),
+      avatar: SessionAvatar.nullable().optional(),
+    })
+    .refine(
+      (value) =>
+        value.title !== undefined || value.description !== undefined || value.avatar !== undefined,
+      { message: "Name a title, description or avatar to change" },
+    ),
 );
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
@@ -16442,6 +16458,10 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     initialMessage: primitives.string,
     title: primitives.nullableString,
     titleSource: z.enum(["user", "agent"]).nullable(),
+    /** One-line description shown with the title; display metadata, never sent to the model. */
+    description: primitives.nullableString.default(null),
+    /** Avatar shown with the title; display metadata, never sent to the model. */
+    avatar: SessionAvatar.nullable().default(null),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -16790,6 +16810,8 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     automationWait: true,
     title: true,
     titleSource: true,
+    description: true,
+    avatar: true,
     createdBy: true,
     channelId: true,
     parentSessionId: true,
@@ -17043,6 +17065,8 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
     "terminal.pty.exited", // PTY session ended (exitCode/reason)
     "session.title_set",
+    // A chat's description or avatar changed (display metadata only).
+    "session.profile_set",
     "session.model_settings.updated",
     // An authorized person or host changed the task root's usage limit.
     "session.usage_limit.updated",
@@ -19910,6 +19934,17 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       initialMessage: z.string().min(1).optional(),
       /** Exempt the new session from the idle-session archive (for persistent agents). */
       keepLive: primitives.optionalBoolean,
+      /** The new chat's name, description and avatar, as if a person set them
+       * (a bot started from a template, for example). Display metadata only;
+       * never sent to the model. */
+      profile: z
+        .object({
+          title: z.string().trim().min(1).max(200).optional(),
+          description: SessionDescription.optional(),
+          avatar: SessionAvatar.optional(),
+        })
+        .strict()
+        .optional(),
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.

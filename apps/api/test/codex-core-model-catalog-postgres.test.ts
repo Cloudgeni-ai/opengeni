@@ -3,7 +3,6 @@ import * as codex from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { resolveDefaultSessionModel } from "@opengeni/core";
-import * as opengeniDb from "@opengeni/db";
 import { bootstrapWorkspace, createDb, encryptEnvironmentValue, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -87,18 +86,6 @@ async function organization(): Promise<Fixture> {
     where account_id = ${fixture.accountId}::uuid and provider = 'codex'`;
   expect(cutover?.enabled).toBe(true);
   return fixture;
-}
-
-async function setCutover(fixture: Fixture, enabled: boolean | null): Promise<void> {
-  if (enabled === null) {
-    await shared!.admin`delete from subscription_provider_cutovers
-      where account_id = ${fixture.accountId}::uuid and provider = 'codex'`;
-    return;
-  }
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${fixture.accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 function tokens(label: string): string {
@@ -198,10 +185,6 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     const fixture = await organization();
     await coreConnection(fixture, `core-only-${crypto.randomUUID()}`);
     const models = mockLiveModels();
-    const legacyActive = spyOn(opengeniDb, "legacyWorkspaceCodexSubscriptionActive");
-    const legacyAccounts = spyOn(opengeniDb, "listCodexAccountStatuses");
-    const legacyCredentialRead = spyOn(opengeniDb, "loadCodexCredentialForRun");
-    restores.push(legacyActive, legacyAccounts, legacyCredentialRead);
 
     const value = await catalog(fixture);
     for (const entry of codexEntries(value)) {
@@ -236,32 +219,5 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     });
     expect(created.status).toBe(202);
     expect((await created.json()).model).toBe(resolved.model);
-
-    expect(legacyActive).not.toHaveBeenCalled();
-    expect(legacyAccounts).not.toHaveBeenCalled();
-    expect(legacyCredentialRead).not.toHaveBeenCalled();
-  }, 180_000);
-
-  test("a disabled cutover reports Codex unavailable without reading a legacy table", async () => {
-    const fixture = await organization();
-    await coreConnection(fixture, `maintenance-${crypto.randomUUID()}`);
-    await setCutover(fixture, false);
-    const models = mockLiveModels();
-    const legacyActive = spyOn(opengeniDb, "legacyWorkspaceCodexSubscriptionActive");
-    const legacyAccounts = spyOn(opengeniDb, "listCodexAccountStatuses");
-    restores.push(legacyActive, legacyAccounts);
-    const value = await catalog(fixture);
-    for (const entry of codexEntries(value)) {
-      expect({
-        id: entry.id,
-        readiness: entry.credentialReadiness.status,
-        selectable: entry.availability.selectable,
-      }).toEqual({ id: entry.id, readiness: "not_ready", selectable: false });
-    }
-    expect(value.defaultSelection?.model.startsWith("codex/")).toBe(false);
-    expect((await defaultModel(fixture)).model.startsWith("codex/")).toBe(false);
-    expect(models).not.toHaveBeenCalled();
-    expect(legacyActive).not.toHaveBeenCalled();
-    expect(legacyAccounts).not.toHaveBeenCalled();
   }, 180_000);
 });

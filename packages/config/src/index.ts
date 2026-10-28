@@ -23,6 +23,7 @@ export * from "./web-search";
 export * from "./side-feature-residency";
 import {
   parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
   sideFeatureRouteAllowed,
   type SideFeatureResidencySettings,
   type SideFeatureTarget,
@@ -1315,8 +1316,10 @@ const SettingsSchema = z.object({
     })
     .default("gpt-6-luna"),
   // Preferred effort for the credits default. Clamped to the highest effort
-  // the selected model supports at or below this value.
-  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
+  // the selected model supports at or below this value. Medium, the model's
+  // own default: most first chats are everyday questions that should answer
+  // quickly; anyone can raise it per chat or save a higher workspace default.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("medium"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is
@@ -6346,6 +6349,8 @@ const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string 
 ];
 
 const warnedRetiredDeploymentSwitches = new Set<string>();
+
+const warnedSideFeatureResidency = new Set<string>();
 
 function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
   for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
@@ -12204,6 +12209,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   }
   if (settings.sideFeatureResidencyJson?.trim()) {
     parseSideFeatureResidencyJson(settings.sideFeatureResidencyJson);
+    // Logged once per process: settings are read many times.
+    for (const warning of sideFeatureResidencyDeclarationWarnings(
+      settings.sideFeatureResidencyJson,
+    )) {
+      if (warnedSideFeatureResidency.has(warning)) continue;
+      warnedSideFeatureResidency.add(warning);
+      console.warn(`[config] OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: ${warning}`);
+    }
   }
   if (
     settings.productAccessMode === "configured" &&

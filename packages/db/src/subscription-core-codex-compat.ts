@@ -2,9 +2,7 @@
  * Legacy Codex route shapes projected from the shared subscription core
  * (M3 PR 2b, SUB-COMPAT-02).
  *
- * Dormant until an organization's Codex cutover row is enabled: API handlers
- * read `readCodexCutoverDisposition` first and call into this module only for
- * the `core` disposition. The pools, settings and writers themselves are
+ * The pools, settings and writers themselves are
  * provider-neutral (`subscription-core/administration`) and run under the
  * caller's own row-level-security context; this module supplies Codex as
  * data and projects the neutral rows into the legacy Codex account shape
@@ -20,7 +18,6 @@ import type { Database } from "./database";
 import { decodeSubscriptionQuota } from "./subscription-core-repository";
 import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
-  readSubscriptionCoreCutoverDisposition,
   readSubscriptionCoreOrganizationPool,
   type SubscriptionCoreConnectionReach,
   readSubscriptionCoreWorkspacePool,
@@ -34,7 +31,6 @@ import {
   type SubscriptionCoreAdministration,
   type SubscriptionCoreAllocatorResult,
   type SubscriptionCoreConnectionRow,
-  type SubscriptionCoreCutoverDisposition,
   type SubscriptionCoreExtraCreditsResult,
   type SubscriptionCoreWake,
 } from "./subscription-core/administration";
@@ -49,31 +45,6 @@ import type {
 } from "./codex-account-types";
 
 export { SubscriptionCoreCodexSourceRefusedError } from "./subscription-core-codex-errors";
-
-/**
- * `core`: the cutover is enabled. `maintenance`: a missing or disabled row; callers fail
- * closed and read no legacy Codex table.
- */
-export type CodexCutoverDisposition = SubscriptionCoreCutoverDisposition;
-
-export async function readCodexCutoverDisposition(
-  db: Database,
-  accountId: string,
-  /**
-   * The caller's workspace, when it has one. The cutover row needs only the
-   * account scope, but a caller inside a shared request transaction (whose
-   * sibling queries run concurrently) must not have its workspace setting
-   * changed underneath them, so the nested scope keeps the same workspace.
-   */
-  workspaceId: string | null = null,
-): Promise<CodexCutoverDisposition> {
-  return await readSubscriptionCoreCutoverDisposition(
-    db,
-    SUBSCRIPTION_CORE_CODEX,
-    accountId,
-    workspaceId,
-  );
-}
 
 /** A wake the caller delivers after its mutation committed. */
 export type SubscriptionCoreCodexWake = SubscriptionCoreWake;

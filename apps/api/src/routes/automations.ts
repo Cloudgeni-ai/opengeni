@@ -51,6 +51,7 @@ import {
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   requireAutomationAdapter,
   requirePermission,
   requireAutomationCredentialRestrictionPermissions,
@@ -62,15 +63,16 @@ import { HTTPException } from "hono/http-exception";
 import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
 /**
- * Create, change, delete or fire an automation: a workspace admin, but never
- * a Site page (a tool it called). Agents use ordinary workspace permissions.
+ * Create, change, delete or fire an automation: a workspace admin or the
+ * owner of a Personal workspace, but never a Site page (a tool it called).
+ * Agents use ordinary workspace permissions.
  */
 async function requireAutomationWriter(
   c: Context,
   deps: ApiRouteDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
-  const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+  const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
   if (currentSiteSessionOrigin())
     throw new HTTPException(403, { message: "A Site page cannot create or change automations" });
 

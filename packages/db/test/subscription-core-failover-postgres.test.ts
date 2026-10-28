@@ -267,12 +267,10 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         from pg_roles role cross join pg_class relation where role.rolname = current_user and relation.oid = 'session_turns'::regclass`,
         );
         expect(role).toEqual({ rolsuper: false, rolbypassrls: false, owner: false });
-        expect(
-          await readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
-        ).toBe(target);
-        expect(
-          await readSubscriptionCoreFailoverProvider(tx, org.accountId, "unregistered"),
-        ).toBeNull();
+        expect(await readSubscriptionCoreFailoverProvider(tx, target.adapter.provider)).toBe(
+          target,
+        );
+        expect(await readSubscriptionCoreFailoverProvider(tx, "unregistered")).toBeNull();
         await expect(
           tx.transaction((inner) =>
             inner.execute(sql`select * from opengeni_private.subscription_core_providers`),
@@ -402,58 +400,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     }
   });
 
-  test("D-34 no receipt, uncommitted receipt and maintenance never lease target; commit enables it", async () => {
-    const org = await fixture.organization();
-    const source = await fixture.connection(org, home);
-    const destination = await fixture.connection(org, target);
-    await fixture.exhausted(org.accountId, source);
-    const work = await fixture.turn(org);
-    // Reproduce the historical pre-receipt switch/connection state only in
-    // this disposable clone; runtime roles cannot delete append-only receipts.
-    await fixture.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`delete from opengeni_private.subscription_provider_cutover_receipts where provider = ${target.adapter.provider}`;
-    });
-    const noTargetLease = async () => {
-      expect(await place(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
-      const [row] = await fixture.admin<
-        { count: number }[]
-      >`select count(*)::int as count from subscription_leases where connection_id = ${destination}::uuid`;
-      expect(row!.count).toBe(0);
-    };
-    await noTargetLease();
-    let inserted!: () => void;
-    let commit!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      inserted = resolve;
-    });
-    const proceed = new Promise<void>((resolve) => {
-      commit = resolve;
-    });
-    const writer = fixture.admin.begin(async (tx) => {
-      await tx`insert into opengeni_private.subscription_provider_cutover_receipts(provider, migration, committed_at, seed_rotation)
-        values (${target.adapter.provider}, '9999_failover_fixture.sql', '-infinity', '{"mode":"spread"}')`;
-      inserted();
-      await proceed;
-    });
-    await ready;
-    try {
-      await noTargetLease();
-    } finally {
-      commit();
-      await writer;
-    }
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await noTargetLease();
-    await fixture.admin`delete from subscription_provider_cutovers where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await noTargetLease();
-    await fixture.admin`insert into subscription_provider_cutovers(account_id, provider, enabled) values (${org.accountId}::uuid, ${target.adapter.provider}, true)`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({
-      kind: "run",
-      connectionId: destination,
-    });
-  });
-
   test("D-35 effective empty order wins, missing order derives adapter tier; restrictions and switches apply", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
@@ -535,7 +481,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     }
   });
 
-  test("B1 no-mapping diagnostic distinguishes empty order, disabled gates, pins and unavailable mapped targets", async () => {
+  test("B1 no-mapping diagnostic distinguishes empty order, disabled failover, pins and unavailable mapped targets", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home);
     const destination = await fixture.connection(org, target);
@@ -561,26 +507,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     });
     await fixture.pin(org, work, home.adapter.provider, source, "home/model", false, "automatic");
     await fixture.admin`update subscription_settings set fallback_order = ${fixture.admin.json({ "home/model": ["target/model"] })}::jsonb where account_id = ${org.accountId}::uuid`;
-    // Readiness is not mapping: committed registry/receipt with disabled live switch.
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await checkWait();
-    await fixture.admin`update subscription_provider_cutovers set enabled = true where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    await fixture.admin.begin(async (tx) => {
-      // Reproduce pre-receipt state only in this disposable fixture clone.
-      await tx`set local session_replication_role = replica`;
-      await tx`delete from opengeni_private.subscription_provider_cutover_receipts where provider = ${target.adapter.provider}`;
-      // Uncommitted deletion must not affect the app's mapped target.
-      expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-        kind: "run",
-        connectionId: destination,
-      });
-    });
-    try {
-      await checkWait();
-    } finally {
-      await fixture.admin`insert into opengeni_private.subscription_provider_cutover_receipts(provider, migration, committed_at, seed_rotation)
-        values (${target.adapter.provider}, '9999_failover_fixture.sql', '-infinity', '{"mode":"spread"}')`;
-    }
     await fixture.exhausted(org.accountId, destination);
     await checkWait();
     // A mapped but policy-denied target is not an absent mapping.
@@ -596,7 +522,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await evaluate(fixture.client.db, home, privateWork)).toMatchObject(ordinaryWait);
   });
 
-  test("B1 no-mapping diagnostic preserves same-provider fallback and home maintenance", async () => {
+  test("B1 no-mapping diagnostic preserves same-provider fallback", async () => {
     const org = await fixture.organization();
     const source = await fixture.connection(org, home, { allowedModelIds: ["home/second"] });
     const work = await fixture.turn(org);
@@ -610,13 +536,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     expect(await place(fixture.client.db, home, work)).toMatchObject({
       kind: "wait",
       reason: "failover_no_model_mapping",
-    });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${home.adapter.provider}`;
-    expect(await place(fixture.client.db, home, work)).toMatchObject({
-      kind: "cutover_not_enabled",
-    });
-    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-      kind: "cutover_not_enabled",
     });
   });
 
@@ -995,7 +914,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       await fixture.admin`insert into subscription_turn_failures(account_id, workspace_id, session_id, turn_id, connection_id, provider, failure_kind, recovery_evidence)
         values (${org.accountId}::uuid, ${org.workspaceId}::uuid, ${work.identity.sessionId}::uuid, ${work.identity.turnId}::uuid,
           ${connectionId}::uuid, ${provider}, 'exhausted', ${fixture.admin.json({ refusals })}::jsonb)`;
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid`;
     expect(await count(fixture.client.db, work.identity)).toBe(3);
     expect(
       await count(fixture.client.db, { ...work.identity, workspaceId: crypto.randomUUID() }),
@@ -1165,12 +1083,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       earliestResetAt: new Date(soon),
       healthRetryAt: retry,
     });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${target.adapter.provider}`;
-    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
-      kind: "wait",
-      earliestResetAt: new Date(later),
-      healthRetryAt: null,
-    });
   });
 
   test("D-33 raced first inserts and same-turn reservations agree on one target account", async () => {
@@ -1233,9 +1145,6 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       kind: "wait",
       reason: "compaction_provider_locked",
     });
-    await fixture.admin`update subscription_provider_cutovers set enabled = false where account_id = ${org.accountId}::uuid and provider = ${home.adapter.provider}`;
-    expect(await place(fixture.client.db, home, work)).toEqual({ kind: "cutover_not_enabled" });
-    expect(await fixture.binding(work, target.adapter.provider)).toBeNull();
   });
 
   test("D-35 per-model upstream entitlement and absent/mismatched tiers fail closed", async () => {
@@ -1362,7 +1271,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     try {
       expect(
         await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
-          readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
+          readSubscriptionCoreFailoverProvider(tx, target.adapter.provider),
         ),
       ).toEqual({ status: "completed", value: null });
     } finally {
@@ -1375,7 +1284,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     try {
       expect(
         await withSubscriptionCoreAcceptedTurn(fixture.client.db, work.identity, (tx) =>
-          readSubscriptionCoreFailoverProvider(tx, org.accountId, target.adapter.provider),
+          readSubscriptionCoreFailoverProvider(tx, target.adapter.provider),
         ),
       ).toEqual({ status: "completed", value: null });
     } finally {
