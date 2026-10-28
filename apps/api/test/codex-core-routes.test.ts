@@ -514,11 +514,18 @@ describe("Codex routes on the shared core", () => {
       expect(removed.status).toBe(200);
       expect(await removed.json()).toEqual({ disconnected: true, newActiveId: CONNECTION });
       // The route id (canonical or a legacy alias) is resolved by the database.
+      // The person's delegated token is audited as the app.
       expect(one.mock.calls.at(-1)![1]).toEqual({
         accountId: ACCOUNT,
         workspaceId: WS,
         subjectId: "tester",
         connectionId: id,
+        audit: {
+          subjectId: "tester",
+          source: "app",
+          principalKind: "human_session",
+          via: "delegated_token",
+        },
       });
     }
     for (const [next, status] of [
@@ -553,6 +560,12 @@ describe("Codex routes on the shared core", () => {
       accountId: ACCOUNT,
       workspaceId: WS,
       subjectId: "tester",
+      audit: {
+        subjectId: "tester",
+        source: "app",
+        principalKind: "human_session",
+        via: "delegated_token",
+      },
     });
     for (const [refusal, status] of [
       ["unresolved_redemption", 409],
@@ -956,6 +969,8 @@ describe("organization Codex routes", () => {
       workspaceId: null,
       subjectId: "user:org-admin",
       connectionId: CONNECTION,
+      // A verified person proof with no more specific dispatch stamp.
+      audit: { subjectId: "user:org-admin", source: "agent", principalKind: "delegated_person" },
     });
     outcome = "in_use";
     const busy = await app().fetch(
