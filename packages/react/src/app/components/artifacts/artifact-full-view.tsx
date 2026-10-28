@@ -31,6 +31,7 @@ export const ArtifactFullWindowDialog = /* @__PURE__ */ forwardRef<
         <Dialog.Content
           ref={ref}
           data-artifact-fullscreen
+          data-window-layer
           aria-describedby={undefined}
           {...content}
           className="fixed inset-0 z-50 flex h-dvh w-dvw flex-col overflow-hidden bg-surface text-left text-fg outline-hidden"
