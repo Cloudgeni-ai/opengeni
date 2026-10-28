@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolveWorkspaceCodexCompactionDefault } from "@opengeni/contracts";
-import {
-  assertSessionAllowsProductModel,
-  CodexCompactionV2ProviderLockedError,
-  CODEX_COMPACTION_V2_PROVIDER_LOCKED,
-} from "../src/domain/sessions";
+import { sessionNeedsPortableModelSwitch } from "../src/domain/sessions";
 
 describe("resolveWorkspaceCodexCompactionDefault", () => {
   test("defaults to remote_v2 when unset", () => {
@@ -23,30 +19,23 @@ describe("resolveWorkspaceCodexCompactionDefault", () => {
   });
 });
 
-describe("assertSessionAllowsProductModel", () => {
-  test("allows any model on portable sessions", () => {
-    expect(() =>
-      assertSessionAllowsProductModel({ codexCompactionMode: "portable" }, "gpt-5"),
-    ).not.toThrow();
+describe("sessionNeedsPortableModelSwitch", () => {
+  test("portable sessions never need a switch", () => {
+    expect(sessionNeedsPortableModelSwitch({ codexCompactionMode: "portable" }, "gpt-5")).toBe(
+      false,
+    );
   });
 
-  test("allows Codex models on remote_v2 sessions", () => {
-    expect(() =>
-      assertSessionAllowsProductModel({ codexCompactionMode: "remote_v2" }, "codex/gpt-5.4"),
-    ).not.toThrow();
+  test("Codex models keep remote_v2 sessions as they are", () => {
+    expect(
+      sessionNeedsPortableModelSwitch({ codexCompactionMode: "remote_v2" }, "codex/gpt-5.4"),
+    ).toBe(false);
+    expect(sessionNeedsPortableModelSwitch({ codexCompactionMode: "remote_v2" }, null)).toBe(false);
   });
 
-  test("rejects non-Codex models on remote_v2 sessions", () => {
-    expect(() =>
-      assertSessionAllowsProductModel({ codexCompactionMode: "remote_v2" }, "gpt-5"),
-    ).toThrow(CodexCompactionV2ProviderLockedError);
-    try {
-      assertSessionAllowsProductModel({ codexCompactionMode: "remote_v2" }, "gpt-5");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CodexCompactionV2ProviderLockedError);
-      expect((error as CodexCompactionV2ProviderLockedError).code).toBe(
-        CODEX_COMPACTION_V2_PROVIDER_LOCKED,
-      );
-    }
+  test("a non-Codex model on a remote_v2 session converts it instead of failing", () => {
+    expect(sessionNeedsPortableModelSwitch({ codexCompactionMode: "remote_v2" }, "gpt-5")).toBe(
+      true,
+    );
   });
 });

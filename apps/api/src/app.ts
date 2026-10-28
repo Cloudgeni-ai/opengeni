@@ -187,7 +187,6 @@ import {
   sessionUsageLimitsProducerEnabled,
 } from "@opengeni/core";
 import {
-  CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
   hasPermission,
   requireAccessGrant,
@@ -2557,12 +2556,9 @@ export function createAppComposition(deps: AppDependencies): {
             databaseUnavailableHttpError(rawError, c.req.method) ??
             databaseContentionHttpError(rawError, c.req.method) ??
             rawError);
-    const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
-    const status = compactionLock ? 422 : httpStatusForError(error);
-    const code: ErrorCode = compactionLock
-      ? compactionLock.code
-      : (apiError?.code ?? errorCodeForStatus(status));
+    const status = httpStatusForError(error);
+    const code: ErrorCode = apiError?.code ?? errorCodeForStatus(status);
     if (status >= 500) logHttpFailure(c, status, code, rawError);
     if (
       apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE ||
@@ -2574,11 +2570,9 @@ export function createAppComposition(deps: AppDependencies): {
       error: {
         status,
         code,
-        message: compactionLock
-          ? (boundedPublicMessage(compactionLock.message) ?? "Request failed.")
-          : apiError
-            ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
-            : publicErrorMessage(error, status),
+        message: apiError
+          ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
+          : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
         ...((apiError?.outcomeUnknown ?? mutationOutcomeUnknown(error, c.req.method))
           ? { outcomeUnknown: true }
@@ -3021,25 +3015,9 @@ function structuredServicesHint(backend: string): {
   return { fileSystem: hasBox, git: hasBox, terminalEvents: hasBox };
 }
 
-function codexCompactionV2ProviderLockedError(
-  error: unknown,
-): CodexCompactionV2ProviderLockedError | null {
-  if (error instanceof CodexCompactionV2ProviderLockedError) return error;
-  if (
-    error instanceof HTTPException &&
-    error.cause instanceof CodexCompactionV2ProviderLockedError
-  ) {
-    return error.cause;
-  }
-  return null;
-}
-
 export function httpStatusForError(error: unknown): number {
   if (error instanceof ConnectAttemptConflictError) return 409;
   if (error instanceof ConnectAttemptNotFoundError) return 404;
-  if (codexCompactionV2ProviderLockedError(error)) {
-    return 422;
-  }
   if (workspaceControlBusyHttpError(error)) {
     return 503;
   }

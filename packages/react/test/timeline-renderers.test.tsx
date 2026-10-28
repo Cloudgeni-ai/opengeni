@@ -267,6 +267,37 @@ describe("context compaction rendering", () => {
     await r.unmount();
   });
 
+  test("rebuilding a Codex chat for another model reads as one short note", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Now write the backfill script." }),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+          }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+          timelineEvent("turn.started", {}),
+          timelineEvent("agent.message.completed", { text: "Here is the script." }),
+          timelineEvent("turn.completed", { output: "Here is the script." }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Earlier messages summarized for the new model");
+    // One note only: no compaction headline and no "compacted" turn facet.
+    expect(text).not.toMatch(/compacted/i);
+    expect(text).not.toContain("estimated history tokens");
+    expect(text).not.toContain("Auto");
+    await r.unmount();
+  });
+
   test("a provider-rejected compaction stays short and keeps diagnostics behind Details", async () => {
     const recorded =
       "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";

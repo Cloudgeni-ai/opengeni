@@ -334,6 +334,16 @@ export default defineConfig({
               test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.tsx?$/,
             },
             {
+              // Session creation at startup and the app state both read the
+              // session tool helpers. Left to entry-aware grouping they can
+              // join the app-state chunk, which the startup context then
+              // imports back: a chunk cycle whose reads can run too early.
+              name: "session-tool-helpers",
+              test: /packages[\\/](?:react[\\/]src[\\/]app[\\/]lib[\\/]session-tools|contracts[\\/]src[\\/]github-repository)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as

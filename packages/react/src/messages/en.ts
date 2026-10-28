@@ -3042,6 +3042,8 @@ export const englishMessages = {
   "messageTimeline.couldnTLoadLaterActivity": "Couldn’t load later activity. {message}",
   "messageTimeline.couldnTStart": "Couldn't start",
   "messageTimeline.details": "Details",
+  "messageTimeline.earlierMessagesSummarizedForNewModel":
+    "Earlier messages summarized for the new model",
   "messageTimeline.editMessage": "Edit message",
   "messageTimeline.enableProvider": "Enable {provider}",
   "messageTimeline.evidence": "Evidence",
@@ -3101,6 +3103,8 @@ export const englishMessages = {
   "messageTimeline.setupUnavailableHere":
     "{provider} can't be connected from here. Ask whoever manages this app to allow it.",
   "messageTimeline.skipped": "Skipped",
+  "messageTimeline.summarizingEarlierMessagesForNewModel":
+    "Summarizing earlier messages for the new model…",
   "messageTimeline.theAgentRequestedStructuredInput": "The agent requested structured input.",
   "messageTimeline.thisAutomationWasNotGranted":
     "This automation was not granted access to your personal connection.",

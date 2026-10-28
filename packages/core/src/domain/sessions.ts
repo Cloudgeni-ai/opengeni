@@ -1827,34 +1827,19 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   canonicalConfiguredModel(settings, model);
 }
 
-export const CODEX_COMPACTION_V2_PROVIDER_LOCKED = "codex_compaction_v2_provider_locked" as const;
-
-/** Session is frozen on Codex remote compaction v2; non-Codex models are refused. */
-export class CodexCompactionV2ProviderLockedError extends Error {
-  readonly code = CODEX_COMPACTION_V2_PROVIDER_LOCKED;
-  readonly productModelId: string;
-
-  constructor(productModelId: string) {
-    super(
-      `session is locked to Codex remote compaction v2; model "${productModelId}" is not a Codex subscription model`,
-    );
-    this.name = "CodexCompactionV2ProviderLockedError";
-    this.productModelId = productModelId;
-  }
-}
-
 /**
- * Fail closed when a remote_v2 session would run a non-Codex product model.
- * Portable sessions and non-Codex sessions keep free mid-session provider swap.
+ * True when running `productModelId` on this session must first convert its
+ * Codex remote_v2 context to portable form. Any model may run on any session:
+ * the worker rebuilds portable context from stored history before the first
+ * non-Codex turn and keeps the session portable from then on.
  */
-export function assertSessionAllowsProductModel(
+export function sessionNeedsPortableModelSwitch(
   session: Pick<Session, "codexCompactionMode">,
   productModelId: string | null | undefined,
-): void {
-  if (productModelId === null || productModelId === undefined) return;
-  if (session.codexCompactionMode !== "remote_v2") return;
-  if (isCodexBilledModel(productModelId)) return;
-  throw new CodexCompactionV2ProviderLockedError(productModelId);
+): boolean {
+  if (productModelId === null || productModelId === undefined) return false;
+  if (session.codexCompactionMode !== "remote_v2") return false;
+  return !isCodexBilledModel(productModelId);
 }
 
 /**
@@ -2128,14 +2113,6 @@ export async function postUserMessageTurn(
       ? requestedModel
       : null;
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, effectiveModelForGate);
-  try {
-    assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError) {
-      throw new HTTPException(422, { message: error.message, cause: error });
-    }
-    throw error;
-  }
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
@@ -2471,13 +2448,6 @@ export async function retryFailedSession(
     retainedModel,
   );
   const model = canonicalConfiguredModel(settings, request.model ?? retainedModel)!;
-  try {
-    assertSessionAllowsProductModel(session, model);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError)
-      throw new HTTPException(422, { message: error.message, cause: error });
-    throw error;
-  }
   await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
   const executionPolicy = withDeveloperSetupCredentialRestriction(
     resolveTurnExecutionPolicyV1(settings, {
@@ -4564,14 +4534,6 @@ async function acceptSessionUserMessageInFileScope(
       throw new Error("effective follow-up model unexpectedly resolved to null");
     }
     await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
-    try {
-      assertSessionAllowsProductModel(existingSession, effectiveModel);
-    } catch (error) {
-      if (error instanceof CodexCompactionV2ProviderLockedError) {
-        throw new HTTPException(422, { message: error.message, cause: error });
-      }
-      throw error;
-    }
     const sessionReasoningEffort = existingSession.reasoningEffort;
     const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
     const sessionLatencyMode = existingSession.latencyMode;
@@ -5112,13 +5074,6 @@ export async function setSessionModel(
           reasoningEffort: input.reasoningEffort,
           validate: (session) => {
             try {
-              assertSessionAllowsProductModel(
-                {
-                  codexCompactionMode:
-                    session.codexCompactionMode as Session["codexCompactionMode"],
-                },
-                model,
-              );
               // Validate fresh selection/provider and preserved latency exactly as
               // prompt admission does; never silently clamp requested settings.
               resolveTurnExecutionPolicyV1(settings, {
