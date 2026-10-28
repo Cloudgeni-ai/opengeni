@@ -690,6 +690,13 @@ test("workspace Models exposes a reloadable compaction page to admins and reader
   }
 });
 
+/** A connect step's back link and title keep room above them (not flush with the column top). */
+function expectConnectStepSpacing(container: HTMLElement) {
+  const frame = container.querySelector("form")!.parentElement!;
+  expect(frame.className).toContain("[&>form>header]:pt-4");
+  expect(frame.className).not.toContain("[&>form>header]:pt-0");
+}
+
 describe("Codex rows", () => {
   for (const saved of [true, false]) {
     test(`an account whose live check failed reads like its page: saved reading ${saved}`, async () => {
@@ -2383,6 +2390,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
       expect(view.container.textContent).toContain(OWN_NOTE);
+      expectConnectStepSpacing(view.container);
       await act(async () => button(view.container, /Sign in with ChatGPT/)!.click());
       await flush();
       expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a", { scope: "user" });
@@ -2395,6 +2403,7 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect:supergrok" }));
       await flush();
       expect(view.container.textContent).toContain(OWN_NOTE);
+      expectConnectStepSpacing(view.container);
       expect(view.container.textContent).not.toContain("Everyone in this workspace");
       await act(async () => button(view.container, /Sign in with xAI/)!.click());
       await flush();
@@ -2410,6 +2419,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect Claude subscription");
       expect(view.container.textContent).toContain(OWN_NOTE);
+      expectConnectStepSpacing(view.container);
       expect(view.container.textContent).not.toContain("Everyone in this workspace");
       await act(async () => button(view.container, /^Setup token$/)!.click());
       await flush();

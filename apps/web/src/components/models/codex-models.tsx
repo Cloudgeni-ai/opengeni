@@ -948,6 +948,7 @@ export function CodexConnectPage({
 
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay for new work."
       onClose={onClose}
