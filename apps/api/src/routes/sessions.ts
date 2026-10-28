@@ -503,6 +503,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     bus,
     objectStorage,
     observability: deps.observability,
+    wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });

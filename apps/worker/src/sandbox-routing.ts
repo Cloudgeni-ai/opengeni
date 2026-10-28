@@ -434,6 +434,10 @@ async function resolveCurrentHomeBackend(
         ids.workspaceId,
         marked.backgroundCommandEvents,
       );
+      await signalBackgroundCommandWakes(
+        marked.backgroundCommandWakes,
+        backgroundCommandWakeSender(services.wakeSessionWorkflow),
+      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
@@ -1289,6 +1293,10 @@ export function wrapTurnBoxWithRouting(
                 ids.workspaceId,
                 marked.backgroundCommandEvents,
               );
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
@@ -1588,6 +1596,10 @@ export function wrapLazyTurnBoxWithRouting(
                 services.bus,
                 ids.workspaceId,
                 marked.backgroundCommandEvents,
+              );
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
               );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,

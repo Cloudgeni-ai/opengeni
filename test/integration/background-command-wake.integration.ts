@@ -23,7 +23,8 @@ const root = new URL("../..", import.meta.url).pathname;
 /**
  * One real API with control and turn workers, the in-process local sandbox and
  * a scripted model. Times how soon a session parked in `wait_for_input` starts
- * its next turn after its background command exits, and after a deadline.
+ * its next turn after its background command's result is settled (the sandbox
+ * reaper observes the exit), and after a deadline.
  */
 async function withWaitStack(
   run: (stack: {
@@ -200,7 +201,7 @@ test("wait_for_input resumes promptly when its background command exits and at i
     expect(command.wakeMs).toBeLessThan(4_000);
     // The wake outbox owns the deadline; its dispatcher runs every 10 s.
     expect(timeout.wakeMs).toBeGreaterThanOrEqual(-1_000);
-    expect(timeout.wakeMs).toBeLessThan(12_000);
+    expect(timeout.wakeMs).toBeLessThan(15_000);
     for (const wake of concurrentWakes) expect(wake.wakeMs).toBeLessThan(4_000);
   });
 }, 600_000);

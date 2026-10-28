@@ -22,6 +22,8 @@
 
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
+import { backgroundCommandWakeSender } from "@opengeni/core";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 import {
   effectiveSandboxLifecycle,
   sandboxProviderMaxRemainingLifetimeMs,
@@ -35,6 +37,7 @@ import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
+  signalBackgroundCommandWakes,
   beginSandboxRematerialization,
   sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
@@ -183,6 +186,9 @@ export type SandboxResumeServices = {
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Live fanout for background commands a provider loss settled. */
   bus?: EventBus | null;
+  /** Wakes a session waiting on a background command this resume settles as
+   * lost. Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
   /** One turn's journal, background-command ledger and metering, bound onto a
    * compute box's agent session before the turn receives it. Other backends
    * ignore it. */
@@ -2267,6 +2273,10 @@ async function resumeBoxForTurnOnce(
           services.bus,
           ids.workspaceId,
           marked.backgroundCommandEvents,
+        );
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
         );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,

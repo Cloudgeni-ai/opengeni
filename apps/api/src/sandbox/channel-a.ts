@@ -30,6 +30,7 @@ import { githubAppBotIdentity } from "@opengeni/github";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
+  signalBackgroundCommandWakes,
   getSandboxSessionEnvelope,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
@@ -105,6 +106,8 @@ import {
   getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
+  backgroundCommandWakeSender,
+  type BackgroundCommandWakeSignal,
   type ChannelAMachineAuthority,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
@@ -115,6 +118,9 @@ export type ChannelAServices = {
   bus: EventBus;
   objectStorage?: ObjectStorage | null;
   observability?: Observability | undefined;
+  /** Wakes a session waiting on a background command a request settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: BackgroundCommandWakeSignal | null | undefined;
 };
 
 export type ChannelAOperation =
@@ -922,6 +928,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,
@@ -1060,6 +1067,10 @@ async function withChannelAOperation<T>(
               expectedInstanceId: live.instanceId,
             }).catch(() => null);
             if (marked?.status === "marked") {
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
               await appendAndPublishEvents(db, bus, workspaceId, session.id, [
                 {
                   type: "sandbox.box.lost",
@@ -1168,6 +1179,10 @@ async function withChannelAOperation<T>(
         expectedInstanceId: live.instanceId!,
       });
       if (marked.status === "marked") {
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
         await appendAndPublishEvents(db, bus, workspaceId, session.id, [
           {
             type: "sandbox.box.lost",
@@ -1276,6 +1291,7 @@ async function withChannelAOperation<T>(
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
           ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          wakeSessionWorkflow: services.wakeSessionWorkflow,
         },
         {
           accountId,

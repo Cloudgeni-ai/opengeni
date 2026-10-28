@@ -995,7 +995,8 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability, objectStorage, bus } = await services();
+      const { db, settings, observability, objectStorage, bus, wakeSessionWorkflow } =
+        await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -1020,6 +1021,7 @@ export function createSandboxLeaseActivities(
           captureAttempt,
           objectStorage,
           bus,
+          wakeSessionWorkflow,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -2423,6 +2425,20 @@ function deferEndedEpochProbe(backoff: EndedEpochProbeBackoff, key: string): voi
   });
 }
 
+/** A failed direct wake falls back to the dispatcher; say so, so a broken
+ * signaler does not silently turn every command wake into a 10 s one. */
+function wakeSignalWarning(
+  observability: ActivityServices["observability"],
+  what: string,
+): (error: unknown, wake: { sessionId: string; wakeRevision: number }) => void {
+  return (error, wake) =>
+    observability.warn(`sandbox reaper: ${what} wake signal failed; the dispatcher delivers it`, {
+      sessionId: wake.sessionId,
+      wakeRevision: wake.wakeRevision,
+      error: errorMessage(error),
+    });
+}
+
 async function reconcileTerminalRetainedProcesses(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -2878,6 +2894,11 @@ async function reconcileTerminalRetainedProcesses(
               },
             );
           }
+          await signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(wakeSessionWorkflow),
+            { onError: wakeSignalWarning(observability, "lost-box command") },
+          );
           continue;
         }
       } catch (error) {
@@ -2922,6 +2943,7 @@ async function reconcileTerminalRetainedProcesses(
       await signalBackgroundCommandWakes(
         settlement.backgroundCommandWakes,
         backgroundCommandWakeSender(wakeSessionWorkflow),
+        { onError: wakeSignalWarning(observability, "retained command") },
       );
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
@@ -4261,6 +4283,7 @@ async function terminateDrainableBox(
   attempt: SandboxDrainCaptureAttempt,
   objectStorage: ObjectStorage | null,
   bus: ActivityServices["bus"] | null = null,
+  wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"] | null = null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -4810,7 +4833,8 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents, backgroundCommandWakes } =
+    await confirmDrainCold(
     db,
     {
       accountId,
@@ -4841,6 +4865,11 @@ async function terminateDrainableBox(
       error: errorMessage(error),
     });
   });
+  await signalBackgroundCommandWakes(
+    backgroundCommandWakes,
+    backgroundCommandWakeSender(wakeSessionWorkflow),
+    { onError: wakeSignalWarning(observability, "contained command") },
+  );
   if (wentCold) {
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another

@@ -718,6 +718,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  wakeSessionWorkflow,
                   ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
@@ -802,6 +803,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  wakeSessionWorkflow,
                   ...(computeTurn ? { computeTurn } : {}),
                 },
                 {

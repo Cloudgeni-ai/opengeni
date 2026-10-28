@@ -32,17 +32,16 @@ export function captureConnectedCommandOutput(
  * of a background-command settlement. Absent signaler: the periodic wake
  * dispatcher delivers the committed wake instead.
  */
+export type BackgroundCommandWakeSignal = (input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+  wakeRevision: number;
+}) => Promise<unknown>;
+
 export function backgroundCommandWakeSender(
-  signal:
-    | ((input: {
-        accountId: string;
-        workspaceId: string;
-        sessionId: string;
-        workflowId: string;
-        wakeRevision: number;
-      }) => Promise<unknown>)
-    | null
-    | undefined,
+  signal: BackgroundCommandWakeSignal | null | undefined,
 ): ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined {
   if (!signal) return undefined;
   return async (wake) =>
