@@ -53,6 +53,7 @@ import {
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
+  isOpeningToolLoadResponse,
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
   type SandboxFileDownload,
@@ -1316,6 +1317,9 @@ export async function runTurnStreamAttempt(
     const iterator = eventing.stream.toStream()[Symbol.asyncIterator]();
     const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
+    // The local opening tool load and its search result precede the first
+    // provider response; they are not its first byte.
+    let openingToolLoadInFlight = false;
     try {
       while (true) {
         const next = await nextStreamEvent(iterator, activityContext);
@@ -1324,7 +1328,9 @@ export async function runTurnStreamAttempt(
           streamDone = true;
           break;
         }
-        await settleFallbackProviderFirstByte();
+        if (next.value.type === "raw_model_stream_event")
+          openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
+        if (!openingToolLoadInFlight) await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
         let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
