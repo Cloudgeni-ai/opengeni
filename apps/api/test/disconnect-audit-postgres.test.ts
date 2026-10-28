@@ -16,6 +16,7 @@ import {
   createSession,
   encryptEnvironmentValue,
   initializeSessionStartAtomically,
+  revokeConnection,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -717,6 +718,7 @@ describe("connector disconnects are audited", () => {
         source: "app",
         principalKind: "human_session",
         scope: "organization",
+        provider: "opengeni_mcp",
         clientName: "Audit Agent",
         connectedBySubjectId: person.subjectId,
       },
@@ -727,6 +729,38 @@ describe("connector disconnects are audited", () => {
     );
     expect([204, 404]).toContain(repeated.status);
     expect(await auditRows(agent.connectionId)).toHaveLength(1);
+  }, 120_000);
+
+  test("a failed audit write rolls the disconnect back", async () => {
+    const person = await signedInPerson();
+    const connection = await createConnection(client.db, {
+      accountId: person.workspaceAccountId,
+      workspaceId: person.workspaceId,
+      subjectId: null,
+      providerDomain: "mcp.audit.example",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "connector-secret" }),
+      ),
+      createdBySubjectId: person.subjectId,
+    });
+    // An actor the audit writer refuses: the revocation must not commit alone.
+    await expect(
+      revokeConnection(
+        client.db,
+        person.workspaceId,
+        connection.id,
+        person.subjectId,
+        connection.version,
+        { audit: { subjectId: " ", source: "app", principalKind: "human_session" } },
+      ),
+    ).rejects.toThrow("disconnect audit requires an acting subject");
+    const [row] = await shared.admin<
+      { status: string }[]
+    >`select status from connections where id = ${connection.id}`;
+    expect(row!.status).toBe("active");
+    expect(await auditRows(connection.id)).toHaveLength(0);
   }, 120_000);
 });
 

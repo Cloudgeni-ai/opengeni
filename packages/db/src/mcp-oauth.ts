@@ -675,7 +675,13 @@ export async function revokeOrganizationMcpConnection(
           workspaceId: null,
           action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
           actor: audit,
-          target: { type: "organization_mcp_connection", id: row.family_id },
+          // The connector is the Opengeni organization MCP server itself;
+          // the outside client is named in the details.
+          target: {
+            type: "organization_mcp_connection",
+            id: row.family_id,
+            provider: "opengeni_mcp",
+          },
           details: { clientName: row.client_name, connectedBySubjectId: row.subject_id },
         }),
       );
