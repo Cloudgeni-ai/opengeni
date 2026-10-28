@@ -19,11 +19,16 @@ after a deployment or control-plane landing. It must be a nonnegative safe integ
 no more than 30 minutes ahead of the configuration-load clock. Expired deadlines
 are valid but suppress nothing. Invalid values emit an unsuppressed
 `invalid-grace` WARNING and are ignored; they neither mute alerts nor prevent a
-healthy status check. Ticks never renew grace. The immutable config digest is
+healthy status check. The bound is checked against each execution's clock: a
+deadline pinned too far ahead becomes valid during its final 30 minutes. Rollout
+owners must pin a deadline within the horizon when configuring it, rather than
+rely on an initially invalid value remaining invalid. Ticks never renew grace.
+The immutable config digest is
 verified before its grace can suppress any image-validation failure.
 
 Grace deliberately suppresses *all* health reasons, including an explicit stop,
-crash loop, unavailability and deployment binding mismatch. Those reasons remain
+crash loop, unavailability and deployment binding mismatch, as well as integrity
+failures in the plan, source hashes or contract digest. Those reasons remain
 visible in INFO events. Use a short explicit deadline; never use grace to mask
 incompatible runtime scheduling. Missing-run monitoring remains independent.
 
@@ -36,9 +41,10 @@ the retained cloud-auth module for authenticated read access and a 15-second
 UID, URI, image digest and reconciled generation before reading status. A mismatch
 alerts, including after grace expires; it does not invoke recovery.
 
-The rollout owner **must re-pin the deployment contract and configuration digest
-after each batcher deploy**, including the new image digest and a bounded grace
-deadline. Grace alone cannot repair an obsolete binding. Keep all prior receipts
+Before a later batcher deploy, the rollout owner must first pin bounded grace in
+a watchdog Job update. After the batcher deploy, **re-pin the deployment contract
+and configuration digest in a second Job update**, including the new image digest.
+Grace alone cannot repair an obsolete binding. Keep all prior receipts
 and configuration versions as historical evidence. Legacy claim fields identify
 that historical configuration; the watchdog does not access claim storage.
 
@@ -52,12 +58,14 @@ future, malformed or unavailable measurements alert rather than imply health.
 
 ## Ordered no-Manual deployment and verification
 
-Coordinate with Jørgen's batcher owner. This change authorizes no batcher mode
+Coordinate with the designated batcher owner. This change authorizes no batcher mode
 switch, CI cancellation/rerun, readiness edit or OFF drill.
 
 1. Complete exact-head VM validation and independent review; attach evidence and
    land through `queue-ready`. Build and qualify the immutable image from landed
-   source, retaining its source manifest, digest and test output.
+   source, retaining its source manifest, digest and test output. Arrange rollout
+   promptly after landing: the old Job retains automatic-OFF behavior until the
+   in-place image/configuration update below is complete.
 2. Capture the current Job, Scheduler, binding and alert-routing configuration.
    Confirm no Job execution is running immediately before the update. If one is
    running, let it finish and check again; do not cancel it or pause Scheduler.
