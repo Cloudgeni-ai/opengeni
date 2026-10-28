@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   codeSearchDeploymentPolicy,
@@ -6,6 +6,7 @@ import {
   decisionModelRoute,
   getSettings,
   parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
   SIDE_FEATURE_ROUTE_IDS,
   SIDE_FEATURE_ROUTES,
   sideFeatureProcessingResidency,
@@ -197,29 +198,71 @@ describe("side-feature residency records", () => {
           deployment: "gpt-global",
         }),
       ).toBe(false);
-      // A declaration without the deployment, or with an unreadable one, is refused.
+      // A declaration without the deployment, or with an unreadable one,
+      // still parses (a config mismatch must not stop the service), but it
+      // names no deployment, so the route is unknown and a warning says why.
       for (const deployment of [undefined, "gpt-eu/x", "..", "gpt eu"]) {
-        expect(() =>
-          parseSideFeatureResidencyJson(
-            declarations({
-              [route]: {
-                endpoint: azure,
-                ...(deployment === undefined ? {} : { deployment }),
-                residency: euDataZone,
-              },
-            }),
+        const json = declarations({
+          [route]: {
+            endpoint: azure,
+            ...(deployment === undefined ? {} : { deployment }),
+            residency: euDataZone,
+          },
+        });
+        expect(parseSideFeatureResidencyJson(json)[route]).toEqual({
+          endpoint: azure,
+          residency: euDataZone,
+        });
+        expect(sideFeatureResidencyDeclarationWarnings(json)).toEqual([
+          expect.stringMatching(
+            new RegExp(
+              `^${route.replace(/\./gu, "\\.")} must name the deployment.*unknown \\(not EU\\)$`,
+              "u",
+            ),
           ),
-        ).toThrow(/must name the deployment/u);
+        ]);
+        const unknown = settings({ sideFeatureResidencyJson: json, requiredModelGeography: "eu" });
+        for (const called of ["gpt-eu", deployment]) {
+          expect(
+            sideFeatureRouteIsEu(unknown, { route, endpoint: azure, deployment: called }),
+          ).toBe(false);
+          expect(
+            sideFeatureRouteAllowed(unknown, { route, endpoint: azure, deployment: called }),
+          ).toBe(false);
+        }
+        // Without the EU requirement nothing changes.
+        expect(
+          sideFeatureRouteAllowed(settings({ sideFeatureResidencyJson: json }), {
+            route,
+            endpoint: azure,
+            deployment: "gpt-eu",
+          }),
+        ).toBe(true);
       }
+      expect(
+        sideFeatureResidencyDeclarationWarnings(
+          declarations({
+            [route]: { endpoint: azure, deployment: "gpt-eu", residency: euDataZone },
+          }),
+        ),
+      ).toEqual([]);
     }
-    // Other routes don't call a named deployment, so they can't name one.
-    expect(() =>
-      parseSideFeatureResidencyJson(
-        declarations({
-          "web_search.searxng": { endpoint: SEARXNG, deployment: "x", residency: euSelfHosted },
-        }),
-      ),
-    ).toThrow(/does not call a named deployment/u);
+    // Other routes don't call a named deployment: one there is ignored, with a warning.
+    const searxng = declarations({
+      "web_search.searxng": { endpoint: SEARXNG, deployment: "x", residency: euSelfHosted },
+    });
+    expect(parseSideFeatureResidencyJson(searxng)["web_search.searxng"]).toEqual({
+      endpoint: SEARXNG,
+      residency: euSelfHosted,
+    });
+    expect(sideFeatureResidencyDeclarationWarnings(searxng)).toEqual([
+      'web_search.searxng does not call a named deployment; its "deployment" is ignored',
+    ]);
+    expect(
+      sideFeatureRouteIsEu(settings({ sideFeatureResidencyJson: searxng }), searxngTarget),
+    ).toBe(true);
+    expect(sideFeatureResidencyDeclarationWarnings(undefined)).toEqual([]);
+    expect(sideFeatureResidencyDeclarationWarnings("[")).toEqual([]);
   });
 
   test("declarations are rejected for unknown or code-owned routes and bad endpoints", () => {
@@ -282,6 +325,36 @@ describe("side-feature residency records", () => {
       }),
     ).toThrow();
     expect(sideFeatureRouteIsEu(boot({ "web_search.searxng": valid }), searxngTarget)).toBe(true);
+  });
+
+  test("an Azure deployment declaration without its deployment boots, warns once and stays unknown", () => {
+    const azure = "https://voice.example.azure.com";
+    const env = {
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: declarations({
+        "realtime_voice.azure_live": { endpoint: azure, residency: euDataZone },
+      }),
+    };
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const booted = getSettings(env);
+      getSettings(env);
+      const warnings = warn.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"));
+      expect(warnings).toEqual([
+        expect.stringContaining("realtime_voice.azure_live must name the deployment"),
+      ]);
+      expect(
+        sideFeatureRouteIsEu(booted, {
+          route: "realtime_voice.azure_live",
+          endpoint: azure,
+          deployment: booted.azureLiveDeployment,
+        }),
+      ).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("routes may run anywhere without the EU requirement and only on EU records under it", () => {

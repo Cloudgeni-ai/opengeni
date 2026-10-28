@@ -224,9 +224,12 @@ integration, never a region, and is never read for EU status.
   body or a `?deployment=` query. Without a matching declaration a route is
   unknown, so not EU. `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` maps route ids to
   `{ endpoint, deployment?, residency }` and is validated at boot; it rejects
-  unknown routes, routes with a code-owned rule, non-http(s) endpoints, vendor
-  default hosts, an Azure deployment route without a plain
-  `[A-Za-z0-9._-]+` deployment, and a deployment on any other route:
+  unknown routes, routes with a code-owned rule, non-http(s) endpoints and
+  vendor default hosts. A missing deployment never stops the service: an Azure
+  deployment route declared without a plain `[A-Za-z0-9._-]+` deployment
+  boots, logs a warning once and stays unknown (EU-only workspaces see
+  `region_restricted`), and a `deployment` on any other route is ignored with
+  a warning:
 
   ```json
   {

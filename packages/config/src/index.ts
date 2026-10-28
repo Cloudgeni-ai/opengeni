@@ -23,6 +23,7 @@ export * from "./web-search";
 export * from "./side-feature-residency";
 import {
   parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
   sideFeatureRouteAllowed,
   type SideFeatureResidencySettings,
   type SideFeatureTarget,
@@ -6349,6 +6350,8 @@ const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string 
 
 const warnedRetiredDeploymentSwitches = new Set<string>();
 
+const warnedSideFeatureResidency = new Set<string>();
+
 function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
   for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
     if (source[name] === undefined || warnedRetiredDeploymentSwitches.has(name)) continue;
@@ -12206,6 +12209,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   }
   if (settings.sideFeatureResidencyJson?.trim()) {
     parseSideFeatureResidencyJson(settings.sideFeatureResidencyJson);
+    // Logged once per process: settings are read many times.
+    for (const warning of sideFeatureResidencyDeclarationWarnings(
+      settings.sideFeatureResidencyJson,
+    )) {
+      if (warnedSideFeatureResidency.has(warning)) continue;
+      warnedSideFeatureResidency.add(warning);
+      console.warn(`[config] OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: ${warning}`);
+    }
   }
   if (
     settings.productAccessMode === "configured" &&

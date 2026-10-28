@@ -343,25 +343,44 @@ const SideFeatureResidencyDeclarations = z
           message: "a vendor default host has a code-owned rule and cannot be declared",
         });
       }
-      if (!isSideFeatureRouteId(key)) continue;
-      if (sideFeatureRouteNamesDeployment(key)) {
-        if (!plainDeploymentName(declaration.deployment)) {
-          context.addIssue({
-            code: "custom",
-            path: [key, "deployment"],
-            message:
-              "must name the deployment this route calls ([A-Za-z0-9._-]+); one resource can hold EU and global deployments",
-          });
-        }
-      } else if (declaration.deployment !== undefined) {
-        context.addIssue({
-          code: "custom",
-          path: [key, "deployment"],
-          message: "this route does not call a named deployment",
-        });
-      }
+      // A missing or unreadable `deployment` is not an issue here: it leaves
+      // the route unknown (see sideFeatureResidencyDeclarationWarnings), so a
+      // config mismatch never stops a running service.
     }
   });
+
+/**
+ * Problems in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` that leave a declaration
+ * without effect rather than failing boot: an Azure deployment route whose
+ * declaration names no plain deployment is unknown (so not EU), and a
+ * `deployment` on any other route is ignored. Boot logs them once. Empty when
+ * the value is unset or invalid (boot rejects an invalid value).
+ */
+export function sideFeatureResidencyDeclarationWarnings(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  const parsed = SideFeatureResidencyDeclarations.safeParse(raw);
+  if (!parsed.success) return [];
+  const warnings: string[] = [];
+  for (const [route, declaration] of Object.entries(parsed.data)) {
+    if (!isSideFeatureRouteId(route)) continue;
+    if (sideFeatureRouteNamesDeployment(route)) {
+      if (!plainDeploymentName(declaration.deployment)) {
+        warnings.push(
+          `${route} must name the deployment it calls in "deployment" ([A-Za-z0-9._-]+), since one Azure resource can hold EU and global deployments; until it does, the route is unknown (not EU)`,
+        );
+      }
+    } else if (declaration.deployment !== undefined) {
+      warnings.push(`${route} does not call a named deployment; its "deployment" is ignored`);
+    }
+  }
+  return warnings;
+}
 
 /** A parsed declaration: the endpoint origin (and deployment) it describes and its residency. */
 export type SideFeatureResidencyDeclarationV1 = {
@@ -392,7 +411,12 @@ export function parseSideFeatureResidencyJson(
   for (const [route, { endpoint, deployment, residency }] of Object.entries(parsed.data)) {
     declarations[route as SideFeatureRouteId] = {
       endpoint: sideFeatureEndpointOrigin(endpoint)!,
-      ...(deployment !== undefined ? { deployment } : {}),
+      // Only a readable deployment on a route that calls one; otherwise the
+      // declaration names none and the route stays unknown.
+      ...(sideFeatureRouteNamesDeployment(route as SideFeatureRouteId) &&
+      plainDeploymentName(deployment)
+        ? { deployment: deployment! }
+        : {}),
       residency: ModelResidencyV1.parse({
         geography: residency.geography,
         deploymentType: residency.deploymentType,
