@@ -323,6 +323,12 @@ exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
 `/workspace` has no special meaning on a machine.
 
+The machine's own Git identity applies to commits. When the agent's environment
+has no `EMAIL`, its commands receive `EMAIL=agent@opengeni.invalid`, Git's
+last-resort commit email: `GIT_*_EMAIL` and any `user.email` setting still win,
+so only a machine with no identity at all (typically a fresh container, whose
+hostname gives Git no address to detect) commits with it.
+
 The Files surface advertises that effective path as `FileSystem.root`, including
 Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
 in the same namespace and sends the negotiated `{ epoch, root }` identity with

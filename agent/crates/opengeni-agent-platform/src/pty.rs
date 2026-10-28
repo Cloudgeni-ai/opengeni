@@ -211,6 +211,9 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     for (k, v) in &req.env {
         cmd.env(k, v);
     }
+    if let Some(email) = crate::default_git_email(req.env.contains_key("EMAIL")) {
+        cmd.env("EMAIL", email);
+    }
     // Advertise a sensible TERM so curses apps render; the request may override.
     let term = if req.term.is_empty() {
         "xterm-256color"

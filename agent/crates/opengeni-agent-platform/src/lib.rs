@@ -733,6 +733,30 @@ fn host_arch() -> v1::Arch {
     }
 }
 
+/// The commit email Git falls back to for commands this agent runs when
+/// nothing else names one (the same address the sandbox and desktop images
+/// configure at Git's system level).
+pub const DEFAULT_GIT_EMAIL: &str = "agent@opengeni.invalid";
+
+/// The `EMAIL` a child process receives: [`DEFAULT_GIT_EMAIL`] only when
+/// neither the request nor the agent's own environment sets `EMAIL`. Git reads
+/// `EMAIL` after `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every
+/// `user.email` setting (system, global, repository), so an identity the
+/// machine, its user or a repository configures always wins. Without it,
+/// `git commit` fails in a container whose hostname has no domain to
+/// auto-detect an address from.
+#[must_use]
+pub(crate) fn default_git_email(request_sets_email: bool) -> Option<&'static str> {
+    default_git_email_with(request_sets_email, std::env::var_os("EMAIL").as_deref())
+}
+
+fn default_git_email_with(
+    request_sets_email: bool,
+    ambient: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    (!request_sets_email && ambient.is_none()).then_some(DEFAULT_GIT_EMAIL)
+}
+
 /// The platform's default login-shell argv (used when a PTY open names no
 /// command): `$SHELL` (or `/bin/sh`) on unix, `cmd.exe` on Windows.
 #[must_use]
@@ -775,5 +799,22 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(parts.join(" "));
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn default_git_email_fills_only_an_unset_email() {
+        assert_eq!(default_git_email_with(false, None), Some(DEFAULT_GIT_EMAIL));
+        assert_eq!(default_git_email_with(true, None), None);
+        assert_eq!(
+            default_git_email_with(false, Some(OsStr::new("me@example.com"))),
+            None
+        );
+        assert_eq!(DEFAULT_GIT_EMAIL, "agent@opengeni.invalid");
     }
 }
