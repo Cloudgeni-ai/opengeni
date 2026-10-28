@@ -195,8 +195,9 @@ test("priority uses five-minute low-call polling and waits on provider rate hint
     const url = new URL(String(input));
     expect(/\/actions\/workflows\/(ci|batch-ci)\.yml\/runs$/.test(url.pathname)).toBe(true);
     expect(url.searchParams.get("event")).toBe("push");
+    // ci.yml push demand covers main and batch/<id> candidates.
     if (url.pathname.includes("/workflows/ci.yml/"))
-      expect(url.searchParams.get("branch")).toBe("main");
+      expect(url.searchParams.get("branch")).toBeNull();
     if (calls === 1) return new Response("", { status: 429, headers: { "retry-after": "60" } });
     return Response.json({
       workflow_runs:

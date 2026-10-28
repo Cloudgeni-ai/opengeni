@@ -470,13 +470,6 @@ else, so each is a broken feature, not an authority hole:
   `resolveCodexAppsCredentialIdForRun`
   (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
   execution.
-- The OAuth-callback grant rechecks over the signed `state.subjectId` in
-  `apps/api/src/integrations/{google-drive,atlassian,fiken,social-oauth}.ts`
-  and `apps/api/src/routes/connections.ts`. The generic MCP and curated API
-  Integration callbacks (`oauth-client` and `provider-oauth`) now resolve the
-  exact signed human's live personal-workspace pointer through the narrow
-  `resolveNamedManagedPersonalWorkspaceGrant` seam; the remaining provider
-  callbacks still deny personal-workspace setup rather than leaking authority.
 - SQL seams without the personal-workspace disjunct: the xAI subscription
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
@@ -490,6 +483,20 @@ else, so each is a broken feature, not an authority hole:
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
   disjunct.)
+
+The OAuth/install callback re-checks over the signed `state.subjectId` are
+repaired; do not add them back to this list. Every callback (MCP OAuth,
+Integration Definition OAuth, Google Drive, Atlassian, personal GitHub, GitHub
+App Connect, social OAuth, Fiken, and the Slack bot) re-checks its owner
+through `requireConnectOwnerAuthority`, which resolves the exact signed human's
+live personal-workspace pointer through the narrow
+`resolveNamedManagedPersonalWorkspaceGrant` seam. That works only because every
+owner-bound state signs the `personalOwnerVerified` claim through
+`connectOwnerStateFields`, and `ConnectOwner` makes the claim required on every
+re-check. Fiken and the Slack bot once omitted the claim and the legacy social
+callback used a bare `getWorkspaceGrant`; each failed only in Personal
+workspaces. `apps/api/test/connect-owner-state-surface.test.ts` keeps new
+connectors on both paths.
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER

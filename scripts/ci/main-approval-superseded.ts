@@ -104,6 +104,45 @@ export function supersededQueuedRuns(
     .map((r) => r.id);
 }
 
+export type MainRun = {
+  id: number;
+  headSha: string;
+  runAttempt: number;
+  /** When this attempt was requested. */
+  runStartedAt: string;
+  status: string;
+  conclusion: string | null;
+  versionMerge: boolean;
+};
+
+/** How often main runs the full suite while it changes (docs/merge-batcher.md). */
+export const MAIN_CI_INTERVAL_MS = 30 * 60 * 1000;
+
+/**
+ * With MAIN_CI_DEFERRED, ordinary main pushes cancel their own first attempt.
+ * Re-run the newest main SHA's run when no full run is in progress and the last
+ * one started at least the interval ago. A full run is any re-run, or a
+ * Version merge's first attempt; a run parked on an approval is not in progress.
+ */
+export function dueMainRun(runs: MainRun[], mainSha: string, now: number): number | null {
+  const head = runs.find((r) => r.headSha === mainSha);
+  if (
+    !head ||
+    head.runAttempt > 1 ||
+    head.versionMerge ||
+    head.status !== "completed" ||
+    head.conclusion !== "cancelled"
+  )
+    return null;
+  const full = runs.filter((r) => r.runAttempt > 1 || r.versionMerge);
+  if (full.some((r) => r.status !== "completed" && r.status !== "waiting")) return null;
+  const last = Math.max(
+    -Infinity,
+    ...full.map((r) => Date.parse(r.runStartedAt)).filter(Number.isFinite),
+  );
+  return now - last >= MAIN_CI_INTERVAL_MS ? head.id : null;
+}
+
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   const token = process.env.GITHUB_TOKEN;
@@ -130,6 +169,8 @@ async function main() {
     created_at: string;
     run_attempt: number;
     run_started_at: string;
+    status: string;
+    conclusion: string | null;
     head_commit?: { message?: string } | null;
   };
   const ciRuns = (query: string) =>
@@ -217,6 +258,27 @@ async function main() {
     }
   }
   if (failed) console.log(`${failed} cancels skipped; the next pass retries`);
+
+  if (process.env.MAIN_CI_DEFERRED === "true") {
+    const recent = (await ciRuns("per_page=100")).workflow_runs;
+    const due = dueMainRun(
+      recent.map((r) => ({
+        id: r.id,
+        headSha: r.head_sha,
+        runAttempt: r.run_attempt,
+        runStartedAt: r.run_started_at,
+        status: r.status,
+        conclusion: r.conclusion,
+        versionMerge: isVersionMerge(r.head_commit?.message),
+      })),
+      mainSha,
+      Date.now(),
+    );
+    console.log(
+      due ? `re-run ${due} for main ${mainSha}${dryRun ? " (dry run)" : ""}` : "main CI is not due",
+    );
+    if (due && !dryRun) await api(`actions/runs/${due}/rerun`, { method: "POST" });
+  }
 }
 
 if (import.meta.main) await main();

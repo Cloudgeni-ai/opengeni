@@ -2,8 +2,8 @@ import { index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-cor
 import type { SessionAvatar } from "@opengeni/contracts";
 
 /**
- * Bot templates saved in a workspace (migration 1008): where a new bot chat
- * starts. The foreign key to workspaces lives in the migration.
+ * Bot templates saved in a workspace (migrations 1008 and 1064): where a new
+ * bot chat starts. The foreign key to workspaces lives in the migration.
  */
 export const botTemplates = pgTable(
   "bot_templates",
@@ -15,6 +15,7 @@ export const botTemplates = pgTable(
     description: text("description").notNull().default(""),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
     setupInstructions: text("setup_instructions").notNull(),
+    visibility: text("visibility").$type<"private" | "workspace">().notNull().default("workspace"),
     sourceSessionId: uuid("source_session_id"),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

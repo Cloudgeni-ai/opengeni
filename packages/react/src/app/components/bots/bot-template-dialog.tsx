@@ -1,12 +1,14 @@
 /**
  * Create or change a bot template: the new bot's name, description and
- * avatar, and the setup instructions that become its chat's first message.
+ * avatar, the setup instructions that become its chat's first message, and
+ * who can use it (Only me, or everyone in the workspace).
  */
 import { useState } from "react";
 import { BOT_TEMPLATE_SETUP_INSTRUCTIONS_MAX_LENGTH } from "@opengeni/contracts";
-import type { SessionAvatar } from "@opengeni/sdk";
+import type { BotTemplateVisibility, SessionAvatar } from "@opengeni/sdk";
 
 import { Field, TextArea } from "../../../ui/field";
+import { SegmentedControl } from "../../../ui/segmented-control";
 import { SessionProfileDialog } from "../session/session-profile-dialog";
 
 export type BotTemplateValues = {
@@ -14,7 +16,13 @@ export type BotTemplateValues = {
   description: string;
   avatar: SessionAvatar | null;
   setupInstructions: string;
+  visibility: BotTemplateVisibility;
 };
+
+const VISIBILITY_OPTIONS = [
+  { value: "private", label: "Only me" },
+  { value: "workspace", label: "Everyone in the workspace" },
+] as const satisfies readonly { value: BotTemplateVisibility; label: string }[];
 
 export function BotTemplateDialog({
   open,
@@ -36,12 +44,14 @@ export function BotTemplateDialog({
 }) {
   const [setup, setSetup] = useState(initial.setupInstructions);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const [visibility, setVisibility] = useState(initial.visibility);
   const [opened, setOpened] = useState(open);
   if (open !== opened) {
     setOpened(open);
     if (open) {
       setSetup(initial.setupInstructions);
       setSetupError(null);
+      setVisibility(initial.visibility);
     }
   }
   return (
@@ -59,7 +69,7 @@ export function BotTemplateDialog({
       }
       description={
         mode === "save"
-          ? "Anyone in the workspace can start a bot like this one from it. Its chat history isn't included."
+          ? "Start new bots like this one from it. Its chat history isn't included."
           : "Starting from it opens a new chat with the setup instructions as its first message."
       }
       submitLabel={mode === "edit" ? "Save" : "Save template"}
@@ -79,6 +89,7 @@ export function BotTemplateDialog({
           description: values.description,
           avatar: values.avatar,
           setupInstructions: trimmed,
+          visibility,
         });
       }}
     >
@@ -88,7 +99,7 @@ export function BotTemplateDialog({
         hint={
           mode === "save"
             ? "What the new bot should set up and ask about. Tip: ask the agent in this chat to save itself as a bot template, and it writes these from what it knows."
-            : "What the new bot should set up (Skills, connections, automations, machines) and what to ask the person first."
+            : "What the new bot should set up (Skills, plugins, connections, automations, machines) and what to ask the person first."
         }
       >
         <TextArea
@@ -100,6 +111,22 @@ export function BotTemplateDialog({
             setSetup(event.target.value);
             setSetupError(null);
           }}
+        />
+      </Field>
+      <Field
+        label="Who can use it"
+        hint={
+          visibility === "private"
+            ? "Only you see it in Bot templates."
+            : "Everyone in this workspace can start bots from it."
+        }
+      >
+        <SegmentedControl
+          size="sm"
+          aria-label="Who can use it"
+          options={VISIBILITY_OPTIONS}
+          value={visibility}
+          onValueChange={setVisibility}
         />
       </Field>
     </SessionProfileDialog>

@@ -50,6 +50,8 @@ import {
   messageTimeZoneWallClock,
 } from "./message-time-zone";
 export * from "./message-time-zone";
+import { OPENING_TOOLS_MAX } from "./opening-tools";
+export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
@@ -16912,7 +16914,11 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     title: primitives.string,
     /** A notification's subtitle; empty otherwise. */
     subtitle: primitives.string.default(""),
-    /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
+    /**
+     * Plain text: for an approval, where it runs (the integration, and the
+     * account when there are several); for a notification, its message
+     * (paragraphs, "- " bullets, **bold**, `code`, links).
+     */
     body: primitives.string,
     /** A notification's label/value facts; empty otherwise. */
     facts: z
@@ -19274,6 +19280,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
+        // First-party tools the opening context is for, such as the tool that
+        // reaches the open document or record it names. The first turn loads
+        // them before its first model request, as a search by name would, so it
+        // can use them without searching; the session's tool block is unchanged.
+        // Decided once at creation. Names outside the session's tool selection
+        // are ignored; this grants no tool or permission.
+        modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
         timeZone: MessageTimeZone.optional(),
@@ -21306,6 +21319,20 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
           messages: z.number().int().positive(),
         }),
       )
+      .optional(),
+    /**
+     * The next saved message is the machine owner's own and was approved for
+     * other machines, not this one, so it can't start here and no recheck
+     * helps: it runs after the chat moves to a machine it was approved for,
+     * or it is removed and sent again here. Older servers omit it.
+     */
+    queuedTurnNotApprovedHere: z.boolean().optional(),
+    /**
+     * Where that message may run: the owner's personal machines it was
+     * approved for. Listed only for its sender; empty for everyone else.
+     */
+    queuedTurnApprovedMachines: z
+      .array(z.object({ sandboxId: primitives.uuid, machineName: primitives.string }))
       .optional(),
   }),
 );

@@ -1,11 +1,16 @@
-import { and, asc, eq, sql } from "drizzle-orm";
-import { BOT_TEMPLATES_PER_WORKSPACE_MAX, type SessionAvatar } from "@opengeni/contracts";
+import { and, asc, eq, or, sql } from "drizzle-orm";
+import {
+  BOT_TEMPLATES_PER_WORKSPACE_MAX,
+  type BotTemplateVisibility,
+  type SessionAvatar,
+} from "@opengeni/contracts";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
 /**
- * Bot templates saved in a workspace (migration 1008). Everyone in the
- * workspace reads them; the API decides who may change one.
+ * Bot templates saved in a workspace (migrations 1008 and 1064). A shared
+ * template is read by everyone in the workspace and an Only me one only by
+ * whoever saved it; the API decides who may change one.
  */
 
 export interface BotTemplateRecord {
@@ -17,6 +22,7 @@ export interface BotTemplateRecord {
   /** As stored; read it back through the contract's schema. */
   avatar: unknown;
   setupInstructions: string;
+  visibility: BotTemplateVisibility;
   sourceSessionId: string | null;
   createdBySubjectId: string | null;
   createdAt: Date;
@@ -44,6 +50,7 @@ function record(row: Row): BotTemplateRecord {
     description: row.description,
     avatar: row.avatar ?? null,
     setupInstructions: row.setupInstructions,
+    visibility: row.visibility === "private" ? "private" : "workspace",
     sourceSessionId: row.sourceSessionId,
     createdBySubjectId: row.createdBySubjectId,
     createdAt: row.createdAt,
@@ -51,16 +58,30 @@ function record(row: Row): BotTemplateRecord {
   };
 }
 
-/** The workspace's bot templates, oldest first. */
+/**
+ * The workspace's bot templates a reader sees, oldest first: the shared ones
+ * and, for a person, their own Only me ones.
+ */
 export async function listBotTemplates(
   db: Database,
   workspaceId: string,
+  readerSubjectId: string | null,
 ): Promise<BotTemplateRecord[]> {
   return await withWorkspaceRls(db, workspaceId, async (scoped) => {
     const rows = await scoped
       .select()
       .from(schema.botTemplates)
-      .where(eq(schema.botTemplates.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(schema.botTemplates.workspaceId, workspaceId),
+          readerSubjectId === null
+            ? eq(schema.botTemplates.visibility, "workspace")
+            : or(
+                eq(schema.botTemplates.visibility, "workspace"),
+                eq(schema.botTemplates.createdBySubjectId, readerSubjectId),
+              ),
+        ),
+      )
       .orderBy(asc(schema.botTemplates.createdAt), asc(schema.botTemplates.id));
     return rows.map(record);
   });
@@ -94,6 +115,7 @@ export async function createBotTemplate(
     description: string;
     avatar: SessionAvatar | null;
     setupInstructions: string;
+    visibility: BotTemplateVisibility;
     sourceSessionId: string | null;
     createdBySubjectId: string | null;
   },
@@ -119,6 +141,7 @@ export async function createBotTemplate(
         description: input.description,
         avatar: input.avatar,
         setupInstructions: input.setupInstructions,
+        visibility: input.visibility,
         sourceSessionId: input.sourceSessionId,
         createdBySubjectId: input.createdBySubjectId,
       })
@@ -137,6 +160,7 @@ export async function updateBotTemplate(
     description?: string | undefined;
     avatar?: SessionAvatar | null | undefined;
     setupInstructions?: string | undefined;
+    visibility?: BotTemplateVisibility | undefined;
   },
 ): Promise<BotTemplateRecord | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
@@ -149,6 +173,7 @@ export async function updateBotTemplate(
         ...(input.setupInstructions !== undefined
           ? { setupInstructions: input.setupInstructions }
           : {}),
+        ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
         updatedAt: sql`now()`,
       })
       .where(

@@ -46,6 +46,7 @@ const searchPage = (_workspaceId: string, options: SearchOptions) => ({
           parentSessionId: null,
           title: "Usage report follow-up",
           titleSource: "user",
+          avatar: { kind: "emoji", emoji: "📈", hue: 150 },
           status: "idle",
           pinned: false,
           archived: false,
@@ -433,6 +434,14 @@ test("typing still lists chats first, then matching Sites in their own group, wi
   expect(option("Usage dashboard").querySelector("svg")?.getAttribute("class")).toContain(
     "lucide-panels-top-left",
   );
+});
+
+test("a chat with an avatar shows it, the way its sidebar row does", async () => {
+  await openMenu();
+  await type("usage");
+  const row = option("Usage report follow-up");
+  expect(row.querySelector('[data-session-avatar="emoji"]')?.textContent).toBe("📈");
+  expect(row.querySelector("svg.lucide-message-square")).toBeNull();
 });
 
 test("with no matching chats, Sites lead; Enter opens one in the app, the way its sidebar row does", async () => {

@@ -243,6 +243,7 @@ describe("fail-closed change impact", () => {
   test.each([
     "bun.lock",
     ".bun-version",
+    ".changeset/config.json",
     ".github/workflows/ci.yml",
     ".dockerignore",
     "scripts/ci/workspace.ts",
@@ -265,6 +266,19 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("docs and changeset notes alongside code select only the code's tests", () => {
+    const code = createImpactPlan(["apps/web/src/main.tsx"]);
+    const mixed = createImpactPlan([
+      "apps/web/src/main.tsx",
+      "docs/artifact-engine.md",
+      ".changeset/quiet-web.md",
+    ]);
+    expect(mixed.mode).toBe("focused");
+    expect(mixed.unitTests).toEqual(code.unitTests);
+    expect(mixed.typecheckProjects).toEqual(code.typecheckProjects);
+    expect(createImpactPlan([".changeset/quiet-web.md"]).mode).toBe("docs");
   });
 
   test("public API surface guards follow the API, contracts, SDK, and React graph", () => {
@@ -374,6 +388,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -984,6 +999,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,

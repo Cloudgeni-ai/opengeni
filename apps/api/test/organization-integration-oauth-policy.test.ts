@@ -145,7 +145,12 @@ function deps(): ApiRouteDeps {
 test("active OAuth starts and Fiken token preparation deny before provider discovery or effects", async () => {
   await allow([]);
   const api = deps();
-  const input = { ...scope, requestUrl: "https://api.example.test/start", payload: {} };
+  const input = {
+    ...scope,
+    personalOwnershipAllowed: false,
+    requestUrl: "https://api.example.test/start",
+    payload: {},
+  };
   const starts = [
     () => startFikenOAuth(api, input),
     () =>
@@ -441,6 +446,7 @@ test("legacy Fiken callback preflights exchange and fences a restriction racing 
   const start = async () => {
     const started = await startFikenOAuth(api, {
       ...actor,
+      personalOwnershipAllowed: false,
       requestUrl: "https://api.example.test/start",
       payload: {},
     });
@@ -500,6 +506,7 @@ test("linked Fiken completed receipt and provider denial remain readable under r
     const attempt = await begin("fiken-oauth", actor);
     const started = await startFikenOAuth(api, {
       ...actor,
+      personalOwnershipAllowed: false,
       connectAttemptId: attempt.id,
       requestUrl: "https://api.example.test/start",
       payload: {},

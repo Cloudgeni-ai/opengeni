@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { GitHubAuth, GitHubReader } from "./github";
-import { config } from "./model";
+import { config, MAIN_PRE_FANOUT_JOBS } from "./model";
 
 function reader(
   jobs: Array<{ status: string; created_at?: string }>,
@@ -128,7 +128,7 @@ test("live reader honors two hosted slots and uses non-reserving complete observ
 test("queued main demand and queue-wait telemetry remain informational", async () => {
   const live = reader([
     { status: "queued", created_at: "2026-01-01T00:00:00Z" },
-    ...Array.from({ length: 4 }, () => ({ status: "completed" })),
+    ...Array.from({ length: MAIN_PRE_FANOUT_JOBS }, () => ({ status: "completed" })),
   ]);
   expect(await live.mainBusy()).toBe(false);
   expect(live.lastHeadroom).toMatchObject({
@@ -143,7 +143,7 @@ test("second slot holds on queued main while landing remains slot-neutral", asyn
   const live = reader(
     [
       { status: "queued", created_at: "2026-01-01T00:00:00Z" },
-      ...Array.from({ length: 4 }, () => ({ status: "completed" })),
+      ...Array.from({ length: MAIN_PRE_FANOUT_JOBS }, () => ({ status: "completed" })),
     ],
     { batch: true, withMain: true, maxInflight: 2 },
   );

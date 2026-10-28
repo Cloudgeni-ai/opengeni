@@ -54,18 +54,28 @@ export function connectSetupPermission(attempt: {
     : "connections:write";
 }
 
+/**
+ * The owner a Connect step or OAuth callback re-checks. `personalOwnerVerified`
+ * is required: it is the only way to find a managed human's authority in their
+ * own Personal workspace, which has no membership row, so leaving it out must
+ * be a compile error rather than a silent denial in that workspace alone.
+ */
+export type ConnectOwner = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  personalOwnerVerified: boolean;
+  externalContinuation?: ExternalActorContinuation;
+};
+
 /** Accept only a verified request owner or authenticated server-minted OAuth
  * state. The callback does not need a browser cookie: it rechecks the stored
- * principal against current authority before claiming and committing effects. */
+ * principal against current authority before claiming and committing effects.
+ * Every OAuth/install callback re-checks its owner here, never through a bare
+ * membership lookup (`connect-owner-state-surface.test.ts`). */
 export async function requireConnectOwnerAuthority(
   db: Database,
-  state: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    personalOwnerVerified?: boolean;
-    externalContinuation?: ExternalActorContinuation;
-  },
+  state: ConnectOwner,
   permission: Permission = "connections:write",
   origin: ExternalActorContinuation | null = null,
 ): Promise<void> {

@@ -10,8 +10,9 @@ import { defineSchema } from "./define-schema";
  * A bot template is where a new bot starts: a name, description and avatar,
  * plus setup instructions that become the new chat's first message. The
  * agent then sets itself up with its ordinary tools (Skills, connections,
- * schedules, machines) and the chat simply continues. A workspace keeps the
- * templates its people and agents save.
+ * schedules, machines, plugins) and the chat simply continues. A workspace
+ * keeps the templates its people and agents save, each either Only me or
+ * shared with the workspace, like a chat.
  *
  * This module must not import `./index`.
  */
@@ -143,6 +144,15 @@ const BotTemplateSetupInstructions = /* @__PURE__ */ defineSchema(() =>
   z.string().trim().min(1).max(BOT_TEMPLATE_SETUP_INSTRUCTIONS_MAX_LENGTH),
 );
 
+/**
+ * Who sees a template: `private` (Only me) is whoever saved it; `workspace`
+ * is everyone in the workspace. The same two words a chat uses.
+ */
+export const BotTemplateVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["private", "workspace"]),
+);
+export type BotTemplateVisibility = z.infer<typeof BotTemplateVisibility>;
+
 /** A template saved in a workspace. */
 export const WorkspaceBotTemplate = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -152,6 +162,7 @@ export const WorkspaceBotTemplate = /* @__PURE__ */ defineSchema(() =>
     description: z.string(),
     avatar: SessionAvatar.nullable(),
     setupInstructions: z.string(),
+    visibility: BotTemplateVisibility,
     /** The chat it was saved from, when it was saved from one. */
     sourceSessionId: Uuid.nullable(),
     /** Who saved it; null when a workspace-level caller did. */
@@ -171,6 +182,9 @@ export const CreateBotTemplateRequest = /* @__PURE__ */ defineSchema(() =>
       description: BotTemplateDescription.default(""),
       avatar: SessionAvatar.nullable().default(null),
       setupInstructions: BotTemplateSetupInstructions,
+      /** Only a person can keep a template to themselves. */
+      visibility: BotTemplateVisibility.default("workspace"),
+      /** A chat in this workspace the caller can open. */
       sourceSessionId: Uuid.nullable().default(null),
     })
     .strict(),
@@ -186,6 +200,7 @@ export const UpdateBotTemplateRequest = /* @__PURE__ */ defineSchema(() =>
       description: BotTemplateDescription.optional(),
       avatar: SessionAvatar.nullable().optional(),
       setupInstructions: BotTemplateSetupInstructions.optional(),
+      visibility: BotTemplateVisibility.optional(),
     })
     .strict(),
 );

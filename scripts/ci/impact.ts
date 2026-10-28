@@ -61,7 +61,9 @@ export function impactPlanConsoleSummary(plan: ImpactPlan, outputPath: string): 
 
 const GLOBAL_FENCES = [
   /^\.bun-version$/,
-  /^\.changeset\//,
+  // A changeset note only feeds the release plan, which source contracts
+  // validate on every run; changeset configuration still fences.
+  /^\.changeset\/(?![^/]+\.md$)/,
   /^\.github\//,
   /^\.dockerignore$/,
   /^\.npmrc$/,
@@ -97,7 +99,8 @@ const PUBLIC_API_WORKSPACES = new Set([
   "@opengeni/sdk",
 ]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
-const DOC_PATTERN = /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/;
+const DOC_PATTERN =
+  /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md|\.changeset\/[^/]+\.md)$/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",
@@ -310,6 +313,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-menus.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/teams-approval.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/testing",
@@ -855,6 +863,12 @@ export function createImpactPlan(
   const direct = new Set<string>();
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
+    // Docs and changeset notes select no tests; the docs, format and
+    // release-plan guards check them on every run.
+    if (DOC_PATTERN.test(path)) {
+      reasons.push({ path, reason: "documentation or changeset note" });
+      continue;
+    }
     const pkg = workspaceForPath(graph, path);
     if (pkg && !ARTIFACT_SKILL_PATTERN.test(path)) {
       direct.add(pkg.name);

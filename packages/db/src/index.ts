@@ -887,6 +887,8 @@ import {
 import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
+  type InteractionRequestCurrentTarget,
+  InteractionRequestRefusedError,
   InteractionResourceStateError,
   persistAttemptInteractionInterventionInTransaction,
   resolveInteractionInterventionInTransaction,
@@ -917,6 +919,8 @@ import {
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageTimeZoneFromTurnMetadata,
   normalizeMessageTimeZone,
+  OPENING_TOOLS_METADATA_KEY,
+  openingToolsFromTurnMetadata,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -42483,6 +42487,32 @@ export async function listTurnOpenSuffixToolCalls(
 }
 
 /**
+ * The interaction_request_human calls of a turn that hold an intervention: a
+ * request recorded at a pause, or a wait attached to one. Any status counts;
+ * a call not listed was refused (or never reached a pause).
+ */
+export async function listRecordedInteractionToolCallIds(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; toolCallIds: string[] },
+): Promise<Set<string>> {
+  if (input.toolCallIds.length === 0) return new Set();
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ toolCallId: schema.interactionInterventions.originatingToolCallId })
+      .from(schema.interactionInterventions)
+      .where(
+        and(
+          eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+          eq(schema.interactionInterventions.originatingSessionId, input.sessionId),
+          eq(schema.interactionInterventions.originatingTurnId, input.turnId),
+          inArray(schema.interactionInterventions.originatingToolCallId, input.toolCallIds),
+        ),
+      );
+    return new Set(rows.flatMap((row) => (row.toolCallId ? [row.toolCallId] : [])));
+  });
+}
+
+/**
  * Remove completed receipts only after the full SDK call/result batch is
  * durable. Until then every raw result remains available to an attempt-ending
  * transaction, including reverse-completing parallel calls.
@@ -70685,6 +70715,26 @@ export function storedSessionAvatar(value: unknown): SessionAvatar | null {
 }
 
 /**
+ * A chat's name and avatar, as a bot shows itself outside the console (its
+ * Slack posts). Null when the chat does not exist in this workspace.
+ */
+export async function getSessionBotIdentity(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ title: string | null; avatar: SessionAvatar | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ title: schema.sessions.title, avatar: schema.sessions.avatar })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return { title: row.title?.trim() || null, avatar: storedSessionAvatar(row.avatar) };
+  });
+}
+
+/**
  * Set a chat's description and/or avatar (display metadata) and append its
  * public `session.profile_set` event under the canonical session event-write
  * lock, like {@link updateSessionTitleWithEvent}. Only the named fields change;
@@ -72168,6 +72218,12 @@ export type InitializeSessionStartInput = {
    */
   initialTimeZone?: string;
   /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection, frozen in the initial turn's metadata. That turn's first model
+   * step loads them as a search by name would.
+   */
+  initialOpeningTools?: readonly string[];
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -72226,10 +72282,16 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
-  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+  const openingTools = openingToolsFromTurnMetadata({
+    [OPENING_TOOLS_METADATA_KEY]: input.initialOpeningTools,
+  });
+  return {
+    ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+    ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+  };
 }
 
 /**
@@ -82544,6 +82606,8 @@ export type ApplySessionTurnSettlementInput = {
       operationId: string;
       toolCallId: string;
       input: RequestHumanInteractionToolInput;
+      /** The target as read at this pause, or why it could not be read. */
+      currentTarget?: InteractionRequestCurrentTarget | string;
     }>;
   };
   recording?: SessionTurnRecordingSettlement;
@@ -83047,6 +83111,7 @@ export async function applySessionTurnSettlement(
         }),
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
+      let interactionRefusalEvent: AppendEventInput | null = null;
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -83189,25 +83254,57 @@ export async function applySessionTurnSettlement(
           }
         }
         for (const request of interactionInterventionRequests) {
-          await persistAttemptInteractionInterventionInTransaction(tx as unknown as Database, {
-            ...request,
-            accountId: session.accountId,
-            workspaceId,
-            originatingSessionId: input.sessionId,
-            originatingTurnId: input.turnId,
-            originatingAttemptId: input.attemptId,
-          });
+          try {
+            // A savepoint, so a refused request leaves nothing behind.
+            await tx.transaction(async (savepoint) => {
+              await persistAttemptInteractionInterventionInTransaction(
+                savepoint as unknown as Database,
+                {
+                  ...request,
+                  accountId: session.accountId,
+                  workspaceId,
+                  originatingSessionId: input.sessionId,
+                  originatingTurnId: input.turnId,
+                  originatingAttemptId: input.attemptId,
+                },
+              );
+            });
+          } catch (error) {
+            if (!(error instanceof InteractionRequestRefusedError)) throw error;
+            // The agent learns why as this call's result: the pause records
+            // a system rejection, so the turn resumes at once instead of
+            // failing. One decision resumes a pause, so a second refused call
+            // stays pending; the worker's re-freeze after the first is
+            // answered passes it here again and it is refused the same way.
+            interactionRefusalEvent ??= {
+              type: "user.approvalDecision",
+              payload: {
+                approvalId: request.toolCallId,
+                decision: "reject",
+                refusal: error.refusal,
+              },
+              clientEventId: `system:interaction-request-refused:${request.id}:${turn.executionGeneration}`,
+            };
+          }
         }
         // The child is now blocked on a human. Tell its parent through the
         // durable outbox (the worker delivers it): one row per exact
         // (child, turn, generation), so a same-generation re-freeze after an
         // activity retry dedupes and a later generation is a new notice.
-        await enqueueChildRequiresActionOutboxTx(tx as unknown as Database, workspaceId, session, {
-          turnId: input.turnId,
-          turnGeneration: turn.executionGeneration,
-          humanInputRequests,
-          pendingApprovals: input.runState.pendingApprovals,
-        });
+        // A refused request resumes the turn at once, so nobody is waited on.
+        if (!interactionRefusalEvent) {
+          await enqueueChildRequiresActionOutboxTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            {
+              turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              humanInputRequests,
+              pendingApprovals: input.runState.pendingApprovals,
+            },
+          );
+        }
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -83556,6 +83653,7 @@ export async function applySessionTurnSettlement(
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
+        ...(interactionRefusalEvent ? [interactionRefusalEvent] : []),
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {

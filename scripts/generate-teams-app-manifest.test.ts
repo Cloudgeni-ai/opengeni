@@ -24,7 +24,11 @@ describe("Teams app package", () => {
     const manifest = buildTeamsAppManifest(options);
     expect(manifest.id).toBe(options.appId);
     expect(manifest.bots[0]?.botId).toBe(options.botId);
-    expect(manifest.bots[0]?.scopes).toEqual(["personal", "team"]);
+    expect(manifest.bots[0]?.scopes).toEqual(["personal"]);
+    expect(buildTeamsAppManifest({ ...options, groupChats: true }).bots[0]?.scopes).toEqual([
+      "personal",
+      "groupchat",
+    ]);
     expect(manifest.manifestVersion).toBe("1.25");
     expect(manifest.validDomains).toEqual(["pilot.example.com"]);
     for (const key of [

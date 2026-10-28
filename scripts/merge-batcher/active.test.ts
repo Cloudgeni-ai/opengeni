@@ -32,6 +32,7 @@ import {
   type FollowupPull,
   type BatchReservation,
 } from "./model";
+import { MAIN_PRE_FANOUT_JOBS } from "./model";
 
 const NOW = "2026-10-21T12:00:00.000Z";
 const roots: string[] = [];
@@ -1410,10 +1411,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           if (path.includes("/jobs?"))
             return Response.json({
               // One queued job after the MAIN_PRE_FANOUT_JOBS pre-plan jobs.
-              total_count: 5,
+              total_count: MAIN_PRE_FANOUT_JOBS + 1,
               jobs: [
                 { status: "queued" },
-                ...Array.from({ length: 4 }, () => ({ status: "completed" })),
+                ...Array.from({ length: MAIN_PRE_FANOUT_JOBS }, () => ({ status: "completed" })),
               ],
             });
           const status = new URL(path).searchParams.get("status");
@@ -2463,7 +2464,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         run: { id: 1000, status: "waiting", ...MAIN },
         jobs: () =>
           approved
-            ? page(jobs("queued", "queued", "completed", "completed", "completed"))
+            ? page(jobs("queued", "queued", "completed", "completed", "completed", "completed"))
             : page(jobs("waiting", "waiting", "completed")),
       };
       const fixtures = [transition, ...idleOther(32)];

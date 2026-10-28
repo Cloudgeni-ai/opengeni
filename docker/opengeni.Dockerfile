@@ -259,11 +259,12 @@ ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
 # Voice normalization/segmentation executes ffmpeg here, without a worker hop.
-# Artifact rasterization needs fonts. Documents upload parsing is queued to the
+# Artifact rasterization needs fonts; a bot's emoji avatar for Slack is drawn
+# with the colour emoji font. Documents upload parsing is queued to the
 # existing control worker, so LibreOffice and OCR data belong only in worker.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \

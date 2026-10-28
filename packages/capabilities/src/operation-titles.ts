@@ -58,6 +58,11 @@ const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.contact\.permanentDelete$/, "Permanently delete a contact"],
   [/\.contacts\.delta$/, "Read changes to contacts"],
   [/(^|\.)ListPeople$/, "Find people"],
+  // Work or school directory.
+  [/^users\.user\.ListUser$/, "Find colleagues"],
+  [/^users\.user\.GetUser$/, "Read a colleague's profile"],
+  [/^(me|users)\.GetManager$/, "Read a manager"],
+  [/^(me|users)\.ListDirectReports$/, "Read direct reports"],
   // OneDrive and SharePoint files. An item is a file or a folder.
   [/^drives\.CreateItems$/, "Create a file or folder"],
   [/^drives\.UpdateItems$/, "Update a file or folder"],
@@ -76,6 +81,20 @@ const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   [/\.driveItem\.permanentDelete$/, "Permanently delete a file or folder"],
   [/\.(drive|driveItem)\.search$/, "Search files"],
   [/\.(drive|root|driveItem)\.delta$/, "Read changes to files"],
+  // SharePoint sites, lists and Microsoft 365 search.
+  [/^search\.query$/, "Search Microsoft 365"],
+  [/^sites\.site\.ListSite$/, "Find SharePoint sites"],
+  [/^sites\.site\.GetSite$/, "Read a SharePoint site"],
+  [/^sites\.site\.getByPath$/, "Read a SharePoint site"],
+  [/^sites\.ListSites$/, "Read subsites"],
+  [/^me\.ListFollowedSites$/, "Read followed sites"],
+  [/^sites\.(ListDrives|GetDrive)$/, "Read document libraries"],
+  [/^sites\.(ListLists|GetLists)$/, "Read SharePoint lists"],
+  [/^sites\.lists\.(ListItems|GetItems)$/, "Read list items"],
+  [/^sites\.lists\.CreateItems$/, "Add a list item"],
+  [/^sites\.lists\.items\.UpdateFields$/, "Update a list item"],
+  [/^sites\.ListPages$/, "Read site pages"],
+  [/^drives\.GetRoot$/, "Read a library's top folder"],
   // Teams.
   [/^chats\.CreateMessages$/, "Send a chat message"],
   [/^chats\.ListMessages$/, "Read chat messages"],

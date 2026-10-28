@@ -53,8 +53,12 @@ describe("shared OAuth account policy", () => {
     });
   });
   test("verified reconnect cannot lose proof or change issuer", () => {
+    // A failed identity read is unknown, not evidence of a different account.
+    expect(
+      decide({ requestedConnectionId: "existing", metadata: { ...metadata, subject: undefined } }),
+    ).toEqual({ kind: "reject", reason: "account_identity_unavailable" });
     for (const value of [
-      { ...metadata, subject: undefined },
+      { ...metadata, subject: "other" },
       { ...metadata, authorizationServerIssuer: "https://other.test" },
     ]) {
       expect(decide({ requestedConnectionId: "existing", metadata: value })).toEqual({

@@ -168,6 +168,7 @@ export {
   annotationDisplayOrdinal,
   annotationFromSelection,
   annotationHasNote,
+  annotationQuoteText,
   bestQuoteOccurrence,
   matchingQuoteInSource,
   occurrenceOffsets,

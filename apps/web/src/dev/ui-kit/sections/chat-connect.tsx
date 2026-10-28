@@ -44,11 +44,49 @@ function emptyList(): unknown {
   return Object.assign([], { items: [], definitions: [], integrations: [], machines: [] });
 }
 
+/** The marketplace plugin the plugin card offers: two Skills and an MCP server. */
+const PLUGIN = {
+  id: "anthropic:sentry",
+  provider: "anthropic",
+  name: "sentry",
+  displayName: "Sentry",
+  description: "Find, triage and explain production errors from Sentry.",
+  category: "Monitoring",
+  sourceUrl: "https://github.com/example/plugins/tree/main/sentry",
+  logoUrl: null,
+  author: { name: "Sentry" },
+  skills: [
+    {
+      name: "triage-errors",
+      description: "Group the newest errors and say which one to fix first.",
+      sourceUrl: "https://github.com/example/plugins/tree/main/sentry/skills/triage-errors",
+    },
+    {
+      name: "explain-issue",
+      description: "Explain one Sentry issue with its stack trace and recent changes.",
+      sourceUrl: "https://github.com/example/plugins/tree/main/sentry/skills/explain-issue",
+    },
+  ],
+  mcpServers: [
+    {
+      name: "sentry",
+      transport: "http",
+      endpoint: "https://mcp.sentry.dev/mcp",
+      requiresConfiguration: false,
+    },
+  ],
+};
+
 const client = new Proxy(
   {
     catalogAssetUrl: () => null,
     connectTransport: () => ({}),
     listCapabilities: async () => ({ items: CATALOG.map((item) => ({ ...item, enabled: false })) }),
+    discoverPlugins: async () => ({ items: [PLUGIN], nextCursor: null }),
+    listInstalledPlugins: async () => ({ plugins: [] }),
+    previewPlugin: async () => {
+      throw new Error("The UI kit doesn't install plugins.");
+    },
     inspectMcpAuthentication: async () => ({ kind: "none" }),
     getGitHubApp: async () => ({
       status: "unbound",
@@ -97,6 +135,7 @@ const context = new Proxy(
             "connections:write",
             "capabilities:manage",
             "sessions:read",
+            "sessions:control",
           ],
         },
       ],
@@ -133,7 +172,7 @@ function notice(id: string, extra: Partial<AuthNeededItem>): AuthNeededItem {
 function capability(
   id: string,
   name: string,
-  kind: "mcp" | "api",
+  kind: "mcp" | "api" | "plugin",
   rationale: string,
 ): AuthNeededItem["capability"] {
   return {
@@ -207,6 +246,22 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
       ),
     }),
     ask: ["Open a PR with the fix.", "I need GitHub access for this repository. Connect it below."],
+  },
+  plugin: {
+    label: "Plugin (Skills and an MCP server)",
+    item: notice("plugin", {
+      providerDomain: "sentry.io",
+      capability: capability(
+        "plugin:marketplace/anthropic/sentry",
+        "Sentry",
+        "plugin",
+        "Install the Sentry plugin so I can triage this morning's errors.",
+      ),
+    }),
+    ask: [
+      "Set yourself up to triage our Sentry errors.",
+      "There's a Sentry plugin with triage Skills and its MCP server. Install it below.",
+    ],
   },
 };
 
