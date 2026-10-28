@@ -4155,6 +4155,15 @@ export const englishMessages = {
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
   "sessionAdmission.aMember": "another member",
+  "sessionAdmission.approvedElsewhereBody":
+    "You sent it for “{approved}”, but this chat now runs on “{machine}”. A saved message only runs on the machine it was sent for.",
+  "sessionAdmission.approvedElsewhereNext":
+    "Run it on “{approved}”, or remove it from the queue and send it again to use “{machine}”.",
+  "sessionAdmission.approvedElsewhereOfflineNext":
+    "“{approved}” is offline right now. Run it there once it’s back, or remove it from the queue and send it again to use “{machine}”.",
+  "sessionAdmission.approvedElsewhereTitle": "Your message is waiting for “{approved}”",
+  "sessionAdmission.approvedElsewhereUnavailableNext":
+    "“{approved}” isn’t available to this chat right now. Remove the message from the queue and send it again to use “{machine}”.",
   "sessionAdmission.cantRecheckNote":
     "Someone with permission to control this session can recheck after the issue is resolved.",
   "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
@@ -4173,10 +4182,10 @@ export const englishMessages = {
     "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
   "sessionAdmission.genericTitle": "Couldn't start",
   "sessionAdmission.grantBody":
-    "A personal resource needed by this chat hasn't been authorized. Your queued work is saved.",
+    "The next message needs a machine or other personal resource that isn’t approved for this chat. Your queued work is saved.",
   "sessionAdmission.grantNext":
-    "Ask its owner to grant access, or choose a resource you can use. Then recheck to continue. It will not retry automatically.",
-  "sessionAdmission.grantTitle": "Resource permission needed",
+    "Choose one this chat may use, or ask the person it belongs to to allow it here. Then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.grantTitle": "Not approved for this chat",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
   "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
@@ -4203,6 +4212,11 @@ export const englishMessages = {
   "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
   "sessionAdmission.noMachineChoices":
     "No workspace or cloud machine is available for this chat right now.",
+  "sessionAdmission.notApprovedHereBody":
+    "It was sent before this chat moved to “{machine}”, so it isn’t approved for this machine.",
+  "sessionAdmission.notApprovedHereNext":
+    "Remove it from the queue and send it again to use “{machine}”, or move the chat to a workspace or cloud machine.",
+  "sessionAdmission.notApprovedHereTitle": "Your message can’t run on “{machine}”",
   "sessionAdmission.otherMachineDraftNext":
     "Your draft stays here. Choose a machine you can use, or ask {owner} about sharing this machine with the workspace.",
   "sessionAdmission.otherMachineExplanation":
@@ -4211,6 +4225,11 @@ export const englishMessages = {
     "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
+  "sessionAdmission.othersApprovedElsewhereBody":
+    "{owner} sent it for another machine, so it can’t run on “{machine}”.",
+  "sessionAdmission.othersApprovedElsewhereNext":
+    "{owner} can move the chat back to that machine, or send the message again here.",
+  "sessionAdmission.othersApprovedElsewhereTitle": "A message is waiting for another machine",
   "sessionAdmission.othersMessagesWaitingNext_one":
     "{owner}’s next message brings it to the agent.",
   "sessionAdmission.othersMessagesWaitingNext_other":
@@ -4252,6 +4271,7 @@ export const englishMessages = {
   "sessionAdmission.requestCopied": "Request copied",
   "sessionAdmission.requestCopiedNote":
     "Paste it into a message to the owner. Nothing has been sent.",
+  "sessionAdmission.runOnApprovedMachine": "Run it on {approved}",
   "sessionAdmission.savedMessageMachineNote":
     "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
   "sessionAdmission.theMachineOwner": "the machine owner",

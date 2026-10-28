@@ -113,6 +113,7 @@ export const SECTION_KEYS = [
   "chat-questions",
   "chat-connect",
   "chat-answers",
+  "chat-admission",
   // Foundations
   "logo-tile",
   "relative-time",
@@ -733,6 +734,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Show options the agent found as cards, a table and a chart the person can filter and pick from.",
     usedOn: "Chat, embedded chat and phone",
     load: () => import("./chat-answers"),
+  },
+  {
+    key: "chat-admission",
+    group: "Chat",
+    title: "Messages that can't start",
+    purpose:
+      "Say why a saved message didn't start, name the machine involved, and offer the one way forward.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-admission"),
   },
   {
     key: "cadence-picker",

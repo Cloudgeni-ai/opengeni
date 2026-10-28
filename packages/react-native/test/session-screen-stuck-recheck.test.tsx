@@ -388,3 +388,43 @@ test("a message refused on someone else's personal machine says only its owner c
   expect(view.container.textContent).toContain("Only Kari can start new work there.");
   await view.unmount();
 });
+
+test("a message sent for the owner's other machine names it and runs it there, with no futile Try again", async () => {
+  // Machine reads are cached per session, so this chat is a fresh one.
+  session = { ...grantBlockedSession, id: "session-b", activeSandboxId: "laptop" };
+  machinesResponse = {
+    activeSandboxId: "laptop",
+    activeEpoch: 1,
+    machines: [
+      { sandboxId: "server", name: "Home server", scope: "user", state: "online", active: false },
+    ],
+    sessionMachineAccess: {
+      sandboxId: "laptop",
+      machineName: "Laptop",
+      ownerName: "Kari",
+      isOwner: true,
+      queuedTurnBlocked: false,
+      queuedTurnNotApprovedHere: true,
+      queuedTurnApprovedMachines: [{ sandboxId: "server", machineName: "Home server" }],
+    },
+  };
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("Your message is waiting for “Home server”");
+  expect(view.container.textContent).toContain("this chat now runs on “Laptop”");
+  expect(view.container.querySelector('button[aria-label="Try again"]')).toBeNull();
+  const run = view.container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Run it on Home server"]',
+  );
+  expect(run).not.toBeNull();
+  await actRun(async () => run!.click());
+  await flush();
+  // Moved, then one fenced recheck.
+  expect(resumes).toHaveLength(1);
+  expect((resumes[0]!.args[2] as { expectedControlEtag: string }).expectedControlEtag).toBe(
+    "etag-4",
+  );
+  resumes[0]!.done.resolve({});
+  await flush();
+  await view.unmount();
+});
