@@ -69,9 +69,15 @@ test("the rail starts below the desktop window bar and scrolls clear of the wind
           const box = (await toggle.boundingBox())!;
           expect(box.x).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
           expect(box.y + box.height).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
-          expect((await windowBarControls(page)).map((control) => control.buttons)).toEqual([
-            ["Collapse sidebar"],
-          ]);
+          expect(
+            (await windowBarControls(page)).map(({ visible, buttons }) => ({ visible, buttons })),
+          ).toEqual([{ visible: true, buttons: ["Collapse sidebar"] }]);
+          // The bar comes first on screen and first in the tab order.
+          await page.keyboard.press("Tab");
+          expect(
+            await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+          ).toBe("Collapse sidebar");
+          await page.keyboard.press("Shift+Tab");
         } else {
           expect(await sidebarToggles.count()).toBe(1);
         }
@@ -101,6 +107,34 @@ test("the rail starts below the desktop window bar and scrolls clear of the wind
         await page.keyboard.press("Enter");
         await toggle.waitFor();
         expect((await viewport.boundingBox())!.y).toBe(top);
+        if (platform === "macos") {
+          // The session page's workspace dock: below 1024px a full-window
+          // overlay, mounted but hidden while closed. Closed, the toggle stays
+          // in the bar; open, the overlay is the window's inset panel and the
+          // toggle, with nothing to show or hide under it, steps aside.
+          const shown = async () =>
+            (await windowBarControls(page)).map((control) => control.visible);
+          expect(await shown()).toEqual([true]);
+          await page.getByRole("button", { name: "Open workspace", exact: true }).click();
+          await page.getByRole("button", { name: "Close workspace", exact: true }).waitFor();
+          if (width < 1024) {
+            expect(await shown()).toEqual([false]);
+            const overlay = (await page.locator("[data-workspace-surface]").boundingBox())!;
+            expect(overlay).toEqual({
+              x: 4,
+              y: WINDOW_BAR_HEIGHT,
+              width: width - 8,
+              height: 420 - WINDOW_BAR_HEIGHT - 4,
+            });
+          } else {
+            expect(await shown()).toEqual([true]);
+          }
+          await expectWindowTop(page, platform);
+          await page.getByRole("button", { name: "Close workspace", exact: true }).click();
+          await toggle.waitFor();
+          expect(await shown()).toEqual([true]);
+          await expectWindowTop(page, platform);
+        }
         expect(errors).toEqual([]);
         await page.close();
       }

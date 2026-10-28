@@ -151,13 +151,13 @@ describe("the desktop window bar", () => {
     }
     // Below the bar the layout is the web app's own: same places on Windows,
     // and on macOS the same within the panel's 1px border and its 4px inset
-    // (a centred column moves by half of it).
+    // (a centred column moves by half of it, plus the border).
     for (const [key, box] of title) {
       if (!key.startsWith("browser-")) continue;
       expect({ key, ...title.get(key.replace("browser", "windows"))! }).toEqual({ key, ...box });
       const mac = title.get(key.replace("browser", "macos"))!;
       expect({ key, y: mac.y }).toEqual({ key, y: box.y + 1 });
-      expect({ key, near: Math.abs(mac.x - box.x) <= 5 }).toEqual({ key, near: true });
+      expect({ key, near: Math.abs(mac.x - box.x) <= 3 }).toEqual({ key, near: true });
     }
     // And the web app is unchanged: 24px past the rail below 1024px, then the
     // centred column with its 32px inset.

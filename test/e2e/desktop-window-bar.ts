@@ -76,23 +76,25 @@ export async function contentUnderWindowBar(page: Page): Promise<string[]> {
   }, WINDOW_BAR_HEIGHT);
 }
 
-/** The controls the page places in the window bar, with their boxes and drag behaviour. */
+/**
+ * The controls the page places in the window bar, with their boxes, drag
+ * behaviour and whether they are shown (a full-window layer hides them).
+ */
 export async function windowBarControls(page: Page) {
   return page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>("[data-window-bar-controls]")]
-      .filter((element) => element.getClientRects().length > 0)
-      .map((element) => {
-        const box = element.getBoundingClientRect();
-        return {
-          left: box.left,
-          top: box.top,
-          bottom: box.bottom,
-          drag: getComputedStyle(element).getPropertyValue("-webkit-app-region"),
-          buttons: [...element.querySelectorAll("button")].map(
-            (button) => button.getAttribute("aria-label") ?? "",
-          ),
-        };
-      }),
+    [...document.querySelectorAll<HTMLElement>("[data-window-bar-controls]")].map((element) => {
+      const box = element.getBoundingClientRect();
+      return {
+        visible: element.getClientRects().length > 0,
+        left: box.left,
+        top: box.top,
+        bottom: box.bottom,
+        drag: getComputedStyle(element).getPropertyValue("-webkit-app-region"),
+        buttons: [...element.querySelectorAll("button")].map(
+          (button) => button.getAttribute("aria-label") ?? "",
+        ),
+      };
+    }),
   );
 }
 
@@ -140,7 +142,7 @@ export async function expectWindowTop(page: Page, platform: string) {
     expect(bar).toBeNull();
   }
   if (platform === "macos") {
-    for (const control of controls) {
+    for (const control of controls.filter((each) => each.visible)) {
       expect(control.left).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
       expect(control.top).toBeGreaterThanOrEqual(0);
       expect(control.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);

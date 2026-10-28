@@ -80,7 +80,10 @@ html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   position: fixed;
   inset: 0 0 auto;
   /* Above the page, below full-window layers and dialogs (z-index 50), whose
-     backdrops dim it like the rest of the window. */
+     backdrops dim it like the rest of the window. The macOS app's own bar
+     controls (`[data-window-bar-controls]`, the sidebar toggle) sit one above
+     it at 46, from 84px: clear of the traffic lights and of the wider badge
+     macOS shows while the window is shared or recorded. */
   z-index: 45;
   height: var(--og-window-bar-height);
   background-color: var(--og-color-bg);
@@ -183,12 +186,14 @@ html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surfa
   overflow: hidden;
 }
 
-html[data-desktop="macos"]:has(:is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer]) [data-window-bar-controls] {
+html[data-desktop="macos"]:has(:is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer]:not([hidden])) [data-window-bar-controls] {
   display: none;
 }
 
 @layer components {
-  html[data-desktop="macos"] .og-rail-glow {
+  /* The docked rails are part of the window frame, which carries the glow.
+     A rail in a sheet (a narrow window) keeps its own. */
+  html[data-desktop="macos"] [data-shell-rail] .og-rail-glow {
     background: transparent;
   }
 }

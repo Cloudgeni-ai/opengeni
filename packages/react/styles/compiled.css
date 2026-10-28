@@ -1075,6 +1075,9 @@
 :where(.og-root).left-\[38\%\],:where(.og-root) .left-\[38\%\] {
     left: 38%;
   }
+:where(.og-root).left-\[84px\],:where(.og-root) .left-\[84px\] {
+    left: 84px;
+  }
 :where(.og-root).isolate,:where(.og-root) .isolate {
     isolation: isolate;
   }
@@ -1104,6 +1107,9 @@
   }
 :where(.og-root).z-\[35\],:where(.og-root) .z-\[35\] {
     z-index: 35;
+  }
+:where(.og-root).z-\[46\],:where(.og-root) .z-\[46\] {
+    z-index: 46;
   }
 :where(.og-root).z-\[60\],:where(.og-root) .z-\[60\] {
     z-index: 60;
@@ -1580,6 +1586,9 @@
   }
 :where(.og-root).\!h-auto,:where(.og-root) .\!h-auto {
     height: auto !important;
+  }
+:where(.og-root).h-\(--og-window-bar-height\),:where(.og-root) .h-\(--og-window-bar-height\) {
+    height: var(--og-window-bar-height);
   }
 :where(.og-root).h-0,:where(.og-root) .h-0 {
     height: calc(var(--spacing) * 0);

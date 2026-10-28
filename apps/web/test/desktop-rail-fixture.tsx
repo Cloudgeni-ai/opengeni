@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
-import { OpenGeniProvider } from "@opengeni/react";
+import { useState } from "react";
+import { OpenGeniProvider, WorkspaceDock } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { RailBody } from "../src/components/rail/rail-shell";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
@@ -14,6 +15,9 @@ localStorage.setItem("opengeni.rail.nav", "true");
 
 function Preview() {
   const rail = useRail();
+  // The session page's real workspace dock, closed until asked: below 1024px
+  // it is a full-window overlay that stays mounted (hidden) while closed.
+  const [dockClosed, setDockClosed] = useState(true);
   return (
     <OpenGeniProvider client={client} workspaceId={workspaceId}>
       <TooltipProvider>
@@ -26,9 +30,31 @@ function Preview() {
           >
             <RailBody />
           </nav>
-          <section className="flex flex-1 items-center justify-center text-sm text-fg-muted">
-            Real sidebar components · Sample workspace data
-          </section>
+          <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <WorkspaceDock
+              collapsed={dockClosed}
+              onCollapsedChange={setDockClosed}
+              tabs={[
+                {
+                  id: "files",
+                  label: "Files",
+                  content: (
+                    <button type="button" onClick={() => setDockClosed(true)}>
+                      Close workspace
+                    </button>
+                  ),
+                },
+              ]}
+              primary={
+                <section className="flex h-full flex-col items-center justify-center gap-3 text-sm text-fg-muted">
+                  Real sidebar components · Sample workspace data
+                  <button type="button" onClick={() => setDockClosed(false)}>
+                    Open workspace
+                  </button>
+                </section>
+              }
+            />
+          </div>
         </main>
       </TooltipProvider>
     </OpenGeniProvider>

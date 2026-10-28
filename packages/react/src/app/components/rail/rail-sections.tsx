@@ -69,8 +69,9 @@ const SIDEBAR_TOGGLE_IN_WINDOW_BAR = desktopPlatform === "macos";
 
 /**
  * Controls drawn in the desktop window bar, above the page and its drag
- * region. Rendered into the body, so no rail or canvas stacking context can
- * put them under the bar.
+ * region (`z-[46]`, one above the bar's 45). Rendered into a host at the start
+ * of the body, so no rail or canvas stacking context can put them under the
+ * bar, and they come first in the tab order, as the bar comes first on screen.
  */
 function WindowBarControls({ children }: { children: ReactNode }) {
   if (typeof document === "undefined") return null;
@@ -81,8 +82,18 @@ function WindowBarControls({ children }: { children: ReactNode }) {
     >
       {children}
     </div>,
-    document.body,
+    windowBarHost(),
   );
+}
+
+function windowBarHost(): HTMLElement {
+  let host = document.querySelector<HTMLElement>("body > [data-window-bar-host]");
+  if (!host) {
+    host = document.createElement("div");
+    host.setAttribute("data-window-bar-host", "");
+    document.body.prepend(host);
+  }
+  return host;
 }
 
 /**
