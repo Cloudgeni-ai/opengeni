@@ -127,6 +127,7 @@ test("Drive callback requires an authenticated read and binds one exact personal
   let hasRefreshToken = true;
   let driveEmail = "anna@example.test";
   let identityReads = 0;
+  let aboutFails = false;
   // Exercise the real HTTP routes, PKCE state, MCP handshake, claims and database
   // writes. Only external provider transport is synthetic, with no live fallback.
   const transport = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
@@ -162,6 +163,7 @@ test("Drive callback requires an authenticated read and binds one exact personal
     if (url === "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)") {
       identityReads++;
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-drive-access");
+      if (aboutFails) return Response.json({ error: "forbidden" }, { status: 403 });
       return Response.json({ user: { emailAddress: driveEmail } });
     }
     if (url === OFFICIAL_DRIVE_MCP_URL) {
@@ -500,6 +502,32 @@ test("Drive callback requires an authenticated read and binds one exact personal
       account: { id: completed.account.id },
     });
     expect(await accounts()).toHaveLength(2);
+
+    // A failed identity read on reconnect is not reported as a different account,
+    // and leaves the stored connection untouched.
+    const beforeFailedIdentity = await getConnectionMetadata(
+      client.db,
+      identity.personalWorkspaceId,
+      completed.account.id,
+      identity.subjectId,
+    );
+    aboutFails = true;
+    const unverified = await begin(completed.account.id);
+    await callback(unverified.state);
+    expect(await read(unverified.attempt.id)).toMatchObject({
+      state: "failed",
+      credentialsCommitted: false,
+      error: { code: "account_identity_unavailable" },
+    });
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        identity.personalWorkspaceId,
+        completed.account.id,
+        identity.subjectId,
+      ),
+    ).toEqual(beforeFailedIdentity);
+    aboutFails = false;
   } finally {
     transport.mockRestore();
   }

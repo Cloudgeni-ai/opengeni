@@ -21,6 +21,7 @@ import {
   legacyMcpClientError,
   requireEnvironmentEncryption,
   withMcpStreamableHttpClient,
+  type McpStreamableHttpClient,
 } from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
@@ -2820,11 +2821,12 @@ async function verifyMcpToolsList(
   signal: AbortSignal,
   verification?: OAuthProviderProfile["remoteToolVerification"],
   identity?: AccountIdentityVerifier,
+  identityBudgetMs: () => number = () => 0,
 ): Promise<{
   tools: Array<{ name: string; description?: string }>;
-  providerIdentity?: Record<string, string>;
+  identityCheck?: AccountIdentityCheck;
 }> {
-  const { listed, providerIdentity } = await withMcpStreamableHttpClient(
+  const { listed, identityCheck } = await withMcpStreamableHttpClient(
     {
       url: resource,
       clientName: "opengeni-integration-verify",
@@ -2858,20 +2860,17 @@ async function verifyMcpToolsList(
         // Discard file metadata. Setup retains only the successful proof and tool descriptors.
       }
       // Identity only labels and de-duplicates accounts: a failure leaves it unknown.
-      const providerIdentity =
-        identity?.kind === "mcp_tool" &&
-        toolsResult.tools.some((tool) => tool.name === identity.toolName)
-          ? await client
-              .callTool(
-                { name: identity.toolName, arguments: identity.arguments },
-                { timeout: 10_000, maxTotalTimeout: 10_000 },
-              )
-              .then((result) =>
-                result.isError ? undefined : identity.validateIdentity(mcpToolResultObject(result)),
-              )
-              .catch(() => undefined)
+      const toolIdentity =
+        identity?.kind === "mcp_tool"
+          ? await mcpToolAccountIdentity(
+              client,
+              identity,
+              toolsResult.tools.map((tool) => tool.name),
+              identityBudgetMs(),
+              signal,
+            )
           : undefined;
-      return { listed: toolsResult, providerIdentity };
+      return { listed: toolsResult, identityCheck: toolIdentity };
     },
   );
   return {
@@ -2879,8 +2878,51 @@ async function verifyMcpToolsList(
       name: tool.name,
       ...(tool.description ? { description: tool.description } : {}),
     })),
-    ...(providerIdentity ? { providerIdentity } : {}),
+    ...(identityCheck ? { identityCheck } : {}),
   };
+}
+
+/** A verified identity, or the reason it stayed unknown (logged, never fatal). */
+type AccountIdentityCheck =
+  | { identity: Record<string, string>; failure?: never }
+  | { identity?: never; failure: string };
+
+/** Keep time for persisting the connection: identity never consumes the callback deadline. */
+const IDENTITY_MAX_MS = 5_000;
+const IDENTITY_RESERVE_MS = 5_000;
+
+/** Exported for tests. */
+export async function mcpToolAccountIdentity(
+  client: McpStreamableHttpClient,
+  identity: Extract<AccountIdentityVerifier, { kind: "mcp_tool" }>,
+  listedTools: readonly string[],
+  budgetMs: number,
+  signal: AbortSignal,
+): Promise<AccountIdentityCheck> {
+  if (!listedTools.includes(identity.toolName)) return { failure: "tool_missing" };
+  if (budgetMs <= 0) return { failure: "budget_exhausted" };
+  try {
+    const result = await client.callTool(
+      { name: identity.toolName, arguments: identity.arguments },
+      {
+        timeout: budgetMs,
+        maxTotalTimeout: budgetMs,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(budgetMs)]),
+      },
+    );
+    if (result.isError) return { failure: "tool_error" };
+    return { identity: identity.validateIdentity(mcpToolResultObject(result)) };
+  } catch (error) {
+    return { failure: identityFailureReason(error) };
+  }
+}
+
+function identityFailureReason(error: unknown): string {
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+    return "timeout";
+  if (error instanceof Error && /verification failed/u.test(error.message))
+    return "invalid_identity";
+  return "request_failed";
 }
 
 /** A tool result's object payload: structured content, else a JSON text block. */
@@ -2907,8 +2949,11 @@ async function verifyHttpAccountIdentity(
   settings: Settings,
   identity: Extract<AccountIdentityVerifier, { kind: "http" }>,
   token: TokenResponse,
-  signal: AbortSignal,
-): Promise<Record<string, string> | undefined> {
+  budgetMs: number,
+  outer: AbortSignal,
+): Promise<AccountIdentityCheck> {
+  if (budgetMs <= 0) return { failure: "budget_exhausted" };
+  const signal = AbortSignal.any([outer, AbortSignal.timeout(budgetMs)]);
   try {
     const response = await fetchOAuth(identity.url, settings, {
       method: "GET",
@@ -2919,7 +2964,7 @@ async function verifyHttpAccountIdentity(
     });
     if (!response.ok) {
       await cancelResponseBody(response);
-      return undefined;
+      return { failure: `http_${response.status}` };
     }
     const payload = await readResponseJsonBounded<Record<string, unknown>>(
       response,
@@ -2927,9 +2972,9 @@ async function verifyHttpAccountIdentity(
       "Connector account verification",
       { signal },
     );
-    return identity.validateIdentity(payload);
-  } catch {
-    return undefined;
+    return { identity: identity.validateIdentity(payload) };
+  } catch (error) {
+    return { failure: identityFailureReason(error) };
   }
 }
 
@@ -2955,6 +3000,8 @@ async function verifyMcpToolsListNonFatal(
     const tools = await deadline.run("tools_list", async (signal) => {
       if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
         const identity = local ? undefined : accountIdentityVerifierFor(state.mcpUrl);
+        const identityBudgetMs = () =>
+          Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
         const verified = await verifyMcpToolsList(
           settings,
           state.mcpUrl,
@@ -2962,11 +3009,17 @@ async function verifyMcpToolsListNonFatal(
           signal,
           profile?.remoteToolVerification,
           identity,
+          identityBudgetMs,
         );
-        providerIdentity =
+        const identityCheck =
           identity?.kind === "http"
-            ? await verifyHttpAccountIdentity(settings, identity, token, signal)
-            : verified.providerIdentity;
+            ? await verifyHttpAccountIdentity(settings, identity, token, identityBudgetMs(), signal)
+            : verified.identityCheck;
+        providerIdentity = identityCheck?.identity;
+        if (identityCheck?.failure)
+          observability?.warn("MCP OAuth account identity stayed unknown", {
+            reason: identityCheck.failure,
+          });
         return verified.tools;
       }
       const response = await fetchOAuth(local.url, settings, {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata } from "@opengeni/contracts";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { decideOAuthAccountConnection } from "../src/integrations/oauth-account-identity";
+import { mcpToolAccountIdentity } from "../src/integrations/oauth-client";
 import {
   OFFICIAL_DRIVE_MCP_URL,
   OFFICIAL_GMAIL_MCP_URL,
@@ -93,5 +94,45 @@ describe("reviewed account identity verifiers", () => {
     expect(decide("712020:erik")).toEqual({ kind: "write" });
     // A failed identity read stays unknown: never assumed to be a new account.
     expect(decide(undefined)).toEqual({ kind: "reject", reason: "account_identity_unavailable" });
+  });
+
+  test("the Atlassian tool check parses text or structured results and never throws", async () => {
+    const verifier = accountIdentityVerifierFor(ATLASSIAN)!;
+    if (verifier.kind !== "mcp_tool") throw new Error("expected an MCP tool verifier");
+    const calls: unknown[] = [];
+    const client = (result: unknown) =>
+      ({
+        callTool: async (params: unknown, options: unknown) => {
+          calls.push([params, options]);
+          if (result instanceof Error) throw result;
+          return result;
+        },
+      }) as never;
+    const check = (result: unknown, tools = ["atlassianUserInfo"], budget = 1_000) =>
+      mcpToolAccountIdentity(client(result), verifier, tools, budget, new AbortController().signal);
+    const text = {
+      content: [
+        { type: "text", text: "not json" },
+        { type: "text", text: JSON.stringify({ account_id: "712020:anna", email: "a@x.test" }) },
+      ],
+    };
+    expect(await check(text)).toEqual({
+      identity: { atlassianAccountId: "712020:anna", atlassianEmail: "a@x.test" },
+    });
+    expect(await check({ structuredContent: { account_id: "712020:erik" } })).toEqual({
+      identity: { atlassianAccountId: "712020:erik" },
+    });
+    expect(await check({ isError: true, content: [] })).toEqual({ failure: "tool_error" });
+    expect(await check({ content: [{ type: "text", text: "{}" }] })).toEqual({
+      failure: "invalid_identity",
+    });
+    expect(await check(new Error("socket closed"))).toEqual({ failure: "request_failed" });
+    const timeout = new Error("timed out");
+    timeout.name = "TimeoutError";
+    expect(await check(timeout)).toEqual({ failure: "timeout" });
+    calls.length = 0;
+    expect(await check(text, ["getJiraIssue"])).toEqual({ failure: "tool_missing" });
+    expect(await check(text, undefined, 0)).toEqual({ failure: "budget_exhausted" });
+    expect(calls).toEqual([]);
   });
 });

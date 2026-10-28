@@ -468,7 +468,6 @@ const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> =
   [OFFICIAL_DRIVE_MCP_URL, GOOGLE_DRIVE_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp/authv2", ATLASSIAN_ROVO_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp", ATLASSIAN_ROVO_IDENTITY],
-  ["https://mcp.atlassian.com/v1/sse", ATLASSIAN_ROVO_IDENTITY],
 ]);
 
 /** The reviewed identity check for an exact MCP URL, when its profile has none. */

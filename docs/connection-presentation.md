@@ -114,10 +114,13 @@ Reviewed adapters exist for Slack, Gmail and Google Calendar (in their OAuth
 profiles) and, by exact MCP URL in `accountIdentityVerifierFor`
 (`apps/api/src/integrations/oauth-profiles.ts`), for Google Drive (Drive About's
 `user.emailAddress`, identity `googleDriveEmail`) and Atlassian's hosted Rovo
-MCP (the read-only `atlassianUserInfo` tool, identity `atlassianAccountId`, with
+MCP (`/v1/mcp/authv2` and `/v1/mcp`; the read-only `atlassianUserInfo` tool, identity `atlassianAccountId`, with
 the email and name kept for the label). These run after the normal tool
-verification with the new token. A failed identity read leaves the identity
-unknown, so the one-connection rule above still applies. Connections made before
+verification with the new token, within a short budget that keeps time for
+saving the connection. A failed identity read leaves the identity unknown and is
+logged with a reason, so the one-connection rule above still applies; a reconnect
+of a verified account whose identity cannot be read is refused as unconfirmed,
+not reported as a different account. Connections made before
 an adapter existed have no identity: reconnect that account once before adding
 another.
 
