@@ -4,7 +4,8 @@
  * chat with the template's setup instructions as its first message, ready to
  * read and change before sending; the agent then sets itself up with its
  * ordinary tools. Templates can be exported as a file and imported into
- * another workspace. Whoever saved one, or an admin, can change or delete it.
+ * another workspace. A template is Only me or shared with the workspace, like
+ * a chat; whoever saved one, or an admin, can change or delete it.
  */
 import { useRef, useState } from "react";
 import { BotIcon, DownloadIcon, PlusIcon, UploadIcon } from "lucide-react";
@@ -20,6 +21,7 @@ import { EmptyState } from "../../../ui/empty-state";
 import { ErrorMessage } from "../../../ui/error-message";
 import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
 import { LogoTile } from "../../../ui/logo-tile";
+import { MetaChip } from "../../../ui/meta-chip";
 import { Notice } from "../../../ui/notice";
 import { useAppContext } from "../../app-context";
 import {
@@ -41,6 +43,7 @@ const EMPTY_TEMPLATE: BotTemplateValues = {
   description: "",
   avatar: null,
   setupInstructions: "",
+  visibility: "workspace",
 };
 
 export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
@@ -164,7 +167,7 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
       ) : (
         <DetailSection
           title="Saved in this workspace"
-          description="Anyone in the workspace can start a bot from these."
+          description="Start a bot from one. Templates marked Only me are yours alone."
         >
           <RowList label="Bot templates" variant="catalog">
             {saved.templates.map((template) => (
@@ -193,6 +196,11 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
                   )
                 }
                 title={template.name}
+                titleAddon={
+                  template.visibility === "private" ? (
+                    <MetaChip variant="soft">Only me</MetaChip>
+                  ) : null
+                }
                 description={template.description || undefined}
                 control={
                   <Button
@@ -261,6 +269,7 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
                 description: editing.description,
                 avatar: editing.avatar,
                 setupInstructions: editing.setupInstructions,
+                visibility: editing.visibility,
               }
             : EMPTY_TEMPLATE
         }

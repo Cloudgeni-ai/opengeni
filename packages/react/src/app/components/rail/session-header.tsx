@@ -789,6 +789,8 @@ export function SessionHeader({
               description: session.description ?? "",
               avatar: session.avatar ?? null,
               setupInstructions: "",
+              // Shared like the chat, so an Only me chat stays private by default.
+              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
             }}
             onSubmit={async (values) => {
               const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });

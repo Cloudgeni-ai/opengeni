@@ -15725,6 +15725,9 @@
   margin-top: 22px;
   font-size: 11px;
 }
+:where(.og-root).og-plugin-details-meta:first-child,:where(.og-root) .og-plugin-details-meta:first-child {
+  margin-top: 0;
+}
 :where(.og-root).og-plugin-details-meta span,:where(.og-root) .og-plugin-details-meta span {
   padding: 4px 8px;
   border-radius: 5px;

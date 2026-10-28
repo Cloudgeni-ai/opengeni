@@ -43,7 +43,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     ) &&
     aptTransactions(api) === 1 &&
     api.includes(
-      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client",
+      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client",
     ) &&
     !api.includes("libreoffice-") &&
     !api.includes("tesseract-") &&
@@ -101,14 +101,14 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedCommonInstall)).toBe(false);
 
     const missingApiRuntimeTools = dockerfile.replace(
-      "ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client",
+      "ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client",
       "ffmpeg",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiRuntimeTools)).toBe(false);
 
     const duplicatedConverters = dockerfile.replace(
-      "ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client",
-      "ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client libreoffice-calc tesseract-ocr-eng",
+      "ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client",
+      "ca-certificates curl ffmpeg fonts-liberation fonts-noto-color-emoji git gnupg openssh-client libreoffice-calc tesseract-ocr-eng",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(duplicatedConverters)).toBe(false);
 
