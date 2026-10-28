@@ -6,7 +6,10 @@ import {
 } from "@opengeni/react/app/lib/drive-connect-return";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import {
+  personalExtensionOrigin,
+  sortConnectorsForPresentation,
+} from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
@@ -690,7 +693,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               catalogServiceIdentity(item.id, item.name, item.providerDomain).id === "slack"
                 ? "Your account"
                 : "Agent tools",
-            description: capabilityDescription(item) ?? undefined,
+            description: personalExtensionOrigin(item)
+              ? `From ${personalExtensionOrigin(item)}`
+              : (capabilityDescription(item) ?? undefined),
             status: connectorChip(item).label,
             state: catalogStatusForChip(connectorChip(item)),
             connected: item.enabled,
