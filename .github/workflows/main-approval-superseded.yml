@@ -8,7 +8,8 @@ name: Cancel superseded main CI
 #    the main SHA and Version merges are kept; re-runs wait six hours first.
 # 3. With MAIN_CI_DEFERRED, ordinary main pushes skip CI, and this re-runs the
 #    newest main SHA's run about every 30 minutes (MAIN_CI_INTERVAL_MINUTES)
-#    while main changes (docs/merge-batcher.md "Main CI cadence").
+#    while main changes, and re-runs a failed full run's failed jobs once
+#    (docs/merge-batcher.md "Main CI cadence").
 on:
   push:
     branches: [main]

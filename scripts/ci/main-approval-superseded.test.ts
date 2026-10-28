@@ -6,6 +6,7 @@ import {
   supersededQueuedRuns,
   dueMainRun,
   mainCiInterval,
+  retryableMainRun,
   type MainRun,
   type ParkedRun,
   type QueuedRun,
@@ -161,4 +162,29 @@ test("re-runs the newest deferred main SHA on the main CI cadence", () => {
   expect(dueMainRun([head, full], sha, now, mainCiInterval("2"))).toBe(3);
   expect(mainCiInterval(undefined)).toBe(30 * 60_000);
   expect(mainCiInterval("abc")).toBe(30 * 60_000);
+});
+
+test("retries the newest full main run's failed jobs once", () => {
+  const run = (id: number, h: number, extra: Partial<MainRun> = {}): MainRun => ({
+    id,
+    headSha: `${id}`.padStart(40, "b"),
+    runAttempt: 2,
+    runStartedAt: hoursAgo(h),
+    status: "completed",
+    conclusion: "failure",
+    versionMerge: false,
+    ...extra,
+  });
+  const deferred = run(4, 0.1, { runAttempt: 1, conclusion: "cancelled" });
+  expect(retryableMainRun([deferred, run(3, 0.5)])).toBe(3);
+  // Only the newest full run: an older failure was superseded.
+  expect(retryableMainRun([run(3, 0.5, { conclusion: "success" }), run(2, 1.5)])).toBeNull();
+  // Once only: a failure on the retry stays failed.
+  expect(retryableMainRun([run(3, 0.5, { runAttempt: 3 })])).toBeNull();
+  // Not while it runs, not after success or cancellation, not for Version merges.
+  expect(retryableMainRun([run(3, 0.5, { status: "in_progress", conclusion: null })])).toBeNull();
+  expect(retryableMainRun([run(3, 0.5, { conclusion: "success" })])).toBeNull();
+  expect(retryableMainRun([run(3, 0.5, { conclusion: "cancelled" })])).toBeNull();
+  expect(retryableMainRun([run(3, 0.5, { runAttempt: 1, versionMerge: true })])).toBeNull();
+  expect(retryableMainRun([deferred])).toBeNull();
 });

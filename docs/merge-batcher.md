@@ -66,6 +66,10 @@ job, and `.github/workflows/main-approval-superseded.yml` re-runs the newest
 least 30 minutes ago (the repository variable `MAIN_CI_INTERVAL_MINUTES`
 changes that). Version merges always run in full on their own push.
 
+If that full run fails, the same workflow re-runs its failed jobs once, as the
+batcher does for a batch, so one flaky test does not cost `main` its images for
+a whole interval. A failure on the retry stays: `main` is broken and needs a fix.
+
 To get a fully tested SHA with images now, re-run that SHA's `CI` run on `main`
 (`gh run rerun <id>`). Canary and staging deploys use the newest fully green
 `main` SHA as before.
