@@ -2,6 +2,7 @@
 // (`setup_append`, `definition_edit`, `proposed`, `verifying`, ...); this is the
 // single boundary that translates them into sentence-case labels and maps them
 // onto the shared StatusDot tone language. No rig surface renders a raw slug.
+import { personSubjectOf } from "@opengeni/react/app/lib/person-subject";
 import type { StatusTone } from "@opengeni/react/ui/status-dot";
 import type { RigChange, RigChangeKind, RigVersion } from "@opengeni/react/app/types";
 
@@ -114,22 +115,36 @@ export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
   }
 }
 
-/** Attribution string → a short human label. Domain stores `user:<subject>`,
- *  `session:<id>`, or `system`; render the actor, not the raw prefix. */
-export function rigActorLabel(createdBy: string | null | undefined): string {
+/** Attribution string → a short human label. Domain stores the person's
+ *  subject (`user:<id>`; older versions `user:user:<id>`), `session:<id>`, or
+ *  `system`; render the person's name, never the raw id. `personName` names a
+ *  subject ("you" for the viewer); `inSentence` for "Proposed by …". */
+export function rigActorLabel(
+  createdBy: string | null | undefined,
+  personName: (subjectId: string) => string | null = () => null,
+  options: { inSentence?: boolean } = {},
+): string {
+  const generic = (text: string) =>
+    options.inSentence ? text : text.charAt(0).toUpperCase() + text.slice(1);
   if (!createdBy) {
-    return "Unknown";
+    return generic("unknown");
   }
   if (createdBy === "system") {
-    return "System";
+    return generic("system");
+  }
+  const person = personSubjectOf(createdBy);
+  if (person) {
+    const name = personName(person);
+    if (name === "you") return generic("you");
+    return name ?? generic("a teammate");
   }
   const [kind, ...rest] = createdBy.split(":");
   const id = rest.join(":");
   if (kind === "user") {
-    return id || "A teammate";
+    return generic("a teammate");
   }
   if (kind === "session") {
-    return id ? `Agent session ${id.slice(0, 8)}` : "An agent session";
+    return generic(id ? `agent session ${id.slice(0, 8)}` : "an agent session");
   }
   return createdBy;
 }

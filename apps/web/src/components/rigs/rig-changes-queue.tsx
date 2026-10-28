@@ -26,6 +26,7 @@ import type { RigChange } from "@opengeni/react/app/types";
 export function RigChangesQueue({
   changes,
   versionLabel,
+  personName,
   canManage,
   mutating,
   onVerify,
@@ -34,6 +35,8 @@ export function RigChangesQueue({
   changes: RigChange[];
   /** Map a version id to its human "v{n}" label (or null if unknown). */
   versionLabel: (versionId: string | null) => string | null;
+  /** Names a person's subject ("you" for the viewer); null when unknown. */
+  personName?: (subjectId: string) => string | null;
   canManage: boolean;
   mutating: boolean;
   onVerify: (changeId: string) => Promise<RigChange | null>;
@@ -74,7 +77,7 @@ export function RigChangesQueue({
               </MetaChip>
             }
             meta={[
-              `Proposed by ${rigActorLabel(change.proposedBy)}`,
+              `Proposed by ${rigActorLabel(change.proposedBy, personName, { inSentence: true })}`,
               <RelativeTime key="time" date={change.createdAt} />,
             ]}
             indicator="expand"

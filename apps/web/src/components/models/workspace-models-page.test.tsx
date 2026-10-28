@@ -2371,6 +2371,77 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("in a Personal workspace Connect provider opens the key form for that workspace", async () => {
+    organizationAdmin = true;
+    personalWorkspace = true;
+    routeOrganizationReads();
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      for (const name of ["OpenRouter", "Vercel AI Gateway", "Opper"]) {
+        const row = rowsNamed(view.container, name)[0]!;
+        expect(row.textContent).toContain("For your Personal workspace");
+        expect(row.textContent).not.toContain("Not used in Personal workspaces");
+      }
+      // An organization OpenAI key still serves shared workspaces only.
+      expect(rowsNamed(view.container, "Azure OpenAI")[0]?.textContent).toContain(
+        "Not used in Personal workspaces",
+      );
+      const openRouter = rowsNamed(view.container, "OpenRouter")[0]!;
+      await act(async () => openRouter.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await flush();
+      expect(lastNavigation?.search).toMatchObject({ view: "connect:openrouter" });
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "This key will belong to your Personal workspace, so only you use it.",
+      );
+      expect(text).not.toContain("Which workspaces can use it");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("in a Personal workspace a connected key opens that workspace's key, not the organization's", async () => {
+    organizationAdmin = true;
+    personalWorkspace = true;
+    routeOrganizationReads();
+    client.listConnections.mockImplementation(async () => [
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        accountId: "organization-a",
+        workspaceId: "workspace-a",
+        subjectId: null,
+        providerDomain: "openrouter.ai",
+        kind: "api_key",
+        status: "active",
+        grantedScopes: [],
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastUsedAt: null,
+        lastError: null,
+        version: 1,
+        metadata: { credentialRole: "openrouter", credentialLabel: "OpenRouter" },
+        createdBySubjectId: "user:fixture-admin",
+        updatedBySubjectId: "user:fixture-admin",
+        createdAt: "2026-08-27T12:00:00.000Z",
+        updatedAt: "2026-08-27T12:00:00.000Z",
+      } as ConnectionMetadata,
+    ]);
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      const openRouter = rowsNamed(view.container, "OpenRouter")[0]!;
+      await act(async () => openRouter.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await flush();
+      expect(lastNavigation?.search).toMatchObject({ account: "gateway:openrouter" });
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("Organization > Models lists the accounts and every workspace, each opening its page", async () => {
     organizationAdmin = true;
     organizationList = true;

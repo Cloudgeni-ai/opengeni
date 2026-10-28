@@ -1546,13 +1546,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       const dataTools =
         viewer.kind === "member"
           ? []
-          : await siteAgentDataToolsForStart(
-              deps,
-              host.scope,
-              host.site.id,
-              viewer.kind,
-              undefined,
-            );
+          : await siteAgentDataToolsForStart(deps, host.scope, host.site.id);
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
