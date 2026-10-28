@@ -108,6 +108,7 @@ describe("Codex usage limit reset", () => {
     ];
     expect(codexWaitIsUsageLimit(wait({ waitReason: "no_eligible_capacity" }))).toBe(true);
     expect(codexWaitIsUsageLimit(wait({ waitReason: "compaction_provider_locked" }))).toBe(true);
+    expect(codexWaitIsUsageLimit(wait({ waitReason: "pinned_account_unavailable" }))).toBe(true);
     // An older wait event without a reason.
     expect(codexWaitIsUsageLimit(wait({}))).toBe(true);
     expect(

@@ -3304,7 +3304,12 @@ function SessionChatPane(props: {
     setUsageContinuation({ sessionId, pending: true, error: null });
     let error: string | null = null;
     try {
-      if (options.resumeFirst) await composer.resume();
+      // A failed resume stops here (the server would hold the work) and
+      // shows its error in the notice.
+      if (options.resumeFirst)
+        await context.client.resumeSession(props.session.workspaceId, sessionId, {
+          clientEventId: crypto.randomUUID(),
+        });
       if (
         props.session.status === "failed" &&
         props.failure?.failureEventId &&
@@ -3375,7 +3380,9 @@ function SessionChatPane(props: {
     onContinue: (picked) =>
       void continueAfterUsageLimit(
         { model: picked, reasoningEffort, latencyMode },
-        { resumeFirst: usagePaused },
+        // A Steer resumes a paused waiting chat itself; resuming first would
+        // wake its Codex wait for nothing.
+        { resumeFirst: usagePaused && props.session.status !== "waiting_capacity" },
       ),
   });
   // A wait with no reset in sight keeps the server's own wait message; the
