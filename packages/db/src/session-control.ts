@@ -2815,8 +2815,9 @@ export async function registerSessionWorkflowWakeInTransaction(
  * to now alone leaves the input waiting for the periodic dispatcher. The signal
  * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
  * whole pending batch, and the admission-aware acknowledgement keeps this
- * revision open until it does. Terminal background-command settlement does not
- * signal from its settlement callers yet, so the dispatcher delivers that wake.
+ * revision open until it does. Terminal background-command settlement returns
+ * its committed wakes so each settlement caller signals them after commit; the
+ * dispatcher delivers any a caller could not signal.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,

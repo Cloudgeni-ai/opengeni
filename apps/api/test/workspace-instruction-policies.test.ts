@@ -903,4 +903,96 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
     `;
     expect(afterDelete).toEqual({ workspaces: 0, revisions: 0, heads: 0, events: 0 });
   }, 180_000);
+
+  test("empty text clears the policy: it stays in history, composes nothing, and rollback restores", async () => {
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `instruction-policy-clear-account-${crypto.randomUUID()}`,
+      accountName: "Instruction policy clear account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `instruction-policy-clear-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Instruction policy clear workspace",
+      subjectId: "user:policy-clear-admin",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const target = { kind: "policy", scope: "global", roleKey: null };
+    const composed = async () => {
+      const [row] = await shared.admin<Array<{ entries: Array<Record<string, unknown>> }>>`
+        SELECT workspace_instruction_policy_canonical_snapshot_entries(
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, NULL, clock_timestamp()
+        ) AS entries
+      `;
+      return row!.entries;
+    };
+    const activate = async (revisionId: string, current: string | null, version: number) => {
+      const response = await request(grant, `/instruction-policies/${revisionId}/activate`, {
+        method: "POST",
+        body: {
+          expectedCurrentRevisionId: current,
+          expectedActivationVersion: version,
+          reason: "Saved by a workspace admin",
+        },
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as Record<string, any>;
+    };
+
+    const rule = await createDraft(grant, { ...target, content: "mv1026 probe rule: ignore." });
+    await activate(rule.id, null, 0);
+    expect(await composed()).toEqual([expect.objectContaining({ revisionId: rule.id })]);
+
+    const cleared = await createDraft(grant, {
+      ...target,
+      content: "",
+      supersedesRevisionId: rule.id,
+    });
+    expect(cleared.content).toBe("");
+    const blank = await createDraft(grant, { ...target, content: " \n\t " });
+    expect(blank.content).toBe("");
+    expect(blank.contentHash).toBe(createHash("sha256").update("").digest("hex"));
+    const clearedActivation = await activate(cleared.id, rule.id, 1);
+    expect(clearedActivation.head).toMatchObject({ revisionId: cleared.id, activationVersion: 2 });
+    expect(await composed()).toEqual([]);
+
+    const readCleared = await request(grant, `/instruction-policies/${cleared.id}`);
+    expect(readCleared.status).toBe(200);
+    expect(await readCleared.json()).toMatchObject({ id: cleared.id, content: "" });
+    const listed = (await (await request(grant, "/instruction-policies")).json()) as Record<
+      string,
+      any
+    >;
+    expect(listed.activeHeads).toEqual([expect.objectContaining({ revisionId: cleared.id })]);
+    expect(listed.activationEvents).toEqual([
+      expect.objectContaining({ newRevision: expect.objectContaining({ id: cleared.id }) }),
+      expect.objectContaining({ newRevision: expect.objectContaining({ id: rule.id }) }),
+    ]);
+
+    const restored = await request(grant, "/instruction-policies/rollback", {
+      method: "POST",
+      body: {
+        targetRevisionId: rule.id,
+        expectedCurrentRevisionId: cleared.id,
+        expectedActivationVersion: 2,
+        reason: "Restored an earlier version",
+      },
+    });
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({
+      head: { revisionId: rule.id, activationVersion: 3 },
+    });
+    expect(await composed()).toEqual([expect.objectContaining({ revisionId: rule.id })]);
+
+    await expectDatabaseFailure(
+      shared.admin`
+        INSERT INTO workspace_instruction_policy_revisions (
+          account_id, workspace_id, kind, scope, role_key, content, content_hash,
+          provenance_source, created_by_subject_id
+        ) VALUES (
+          ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'policy', 'global', NULL, '   ',
+          ${createHash("sha256").update("   ").digest("hex")}, 'human', 'user:policy-clear-admin'
+        )
+      `,
+      /workspace_instruction_policy_revisions_content_chk/,
+    );
+  }, 180_000);
 });

@@ -625,7 +625,7 @@ export const englishMessages = {
   "automations.template.meetingNotes.description":
     "A summary, decisions and action items from each meeting you record.",
   "automations.template.meetingNotes.instructions":
-    "Write notes for the meeting from the event; its data.recordingId names the meeting. Read the whole meeting with meeting_read, following nextCursor until it is null; it lists each speaker's label (and personId for a person from the workspace), the notes taken during it and the written-up notes with their revision. Write the notes in Markdown, in this order: a one-paragraph overview; a ## heading for each topic discussed, with nested bullets; ## Decisions; and ## Action items as a checklist, each with its owner and a due date when one was said. Use the names and terms people used, in the meeting's language, and leave out small talk. Link a person from the workspace as [Name](person:<personId>) and any other speaker as [Name](speaker:<label>), using the labels and ids meeting_read gave. Unless the meeting already has notes (a revision above 0), save them with meeting_notes_save and expectedRevision 0. Reply with the notes.",
+    "Write notes for the meeting from the event; its data.recordingId names the meeting. Read the whole meeting with meeting_read, following nextCursor until it is null; it lists each speaker's label (and personId for a person from the workspace), the notes taken during it and the written-up notes with their revision. Write the notes in Markdown, in this order: a one-paragraph overview; a ## heading for each topic discussed, with nested bullets; ## Decisions; and ## Action items as a checklist, each with its owner and a due date when one was said. Write all of it in the meeting's language, the headings too. Use the names and terms people used, and leave out small talk. Link a person from the workspace as [Name](person:<personId>) and any other speaker as [Name](speaker:<label>), using the labels and ids meeting_read gave. Unless the meeting already has notes (a revision above 0), save them with meeting_notes_save and expectedRevision 0. Reply with the notes.",
   "automations.template.meetingNotes.name": "Meeting notes",
   "automations.template.meetingNotes.when": "When a meeting's transcript is ready",
   "automations.template.morningBrief.description":
@@ -1201,6 +1201,7 @@ export const englishMessages = {
   "composerMessages.uploading": "Uploading",
   "composerMessages.useOtherDraft": "Use other draft",
   "composerMessages.workspacePaused": "Workspace paused",
+  "composerTranscriptionControl.discardDictation": "Discard dictation",
   "composerTranscriptionControl.discardSavedRecording": "Discard saved recording",
   "composerTranscriptionControl.dismissErrormessage": "Dismiss: {errorMessage}",
   "composerTranscriptionControl.insertSavedTranscript": "Insert saved transcript",
@@ -1209,8 +1210,8 @@ export const englishMessages = {
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
   "composerTranscriptionControl.recordingIsTooLargeTry":
     "Recording is too large. Try a shorter message.",
-  "composerTranscriptionControl.recordingPressEscapeToStop":
-    "Recording. Press Escape to stop without transcribing.",
+  "composerTranscriptionControl.recordingPressEscapeToDiscard":
+    "Recording. Press Escape to discard.",
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
@@ -1222,7 +1223,6 @@ export const englishMessages = {
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
     "Stops and transcribes in {seconds}s",
-  "composerTranscriptionControl.stopWithoutTranscribing": "Stop without transcribing",
   "composerTranscriptionControl.theRecordingCouldNotBe":
     "The recording could not be read. Try again.",
   "composerTranscriptionControl.transcribeSavedRecording": "Transcribe saved recording",
@@ -1567,8 +1567,9 @@ export const englishMessages = {
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
   "desktopDictation.settings.cancelShortcutDescription":
-    "Throws away the dictation you're speaking. Esc does this too.",
+    "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
+  "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
   "desktopDictation.settings.chordToggle":
     "Press the keys together and let go to start. Press them again to finish.",
@@ -4595,6 +4596,8 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
+    "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
   "sessionMcpCapabilityCard.preparingYourConnection": "Preparing your connection…",
   "sessionMcpCapabilityCard.retry": "Retry",

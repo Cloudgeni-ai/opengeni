@@ -2656,14 +2656,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/my-default-execution-target",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
-    "request": [],
-    "response": [],
-    "permission": "sessions:create"
-  },
-  {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
@@ -3491,6 +3483,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ModelAccountSettingsOverview"
     ]
+  },
+  {
+    "id": "getMyDefaultExecutionTarget",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "getMyUsage",
@@ -7365,16 +7367,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:admin"
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/my-default-execution-target",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
-    "request": [
-      "UpdateMemberDefaultExecutionTargetRequest"
-    ],
-    "response": [],
-    "permission": "sessions:create"
-  },
-  {
     "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -8499,6 +8491,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MemberAllowance"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setMyDefaultExecutionTarget",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/my-default-execution-target",
+    "request": [
+      "UpdateMemberDefaultExecutionTargetRequest"
+    ],
+    "response": [
+      "MemberDefaultExecutionTarget"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",

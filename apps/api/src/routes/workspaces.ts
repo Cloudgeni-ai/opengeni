@@ -6,6 +6,7 @@ import {
   memberExecutionTargetUsable,
   realtimeVoiceOfferProblem,
   resolveMemberExecutionDefault,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
 import { getWorkspaceSettings, listConnectionsMetadata } from "@opengeni/db";
@@ -1897,8 +1898,6 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, {
-      message: `missing permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }

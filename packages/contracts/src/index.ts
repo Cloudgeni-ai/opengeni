@@ -11761,7 +11761,8 @@ export const RigVersion = /* @__PURE__ */ defineSchema(() =>
     // Operational build metadata is version-bound but not part of the immutable
     // rig definition. Each backend records its own truthful build state.
     providerImages: RigProviderImages.default({}),
-    // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
+    // Attribution: the person's subject ('user:<id>'; older versions say
+    // 'user:user:<id>') | 'session:<id>' | 'system'.
     createdBy: primitives.nullableString,
     active: primitives.boolean,
     createdAt: primitives.string,

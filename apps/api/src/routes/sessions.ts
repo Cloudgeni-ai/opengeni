@@ -5,6 +5,7 @@ import {
   assertGoalResumeAllowed,
   GoalResumeBlockedError,
   turnAppActionGrant,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -491,8 +492,8 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: `missing permission: ${VIEWER_LIFECYCLE_PERMISSIONS.join(" or ")}`,
+  throw new MissingPermissionRefusal("stream:view", {
+    message: "You don't have permission to watch or use this chat's computer.",
   });
 }
 
@@ -504,6 +505,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     bus,
     objectStorage,
     observability: deps.observability,
+    // Read at call time: route-only compositions (tests) have no workflow client.
+    wakeSessionWorkflow: (input: Parameters<typeof workflowClient.wakeSessionWorkflow>[0]) =>
+      workflowClient.wakeSessionWorkflow(input),
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });

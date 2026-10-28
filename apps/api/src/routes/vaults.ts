@@ -41,6 +41,7 @@ import {
   type VaultRequestActor,
   type VaultService,
   type VaultServiceDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -189,10 +190,7 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       const { workspaceId, actor } = await authorize(c, "secrets:write");
       const payload = await parseRequestJson(c, CreateVaultRequest);
       if (payload.ownerKind === "organization" && !actor.accountAdmin) {
-        throw new ApiHttpError(403, {
-          code: "forbidden",
-          message: "missing permission: account:admin",
-        });
+        throw new MissingPermissionRefusal("account:admin");
       }
       return c.json(await vaults().create(actor, workspaceId, payload), 201);
     }),

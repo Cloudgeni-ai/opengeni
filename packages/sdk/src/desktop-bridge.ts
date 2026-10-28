@@ -398,8 +398,9 @@ export type DesktopDictationRequest =
     }
   | { kind: "stop"; dictationId: string }
   /**
-   * Stop without typing anything. A start of a few seconds is deleted; longer
-   * speech stays saved, as the composer's Escape keeps it, for the composer to offer.
+   * Stop without typing anything and delete the dictation. Speech longer than
+   * a few seconds comes back with the `cancelled` report, for the app to keep
+   * in its recent dictations; nothing offers it anywhere else.
    */
   | { kind: "cancel"; dictationId: string }
   /** Let a failed dictation go without deleting it: the composer offers it later. */
@@ -434,11 +435,20 @@ export type DesktopDictationReport =
       retryable: boolean;
     }
   /** Nothing was recorded, or it was thrown away. */
-  | { dictationId: string; phase: "cancelled" };
+  | {
+      dictationId: string;
+      phase: "cancelled";
+      /**
+       * The speech of a dictation cancelled after a few seconds, for the app
+       * to keep with its recent dictations; it is deleted everywhere else.
+       */
+      audio?: DesktopDictationAudio;
+    };
 
 /** A finished dictation, kept on this computer so its text can be copied again. */
 export interface DesktopDictationHistoryEntry {
   id: string;
+  /** Empty for a cancelled dictation until it is transcribed again. */
   text: string;
   /** ISO timestamp. */
   at: string;
@@ -446,6 +456,8 @@ export interface DesktopDictationHistoryEntry {
   language: string | null;
   /** Its speech is kept too, to play or transcribe again; absent or null when it isn't. */
   audio?: { mimeType: string; durationMilliseconds: number } | null;
+  /** Cancelled before it was transcribed: kept only to play or transcribe again. */
+  cancelled?: boolean;
 }
 
 /**

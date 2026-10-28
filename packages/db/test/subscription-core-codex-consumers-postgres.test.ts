@@ -780,7 +780,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     await expect(
       setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "disabled" }),
     ).rejects.toMatchObject({
-      message: expect.stringContaining("missing permission"),
+      message: expect.stringContaining("don't have permission"),
       reason: "forbidden",
     });
     await expect(
