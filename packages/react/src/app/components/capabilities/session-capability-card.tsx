@@ -167,8 +167,13 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
       <SessionMcpCapabilityCard
-        // Members without integration admin rights connect their own account.
-        personalOnly={setup?.kind === "card" && setup.personalOnly}
+        // Members without integration admin rights connect their own account,
+        // and everything connected in a Personal workspace is its owner's alone.
+        personalOnly={
+          (setup?.kind === "card" && setup.personalOnly) ||
+          context.workspaces.find((workspace) => workspace.id === props.workspaceId)?.kind ===
+            "personal"
+        }
         client={context.client}
         workspaceId={props.workspaceId}
         sessionId={props.sessionId}

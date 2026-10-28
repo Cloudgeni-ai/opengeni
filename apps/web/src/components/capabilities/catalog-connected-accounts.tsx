@@ -11,6 +11,10 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
+import {
+  connectionAccountRows,
+  type AccountOriginWorkspace,
+} from "@opengeni/react/app/components/capabilities/connection-account-rows";
 
 const ACCOUNT_STATUS = {
   active: "connected",
@@ -42,16 +46,23 @@ export type CatalogConnectedAccountsProps = {
   accessDenied?: boolean;
   onRetry?: () => void;
   management?: CatalogConnectedAccountsManagement;
+  /** The workspace being viewed. Your own accounts added in another workspace
+   * name where they came from and are managed there, not here. */
+  workspaceId?: string | undefined;
+  workspaces?: readonly AccountOriginWorkspace[] | undefined;
 };
 
 /** Whether the viewer may disconnect this account: their own personal account,
  * or a shared workspace account when they can manage workspace connections.
- * Another person's personal account is never theirs to remove. */
+ * Another person's personal account is never theirs to remove, and an account
+ * added in another workspace is managed there (removing it removes it there). */
 export function canRemoveConnectedAccount(
-  account: Pick<ConnectionMetadata, "subjectId">,
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
   management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+  workspaceId?: string | undefined,
 ): boolean {
   if (!management?.canWrite) return false;
+  if (workspaceId && account.workspaceId !== workspaceId) return false;
   return (
     account.subjectId === null ||
     (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
@@ -86,6 +97,8 @@ export function CatalogConnectedAccounts({
   accessDenied = false,
   onRetry,
   management,
+  workspaceId,
+  workspaces,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -117,6 +130,12 @@ export function CatalogConnectedAccounts({
     connections ?? [],
     item.mcpUrl ?? item.endpointUrl,
   ).filter((account) => account.status !== "revoked");
+  const rows = connectionAccountRows(accounts, {
+    fallbackName: item.name,
+    workspaceId,
+    workspaces,
+    labelOf: (account) => connectionSignInLabel(account, item.name),
+  });
   const busy = management?.busy === true;
   const addAction =
     management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
@@ -176,8 +195,11 @@ export function CatalogConnectedAccounts({
           className="m-0 list-none divide-y divide-border p-0"
         >
           {accounts.map((account) => {
-            const label = connectionSignInLabel(account, item.name);
+            const row = rows.get(account.id)!;
+            const label = row.label;
             const unfinished = connectedAccountSignInUnfinished(account);
+            // Re-signing in refreshes the same row wherever it was added, so it
+            // stays offered for your own account from another workspace.
             const reconnect =
               management?.onReconnect &&
               account.kind === "oauth2" &&
@@ -185,7 +207,7 @@ export function CatalogConnectedAccounts({
               canRemoveConnectedAccount(account, management)
                 ? management.onReconnect
                 : null;
-            const removable = canRemoveConnectedAccount(account, management);
+            const removable = canRemoveConnectedAccount(account, management, workspaceId);
             return (
               <li
                 key={account.id}
@@ -194,7 +216,7 @@ export function CatalogConnectedAccounts({
                 <div className="min-w-0 flex-1 basis-48">
                   <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <MetaChip>{account.subjectId === null ? "This workspace" : "Only me"}</MetaChip>
+                    <MetaChip>{row.scope}</MetaChip>
                   </div>
                 </div>
                 {unfinished ? (

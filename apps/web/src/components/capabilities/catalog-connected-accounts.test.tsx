@@ -424,6 +424,60 @@ describe("catalog connected accounts", () => {
       await signedOut.unmount();
     });
 
+    test("your own account from another workspace names where it came from and is removed there, not here", async () => {
+      const here = "shared-workspace";
+      const personal = "personal-workspace";
+      const workspaces = [
+        { id: here, name: "Acme", kind: "shared" as const },
+        { id: personal, name: "Mia", kind: "personal" as const },
+      ];
+      const local = account({ workspaceId: here, metadata: { email: "mia@work.test" } });
+      const fromPersonal = account({
+        workspaceId: personal,
+        status: "needs_reauth",
+        metadata: { email: "mia@home.test" },
+      });
+      const fromElsewhere = account({
+        workspaceId: "unlisted-workspace",
+        metadata: { email: "mia@other.test" },
+      });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[local, fromPersonal, fromElsewhere]}
+          management={management()}
+          workspaceId={here}
+          workspaces={workspaces}
+        />,
+      );
+      const rows = [...view.container.querySelectorAll("li")].map((row) => row.textContent);
+      expect(rows[0]).toContain("mia@work.test");
+      expect(rows[0]).not.toContain("From");
+      expect(rows[1]).toContain("Only me · From Personal workspace");
+      expect(rows[2]).toContain("Only me · From another workspace");
+      // Removing it here would disconnect it in the workspace it came from;
+      // signing in again only refreshes that same account, so it stays.
+      expect(buttons(view.container)).toEqual([
+        "Add account",
+        "Remove mia@work.test",
+        "Reconnect mia@home.test",
+      ]);
+      await view.unmount();
+    });
+
+    test("accounts that would read the same say when each was connected", async () => {
+      const first = account({ metadata: {}, createdAt: "2026-10-01T09:00:00Z" });
+      const second = account({ metadata: {}, createdAt: "2026-10-20T09:00:00Z" });
+      const view = await render(
+        <CatalogConnectedAccounts item={item} connections={[first, second]} />,
+      );
+      const labels = [...view.container.querySelectorAll("li p")].map((node) => node.textContent);
+      expect(labels).toHaveLength(2);
+      expect(new Set(labels).size).toBe(2);
+      for (const label of labels) expect(label).toMatch(/^Slack account · Connected /);
+      await view.unmount();
+    });
+
     test("an opaque account that completed OAuth truthfully needs reconnect", async () => {
       const opaque = account({
         status: "needs_reauth",

@@ -4528,6 +4528,8 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
+    "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
   "sessionMcpCapabilityCard.preparingYourConnection": "Preparing your connection…",
   "sessionMcpCapabilityCard.retry": "Retry",
