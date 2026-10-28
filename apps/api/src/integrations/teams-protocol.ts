@@ -15,7 +15,7 @@ const Activity = z.object({
   recipient: z.object({ id: opaque }),
   conversation: z.object({
     id: opaque,
-    conversationType: z.enum(["personal", "channel"]),
+    conversationType: z.enum(["personal", "channel", "groupChat"]),
     tenantId: uuid.optional(),
   }),
   channelData: z.object({
@@ -48,6 +48,7 @@ export type TeamsMessage = {
   botId: string;
   eventId: string;
   personal: boolean;
+  groupChat: boolean;
   text: string;
   occurredAt: string;
   identity: string;
@@ -155,7 +156,9 @@ export function normalizeTeamsMessage(
   if (a.conversation.tenantId && a.conversation.tenantId.toLowerCase() !== tenantId)
     return reject({ reason: "tenant_mismatch" });
   const personal = a.conversation.conversationType === "personal";
-  if (!personal && !a.channelData.channel?.id) return reject({ reason: "missing_channel" });
+  const groupChat = a.conversation.conversationType === "groupChat";
+  if (!personal && !groupChat && !a.channelData.channel?.id)
+    return reject({ reason: "missing_channel" });
   let text = a.text;
   const mentions = (a.entities ?? []).filter(
     (e) => e.type === "mention" && e.mentioned?.id === a.recipient.id,
@@ -165,7 +168,7 @@ export function normalizeTeamsMessage(
   for (const mention of mentions) if (mention.text) text = text.replace(mention.text, "");
   text = text.trim();
   if (!text) return reject({ reason: "empty_text" });
-  const threadId = personal ? null : (a.replyToId ?? a.id);
+  const threadId = personal || groupChat ? null : (a.replyToId ?? a.id);
   const envelope = normalizeConversationInboundEnvelope({
     provider: "microsoft.teams",
     installationId: tenantId,
@@ -180,13 +183,14 @@ export function normalizeTeamsMessage(
   return {
     tenantId,
     actorId: a.from.aadObjectId.toLowerCase(),
-    channelId: personal ? null : a.channelData.channel!.id,
+    channelId: personal || groupChat ? null : a.channelData.channel!.id,
     conversationId: a.conversation.id,
     threadId,
     serviceUrl: teamsServiceUrl(a.serviceUrl),
     botId: a.recipient.id,
     eventId: a.id,
     personal,
+    groupChat,
     text,
     occurredAt: a.timestamp,
     identity: envelope.eventIdentity,
