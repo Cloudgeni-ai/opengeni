@@ -213,7 +213,7 @@ describe("Let the agent decide", () => {
 
 describe("handing a sub-session's question to the agent", () => {
   test("the message names the exact request for the agent and reads back", () => {
-    const message = humanInputDelegationMessage({
+    const message = humanInputDelegationMessage(englishText, {
       sessionId: CHILD,
       sessionTitle: "Build portable Git merge batcher core",
       request: request(),
@@ -256,7 +256,7 @@ describe("handing a sub-session's question to the agent", () => {
   });
 
   test("the chat shows the agent deciding, then what it chose", async () => {
-    const message = humanInputDelegationMessage({
+    const message = humanInputDelegationMessage(englishText, {
       sessionId: CHILD,
       sessionTitle: "Child",
       request: request(),

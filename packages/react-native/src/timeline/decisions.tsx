@@ -536,7 +536,7 @@ function HumanInputForm({
             lead={
               humanInputAgentMayDecide(request) ? (
                 <DecisionLink
-                  label={messages.letAgentDecide}
+                  label={messages.letAgentDecide ?? t("humanInputModel.letTheAgentDecide")}
                   disabled={busy}
                   onPress={() =>
                     void submit({

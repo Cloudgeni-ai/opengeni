@@ -3373,6 +3373,7 @@ function SessionChatPane(props: {
               client={context.client}
               workspaceId={props.session.workspaceId}
               item={{ ...item, humanInputDelegation: item.humanInputDelegation }}
+              viewerSubjectId={context.accessContext.subjectId}
             />
           );
         }
@@ -3401,6 +3402,7 @@ function SessionChatPane(props: {
       );
     },
     [
+      context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,
       props.session.id,
