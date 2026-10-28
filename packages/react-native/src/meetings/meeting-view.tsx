@@ -696,7 +696,9 @@ function Turn(props: {
           accessibilityLabel={
             suggested
               ? msg("meetings.detailPage.nameSuggestedFromTheirVoice", { name })
-              : msg("meetings.detailPage.nameNameThisSpeaker", { name })
+              : turn.speakerLabel && speakerIsNamed(turn.speakerLabel, props.speakers)
+                ? msg("meetings.detailPage.nameChangeWhoThisIs", { name })
+                : msg("meetings.detailPage.nameNameThisSpeaker", { name })
           }
           disabled={!turn.speakerLabel}
           onPress={() => turn.speakerLabel && props.onSpeaker(turn.speakerLabel)}
