@@ -325,6 +325,76 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(count?.count).toBe(0);
   }, 60_000);
 
+  test("a Personal workspace's default can be its owner's own machine; a shared one's cannot", async () => {
+    if (!available) return;
+    const { accountId, workspaceId: personalWorkspaceId } = await freshWorkspace();
+    const [team] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'team') returning id`;
+    const sharedWorkspaceId = team!.id;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${sharedWorkspaceId}, ${accountId})`;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, 'subject', 'active', ${personalWorkspaceId}, 1)`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${personalWorkspaceId}, 'subject'),
+        (${accountId}, ${sharedWorkspaceId}, 'subject')`;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', 'subject', true),
+        set_config('opengeni.initiating_human_subject_id', 'subject', true)`;
+      const [row] = await tx<{ enrollmentId: string; sandboxId: string }[]>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${accountId}::uuid, ${personalWorkspaceId}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'my laptop', false
+        )`;
+      return row!;
+    });
+    const connection = await claimEnrollmentConnection(db, {
+      workspaceId: personalWorkspaceId,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: 1,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      leaseMs: 60_000,
+    });
+    expect(connection.claimed).toBe(true);
+    await admin`
+      update enrollments set last_seen_at = now(), workspace_root = '/srv/project'
+      where id = ${machine.enrollmentId}`;
+    const bus = busWithAgent({ workspaceId: personalWorkspaceId, agentId: machine.enrollmentId });
+    const defaultTarget = admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: machine.sandboxId },
+    });
+    await admin`
+      update workspaces set settings = settings || ${defaultTarget}
+      where id in (${personalWorkspaceId}, ${sharedWorkspaceId})`;
+
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, personalWorkspaceId),
+      personalWorkspaceId,
+      { initialMessage: "start on my own machine" },
+    );
+    expect(session.activeSandboxId).toBe(machine.sandboxId);
+    expect(session.sandboxBackend).toBe("selfhosted");
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, sharedWorkspaceId), sharedWorkspaceId, {
+        initialMessage: "a shared workspace never defaults to a personal machine",
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("default machine is unavailable"),
+    });
+  }, 60_000);
+
   test("a saved workspace machine default fails when Connected Machine execution is disabled", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();

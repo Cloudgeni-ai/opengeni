@@ -13,6 +13,14 @@ export interface AgentConnection {
   apiUrl: string;
   workspaceId: string;
   agentId: string;
+  /**
+   * The server turned down the connection's sign-in: the agent keeps renewing
+   * it (`renewal_required`), or has stopped and needs connecting again
+   * (`reconnect_required`). Absent while it signs in normally.
+   */
+  authentication?: "renewal_required" | "reconnect_required";
+  /** The agent's own words about that, for the details. */
+  authenticationNote?: string;
 }
 
 /**
@@ -100,21 +108,42 @@ export function parsePermissions(
 
 /**
  * `opengeni-agent connections` lists one connection per line:
- * `  <id>  <api url>[ (note)]  workspace=<uuid>  agent=<uuid>`.
+ * `  <id>  <api url>[ (note)]  workspace=<uuid>  agent=<uuid>`, followed by an
+ * indented line when the server turned down its sign-in:
+ * `    Authentication rejected; transport retries paused while credentials are renewed.`
+ * or `    Reconnect required; automatic retries stopped. Run ...`.
  */
 export function parseConnections(stdout: string): AgentConnection[] {
   const connections: AgentConnection[] = [];
+  let last: AgentConnection | null = null;
   for (const line of stdout.split(/\r?\n/u)) {
     const match = /^\s+(\S+)\s+(https?:\/\/\S+).*?\sworkspace=(\S+)\s+agent=(\S+)\s*$/u.exec(line);
-    if (!match) continue;
+    if (!match) {
+      const note = line.trim();
+      if (last && !last.authentication && /^\s/u.test(line) && note) {
+        const authentication = /^reconnect required\b/iu.test(note)
+          ? "reconnect_required"
+          : /^authentication rejected\b/iu.test(note)
+            ? "renewal_required"
+            : null;
+        if (authentication) {
+          last.authentication = authentication;
+          last.authenticationNote = note.slice(0, 300);
+        }
+      }
+      if (!/^\s/u.test(line)) last = null;
+      continue;
+    }
+    last = null;
     const apiUrl = normalizeServerUrl(match[2]!);
     if (!apiUrl) continue;
-    connections.push({
+    last = {
       connectionId: match[1]!,
       apiUrl,
       workspaceId: match[3]!,
       agentId: match[4]!,
-    });
+    };
+    connections.push(last);
   }
   return connections;
 }

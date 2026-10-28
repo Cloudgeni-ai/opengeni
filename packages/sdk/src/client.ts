@@ -134,7 +134,9 @@ import type {
 import type {
   DuplicateWorkspaceArtifactRequest,
   SiteOpenedResponse,
+  SiteProjectResponse,
   SiteSidebarStateResponse,
+  UpdateSiteProjectRequest,
   UpdateSiteSidebarStateRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -2121,6 +2123,24 @@ export class OpenGeniClient {
     return this.requestJson(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/sidebar`,
+      request,
+    );
+  }
+
+  /**
+   * Move a Site's sidebar row from one project to another (null is Default),
+   * like moving a chat: its conversations in that project move with it, and the
+   * Site itself moves for everyone when the row is its own project's. Needs
+   * `sessions:control`; the Site stays published and in Artifacts.
+   */
+  async updateSiteProject(
+    workspaceId: string,
+    siteId: string,
+    request: UpdateSiteProjectRequest,
+  ): Promise<SiteProjectResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/channel`,
       request,
     );
   }

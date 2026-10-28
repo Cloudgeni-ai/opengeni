@@ -10,7 +10,7 @@ import {
   type SessionHumanInputRequest,
   type SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
+import { HumanInputForm, OpenGeniLinkProvider } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -221,7 +221,8 @@ function InboxList({ label, children }: { label: string; children: ReactNode }) 
   );
 }
 
-function InboxRow(props: {
+/** One inbox row. Exported for the DEV UI kit. */
+export function InboxRow(props: {
   item: InboxItem;
   unread: boolean;
   title: string;
@@ -480,13 +481,6 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   // Under the title: what exactly is asked for, or the agent's note.
   const description = (item: InboxItem): ReactNode => {
     if (!item.body) return undefined;
-    if (item.kind === "approval") {
-      return (
-        <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
-          <SecretRefText text={item.body} linkable={false} />
-        </code>
-      );
-    }
     if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
@@ -502,7 +496,8 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
       parts.push(KIND_WORD[item.kind]);
     }
-    if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
+    // An approval's title says what it does; its body says where ("Gmail").
+    if (item.kind === "approval") parts.push(item.body || KIND_WORD.approval);
     if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);

@@ -114,6 +114,7 @@ export const SECTION_KEYS = [
   "chat-connect",
   "chat-answers",
   "chat-admission",
+  "inbox-approvals",
   // Foundations
   "logo-tile",
   "relative-time",
@@ -744,6 +745,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Say why a saved message didn't start, name the machine involved, and offer the one way forward.",
     usedOn: "Chat, embedded chat and phone",
     load: () => import("./chat-admission"),
+  },
+  {
+    key: "inbox-approvals",
+    group: "Chat",
+    title: "Approvals in the inbox",
+    purpose:
+      "Say what a waiting approval does and where it runs, in the inbox and in notifications.",
+    usedOn: "Inbox on web, desktop and phone; phone and desktop notifications",
+    load: () => import("./inbox-approvals"),
   },
   {
     key: "cadence-picker",

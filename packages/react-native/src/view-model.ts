@@ -325,7 +325,9 @@ export function nativeHumanInputSummary(
       ? (labels.humanInputOutcome.agentAnswered ?? labels.humanInputOutcome.answered)
       : item.response.outcome === "skipped" && item.answeredByAgent
         ? (labels.humanInputOutcome.agentSkipped ?? labels.humanInputOutcome.skipped)
-        : labels.humanInputOutcome[item.response.outcome];
+        : item.response.outcome === "skipped" && item.response.agentDecides
+          ? (labels.humanInputOutcome.agentDecides ?? labels.humanInputOutcome.skipped)
+          : labels.humanInputOutcome[item.response.outcome];
   const answers = humanInputAnswerLines(item.answers, item.response, labels.secretSaved, false)
     .map(
       (line, index) =>

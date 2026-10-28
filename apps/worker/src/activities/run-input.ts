@@ -28,6 +28,7 @@ import {
 } from "@opengeni/db";
 import {
   createModelImageSizer,
+  sniffModelImageType,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -475,6 +476,11 @@ async function boundedAttachmentImage(
     boundedImageSizers.set(bound, sizer);
   }
   try {
+    // A file whose stored type does not match its bytes (a JPEG saved as
+    // image/png) keeps the original projection it always had, so earlier
+    // requests stay byte-identical. The provider transport labels it correctly.
+    if (sniffModelImageType(Buffer.from(data.slice(0, 24), "base64")) !== attachment.contentType)
+      return original;
     const sized = await sizer(data, attachment.contentType);
     if (sized.data === data && sized.mediaType === attachment.contentType) return original;
     return {

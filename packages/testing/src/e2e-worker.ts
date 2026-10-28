@@ -40,13 +40,18 @@ const workflowSignaler = await createWorkerWorkflowSignaler(settings, dbClient.d
 // production control worker. Starting only the raw Temporal pollers makes a
 // committed Pause/Resume look successful while a lost immediate trigger is
 // never repaired, stranding the resumed queue forever.
+// OPENGENI_TEST_SANDBOX_REAPER=1 adds the sandbox reaper, the owner that
+// settles a background command still running when its turn ended.
 const wakeSchedule =
   role === "control"
     ? await startInternalMaintenanceCadences({
         settings,
         observability,
         db: dbClient.db,
-        jobs: ["session-workflow-wake-dispatcher"],
+        jobs:
+          process.env.OPENGENI_TEST_SANDBOX_REAPER === "1"
+            ? ["session-workflow-wake-dispatcher", "sandbox-lease-reaper"]
+            : ["session-workflow-wake-dispatcher"],
       })
     : null;
 const { worker, connection } = await createOpenGeniWorker({
@@ -86,6 +91,7 @@ try {
 
 function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "child-wait-boundary") return new ChildWaitBoundaryModel();
+  if (scenario === "background-command-wait") return new BackgroundCommandWaitModel();
   if (scenario === "held-wait-person-turn") return new HeldWaitPersonTurnModel();
   if (scenario === "held-wait-consumed-by-person-turn") {
     return new HeldWaitConsumedByPersonTurnModel();
@@ -410,6 +416,64 @@ class ChildWaitBoundaryModel implements Model {
         output: [functionCall(name("goal_complete"), { evidence: "Controlled deadline elapsed" })],
       };
     return { outputText: "Child completed after its deadline." };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([this.step(request)]).getStreamedResponse(request);
+  }
+}
+
+/**
+ * Wake-latency fixture. The first message names the case:
+ * `BGWAIT mode=command sleep=<s> timeout=<s>` starts `sleep` as a background
+ * command, then waits; `BGWAIT mode=deadline timeout=<s>` only waits. The turn
+ * after the wait reports what woke it, so the test can time the wake.
+ */
+class BackgroundCommandWaitModel implements Model {
+  private step(request: ModelRequest): ScriptedModelStep {
+    const body = JSON.stringify(request.input ?? request);
+    const spec = /BGWAIT mode=(command|deadline)(?: sleep=(\d+))? timeout=(\d+)/u.exec(body);
+    if (!spec) return { outputText: "BGWAIT title" };
+    const [, mode, sleepSeconds, timeoutSeconds] = spec;
+    const waitName = request.tools.find((tool) => tool.name?.endsWith("wait_for_input"))?.name;
+    // Auxiliary calls such as the session title carry no agent tools.
+    if (!waitName) return { outputText: "Background wait fixture" };
+    const items = Array.isArray(request.input) ? (request.input as unknown[]) : [];
+    const called = (name: string) =>
+      items.some(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          (item as { type?: unknown }).type === "function_call" &&
+          (item as { name?: unknown }).name === name,
+      );
+    if (called(waitName)) {
+      const woke = body.includes("session_wait_timeout") ? "timeout" : "input";
+      return { outputText: `BGWAIT DONE ${woke}` };
+    }
+    if (mode === "command" && !called("exec_command")) {
+      return {
+        output: [
+          functionCall("exec_command", {
+            cmd: `sleep ${sleepSeconds ?? "5"}; echo bgwait-finished`,
+            yield_time_ms: 250,
+            max_output_tokens: 200,
+          }),
+        ],
+      };
+    }
+    return {
+      output: [
+        // A turn that answers a person must reply visibly before it waits.
+        assistantMessage("Waiting for the fixture."),
+        functionCall(waitName, {
+          reason: "Waiting for the background command fixture.",
+          timeoutSeconds: Number(timeoutSeconds),
+        }),
+      ],
+    };
   }
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     return new ScriptedModel([this.step(request)]).getResponse(request);

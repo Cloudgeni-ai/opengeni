@@ -150,6 +150,7 @@ type Calls = {
   }>;
   decisions: Array<{ sessionId: string; approvalId: string; decision: string }>;
   reviews: Array<{ sessionId: string; approvalId: string }>;
+  messages: Array<{ sessionId: string; text?: string; modelContext?: string }>;
 };
 
 function fakeClient(state: {
@@ -160,7 +161,7 @@ function fakeClient(state: {
 }) {
   const pending = <T,>(value: () => T): Promise<T> =>
     state.hold ? new Promise<T>(() => {}) : Promise.resolve(value());
-  const calls: Calls = { submitted: [], decisions: [], reviews: [] };
+  const calls: Calls = { submitted: [], decisions: [], reviews: [], messages: [] };
   const client = {
     getSession: async () => {
       throw new Error("not used");
@@ -183,6 +184,14 @@ function fakeClient(state: {
     },
     listEventPage: (_workspaceId: string, sessionId: string) =>
       pending(() => ({ events: state.events?.[sessionId] ?? [] })),
+    sendMessage: async (
+      _workspaceId: string,
+      sessionId: string,
+      message: { text?: string; modelContext?: string },
+    ) => {
+      calls.messages.push({ sessionId, ...message });
+      return {};
+    },
     sendApprovalDecision: async (
       _workspaceId: string,
       sessionId: string,
@@ -405,6 +414,42 @@ describe("DescendantRequests", () => {
     await flush(0);
     await flush(0);
     expect(container().querySelector("[data-descendant-request]")).toBeNull();
+  });
+
+  test("Let the agent decide hands the question to this chat's agent, not the sub-session", async () => {
+    const child = summary("child", { title: "Build portable Git merge batcher core" });
+    const { client, calls } = fakeClient({ requests: { child: [request("child")] } });
+    await render({ client, waiting: [child] });
+
+    await click(button("Let the agent decide")!);
+
+    // Nothing went to the sub-session: this chat's agent answers it.
+    expect(calls.submitted).toEqual([]);
+    expect(calls.messages).toHaveLength(1);
+    const message = calls.messages[0]!;
+    expect(message.sessionId).toBe(PARENT);
+    expect(message.text).toBe("Let the agent decide: Which branch should I review?");
+    expect(message.modelContext).toContain("sessionId child, requestId request-1");
+    expect(message.modelContext).toContain("session_human_input_respond");
+    expect(message.modelContext).toContain("Build portable Git merge batcher core");
+    // The card stays answerable and says the agent is on it.
+    expect(container().textContent).toContain("Your agent is deciding");
+    expect(button("Let the agent decide")).toBeUndefined();
+    expect(answerField()).not.toBeNull();
+  });
+
+  test("a hand-off already in this chat marks the card as being decided", async () => {
+    const childId = "6f0e3b52-6a51-4d7e-9a0c-1d2e3f4a5b6c";
+    const requestId = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
+    const child = summary(childId);
+    const { client } = fakeClient({ requests: { [childId]: [request(childId, requestId)] } });
+    const handOff = event("user.message", {
+      text: "Let the agent decide: Which branch should I review?",
+      modelContext: `opengeni:human-input-delegation ${JSON.stringify({ sessionId: childId, requestId })}\nAnswer it.`,
+    });
+    await render({ client, waiting: [child], events: [handOff] });
+    expect(container().textContent).toContain("Your agent is deciding");
+    expect(button("Let the agent decide")).toBeUndefined();
   });
 
   test("shares an unsent answer with the sub-session's own page", async () => {
