@@ -309,7 +309,9 @@ wakes an idle parent that has an active goal, a held wait, no goal at all, or
 a completed goal (the worker is still its work; the goal is not reopened). A
 goal paused by intent keeps the update pending for its next turn. A
 mid-turn parent receives it at its next claim, and a waiting parent's
-`wait_for_input` ends.
+`wait_for_input` ends. When the parent cannot act on it (failed, or its agent
+has no session tools), the update goes to the nearest ancestor that can, and
+only to that one (see `docs/durable-agent-inputs.md`).
 
 The first accepted answer wins under the request row lock. A later human
 submission returns `200` with the winning event. A later agent call returns

@@ -721,7 +721,7 @@ describe("durable structured human input", () => {
       required: true,
       allowOther: false,
     };
-    const decide = { outcome: "skipped", agentDecides: true };
+    const decide = { outcome: "skipped" as const, agentDecides: true as const };
     expect(validateHumanInputResponse({ questions: [text], allowSkip: false }, decide)).toEqual(
       decide,
     );

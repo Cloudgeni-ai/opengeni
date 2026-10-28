@@ -1111,6 +1111,112 @@ describe("child lifecycle notices", () => {
     expect(pending.map((update) => update.kind)).toEqual(["child_requires_action_resolved"]);
   });
 
+  test("a question goes past a parent that can't act to the nearest ancestor that can, and its resolution follows", async () => {
+    const grant = await workspace();
+    const root = await startSession(grant, { goal: true, message: "coordinate" });
+    const coordinator = await startSession(grant, { parent: root, message: "coordinate a part" });
+    const parent = await startSession(grant, { parent: coordinator, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    // The parent failed: its agent cannot answer anything now.
+    await shared.admin`
+      update sessions set status = 'failed', active_turn_id = null
+      where id = ${parent.session.id}`;
+    const { requestId } = await freezeChild(grant, child);
+    const key = childRequiresActionDedupeKey({
+      childSessionId: child.session.id,
+      turnId: child.turn.id,
+      turnGeneration: child.turn.executionGeneration,
+    });
+    const row = (await outbox(grant, key))!;
+    // Only the nearest ancestor that can act gets it, not every ancestor.
+    expect(row.targetSessionId).toBe(coordinator.session.id);
+    expect(row.sourceSessionId).toBe(child.session.id);
+    expect(row.lineage).toMatchObject({
+      childSessionId: child.session.id,
+      parentSessionId: coordinator.session.id,
+      parentTurnId: coordinator.turn.id,
+      escalatedFromSessionId: parent.session.id,
+    });
+    expect(row.summary).toContain(`Its parent session ${parent.session.id} can't act on it`);
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error(`unexpected ${delivered.reason}`);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(
+          client.db,
+          grant.workspaceId,
+          coordinator.session.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_requires_action"]);
+
+    // The coordinator answers; the resolution lands where the question did.
+    const answered = await acceptSessionHumanInputResponse(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["staging"] }],
+      },
+      respondedBy: `agent_attempt:${coordinator.attemptId}`,
+    });
+    expect(answered.action).toBe("accepted");
+    const resolved = (await outbox(
+      grant,
+      childRequiresActionResolvedDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+        requestId,
+        approvalId: null,
+      }),
+    ))!;
+    expect(resolved.targetSessionId).toBe(coordinator.session.id);
+    const deliveredResolved = await deliver(resolved);
+    if (deliveredResolved.reason !== "added") throw new Error("resolution not added");
+    expect(deliveredResolved.events[1]?.payload).toMatchObject({
+      updateIds: [delivered.update.id],
+      reason: "superseded_by_resolution",
+    });
+
+    // A parent whose agent has no session tools also passes the question on.
+    const toolless = await startSession(grant, { parent: root, message: "no session tools" });
+    const toollessChild = await startSession(grant, { parent: toolless, message: "work" });
+    await shared.admin`
+      update sessions set agent_config = case
+        when agent_config is null then '{"capabilities":{"subagents":false}}'::jsonb
+        else jsonb_set(agent_config, '{capabilities,subagents}', 'false'::jsonb)
+      end
+      where id = ${toolless.session.id}`;
+    await freezeChild(grant, toollessChild);
+    const toollessRow = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: toollessChild.session.id,
+        turnId: toollessChild.turn.id,
+        turnGeneration: toollessChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(toollessRow.targetSessionId).toBe(root.session.id);
+
+    // A parent that can act keeps its child's question.
+    const able = await startSession(grant, { parent: root, message: "able" });
+    const ableChild = await startSession(grant, { parent: able, message: "work" });
+    await freezeChild(grant, ableChild);
+    const ableRow = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: ableChild.session.id,
+        turnId: ableChild.turn.id,
+        turnGeneration: ableChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(ableRow.targetSessionId).toBe(able.session.id);
+    expect(ableRow.lineage).not.toHaveProperty("escalatedFromSessionId");
+  });
+
   test("approval decisions and terminal cancellation also resolve, with the parent locked", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
