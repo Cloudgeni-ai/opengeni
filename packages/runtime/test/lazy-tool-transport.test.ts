@@ -674,7 +674,7 @@ describe("query-independent tool discovery", () => {
           type: "function_call",
           callId: "wrong-prefix",
           name: "tool_list",
-          arguments: '{"namePrefix":"weather."}',
+          arguments: '{"namePrefix":"forecast."}',
         },
       ],
       [{ type: "function_call", callId: "browse", name: "tool_list", arguments: "{}" }],

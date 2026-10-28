@@ -241,6 +241,8 @@ import {
   type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
@@ -8703,24 +8705,6 @@ function normalizeUrl(raw: string): string | null {
   } catch {
     return null;
   }
-}
-
-export function prefixedMcpToolName(registryId: string, toolName: string): string {
-  const name = sharedPrefixedMcpToolName(registryId, toolName);
-  if (name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)) return name;
-  // This is a readable wire alias, never account or execution authority. The
-  // exact tuple stays in the catalog and duplicate aliases fail closed there.
-  // Hash the full tuple before bounding the leaf so long/punctuation-equivalent
-  // names cannot silently select a different tool.
-  const digest = legacyMcpToolDigest(registryId, toolName).slice(0, 24);
-  const leaf = toolName.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 34) || "tool";
-  return `mcp_${digest}__${leaf}`;
-}
-
-function legacyMcpToolDigest(registryId: string, toolName: string): string {
-  return createHash("sha256")
-    .update(JSON.stringify([registryId, toolName]))
-    .digest("hex");
 }
 
 /** A listed tool's person-facing title from `_meta` (API integrations set one), bounded. */

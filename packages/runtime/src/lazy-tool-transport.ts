@@ -34,6 +34,7 @@ import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision"
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
+import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import {
   beforeModelRequest,
   modelResponseSettlement,
@@ -169,8 +170,10 @@ type GenericSearchMarker = {
   /** Version 2 distinguishes compact hits from actually loaded definitions. */
   tools?: Record<string, unknown>[];
   /**
-   * Native routes only: integrations this search named that the person can
-   * connect, said after the search result (generic routes put it in output).
+   * Native routes only: what the search output cannot carry, said after the
+   * search result (generic routes put it in output): close candidates it did
+   * not load, integrations it named that the person can connect, and the
+   * person's other connected accounts.
    */
   notice?: string;
 };
@@ -254,6 +257,37 @@ export type ConnectedToolAccount = {
 
 /** At most this many other accounts are named; the rest are counted. */
 const CONNECTED_ACCOUNTS_NAMED = 10;
+
+/**
+ * The plain text after a native search result about what it did not load:
+ * requested names no authorized tool has, and close candidates (compact
+ * name and description preview, as tool_list shows them).
+ */
+export function searchCandidatesNotice(
+  loaded: boolean,
+  unavailable: readonly string[],
+  candidates: readonly { name: string; description: string }[],
+): string | undefined {
+  if (!unavailable.length && !candidates.length) return undefined;
+  const lines: string[] = [];
+  if (unavailable.length)
+    lines.push(
+      `No authorized tool is named ${unavailable.map((name) => JSON.stringify(name)).join(", ")}.`,
+    );
+  if (candidates.length) {
+    lines.push(
+      loaded ? "Close candidates this search did not load:" : "No tool loaded. Close candidates:",
+    );
+    for (const candidate of candidates)
+      lines.push(
+        candidate.description
+          ? `- ${candidate.name}: ${candidate.description}`
+          : `- ${candidate.name}`,
+      );
+    lines.push('Load one that fits with tool_search names:["<exact name>"] and query:"".');
+  }
+  return lines.join("\n");
+}
 
 /** The plain sentence a search result carries about the person's other connected accounts. */
 export function connectedAccountsNotice(
@@ -870,17 +904,25 @@ export class LazyToolRuntime {
     // lack every deferred server, and a search decided from them would report
     // tools that exist as unavailable.
     await this.ensurePrepared();
-    const { query, names, limit } = parseSearchArgs(rawArguments);
-    if (names !== undefined) {
-      return {
+    const parsed = parseSearchArgs(rawArguments);
+    const { query, limit } = parsed;
+    if (parsed.names !== undefined) {
+      const resolve = this.exactMcpNameResolver();
+      const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
+      return this.withCandidatesNotice({
         version: 2,
-        output: this.genericSearchOutput(rawArguments),
-        tools: structuredClone(this.searchDisclosure(rawArguments)),
-      };
+        output: this.genericSearchOutput(exact),
+        tools: structuredClone(this.searchDisclosure(exact)),
+      });
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
-    const named = toolsNamedInQuery(pool.filter(isFunctionTool), query).map((t) => t.name);
+    const named = [
+      ...new Set([
+        ...this.exactMcpNamesIn(query),
+        ...toolsNamedInQuery(pool.filter(isFunctionTool), query).map((t) => t.name),
+      ]),
+    ];
     const strong = this.searchIndex
       .strongMatches(query)
       .filter(isFunctionTool)
@@ -909,12 +951,16 @@ export class LazyToolRuntime {
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
-    const result = await this.rankedSearch(
+    const ranked = await this.rankedSearch(
       rawArguments,
       { query, limit, named, clear, strongest },
       setupFor,
       signal,
     );
+    // A named or clearly strongest tool needs no alternatives. Otherwise the
+    // loaded best match is a guess, and the close candidates must reach the
+    // model on every route.
+    const result = named.length || strong.length ? ranked : this.withCandidatesNotice(ranked);
     const connectable = await lookup;
     const withConnectable = connectable.length
       ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
@@ -1000,6 +1046,68 @@ export class LazyToolRuntime {
         ? {}
         : { notice: result.notice === undefined ? notice : `${result.notice}\n${notice}` }),
     };
+  }
+
+  /**
+   * Native search outputs carry only loaded definitions. The close candidates
+   * a search found but did not load, and the names it could not resolve,
+   * follow the result as its notice there; generic outputs already list them.
+   */
+  private withCandidatesNotice(result: GenericSearchMarker): GenericSearchMarker {
+    if (this.transport === "generic_dispatch") return result;
+    const output = JSON.parse(result.output) as {
+      tools?: { name: string; description: string }[];
+      schemasLoaded?: boolean;
+      unavailable?: string[];
+      suggestions?: { name: string; description: string }[];
+    };
+    const loaded = new Set((result.tools ?? []).map((tool) => String(tool.name)));
+    const candidates: { name: string; description: string }[] = [];
+    for (const candidate of [
+      ...(output.schemasLoaded ? [] : (output.tools ?? [])),
+      ...(output.suggestions ?? []),
+    ]) {
+      if (!loaded.has(candidate.name) && !candidates.some((c) => c.name === candidate.name))
+        candidates.push(candidate);
+    }
+    const notice = searchCandidatesNotice(loaded.size > 0, output.unavailable ?? [], candidates);
+    if (notice === undefined) return result;
+    return {
+      ...result,
+      notice: result.notice === undefined ? notice : `${notice}\n${result.notice}`,
+    };
+  }
+
+  /**
+   * Resolves a name to the model name of the tool an MCP server publishes
+   * under exactly that name (`projects.search`), when its model name is a
+   * digest alias that a lookup by plain name cannot otherwise tell apart from
+   * a similar, shortened one. Undefined for any other name.
+   */
+  private exactMcpNameResolver(): (name: string) => string | undefined {
+    const pool = new Set(this.searchableTools(this.currentTools).map((tool) => tool.name));
+    const registries = [...new Set(this.modelMcpServerIds().values())];
+    return (name) => {
+      if (!name || name.includes("__") || pool.has(name)) return undefined;
+      for (const registryId of registries) {
+        const model = prefixedMcpToolName(registryId, name);
+        if (isAliasedMcpToolName(model) && pool.has(model)) return model;
+      }
+      return undefined;
+    };
+  }
+
+  /** Aliased MCP tools a free-text query names by the exact name their server publishes. */
+  private exactMcpNamesIn(query: string): string[] {
+    const resolve = this.exactMcpNameResolver();
+    const named: string[] = [];
+    for (const raw of query.split(/[^A-Za-z0-9_.\-/:]+/)) {
+      const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
+      if (!/[_.\-/:]/.test(token)) continue;
+      const model = resolve(token);
+      if (model !== undefined && !named.includes(model)) named.push(model);
+    }
+    return named;
   }
 
   private async rankedSearch(
@@ -1180,12 +1288,28 @@ export class LazyToolRuntime {
           typeof args.limit === "number" && Number.isFinite(args.limit)
             ? Math.max(1, Math.min(40, Math.floor(args.limit)))
             : 20;
+        // Digest aliases sort by their readable name part, so one connection's
+        // tools page alphabetically rather than in digest order.
+        const sortKey = (name: string) =>
+          isAliasedMcpToolName(name)
+            ? `mcp__${name.slice(name.indexOf("__") + 2)}\u0000${name}`
+            : name;
         const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
           .filter(isFunctionTool)
-          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+          .map((tool) => ({ tool, key: sortKey(tool.name) }))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+          .map(({ tool }) => tool);
+        // A prefix also matches the name after the server separator, in the
+        // form a server publishes it (`projects.` or `projects_`).
+        const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_]/g, "_");
+        const hasPrefix = (name: string) =>
+          name.startsWith(prefix) ||
+          (shortPrefix !== null &&
+            name.includes("__") &&
+            name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
         const tools = authorizedTools.filter(
           (tool) =>
-            tool.name.startsWith(prefix) &&
+            hasPrefix(tool.name) &&
             (group === undefined || toolGroup(tool.name, serverIds) === group),
         );
         if (args.view === "groups") {
