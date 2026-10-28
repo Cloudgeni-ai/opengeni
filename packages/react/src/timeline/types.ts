@@ -65,6 +65,11 @@ export type UserMessageItem = {
    * for messages from agents, services and schedules, and for older messages.
    */
   sender?: MessageSender | undefined;
+  /**
+   * This message handed a sub-session's question to the agent ("Let the agent
+   * decide"). Hosts may show the decision instead of the plain text.
+   */
+  humanInputDelegation?: { sessionId: string; requestId: string } | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:

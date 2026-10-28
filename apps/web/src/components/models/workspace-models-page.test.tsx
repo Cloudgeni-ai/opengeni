@@ -1768,6 +1768,35 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an organization Claude subscription reaches Personal workspaces, like Codex", async () => {
+    organizationAdmin = true;
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    routeOrganizationReads();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
+      await flush();
+      const everyWorkspaceText = view.container.textContent ?? "";
+      expect(everyWorkspaceText).toContain("including new ones and everyone's Personal workspace");
+      expect(everyWorkspaceText).not.toContain("can't be used in Personal workspaces");
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      await act(async () => selected.click());
+      await flush();
+      const personal = [
+        ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
+      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"));
+      expect(personal).toBeDefined();
+      expect(
+        personal!.hasAttribute("disabled") || personal!.getAttribute("aria-disabled") === "true",
+      ).toBe(false);
+      expect(view.container.textContent).not.toContain("can't be used there");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("an organization key can't be offered to Personal workspaces, and its choice is saved after connecting", async () => {
     organizationAdmin = true;
     routeOrganizationReads();

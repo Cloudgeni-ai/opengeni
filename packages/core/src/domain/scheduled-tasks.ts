@@ -1138,6 +1138,10 @@ export async function validateScheduledTaskTarget(input: {
 export const PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE =
   "Your personal machine can only run schedules that only you can see. Set Who can see it to Only me, or pick a shared machine.";
 
+/** Following a default never counts as consent to run unattended on a personal machine. */
+export const WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE =
+  "The workspace default is a personal machine, which runs only automations it is chosen on. Choose the machine for this automation instead of the workspace default.";
+
 /**
  * A schedule's audience is resolved after its machine is validated, and can be
  * changed without touching the machine. Re-check the pairing on the final
@@ -1251,7 +1255,9 @@ export async function validateScheduledTaskMachineTarget(input: {
     });
   }
   if (sandbox.scope === "user" && followsWorkspace) {
-    throw new HTTPException(422, { message: "The workspace default must be a shared machine" });
+    throw new HTTPException(422, {
+      message: WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
+    });
   }
   if (sandbox.scope === "user" && input.audience !== "user_private") {
     throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });

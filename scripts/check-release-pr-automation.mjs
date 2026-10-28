@@ -2372,10 +2372,10 @@ function mergedSourceReview(pullNumber, sourceSha, pullIdentity) {
 // ---------------------------------------------------------------------------
 // Tested-descendant release admission.
 //
-// The in-house merge batcher lands one true merge commit per PR and fast-forwards
-// main to the exact tested candidate tip. A Version PR is its own singleton
-// batch, but its own push CI may be coalesced or fail transiently, so a later
-// fully green main tip that contains the Version merge must be releasable.
+// The merge batcher lands each PR as one squash commit (a Version PR as a true
+// merge commit) after testing them together. A Version PR is its own singleton
+// batch, but its own push CI may fail transiently, so a later fully green main
+// tip that contains the Version merge must be releasable.
 // The Version provenance SHA (the Version PR's own merge commit) keeps every
 // exact reviewed-head/base/source-admission/topology proof; the released
 // candidate SHA owns all CI, image and artifact evidence. Nothing proven for
@@ -2412,8 +2412,9 @@ function descendantCommit(value, index) {
 
 // Complete provider ancestry for provenance..candidate in bounded pages. The
 // first-parent walk from the candidate must reach the provenance commit through
-// true two-parent merges only: direct pushes, squashes, octopus merges and a
-// provenance reachable only through a side branch all fail closed.
+// squash commits and true two-parent merges only, each proven below to be one
+// merged PR: direct pushes, octopus merges and a provenance reachable only
+// through a side branch all fail closed.
 async function readDescendantFirstParentMerges(api, provenanceSha, candidateSha) {
   const limits = RELEASE_AUTOMATION_CONTRACT.descendant;
   const maximumComparePages = Math.ceil(limits.maximumComparedCommits / recordsPerPage);
@@ -2479,8 +2480,8 @@ async function readDescendantFirstParentMerges(api, provenanceSha, candidateSha)
       "Version provenance is not on the release candidate's first-parent main history",
     );
     invariant(
-      commit.parents.length === 2,
-      `intervening first-parent commit ${current} is not a two-parent merge`,
+      commit.parents.length === 1 || commit.parents.length === 2,
+      `intervening first-parent commit ${current} is not a squash or two-parent merge`,
     );
     chain.push(commit);
     invariant(
@@ -2492,8 +2493,9 @@ async function readDescendantFirstParentMerges(api, provenanceSha, candidateSha)
   return chain.reverse();
 }
 
-// Every intervening merge must be the provider merge result of exactly one PR
-// merged into main whose exact head is the merge's second parent. A newer
+// Every intervening commit must be the provider merge result of exactly one PR
+// merged into main: a merge's second parent is the PR's exact head, and a
+// squash names the head the merge-tree audit recomputes it from. A newer
 // Version PR in the range makes the requested provenance stale.
 async function verifyInterveningMergePull(api, merge) {
   const pulls = await paginatedArray(
@@ -2519,7 +2521,7 @@ async function verifyInterveningMergePull(api, merge) {
     `intervening PR #${number} did not merge into protected main`,
   );
   invariant(
-    pull.head?.sha === merge.parents[1],
+    merge.parents.length === 1 || pull.head?.sha === merge.parents[1],
     `intervening merge ${merge.sha} does not retain PR #${number}'s exact head`,
   );
   invariant(
@@ -2531,7 +2533,10 @@ async function verifyInterveningMergePull(api, merge) {
     treeSha: merge.treeSha,
     parents: Object.freeze([...merge.parents]),
     pullRequestNumber: number,
-    headSha: merge.parents[1],
+    headSha:
+      merge.parents.length === 1
+        ? assertSha(pull.head?.sha, `intervening PR #${number} head SHA`)
+        : merge.parents[1],
   });
 }
 
@@ -2602,14 +2607,17 @@ function gitAuditOutput(gitDir, args, message) {
 /**
  * Independently recompute every first-parent merge from the Version provenance
  * through the released candidate with `git merge-tree`, using local Git objects
- * fetched as data. Hand-resolved, conflicting, single-parent or octopus commits
- * and a provenance off the candidate's first-parent chain fail closed.
+ * fetched as data. A squash commit is recomputed from its parent and the PR head
+ * in `squashHeads` (provider-proven). Hand-resolved, conflicting, unproven
+ * single-parent or octopus commits and a provenance off the candidate's
+ * first-parent chain fail closed.
  */
 export function auditDescendantMergeContent({
   gitDir,
   provenanceSha,
   candidateSha,
   maximumMerges = RELEASE_AUTOMATION_CONTRACT.descendant.maximumInterveningMerges,
+  squashHeads = {},
 }) {
   assertString(gitDir, "descendant Git directory");
   assertSha(provenanceSha, "Version provenance SHA");
@@ -2661,9 +2669,18 @@ export function auditDescendantMergeContent({
     )
       .split(" ")
       .slice(1);
+    let sides = parents;
+    if (parents.length === 1 && sha !== provenanceSha && Object.hasOwn(squashHeads, sha)) {
+      const head = assertSha(squashHeads[sha], `squash ${sha} PR head`);
+      invariant(
+        gitAuditCommand(gitDir, ["cat-file", "-t", head]).stdout.trim() === "commit",
+        `squash ${sha} PR head ${head} is missing`,
+      );
+      sides = [parents[0], head];
+    }
     invariant(
-      parents.length === 2,
-      `descendant first-parent commit ${sha} is not a two-parent merge`,
+      sides.length === 2,
+      `descendant first-parent commit ${sha} is not a proven squash or two-parent merge`,
     );
     if (expectedFirstParent !== null) {
       invariant(
@@ -2675,8 +2692,8 @@ export function auditDescendantMergeContent({
       "merge-tree",
       "--write-tree",
       "--no-messages",
-      parents[0],
-      parents[1],
+      sides[0],
+      sides[1],
     ]);
     invariant(
       recomputed.status === 0,
@@ -2848,9 +2865,9 @@ function verifyReceiptBody(receipt, file, sha, runId, runAttempt) {
       receipt.sha === sha && receipt.mode === "full",
       "full-green receipt names another source or mode",
     );
-    // A Batch-attested main push skipped its test lanes (docs/merge-batcher.md
-    // "Main-push Batch CI attestation"). It stays valid green-main evidence for
-    // canary and merge-content audits, but a release source needs the full suite.
+    // Receipts from the former merge batcher's main-push attestation skipped
+    // their test lanes. They stay valid green-main evidence for canary and
+    // merge-content audits, but a release source needs the full suite.
     invariant(
       receipt.attestation === undefined,
       "full-green receipt reused Batch CI; a release source needs the full main suite",
@@ -2970,7 +2987,19 @@ async function verifyTestedDescendantRelease({ options, env, logger, context, ap
     // Fail before any provider read when the merge-tree audit cannot run.
     requiredEnvironment(env, ["RELEASE_DESCENDANT_GIT_DIR"]);
     const gitDir = env.RELEASE_DESCENDANT_GIT_DIR;
-    auditMergeContent = (input) => auditDescendantMergeContent({ gitDir, ...input });
+    auditMergeContent = (input) => {
+      // Squashed PR heads are not on main's history: fetch them as data.
+      const missing = Object.values(input.squashHeads ?? {}).filter(
+        (head) => gitAuditCommand(gitDir, ["cat-file", "-e", `${head}^{commit}`]).status !== 0,
+      );
+      if (missing.length > 0)
+        gitAuditOutput(
+          gitDir,
+          ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", ...missing],
+          "squashed PR heads could not be fetched for the descendant merge audit",
+        );
+      return auditDescendantMergeContent({ gitDir, ...input });
+    };
   }
   const { initialMainSha, controller, controllerRelease } = await readRetainedReleaseController(
     api,
@@ -3081,6 +3110,11 @@ async function verifyTestedDescendantRelease({ options, env, logger, context, ap
     await auditMergeContent({
       provenanceSha: context.provenanceSha,
       candidateSha: context.sourceSha,
+      squashHeads: Object.fromEntries(
+        interveningMerges
+          .filter((merge) => merge.parents.length === 1)
+          .map((merge) => [merge.sha, merge.headSha]),
+      ),
     }),
     provenance,
     firstParentMerges,

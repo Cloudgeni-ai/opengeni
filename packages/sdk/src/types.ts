@@ -2567,7 +2567,9 @@ export type HumanInputAnswer = {
 
 export type HumanInputResponse =
   | { outcome: "answered"; answers: HumanInputAnswer[] }
-  | { outcome: "skipped" | "expired" | "cancelled" };
+  /** `agentDecides`: the person chose "Let the agent decide". */
+  | { outcome: "skipped"; agentDecides?: true | undefined }
+  | { outcome: "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
   | {
@@ -2576,7 +2578,12 @@ export type SubmitHumanInputResponseRequest =
       /** Write-only secret values; never echoed in events or responses. */
       secretAnswers?: HumanInputSecretAnswer[] | undefined;
     }
-  | { outcome: "skipped" };
+  /**
+   * `agentDecides`: "Let the agent decide". The asking agent makes its own best
+   * choice; accepted even when the request does not allow an ordinary skip, but
+   * never for secret questions, Skill reviews or secret approvals.
+   */
+  | { outcome: "skipped"; agentDecides?: true | undefined };
 
 export type SessionHumanInputRequest = {
   id: string;

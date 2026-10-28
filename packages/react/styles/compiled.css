@@ -5411,6 +5411,9 @@
 :where(.og-root).text-status-running,:where(.og-root) .text-status-running {
     color: var(--color-status-running);
   }
+:where(.og-root).text-status-success,:where(.og-root) .text-status-success {
+    color: var(--color-status-success);
+  }
 :where(.og-root).text-status-waiting,:where(.og-root) .text-status-waiting {
     color: var(--color-status-waiting);
   }

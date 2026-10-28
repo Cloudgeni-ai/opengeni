@@ -348,6 +348,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       },
       () =>
         settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, deploymentCatalogSettings, {
+          accountId: input.accountId,
           ...(credentialSubjectId
             ? { subjectId: credentialSubjectId }
             : {

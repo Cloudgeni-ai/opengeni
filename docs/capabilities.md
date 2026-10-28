@@ -91,6 +91,42 @@ widens the model-visible tool policy. Runtime authorization is rechecked before
 each Apps request; ownership and mutation rules are detailed in
 [`mcp-surfaces.md`](mcp-surfaces.md).
 
+### Personal workspace extension
+
+A Personal workspace extends its owner's organization for that one person. In
+the owner's Personal workspace, agents and the Connections page also get the
+MCP connectors behind the owner's own active **Only me** (subject-scoped)
+connections made in other workspaces of the same organization. Nothing is
+copied: `personalWorkspaceExtensionMcpServers`
+(`packages/core/src/domain/personal-workspace-connectors.ts`) derives them on
+every catalog read, session create, approval-policy read and worker claim.
+
+- A curated catalog connector uses its catalog definition; the origin
+  workspace's installation config does not follow. A custom MCP uses the
+  origin workspace's enabled capability whose connection reference matches the
+  connection, including that workspace's tool settings for it (allowed tools,
+  timeout, caching and approvals). Workspace-held credential headers and
+  host-authority references never follow; the carried server always binds the
+  owner's own subject-scoped account.
+- It applies only in the subject's canonical Personal workspace, only to that
+  subject's own active subject-scoped connections in the same account, and only
+  while the owner is still a live member of the origin workspace (rechecked
+  each time, so removing the connection or the membership leaves nothing).
+  Workspace-scoped connections and other people's connections never follow.
+- Personal's own installation of the same capability, enabled or disabled,
+  wins. The organization integration policy must allow each connector under
+  the key the owner's own setup of it in Personal would check: a dedicated
+  adapter's key (`gmail`, `google-drive`, `google-calendar`, `slack-personal`)
+  for those curated connectors, `custom:mcp` for other catalog connectors, and
+  `custom:mcp` (plus any dedicated key) for workspace-defined custom servers.
+  Shared workspaces are unchanged.
+- The Connections page lists a carried connector as connected, labelled
+  **From <workspace>**; it is managed in the origin workspace. Its owner can
+  still set its approvals in Personal, stored for the Personal workspace like
+  any of its own connectors.
+
+API integration definitions and MCP event sources are not carried yet.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:

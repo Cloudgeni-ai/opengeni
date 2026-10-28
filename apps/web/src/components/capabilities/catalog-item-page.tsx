@@ -18,6 +18,7 @@ import {
   OWNERSHIP_HELP,
   personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
+import { personalExtensionOrigin } from "@/components/capabilities/catalog-presentation";
 import {
   CredentialForm,
   FikenConnectorControls,
@@ -143,6 +144,7 @@ export function CatalogItemPage({
 
   const title = capabilityTitle(item);
   const description = capabilityDescription(item);
+  const carriedFrom = personalExtensionOrigin(item);
   const publisher = capabilityPublisher(item);
   const community = isCommunityCapability(item);
   const category = capabilityCategoryLabel(item.category);
@@ -663,7 +665,11 @@ export function CatalogItemPage({
         ) : null}
         {connectedScope ? (
           <p className="mt-4 mb-0 text-xs leading-4.5 text-fg-muted">
-            {connectedScope === "personal" ? OWNERSHIP_HELP.personal : OWNERSHIP_HELP.workspace}
+            {carriedFrom
+              ? `You connected it only for yourself in ${carriedFrom}. ${OWNERSHIP_HELP.personal}`
+              : connectedScope === "personal"
+                ? OWNERSHIP_HELP.personal
+                : OWNERSHIP_HELP.workspace}
           </p>
         ) : null}
       </DetailSection>

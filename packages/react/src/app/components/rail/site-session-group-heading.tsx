@@ -4,6 +4,7 @@ import {
   ArchiveIcon,
   ChevronRightIcon,
   EllipsisIcon,
+  FolderIcon,
   PanelsTopLeftIcon,
   PinIcon,
 } from "lucide-react";
@@ -18,29 +19,62 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "../../../ui/context-menu";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { cn } from "../../lib/utils";
 import { visualTreeDepth } from "../../lib/session-rail";
 import type { RailAggregateStatus } from "../../lib/sessions-group";
 import type { SessionSiteOrigin } from "../../lib/session-site-origin";
+import type { Channel } from "../../types";
 
 /**
  * Pin and archive for Site rows, in this person's own sidebar. Archive only
  * hides the row; the Site stays published. Absent where the client cannot
- * change sidebar state, and then the row offers no actions.
+ * change sidebar state, and then the row offers no actions. Move files the
+ * row in another project (null is Default), like a chat; absent where the
+ * client predates it.
  */
 export type SiteRowActions = {
   pin: (origin: SessionSiteOrigin, pinned: boolean) => void;
   archive: (origin: SessionSiteOrigin) => void;
+  move?:
+    | ((origin: SessionSiteOrigin, fromChannelId: string | null, channelId: string | null) => void)
+    | undefined;
 };
 export const SiteRowActionsContext = createContext<SiteRowActions | null>(null);
+
+/** Drag payload of a Site row: `{ siteId, title, channelId }` as JSON. */
+export const SITE_DRAG_TYPE = "application/x-opengeni-site";
+
+export type SiteRowDragPayload = { siteId: string; title: string; channelId: string | null };
+
+export function readSiteRowDragPayload(value: string): SiteRowDragPayload | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const { siteId, title, channelId } = parsed as Record<string, unknown>;
+    if (
+      typeof siteId !== "string" ||
+      typeof title !== "string" ||
+      (channelId !== null && typeof channelId !== "string")
+    )
+      return null;
+    return { siteId, title, channelId };
+  } catch {
+    return null;
+  }
+}
 
 /** A Site's row in the rail: open the Site view, or disclose its conversations. */
 export function SiteSessionGroupHeading({
@@ -54,6 +88,8 @@ export function SiteSessionGroupHeading({
   depth = 0,
   active = false,
   pinned = false,
+  channelId,
+  channels,
 }: {
   origin: SessionSiteOrigin;
   workspaceId: string;
@@ -67,8 +103,19 @@ export function SiteSessionGroupHeading({
   active?: boolean | undefined;
   /** This person pinned the Site in their sidebar. */
   pinned?: boolean | undefined;
+  /** The project this row is in (null is Default); undefined when it stands for every project. */
+  channelId?: string | null | undefined;
+  /** Projects it can move to, as offered for chats. */
+  channels?: readonly Channel[] | undefined;
 }) {
   const actions = useContext(SiteRowActionsContext);
+  const move = actions?.move;
+  // As for a chat row: listed only when there is a project to choose.
+  const moveTargets =
+    move && channelId !== undefined && channels && channels.length > 0
+      ? [{ id: null, name: "Default" }, ...channels]
+      : [];
+  const canMove = moveTargets.length > 0;
   const conversations = `${count} ${count === 1 ? "conversation" : "conversations"}`;
   // A Site without conversations is a plain row: nothing to disclose.
   const disclosable = count > 0 || expanded;
@@ -110,6 +157,24 @@ export function SiteSessionGroupHeading({
         aria-current={active ? "page" : undefined}
         // Without conversations there is no status to announce.
         aria-label={`Open ${origin.title}. Site${pinned ? ". Pinned" : ""}${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
+        // Drag onto a project to move the row there, like a chat row.
+        draggable={canMove}
+        onDragStart={(event) => {
+          if (!canMove) {
+            event.preventDefault();
+            return;
+          }
+          event.stopPropagation();
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData(
+            SITE_DRAG_TYPE,
+            JSON.stringify({
+              siteId: origin.siteId,
+              title: origin.title,
+              channelId: channelId ?? null,
+            } satisfies SiteRowDragPayload),
+          );
+        }}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
       >
         <PanelsTopLeftIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-muted" />
@@ -172,6 +237,28 @@ export function SiteSessionGroupHeading({
                 <ArchiveIcon className="size-4" />
                 Archive
               </DropdownMenuItem>
+              {canMove ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Move to project</DropdownMenuLabel>
+                  {moveTargets.map((channel) => {
+                    const current = (channelId ?? null) === channel.id;
+                    return (
+                      <DropdownMenuItem
+                        key={channel.id ?? "default"}
+                        aria-current={current ? "true" : undefined}
+                        onSelect={() => {
+                          if (!current) move?.(origin, channelId ?? null, channel.id);
+                        }}
+                      >
+                        <FolderIcon aria-hidden="true" />
+                        <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                        <DropdownMenuCheck checked={current} />
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </>
+              ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
         </>
@@ -191,6 +278,28 @@ export function SiteSessionGroupHeading({
           <ArchiveIcon className="size-4" />
           Archive
         </ContextMenuItem>
+        {canMove ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel>Move to project</ContextMenuLabel>
+            {moveTargets.map((channel) => {
+              const current = (channelId ?? null) === channel.id;
+              return (
+                <ContextMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (!current) move?.(origin, channelId ?? null, channel.id);
+                  }}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </ContextMenuItem>
+              );
+            })}
+          </>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   );
