@@ -5,6 +5,13 @@ import { normalizeConversationInboundEnvelope } from "@opengeni/core";
 
 const uuid = z.string().uuid();
 const opaque = z.string().min(1).max(512);
+// Teams repeats rich text as inline HTML. Only activity.text is consumed; the
+// representation is never parsed, fetched, or forwarded as an attachment.
+const InlineTextRepresentation = z.object({
+  contentType: z.literal("text/html"),
+  content: z.string(),
+  contentUrl: z.null().optional(),
+});
 const Activity = z.object({
   type: z.literal("message"),
   id: opaque,
@@ -140,7 +147,7 @@ export function normalizeTeamsMessage(
   const a = parsed.data;
   if (a.from.role === "bot" || a.from.id === a.recipient.id)
     return reject({ reason: "bot_sender" });
-  if (a.attachments?.length)
+  if (a.attachments?.some((value) => !InlineTextRepresentation.safeParse(value).success))
     return reject({
       reason: "attachments",
       attachmentCount: a.attachments.length,
