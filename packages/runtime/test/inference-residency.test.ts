@@ -448,6 +448,12 @@ describe("EU-only inference enforcement", () => {
       "/openai/deployments",
       "/openai/deployments/",
       "/openai/deployments/gpt-eu/deployments/gpt-global-standard/responses",
+      // Encoded separators and dot segments never read as an EU name.
+      "/openai/deployments/gpt-eu%2F..%2Fgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu%5C..%5Cgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu%252F..%252Fgpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/../gpt-global-standard/responses",
+      "/openai/deployments/gpt-eu/%2e%2e/gpt-global-standard/responses",
     ]) {
       await expect(
         guarded(`https://res.openai.azure.com${path}?api-version=1`, post("gpt-eu")),
