@@ -2620,9 +2620,9 @@ export function codexUsageLimitFailurePayload(
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts
     ? `All connected ChatGPT/Codex subscriptions are rate-limited. Access returns ${humanizeResetWindow(info.resetsInSeconds)}. ` +
-      `You can switch this session to a different model in the meantime, or wait for a subscription to reset.`
+      `You can continue with a different model in the meantime, or wait for a subscription to reset.`
     : `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. ` +
-      `You can switch this session to a different model in the meantime, or wait for the limit to reset.`;
+      `You can continue with a different model in the meantime, or wait for the limit to reset.`;
   return {
     error,
     code: "codex_usage_limit_reached",

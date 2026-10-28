@@ -36,7 +36,14 @@ export type ModelPolicyPickerMessages = {
   ultrafast?: string;
   /** How Ultrafast counts against a ChatGPT/Codex plan's usage limits. */
   ultrafastUsageHint?: string;
+  /** Why another model can't run in a Codex-only chat when no new chat is offered. */
   codexOnly: string;
+  /** Row hint in a Codex-only chat: choosing this model starts a new chat. */
+  continuesInNewChat?: string;
+  /** Why the chat stays on Codex and what the new chat starts with. */
+  continueInNewChatBody?: string;
+  /** The one action that starts the new chat. */
+  continueInNewChatAction?: string;
   searchLabel?: string;
   searchPlaceholder?: string;
   currentModel?: string;
@@ -64,6 +71,9 @@ export const defaultModelPolicyPickerMessages = (t: OpenGeniText): ModelPolicyPi
   ultrafast: t("modelPolicy.ultrafast"),
   ultrafastUsageHint: "8× usage",
   codexOnly: t("modelPickerModel.codexOnlySession"),
+  continuesInNewChat: t("modelPickerModel.continuesInANewChat"),
+  continueInNewChatBody: t("modelPickerModel.thisChatStaysOnCodex"),
+  continueInNewChatAction: t("modelPickerModel.continueInANewChat"),
   searchLabel: t("modelPickerModel.searchModelsOrProviders"),
   searchPlaceholder: t("modelPickerModel.searchModelsOrProviders2"),
   currentModel: t("modelPickerModel.currentModel"),
@@ -107,6 +117,11 @@ export type ModelPickerInput<TIcon = unknown> = {
   effort: ReasoningEffort;
   latencyMode: LatencyMode;
   codexOnly?: boolean | undefined;
+  /**
+   * With `codexOnly`, other models stay choosable: choosing one offers to
+   * continue in a new chat on that model instead of changing this chat.
+   */
+  onContinueInNewChat?: ((modelId: string) => void) | undefined;
   collapseScopes?: boolean | undefined;
   allowLatencyMode?: boolean | undefined;
   messages?: Partial<ModelPolicyPickerMessages> | undefined;
@@ -146,20 +161,41 @@ export function billingClassForMissingSelection(modelId: string): PickerBillingC
   return "opengeni_credits";
 }
 
+/**
+ * A chat frozen on Codex remote compaction can't take another model. With a
+ * new-chat handler, other models stay choosable and say they continue in a
+ * new chat; without one they are shown but can't be chosen.
+ */
 function applyCodexOnly(
   rows: ClientPickerModelRow[],
   codexOnly: boolean,
-  unavailableReason: string,
+  messages: ModelPolicyPickerMessages,
+  continueInNewChat: boolean,
 ): ClientPickerModelRow[] {
   if (!codexOnly) return rows;
-  return rows.map((row) =>
-    isCodexPickerModel(row.catalog)
-      ? row
-      : {
-          ...row,
-          selectable: false,
-          unavailableReason: row.unavailableReason ?? unavailableReason,
-        },
+  return rows.map((row) => {
+    if (isCodexPickerModel(row.catalog)) return row;
+    if (continueInNewChat && row.selectable) {
+      return { ...row, fundingHint: messages.continuesInNewChat ?? messages.codexOnly };
+    }
+    return {
+      ...row,
+      selectable: false,
+      unavailableReason: row.unavailableReason ?? messages.codexOnly,
+    };
+  });
+}
+
+/** Choosing this row starts a new chat instead of changing this one. */
+export function continuesInNewChat(
+  props: Pick<ModelPickerInput, "codexOnly" | "onContinueInNewChat">,
+  row: ClientPickerModelRow,
+): boolean {
+  return (
+    props.codexOnly === true &&
+    props.onContinueInNewChat !== undefined &&
+    row.selectable &&
+    !isCodexPickerModel(row.catalog)
   );
 }
 
@@ -188,7 +224,12 @@ export function effectiveRows<TIcon>(
   const rows =
     props.rows !== undefined ? props.rows : projectClientModelRows(t, props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
-  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
+  return applyCodexOnly(
+    rows,
+    props.codexOnly === true,
+    messages,
+    props.onContinueInNewChat !== undefined,
+  ).map((row) => {
     const scoped =
       props.collapseScopes === false
         ? {

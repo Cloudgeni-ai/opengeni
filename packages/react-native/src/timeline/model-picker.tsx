@@ -1,6 +1,7 @@
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   compactEffortLabel,
+  continuesInNewChat,
   groupPresentationFor,
   modelPickerChoice,
   modelPickerMenuView,
@@ -10,7 +11,7 @@ import {
 import { labelReasoningEffort, type PickerBillingClass } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { useState, type ReactNode } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Alert, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
 import { ModelMark } from "./session-list";
 import { BottomSheet } from "./sheet";
@@ -80,6 +81,21 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
   };
   const choose = (row: (typeof view.rows)[number]) => {
     if (props.disabled) return;
+    // A chat frozen on Codex keeps its model; another model continues it in a new chat.
+    if (continuesInNewChat(props, row)) {
+      const onContinue = props.onContinueInNewChat!;
+      Alert.alert(row.label, messages.continueInNewChatBody, [
+        { text: t("native.timeline.modelPicker.cancel"), style: "cancel" },
+        {
+          text: messages.continueInNewChatAction ?? row.label,
+          onPress: () => {
+            onContinue(row.id);
+            close();
+          },
+        },
+      ]);
+      return;
+    }
     const choice = modelPickerChoice(props, row);
     if (!choice) return;
     if (choice.model !== null) props.onModelChange(choice.model);
@@ -279,6 +295,10 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                         {row.unavailableReason ? (
                           <Text numberOfLines={2} style={muted}>
                             {row.unavailableReason}
+                          </Text>
+                        ) : continuesInNewChat(props, row) ? (
+                          <Text numberOfLines={1} style={muted}>
+                            {messages.continuesInNewChat}
                           </Text>
                         ) : null}
                       </View>

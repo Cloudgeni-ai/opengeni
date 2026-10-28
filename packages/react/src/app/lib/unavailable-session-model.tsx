@@ -103,3 +103,46 @@ export function unavailableModelReplacement(input: {
     latencyMode: latencyRunnable ? null : "standard",
   };
 }
+
+/**
+ * The model a Codex-locked chat offers to continue with in a new chat when
+ * Codex can't run it (for example at its usage limit): the server-resolved
+ * default when it is another provider's model, else a connected service, else
+ * the first other model that can run. Null when no other model can run.
+ */
+export function continuationModelForCodexOnlyChat(input: {
+  rows: readonly PickerModelRow[];
+  defaultSelection: DefaultModelSelection | null;
+}): { model: string; label: string; reasoningEffort: ReasoningEffort } | null {
+  const others = input.rows.filter(
+    (row) => row.selectable && row.catalog.source !== "codex" && !row.id.startsWith("codex/"),
+  );
+  const resolved = input.defaultSelection
+    ? findPickerRow(others, input.defaultSelection.model)
+    : undefined;
+  const row =
+    resolved ??
+    others.find((candidate) => CONNECTED_BILLING_CLASSES.has(candidate.billingClass)) ??
+    others[0];
+  if (!row) return null;
+  return {
+    model: row.id,
+    label: row.label,
+    reasoningEffort:
+      resolved && input.defaultSelection
+        ? input.defaultSelection.reasoningEffort
+        : defaultEffortForModel(row.catalog),
+  };
+}
+
+/** Failure codes for a ChatGPT/Codex plan that has run out of usage. */
+const CODEX_USAGE_LIMIT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "codex_usage_limit_reached",
+  "codex_included_usage_exhausted",
+]);
+
+export function isCodexUsageLimitFailure(failureCode: string | null | undefined): boolean {
+  return failureCode !== null && failureCode !== undefined
+    ? CODEX_USAGE_LIMIT_FAILURE_CODES.has(failureCode)
+    : false;
+}

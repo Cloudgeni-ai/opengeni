@@ -233,7 +233,7 @@ export function codexSectionVisible(codex: CodexSubscriptions): boolean {
 }
 
 /**
- * The Codex section: how several accounts share work, keeping chats portable,
+ * The Codex section: how several accounts share work, whether chats can switch models,
  * and Turn off Codex last. Which pool new work uses is not a setting here; the
  * line above the Accounts list says it.
  */
@@ -247,7 +247,7 @@ export function CodexSettingRows({
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
-  /** The "Keep Codex chats portable" row. */
+  /** The "Let Codex chats switch to other models" row. */
   providerSwitch: ReactNode;
   /** How the organization's accounts share work, for the people who manage them. */
   organizationSharing?: ReactNode;

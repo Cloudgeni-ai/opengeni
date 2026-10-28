@@ -211,17 +211,21 @@ import {
 } from "../lib/composer-launch";
 import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
 import {
+  coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,
   runnableLatencyModesForModel,
 } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
+  continuationModelForCodexOnlyChat,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
 } from "../lib/unavailable-session-model";
 import { UnavailableModelNotice } from "../components/session/unavailable-model-notice";
+import { CodexWaitNotice, type ContinueWithModel } from "../components/session/continue-with-model";
+import { useContinueInNewChat } from "../lib/continue-in-new-chat";
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
@@ -3198,6 +3202,45 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  // A chat frozen on Codex remote compaction keeps its Codex model. Other
+  // models continue it in a new chat that starts from a summary of this one.
+  const codexOnly = props.session.codexCompactionMode === "remote_v2";
+  const continuation = useContinueInNewChat(props.session);
+  const canContinueInNewChat = codexOnly && workspacePermissions.includes("sessions:create");
+  const continueInNewChat = (modelId: string) => {
+    const row = findPickerRow(modelCatalog.rows, modelId);
+    void continuation.continueWith({
+      model: modelId,
+      ...(row
+        ? { reasoningEffort: coerceReasoningEffortForModel(row.catalog, reasoningEffort) }
+        : {}),
+    });
+  };
+  const continuationModel = useMemo(
+    () =>
+      canContinueInNewChat
+        ? continuationModelForCodexOnlyChat({
+            rows: modelCatalog.rows,
+            defaultSelection: modelCatalog.defaultSelection,
+          })
+        : null,
+    [canContinueInNewChat, modelCatalog.rows, modelCatalog.defaultSelection],
+  );
+  const continueWith: ContinueWithModel | undefined = continuationModel
+    ? {
+        label: continuationModel.label,
+        pending: continuation.pending,
+        onContinue: () =>
+          void continuation.continueWith({
+            model: continuationModel.model,
+            reasoningEffort: continuationModel.reasoningEffort,
+          }),
+      }
+    : undefined;
+  const codexWaitNotice =
+    continueWith && props.session.status === "waiting_capacity" && !terminal ? (
+      <CodexWaitNotice continueWith={continueWith} />
+    ) : null;
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
@@ -3423,6 +3466,7 @@ function SessionChatPane(props: {
               `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
             }
             canChooseModel={canChooseRecoveryModel}
+            continueWith={continueWith}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
@@ -3934,6 +3978,7 @@ function SessionChatPane(props: {
                 disabled={terminal}
                 header={
                   unavailableModelNotice ||
+                  codexWaitNotice ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
@@ -3955,6 +4000,7 @@ function SessionChatPane(props: {
                         />
                       ) : null}
                       {unavailableModelNotice}
+                      {codexWaitNotice}
                       {usageLimitNotice}
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
@@ -4138,7 +4184,7 @@ function SessionChatPane(props: {
                       model={model}
                       effort={reasoningEffort}
                       latencyMode={latencyMode}
-                      disabled={modelPickerDisabled}
+                      disabled={modelPickerDisabled || continuation.pending}
                       loading={modelCatalog.loading || composer.draftLoading}
                       error={modelCatalog.error ?? composerPolicyError}
                       sessionKey={props.session.id}
@@ -4147,7 +4193,8 @@ function SessionChatPane(props: {
                       claudeSubscriptionAvailable={
                         context.clientConfig.claudeSubscriptionEnabled === true
                       }
-                      codexOnly={props.session.codexCompactionMode === "remote_v2"}
+                      codexOnly={codexOnly}
+                      onContinueInNewChat={canContinueInNewChat ? continueInNewChat : undefined}
                       onModelChange={composer.setModel}
                       onEffortChange={composer.setReasoningEffort}
                       onLatencyModeChange={composer.setLatencyMode}

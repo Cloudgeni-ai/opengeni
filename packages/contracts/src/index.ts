@@ -20178,6 +20178,28 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
 );
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
+/**
+ * Continue a chat in a new chat on another model. The new chat starts with a
+ * bounded copy of the earlier conversation as model-visible context and links
+ * back to it; the earlier chat is unchanged. Used when a chat cannot take the
+ * chosen model, for example a chat frozen on Codex remote compaction.
+ */
+export const ContinueSessionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      idempotencyKey: z.string().min(1).max(200),
+      model: z.string().min(1),
+      reasoningEffort: ReasoningEffort.optional(),
+      latencyMode: LatencyMode.optional(),
+      /** The new chat's visible first message. Omitted: a short request to summarize and continue. */
+      initialMessage: z.string().trim().min(1).max(4000).optional(),
+      clientEventId: SessionOperationKey.optional(),
+      timeZone: MessageTimeZone.optional(),
+    })
+    .strict(),
+);
+export type ContinueSessionRequest = z.infer<typeof ContinueSessionRequest>;
+
 export const SessionTenancyCreateCapabilities = /* @__PURE__ */ defineSchema(() =>
   z.object({
     activated: primitives.boolean,

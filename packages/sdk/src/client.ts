@@ -622,6 +622,7 @@ import type {
   ScheduledTaskRun,
   ForkSessionRequest,
   ForkSessionResponse,
+  ContinueSessionRequest,
   Session,
   SessionStatus,
   WorkClaimSubjectType,
@@ -1933,6 +1934,24 @@ export class OpenGeniClient {
       "POST",
       `${sessionPath(workspaceId, sessionId)}/forks`,
       request,
+    );
+  }
+
+  /**
+   * Continue a chat in a new chat on another model, for example when a chat
+   * frozen on Codex remote compaction can't take the chosen model. Returns the
+   * new chat; the earlier one is unchanged.
+   */
+  async continueSessionInNewChat(
+    workspaceId: string,
+    sessionId: string,
+    request: ContinueSessionRequest,
+  ): Promise<CreateSessionResponse> {
+    const { body } = withMessageTimeZone(request, this.options.messageTimeZone);
+    return await this.requestJson<CreateSessionResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/continuations`,
+      body,
     );
   }
 

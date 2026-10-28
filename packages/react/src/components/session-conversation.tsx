@@ -5,6 +5,7 @@ import {
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import { coerceReasoningEffortForModel, findPickerRow } from "../model-policy";
 import {
   lazy,
   Suspense,
@@ -567,6 +568,37 @@ function ConversationView({
     context.workspaceId,
     showsCapabilityRequest && config.chatConnections && !importedArchive,
   );
+  // A chat frozen on Codex keeps its Codex model. When the host can open
+  // another chat and owns no chat setup, other models continue it there.
+  const [continuingInNewChat, setContinuingInNewChat] = useState(false);
+  const [continueError, setContinueError] = useState<string | null>(null);
+  const codexOnly = detail.session?.codexCompactionMode === "remote_v2";
+  const startContinuation = context.client.continueSessionInNewChat?.bind(context.client);
+  const continueInNewChat =
+    codexOnly &&
+    startContinuation &&
+    onOpenSession &&
+    sessionId &&
+    config.chatConnections &&
+    !importedArchive
+      ? (modelId: string) => {
+          if (continuingInNewChat) return;
+          const row = findPickerRow(catalog.rows, modelId);
+          const effort = composer.policy?.reasoningEffort;
+          setContinuingInNewChat(true);
+          setContinueError(null);
+          void startContinuation(context.workspaceId, sessionId, {
+            idempotencyKey: crypto.randomUUID(),
+            model: modelId,
+            ...(row && effort
+              ? { reasoningEffort: coerceReasoningEffortForModel(row.catalog, effort) }
+              : {}),
+          })
+            .then((next) => onOpenSession(next.id))
+            .catch((caught: unknown) => setContinueError(formatError(caught)))
+            .finally(() => setContinuingInNewChat(false));
+        }
+      : undefined;
   const renderStockAuthNeeded = (item: AuthNeededItem) => {
     if (!sessionId || importedArchive) return undefined;
     const decision = inChatConnectDecision(item, connectSupport, config.chatConnections);
@@ -868,11 +900,13 @@ function ConversationView({
                       effort={composer.policy.reasoningEffort}
                       latencyMode={composer.policy.latencyMode}
                       loading={catalog.loading}
-                      error={catalog.error?.message}
-                      disabled={sessionId === null || terminal}
+                      error={continueError ?? catalog.error?.message}
+                      disabled={sessionId === null || terminal || continuingInNewChat}
                       // A session frozen on Codex remote compaction refuses
-                      // other providers' models; offer them only as disabled.
-                      codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
+                      // other providers' models: they continue in a new chat
+                      // when the host can open one, else they can't be chosen.
+                      codexOnly={codexOnly}
+                      onContinueInNewChat={continueInNewChat}
                       sessionKey={sessionId ?? undefined}
                       onOpenChange={(open) => {
                         if (open) void catalog.refresh();

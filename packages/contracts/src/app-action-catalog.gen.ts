@@ -842,6 +842,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "continueSessionInNewChat",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/continuations",
+    "request": [
+      "ContinueSessionRequest"
+    ],
+    "response": [
+      "CreateSessionResponse"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "continueSessionWaitingWork",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",

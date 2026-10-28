@@ -370,7 +370,7 @@ Learned on Settings > Models, 27 Sep 2026.
   No group headers inside a list, no pool-wide controls between rows, no ⋯ menu floating above
   them.
 - **Settings of a group get their own section, as setting rows.** "Spreading work
-  across accounts", "Keep Codex chats portable": each row has exactly one control. A destructive action
+  across accounts", "Let Codex chats switch to other models": each row has exactly one control. A destructive action
   for the group ("Turn off Codex") is the last row, as quiet danger text (`SettingDangerRow`) that
   confirms in a dialog. Show them directly; don't fold two or three rows under an "Advanced".
 - **No control for what the system decides.** When the product picks something automatically

@@ -61,9 +61,11 @@ Each organization subscription account has its own page.
 - Sharing work between this workspace's accounts: Spread work shares new chats
   evenly across accounts that can serve them. Primary first starts new chats on
   the primary account and uses another account when it can't serve them.
-- Keep Codex chats portable: summarizes long chats in a form another provider's
-  model can continue. Off keeps new chats on Codex, with better memory of long
-  conversations.
+- Let Codex chats switch to other models: long chats keep a summary any model
+  can read instead of ChatGPT's own memory. Applies to new chats. Off (the
+  default) keeps each Codex chat on Codex models, with better memory of long
+  conversations; choosing another model in such a chat offers to continue in a
+  new chat that starts with a summary of it.
 - Codex Apps: lets agents use the ChatGPT apps connected to one account. It must
   be an account owned by the workspace.
 

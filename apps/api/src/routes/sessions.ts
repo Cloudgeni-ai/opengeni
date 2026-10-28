@@ -1,4 +1,5 @@
 import { readSessionResponsePair } from "./session-response-reads";
+import { continueSessionInNewChat } from "../session-continuation";
 import {
   legacyVariableSetFields,
   rejectLegacyVariableSetFields,
@@ -98,6 +99,7 @@ import {
   FsReadRequest,
   FsWriteRequest,
   ForkSessionRequest,
+  ContinueSessionRequest,
   HumanInputRequestStatus,
   GitDiffRequest,
   GitReadBatchRequest,
@@ -1653,6 +1655,50 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       throw sessionTenancyHttpError(error);
     }
+  });
+
+  // Continue a chat in a new chat on another model (for example a chat frozen
+  // on Codex remote compaction). The earlier chat is only read.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/continuations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:create",
+    );
+    requirePermission(authorization.grant, "sessions:read");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = ContinueSessionRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session continuation request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    let session: Session;
+    try {
+      session = await continueSessionInNewChat(
+        deps,
+        authorization.grant,
+        workspaceId,
+        sessionId,
+        parsed.data,
+        authorization,
+      );
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 404) throw error;
+      return sessionCreateErrorResponse(c, error);
+    }
+    return c.json(
+      await withEffectivePolicy(deps, workspaceId, authorization.grant.subjectId, session),
+      202,
+    );
   });
 
   const publishRealtimeMutation = async (
@@ -5796,6 +5842,8 @@ export function sessionAuthorizationOperationForHttp(
   // Owner-only preview of the same change: identical authority to making it.
   if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
+  // Continuing reads the earlier chat; the new chat is an ordinary create.
+  if (suffix === "/continuations" && verb === "POST") return "session.read";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";

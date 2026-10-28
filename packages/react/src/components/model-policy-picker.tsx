@@ -77,8 +77,13 @@ export type ModelPolicyPickerProps = {
   /** Initial menu state when `open` is uncontrolled. */
   defaultOpen?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
-  /** Non-Codex models stay visible but cannot be selected. */
+  /**
+   * The chat is frozen on Codex. Other models stay visible; with
+   * `onContinueInNewChat` they offer a new chat, otherwise they can't be chosen.
+   */
   codexOnly?: boolean | undefined;
+  /** Start a new chat on `modelId` that continues this one (Codex-only chats). */
+  onContinueInNewChat?: ((modelId: string) => void) | undefined;
   /** Identity of the current session scope. */
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */

@@ -50,6 +50,7 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
+import * as Crypto from "expo-crypto";
 import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
@@ -290,6 +291,26 @@ function LiveSession(props: {
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // A chat frozen on Codex keeps its Codex model; another model continues it
+  // in a new chat that starts from a summary of this one.
+  const [continuing, setContinuing] = useState(false);
+  const continueInNewChat = (modelId: string) => {
+    if (continuing) return;
+    setContinuing(true);
+    void props.client
+      .continueSessionInNewChat(props.workspaceId, props.sessionId, {
+        idempotencyKey: Crypto.randomUUID(),
+        model: modelId,
+      })
+      .then((next) => router.push(appSessionPath(next.id, next.workspaceId, null)))
+      .catch((error: unknown) =>
+        Alert.alert(
+          "Couldn't start a new chat",
+          error instanceof Error ? error.message : "Try again in a moment.",
+        ),
+      )
+      .finally(() => setContinuing(false));
+  };
   // The composer owns the next turn's policy, exactly as the web picker edits it.
   const composer = controller.composer;
   const voice = useComposerVoice({
@@ -589,6 +610,8 @@ function LiveSession(props: {
             (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
           )}
           codexOnly={session?.codexCompactionMode === "remote_v2"}
+          onContinueInNewChat={continueInNewChat}
+          disabled={continuing}
           groupPresentation={{
             opengeni_credits: {
               label: "Opengeni",

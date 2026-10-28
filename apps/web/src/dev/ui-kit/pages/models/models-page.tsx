@@ -21,6 +21,11 @@ import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
 import { UsageReadout } from "@opengeni/react/ui/usage-meter";
 import { cn } from "@opengeni/react/app/lib/utils";
+import {
+  CODEX_MODEL_SWITCH_DESCRIPTION,
+  CODEX_MODEL_SWITCH_LABEL,
+  codexModelSwitchToast,
+} from "@/components/models/codex-provider-switch-row";
 
 import { KIT_NOW, currentWorkspace, organization } from "../../fixtures";
 import {
@@ -636,16 +641,14 @@ function CodexSettings() {
       ) : null}
       <SettingRow
         variant={picks.settingRow}
-        label="Keep Codex chats portable"
-        description="Summarizes long chats in a form another provider's model can continue. Off keeps new chats on Codex, with better memory of long conversations."
+        label={CODEX_MODEL_SWITCH_LABEL}
+        description={CODEX_MODEL_SWITCH_DESCRIPTION}
         control={
           <Switch
             checked={portable}
             onCheckedChange={(next) => {
               setPortable(next);
-              toast.success(
-                next ? "New Codex chats are portable" : "New Codex chats stay on Codex",
-              );
+              toast.success(codexModelSwitchToast(next));
             }}
           />
         }

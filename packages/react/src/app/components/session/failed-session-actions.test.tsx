@@ -934,3 +934,30 @@ test("the timeline flag never hides a failure the timeline cannot own", async ()
   expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
   expect(quota.textContent).toContain("daily limit");
 });
+
+test("a Codex usage limit in a chat that stays on Codex offers to continue with another model", async () => {
+  const continued: string[] = [];
+  const limited = {
+    ...failure,
+    failureCode: "codex_usage_limit_reached",
+    reason:
+      "Your ChatGPT/Codex subscription usage limit has been reached. Access resets in about 72h. You can continue with a different model in the meantime, or wait for the limit to reset.",
+  };
+  const continueWith = { label: "GPT-6 Astra", onContinue: () => continued.push("astra") };
+  const container = await render(
+    <FailedSessionBanner failure={limited} actions={actions} continueWith={continueWith} />,
+  );
+  const button = container.querySelector<HTMLButtonElement>('[data-testid="continue-with-model"]');
+  expect(button?.textContent).toBe("Continue with GPT-6 Astra");
+  await act(async () => button!.click());
+  expect(continued).toEqual(["astra"]);
+  // Other failures, and chats that can switch models in place, keep their own actions.
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={failure} actions={actions} continueWith={continueWith} />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="continue-with-model"]')).toBeNull();
+  await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
+  expect(container.querySelector('[data-testid="continue-with-model"]')).toBeNull();
+});

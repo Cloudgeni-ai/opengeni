@@ -183,7 +183,12 @@ type SessionClientMethods = Pick<
  * the attention mutation an open conversation uses to mark itself read.
  */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal" | "updateSessionAttention">>;
+  Partial<
+    Pick<
+      OpenGeniClient,
+      "listSessionSummaryPage" | "findGoal" | "updateSessionAttention" | "continueSessionInNewChat"
+    >
+  >;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.

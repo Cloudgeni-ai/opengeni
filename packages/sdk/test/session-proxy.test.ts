@@ -2077,6 +2077,7 @@ describe("createSessionProxyHandler pass-through", () => {
       ["POST", `${chat}/active-sandbox`],
       ["POST", `${chat}/codex-account`],
       ["POST", `${chat}/forks`],
+      ["POST", `${chat}/continuations`],
       ["POST", `${ws}/chat/completions`],
     ];
     for (const [method, url] of routes) {

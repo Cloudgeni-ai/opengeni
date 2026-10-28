@@ -1396,6 +1396,7 @@ export type {
   SessionVisibilityChangePreview,
   ForkSessionRequest,
   ForkSessionResponse,
+  ContinueSessionRequest,
   SessionCapabilities,
   AgentTopologyPageResponse,
   AgentTopologySession,

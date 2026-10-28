@@ -13,6 +13,7 @@ import {
 import { labelReasoningEffort, type PickerModelRow } from "../model-policy";
 import {
   compactEffortLabel,
+  continuesInNewChat,
   groupPresentationFor,
   modelPickerChoice,
   modelPickerMenuView,
@@ -20,6 +21,8 @@ import {
 import {
   BillingClassMark,
   defaultModelPolicyPickerMessages,
+  PickerAnimatedPage,
+  PickerBackHeader,
   PickerNavRow,
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
@@ -33,11 +36,17 @@ type ClientPickerModelRow = PickerModelRow<ClientModel>;
 export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const t = useOpenGeniText();
   const [query, setQuery] = useState("");
+  // A Codex-only chat confirms before another model starts a new chat.
+  const [continueRow, setContinueRow] = useState<ClientPickerModelRow | null>(null);
   const view = modelPickerMenuView(t, props, query);
   const { messages, rows, groups } = view;
   const selected = view.selected;
   const choose = (row: ClientPickerModelRow) => {
     if (props.disabled) return;
+    if (continuesInNewChat(props, row)) {
+      setContinueRow(row);
+      return;
+    }
     const choice = modelPickerChoice(props, row);
     if (!choice) return;
     if (choice.model !== null) props.onModelChange(choice.model);
@@ -77,6 +86,41 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       onClick={() => choose(row)}
     />
   );
+  if (continueRow && props.onContinueInNewChat) {
+    const onContinue = props.onContinueInNewChat;
+    return (
+      <div data-testid="model-picker-menu" className="flex min-h-0 flex-col">
+        <PickerAnimatedPage pageKey={`continue-${continueRow.id}`} direction={1}>
+          <div data-testid="model-picker-continue">
+            <PickerBackHeader
+              label={continueRow.label}
+              icon={<ModelMark model={continueRow.catalog} className="size-4 text-og-fg-muted" />}
+              onBack={() => setContinueRow(null)}
+            />
+            <p className="px-2.5 pb-3 pt-1 text-og-control leading-snug text-og-fg-muted">
+              {messages.continueInNewChatBody}
+            </p>
+            <div className="px-1.5 pb-1.5">
+              <button
+                type="button"
+                autoFocus
+                disabled={props.disabled}
+                data-testid="model-picker-continue-action"
+                onClick={() => {
+                  onContinue(continueRow.id);
+                  props.onOpenChange?.(false);
+                }}
+                className="flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-control font-medium text-og-primary-fg outline-hidden transition-colors hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {messages.continueInNewChatAction}
+                <ArrowRightIcon className="size-3.5" aria-hidden />
+              </button>
+            </div>
+          </div>
+        </PickerAnimatedPage>
+      </div>
+    );
+  }
   return (
     <div
       data-testid="model-picker-menu"

@@ -5,6 +5,8 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { projectPickerRows, sortPickerRows } from "@opengeni/react";
 import { scheduledRunErrorText } from "./scheduled-run-error";
 import {
+  continuationModelForCodexOnlyChat,
+  isCodexUsageLimitFailure,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
@@ -237,5 +239,43 @@ describe("scheduledRunErrorText", () => {
     const text = scheduledRunErrorText("session_usage_limit");
     expect(text).toContain("Raise or remove the limit");
     expect(text).not.toMatch(/credit|budget|month/i);
+  });
+});
+
+describe("continuationModelForCodexOnlyChat", () => {
+  test("offers another provider's model, never a Codex one", () => {
+    // The resolved default is Codex here, so a non-Codex model is offered.
+    expect(
+      continuationModelForCodexOnlyChat({
+        rows,
+        defaultSelection: {
+          model: "codex/gpt-6-sol",
+          reasoningEffort: "high",
+          source: "workspace",
+        },
+      }),
+    ).toEqual({ model: "gpt-6-astra", label: "GPT-6 Astra", reasoningEffort: "low" });
+    expect(
+      continuationModelForCodexOnlyChat({
+        rows,
+        defaultSelection: { model: "gpt-6-sol", reasoningEffort: "high", source: "credits" },
+      }),
+    ).toEqual({ model: "gpt-6-sol", label: "GPT-6 Sol", reasoningEffort: "high" });
+  });
+
+  test("returns null when only Codex can run", () => {
+    expect(
+      continuationModelForCodexOnlyChat({
+        rows: sortPickerRows(projectPickerRows(t, [codex])),
+        defaultSelection: null,
+      }),
+    ).toBeNull();
+  });
+
+  test("both Codex usage-limit failures offer it", () => {
+    expect(isCodexUsageLimitFailure("codex_usage_limit_reached")).toBe(true);
+    expect(isCodexUsageLimitFailure("codex_included_usage_exhausted")).toBe(true);
+    expect(isCodexUsageLimitFailure("provider_unavailable")).toBe(false);
+    expect(isCodexUsageLimitFailure(undefined)).toBe(false);
   });
 });

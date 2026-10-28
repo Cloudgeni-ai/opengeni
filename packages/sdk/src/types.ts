@@ -1760,6 +1760,23 @@ export type ForkSessionRequest = {
   rigId?: string | null | undefined;
 };
 
+/**
+ * Continue a chat in a new chat on another model. The new chat starts with a
+ * bounded copy of the earlier conversation as model-visible context, keeps its
+ * resources, visibility and machine, and links back to it through
+ * `metadata.continuedFromSessionId`. The earlier chat is unchanged.
+ */
+export type ContinueSessionRequest = {
+  idempotencyKey: string;
+  model: string;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+  /** The new chat's visible first message. Omitted: a short request to summarize and continue. */
+  initialMessage?: string | undefined;
+  clientEventId?: string | undefined;
+  timeZone?: string | undefined;
+};
+
 export type ForkSessionResponse = {
   operationId: string;
   eventId: string;

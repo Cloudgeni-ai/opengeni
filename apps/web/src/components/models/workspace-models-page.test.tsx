@@ -1034,11 +1034,13 @@ describe("Models list", () => {
     }
   });
 
-  test("the portability switch explains itself without On:/Off: copy", async () => {
+  test("the model-switch setting says what people get, without On:/Off: copy", async () => {
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Keep Codex chats portable");
+      expect(text).toContain("Let Codex chats switch to other models");
+      expect(text).toContain("Applies to new chats.");
+      expect(text).not.toContain("portable");
       expect(text).not.toMatch(/\bOn: |\bOff: /);
     } finally {
       await cleanup(view);

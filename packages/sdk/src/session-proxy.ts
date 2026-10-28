@@ -289,7 +289,7 @@ export type SessionProxyHandlerOptions = {
    * request (agent, tools, MCP servers, Skills, instructions, model policy), and
    * the relay refuses the routes that would change that setup afterwards: a
    * chat's agent, tool policy, Skills, variable sets, usage limit, visibility,
-   * active sandbox and Codex account, forks, and `chat/completions`.
+   * active sandbox and Codex account, forks, continuations, and `chat/completions`.
    *
    * Without it, the browser creates chats with Opengeni's own create request,
    * limited by the user's permissions.
@@ -487,6 +487,8 @@ const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
   "POST active-sandbox",
   "POST codex-account",
   "POST forks",
+  // A continuation is a new chat; with server-owned setup only the server creates chats.
+  "POST continuations",
 ]);
 
 class ProxyRejection extends Error {
