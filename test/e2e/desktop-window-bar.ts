@@ -9,6 +9,13 @@ import type { BrowserContext, Page } from "playwright";
 export const WINDOW_BAR_HEIGHT = 44;
 
 /**
+ * Where the macOS app's own bar controls (the sidebar toggle) start: right of
+ * the traffic lights and of the wider badge macOS swaps in for them while the
+ * window is shared or recorded.
+ */
+export const MACOS_BAR_CONTROLS_LEFT = 84;
+
+/**
  * A plain browser has no Windows window controls overlay, so stand in for the
  * 44px title bar area the desktop shell asks for. Call before the page loads.
  */
@@ -31,7 +38,9 @@ export async function simulateWindowsTitleBar(target: Page | BrowserContext) {
  * What the page draws in the window's top `WINDOW_BAR_HEIGHT` pixels, under
  * the window controls, with the bar itself hidden: hit-tests a grid across the
  * strip and lists every element found there other than the page's own
- * background (html, body). Empty when the page starts below the bar.
+ * background (html, body) and the controls placed in the bar on purpose
+ * (`[data-window-bar-controls]`, checked by `windowBarControls`). Empty when
+ * the page starts below the bar.
  */
 export async function contentUnderWindowBar(page: Page): Promise<string[]> {
   return page.evaluate((height) => {
@@ -46,6 +55,7 @@ export async function contentUnderWindowBar(page: Page): Promise<string[]> {
           if (!element || element === document.documentElement || element === document.body) {
             continue;
           }
+          if (element.closest("[data-window-bar-controls]")) continue;
           // A modal dialog's ::backdrop hit-tests as the dialog itself: only
           // count what is drawn at the point by the element's own box.
           const box = element.getBoundingClientRect();
@@ -64,6 +74,26 @@ export async function contentUnderWindowBar(page: Page): Promise<string[]> {
       hide.remove();
     }
   }, WINDOW_BAR_HEIGHT);
+}
+
+/** The controls the page places in the window bar, with their boxes and drag behaviour. */
+export async function windowBarControls(page: Page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>("[data-window-bar-controls]")]
+      .filter((element) => element.getClientRects().length > 0)
+      .map((element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          left: box.left,
+          top: box.top,
+          bottom: box.bottom,
+          drag: getComputedStyle(element).getPropertyValue("-webkit-app-region"),
+          buttons: [...element.querySelectorAll("button")].map(
+            (button) => button.getAttribute("aria-label") ?? "",
+          ),
+        };
+      }),
+  );
 }
 
 /** The window bar's height, colour and drag behaviour, or null when there is none. */
@@ -91,10 +121,13 @@ export async function windowBar(page: Page) {
 /**
  * Asserts the platform's top edge: on macOS and Windows a draggable bar holds
  * the window controls and nothing of the page sits under it; elsewhere there
- * is no bar and the page starts at the top of the window.
+ * is no bar and the page starts at the top of the window. Only the macOS app
+ * puts controls of its own in the bar, right of the traffic lights and not
+ * draggable, so they stay clickable.
  */
 export async function expectWindowTop(page: Page, platform: string) {
   const bar = await windowBar(page);
+  const controls = await windowBarControls(page);
   if (platform === "macos" || platform === "windows") {
     expect(bar).toMatchObject({
       top: 0,
@@ -105,5 +138,15 @@ export async function expectWindowTop(page: Page, platform: string) {
     expect(await contentUnderWindowBar(page)).toEqual([]);
   } else {
     expect(bar).toBeNull();
+  }
+  if (platform === "macos") {
+    for (const control of controls) {
+      expect(control.left).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
+      expect(control.top).toBeGreaterThanOrEqual(0);
+      expect(control.bottom).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
+      expect(control.drag).toBe("no-drag");
+    }
+  } else {
+    expect(controls).toEqual([]);
   }
 }

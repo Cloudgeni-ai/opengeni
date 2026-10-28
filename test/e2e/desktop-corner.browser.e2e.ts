@@ -102,6 +102,42 @@ describe("the desktop window bar", () => {
           const box = (await heading.boundingBox())!;
           title.set(`${platform}-${width}-${rail}`, { x: box.x, y: box.y - pageTop(platform) });
           await expectWindowTop(page, platform);
+          // In the macOS app the page is an inset, rounded panel on the
+          // window's material, flush with the rail and 8px in from the
+          // window's right and bottom edges, like native Mac apps.
+          const canvas = page.locator("[data-canvas]");
+          const panel = await canvas.evaluate((element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            const nav = element.previousElementSibling!.getBoundingClientRect();
+            return {
+              radius: style.borderTopLeftRadius,
+              border: style.borderTopWidth,
+              gapLeft: rect.left - nav.right,
+              gapRight: innerWidth - rect.right,
+              gapBottom: innerHeight - rect.bottom,
+              top: rect.top,
+            };
+          });
+          expect(panel).toEqual(
+            platform === "macos"
+              ? {
+                  radius: "10px",
+                  border: "1px",
+                  gapLeft: 0,
+                  gapRight: 8,
+                  gapBottom: 8,
+                  top: WINDOW_BAR_HEIGHT,
+                }
+              : {
+                  radius: "0px",
+                  border: "0px",
+                  gapLeft: 0,
+                  gapRight: 0,
+                  gapBottom: 0,
+                  top: pageTop(platform),
+                },
+          );
           // The collapsed rail stays 56px wide on every platform.
           if (rail === "collapsed") {
             expect((await page.locator("nav[data-collapsed='true']").boundingBox())!.width).toBe(
@@ -113,12 +149,15 @@ describe("the desktop window bar", () => {
         await page.close();
       }
     }
-    // Below the bar the layout is the web app's own: same places on every platform.
-    for (const platform of ["windows", "macos"]) {
-      for (const [key, box] of title) {
-        if (!key.startsWith("browser-")) continue;
-        expect({ key, ...title.get(key.replace("browser", platform))! }).toEqual({ key, ...box });
-      }
+    // Below the bar the layout is the web app's own: same places on Windows,
+    // and on macOS the same within the panel's 1px border and its 8px inset
+    // (a centred column moves by half of it).
+    for (const [key, box] of title) {
+      if (!key.startsWith("browser-")) continue;
+      expect({ key, ...title.get(key.replace("browser", "windows"))! }).toEqual({ key, ...box });
+      const mac = title.get(key.replace("browser", "macos"))!;
+      expect({ key, y: mac.y }).toEqual({ key, y: box.y + 1 });
+      expect({ key, near: Math.abs(mac.x - box.x) <= 5 }).toEqual({ key, near: true });
     }
     // And the web app is unchanged: 24px past the rail below 1024px, then the
     // centred column with its 32px inset.

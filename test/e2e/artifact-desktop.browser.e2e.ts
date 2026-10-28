@@ -78,7 +78,12 @@ test("expanded Sites start below the desktop window bar", async () => {
         expect(bounds!.x).toBeLessThan(30);
         const fullWindow = (await page.locator("[data-artifact-fullscreen]").boundingBox())!;
         expect(fullWindow.y).toBe(desktopBar ? WINDOW_BAR_HEIGHT : 0);
-        expect(fullWindow.y + fullWindow.height).toBe(700);
+        // On macOS it is the window's inset, rounded main panel: 8px in from
+        // the window's sides and bottom, like the pane it covers.
+        const inset = platform === "macos" ? 8 : 0;
+        expect(fullWindow.x).toBe(inset);
+        expect(fullWindow.x + fullWindow.width).toBe(width - inset);
+        expect(fullWindow.y + fullWindow.height).toBe(700 - inset);
         const header = page.locator("[data-artifact-fullscreen] > [data-window-drag]");
         expect(await header.evaluate((el) => el.getBoundingClientRect().height)).toBe(48);
         await expectWindowTop(page, platform);
@@ -357,7 +362,8 @@ test("app notices start below the desktop window bar", async () => {
         await open("&update=0&paused");
         const banner = page.locator("[data-canvas] > [data-slot='notice']");
         await banner.getByText("Agent work is paused").waitFor();
-        expect((await banner.boundingBox())!.y).toBe(top);
+        // On macOS the page is an inset panel: the banner starts inside its 1px border.
+        expect((await banner.boundingBox())!.y).toBe(top + (platform === "macos" ? 1 : 0));
         await expectWindowTop(page, platform);
         // Beside the open rail the banner keeps its usual spacing.
         await open("&update=0&paused&rail=open");

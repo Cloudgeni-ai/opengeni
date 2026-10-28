@@ -17,8 +17,9 @@ function Preview() {
   return (
     <OpenGeniProvider client={client} workspaceId={workspaceId}>
       <TooltipProvider>
-        <main className="flex h-dvh bg-canvas text-fg">
+        <main data-window-frame className="flex h-dvh bg-canvas text-fg">
           <nav
+            data-shell-rail
             data-collapsed={rail.collapsed}
             style={{ width: rail.collapsed ? 56 : 288 }}
             className="h-full shrink-0 border-r border-border"

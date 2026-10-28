@@ -5,7 +5,13 @@ import { chromium } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess } from "@opengeni/testing/process";
 
-import { expectWindowTop, simulateWindowsTitleBar, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
+import {
+  expectWindowTop,
+  MACOS_BAR_CONTROLS_LEFT,
+  simulateWindowsTitleBar,
+  WINDOW_BAR_HEIGHT,
+  windowBarControls,
+} from "./desktop-window-bar";
 
 test("the rail starts below the desktop window bar and scrolls clear of the window controls", async () => {
   const port = await freePort();
@@ -54,6 +60,21 @@ test("the rail starts below the desktop window bar and scrolls clear of the wind
         const before = (await header.boundingBox())!;
         expect(before.y).toBeGreaterThanOrEqual(top);
         await expectWindowTop(page, platform);
+        // The macOS app has no row of its own for the traffic lights: the
+        // sidebar toggle sits in the window bar beside them, and the rail's
+        // header starts with the brand. Elsewhere it stays in the header.
+        const sidebarToggles = header.getByRole("button", { name: /sidebar$/ });
+        if (platform === "macos") {
+          expect(await sidebarToggles.count()).toBe(0);
+          const box = (await toggle.boundingBox())!;
+          expect(box.x).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
+          expect(box.y + box.height).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
+          expect((await windowBarControls(page)).map((control) => control.buttons)).toEqual([
+            ["Collapse sidebar"],
+          ]);
+        } else {
+          expect(await sidebarToggles.count()).toBe(1);
+        }
         if (output) await page.screenshot({ path: `${output}/${platform}-${width}-top.png` });
         await viewport.evaluate((element) => {
           element.scrollTop = 240;
@@ -66,7 +87,14 @@ test("the rail starts below the desktop window bar and scrolls clear of the wind
         // Pointer collapse and keyboard expansion remain available after scrolling.
         await toggle.click();
         const expand = page.getByRole("button", { name: "Expand sidebar", exact: true });
-        expect((await expand.boundingBox())!.y).toBeGreaterThanOrEqual(top);
+        const expandBox = (await expand.boundingBox())!;
+        if (platform === "macos") {
+          // The toggle stays put in the bar when the rail collapses.
+          expect(expandBox.x).toBeGreaterThanOrEqual(MACOS_BAR_CONTROLS_LEFT);
+          expect(expandBox.y + expandBox.height).toBeLessThanOrEqual(WINDOW_BAR_HEIGHT);
+        } else {
+          expect(expandBox.y).toBeGreaterThanOrEqual(top);
+        }
         await expectWindowTop(page, platform);
         if (output) await page.screenshot({ path: `${output}/${platform}-${width}-collapsed.png` });
         await expand.focus();

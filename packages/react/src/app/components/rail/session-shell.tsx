@@ -344,6 +344,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
         {chatList && !rail.isMobile ? (
           <nav
             aria-label="Primary"
+            data-shell-rail
             data-collapsed={rail.collapsed}
             style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(

@@ -88,10 +88,10 @@ html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   app-region: drag;
 }
 
-/* On macOS it is the rail's material: the window's sidebar glass through the
-   app's background. */
+/* On macOS the bar is part of the window frame (below) and draws nothing of
+   its own. */
 html[data-desktop="macos"]::before {
-  background-color: color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  background-color: transparent;
 }
 
 /* In a short window a tall dialog or a menu can reach over the bar; it stays
@@ -135,17 +135,59 @@ html:is([data-desktop="macos"], [data-desktop="windows"]) [data-window-layer] {
   max-height: none;
 }
 
-html[data-desktop="macos"],
-html[data-desktop="macos"] body {
+/* macOS: one window frame, as in native Mac apps. The bar, the rails and the
+   margin around the main pane are a single surface: the window's sidebar
+   glass through the app's background, with the rail's quiet glow. The main
+   pane (the canvas next to a rail) sits on it as an inset, rounded panel,
+   and the sidebar toggle sits in the bar beside the traffic lights. */
+html[data-desktop="macos"] {
   background-color: transparent;
+}
+
+html[data-desktop="macos"] body {
+  background:
+    radial-gradient(ellipse 26rem 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
+    radial-gradient(ellipse 30rem 45% at 0 100%, var(--og-glow-peach-quiet), transparent 85%),
+    color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+}
+
+html[data-desktop="macos"] [data-window-frame] {
+  background-color: transparent;
+}
+
+html[data-desktop="macos"] [data-canvas] {
+  margin: 0 8px 8px;
+  border: 1px solid var(--og-color-border);
+  border-radius: 10px;
+}
+
+html[data-desktop="macos"] [data-shell-rail] {
+  border-right-color: transparent;
+}
+
+html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
+  margin-left: 0;
+}
+
+/* Layers that fill the window's content (a full-window Site or artifact, the
+   maximized workspace) are the same inset panel, over the rail. The sidebar
+   toggle has nothing to show or hide under them. */
+html[data-desktop="macos"] :is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer] {
+  inset: var(--og-window-bar-height) 8px 8px;
+  width: auto;
+  height: auto;
+  border: 1px solid var(--og-color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+html[data-desktop="macos"]:has(:is([data-artifact-fullscreen], [data-workspace-surface])[data-window-layer]) [data-window-bar-controls] {
+  display: none;
 }
 
 @layer components {
   html[data-desktop="macos"] .og-rail-glow {
-    background:
-      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
-      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach-quiet), transparent 85%),
-      color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+    background: transparent;
   }
 }
 
