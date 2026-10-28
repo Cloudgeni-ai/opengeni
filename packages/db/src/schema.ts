@@ -4937,7 +4937,7 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// An organization's EU-only inference setting (migration 1020). No row means
+// An organization's EU-only inference setting (migration 1060). No row means
 // off. The runtime reads it; only update_organization_inference_residency_v1 writes it.
 export const organizationInferenceResidency = pgTable("organization_inference_residency", {
   accountId: uuid("account_id")
@@ -4950,7 +4950,7 @@ export const organizationInferenceResidency = pgTable("organization_inference_re
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// Append-only history of EU-only inference changes (migration 1020). Each row
+// Append-only history of EU-only inference changes (migration 1060). Each row
 // is also the stored result of its operation id. No runtime privileges.
 export const organizationInferenceResidencyEvents = pgTable(
   "organization_inference_residency_events",

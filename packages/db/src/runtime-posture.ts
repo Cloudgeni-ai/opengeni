@@ -53,7 +53,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the running commands a returning runner did not answer for (0984), the
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002) and the only writer of
- * the EU-only inference setting and its history (1020). Each is
+ * the EU-only inference setting and its history (1060). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -86,7 +86,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withholds the held-browser inventory; until it is granted, the API
  * renews no browser holds.
- * 1020 withholds the EU-only change function; until it is granted the setting
+ * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
