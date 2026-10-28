@@ -398,7 +398,7 @@ export type RunnerScan =
  * tail still lists its completed jobs. capacity.test.ts checks this constant
  * against the workflow file.
  */
-export const MAIN_PRE_FANOUT_JOBS = 4;
+export const MAIN_PRE_FANOUT_JOBS = 5;
 /**
  * ci.yml job and step a main push runs when its exact tree already passed a
  * trusted Batch CI attempt (scripts/ci/batch-attestation.ts). The step runs and

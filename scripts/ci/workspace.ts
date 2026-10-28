@@ -190,6 +190,7 @@ export function transitiveDependencies(
 
 export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
   const projects = [
+    "scripts/batcher",
     "scripts/ci",
     "scripts/operator",
     "scripts/public-api",

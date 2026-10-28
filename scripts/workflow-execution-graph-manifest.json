@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "a21dab8a570bf280fa86f8931c3a809349e6230b866bae92070751514e8ae9a8"
+      "sha256": "016bc9de875747284b70e0a199b63ae4a514a1a7230e405ac6b0196c8a12e896"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -58,7 +58,11 @@
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
-      "sha256": "fa1158683ffa1ab4586ae719aac14e03ff9f63de6b5f271a1d4a4c013bb231a9"
+      "sha256": "a8cf9127997425824515083ab6740b3d371d00fb4e901ba1a345ceee21d67b89"
+    },
+    {
+      "path": ".github/workflows/merge-batcher.yml",
+      "sha256": "2a6470dbca9fadf171f7506427a8500e7cdfb571f4b9fd3b1a84bb9c213f9e93"
     },
     {
       "path": ".github/workflows/merge-content.yml",
@@ -154,7 +158,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "b0655e3225e8e61a6686372847fae324f4b0d49ccfb5a7689181504ba110816c"
+      "sha256": "802509a3d688869db12b13f489898bd758828fc00bfd1792db3143e204890693"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -903,6 +907,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "main-ci-cadence",
+      "step": "Defer this push to the main CI cadence",
+      "sha256": "5d3ab6f81e8a3dc1c0246621a34c83f0ba3e7f2e1203f8903fdd6c843fb5c8cf"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "merge-content",
       "step": "Recompute landed merge trees from their parents",
       "sha256": "c376ad8f0cda757c317e3d7658eace34e2cdddb8b7737b40f1d66c12514ccc0b"
@@ -1025,7 +1035,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "449dd01a3d370129eba3121a92cbb7ff8e0b04a243c19e2312ba06050d84a43d"
+      "sha256": "5dd25a44f594e37791be12ded1fe677be5ffc057b961d8d956c2c0253551e24c"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1433,7 +1443,13 @@
       "workflow": ".github/workflows/main-approval-superseded.yml",
       "job": "superseded",
       "step": "Cancel superseded parked or not-started main CI runs",
-      "sha256": "4a022b1dff8b3faa34098ada685557dd77bd17e4bfe55ffcbfce6ff8a5e643d8"
+      "sha256": "e9cd7d6887cc41c6fd0837266039a1fc72456e76b1372997fd355322e191ec94"
+    },
+    {
+      "workflow": ".github/workflows/merge-batcher.yml",
+      "job": "pass",
+      "step": "Run one pass",
+      "sha256": "76dc09a121599165ef19d190af152fe64a05c16681a902909c855cc462f342f9"
     },
     {
       "workflow": ".github/workflows/merge-content.yml",

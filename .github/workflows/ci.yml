@@ -6,6 +6,9 @@ on:
     branches:
       - main
       - production
+      # Merge batcher candidates (docs/merge-batcher.md): tested like a PR,
+      # against the batch's base on main, and never publish anything.
+      - "batch/**"
   # Main PRs/merge groups use merge-queue.yml. Full CI is a separate,
   # non-cancelling release-candidate lane.
   pull_request:
@@ -213,6 +216,33 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
 
+  # Main CI runs on a cadence instead of on every push (docs/merge-batcher.md
+  # "Main CI cadence"). With MAIN_CI_DEFERRED, the first attempt of an ordinary
+  # main push cancels itself before any work starts; main-approval-superseded.yml
+  # re-runs the newest main SHA's run about every 30 minutes, and anyone can
+  # re-run a main SHA to get its images now. Version merges always run.
+  main-ci-cadence:
+    name: Main CI cadence
+    if: >-
+      ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      vars.MAIN_CI_DEFERRED == 'true' &&
+      !startsWith(github.event.head_commit.message, 'chore: version packages') &&
+      !contains(github.event.head_commit.message, 'changeset-release/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write # cancel this run
+    steps:
+      - name: Defer this push to the main CI cadence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Deferred: main CI runs on a cadence. Re-run this workflow to test this exact SHA now." >> "$GITHUB_STEP_SUMMARY"
+          gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          # Cancellation lands within seconds; never let this run continue.
+          sleep 300
+          exit 1
+
   # A merge-batcher landing fast-forwards main to a commit whose exact Git tree
   # already passed a trusted Batch CI attempt. That push reuses the Batch
   # verdict: its test lanes are skipped, while deployment artifacts, the
@@ -272,8 +302,8 @@ jobs:
 
   plan:
     name: Explain change impact
-    needs: [automation-admission, batch-attestation]
-    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, main-ci-cadence, batch-attestation]
+    if: ${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 17
     permissions:
@@ -414,6 +444,14 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
+          elif [ "$EVENT_NAME" = "push" ] && [[ "$GITHUB_REF" == refs/heads/batch/* ]]; then
+            # A batch tip names its base on main in its manifest commit.
+            base="$(git log -1 --format=%B HEAD | sed -n 's/^Batch-Manifest: //p' | jq -r '.base // empty' 2>/dev/null || true)"
+            if [[ "$base" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$base" HEAD; then
+              bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output impact-plan.json
+            else
+              bun scripts/ci/impact.ts --full --output impact-plan.json
+            fi
           elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] ||
                { [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; }; then
             bun scripts/ci/impact.ts --full --output impact-plan.json

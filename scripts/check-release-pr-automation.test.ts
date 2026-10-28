@@ -4825,13 +4825,20 @@ describe("workflow contracts", () => {
         },
       },
       "automation-admission": { result: "skipped" },
+      "main-ci-cadence": { result: "skipped" },
       "artifact-runtime": { result: "success" },
       "release-image-validation": { result: "success" },
     };
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
       if (
         reports.has(name) ||
-        ["automation-admission", "batch-attestation", "merge-content", "full-green"].includes(name)
+        [
+          "automation-admission",
+          "main-ci-cadence",
+          "batch-attestation",
+          "merge-content",
+          "full-green",
+        ].includes(name)
       )
         continue;
       // Execute the checked-in boolean predicate with GitHub's documented
@@ -5048,7 +5055,7 @@ describe("workflow contracts", () => {
     expect(release.jobs.version.if).toBe(
       "${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}",
     );
-    expect(ci.on.push.branches).toEqual(["main", "production"]);
+    expect(ci.on.push.branches).toEqual(["main", "production", "batch/**"]);
     expect(ci.on.pull_request).not.toBeUndefined();
     expect(ci.on.schedule).toEqual([{ cron: "0 3 * * 1" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(
@@ -5196,10 +5203,11 @@ describe("workflow contracts", () => {
   test("shards selected work while preserving current acceptance and full-mode safety gates", () => {
     const plan = ci.jobs.plan;
     expect(plan.name).toBe("Explain change impact");
-    // batch-attestation is push-to-main only; plan tolerates its skipped result.
-    expect(plan.needs).toEqual(["automation-admission", "batch-attestation"]);
+    // main-ci-cadence and batch-attestation are push-to-main only; plan
+    // tolerates their skipped results and stops when a push is deferred.
+    expect(plan.needs).toEqual(["automation-admission", "main-ci-cadence", "batch-attestation"]);
     expect(plan.if).toBe(
-      "${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(plan.outputs).toEqual(
       expect.objectContaining({

@@ -1,0 +1,312 @@
+// Pure decisions for the merge batcher. Everything here is a function of one
+// observation of GitHub, so a pass can be repeated or interrupted at any point.
+
+export const QUEUE_LABEL = "queue-ready";
+export const PRIORITY_LABEL = "queue-priority";
+export const VERSION_BRANCH = "changeset-release/main";
+export const BATCH_PREFIX = "batch/";
+export const BUILD_PREFIX = "batch-build/";
+export const CI_WORKFLOW = ".github/workflows/ci.yml";
+export const MANIFEST_TRAILER = "Batch-Manifest: ";
+
+/** Changes to CI or to the batcher itself are tested and landed alone. */
+export const CONTROL_PLANE = [/^\.github\//, /^scripts\/ci\//, /^scripts\/batcher\//];
+
+export interface Settings {
+  /** Once the oldest ready PR has waited this long, build a batch. */
+  windowMs: number;
+  maxBatch: number;
+  /** A batch whose CI has not appeared after this long is rebuilt. */
+  startTimeoutMs: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  windowMs: 3 * 60_000,
+  maxBatch: 12,
+  startTimeoutMs: 10 * 60_000,
+};
+
+export interface QueuedPull {
+  number: number;
+  title: string;
+  headSha: string;
+  /** When it was (last) queued: the queue-ready label or auto-merge. */
+  queuedAt: number;
+  /** When PR CI passed on this exact head, or null while it has not. */
+  greenAt: number | null;
+  /** GitHub says the PR conflicts with main. */
+  conflicting: boolean;
+  priority: boolean;
+  version: boolean;
+  controlPlane: boolean;
+}
+
+export interface Member {
+  number: number;
+  title: string;
+  head: string;
+  /** Tree after this member was merged into the candidate. */
+  tree: string;
+  version?: true;
+}
+
+export interface Manifest {
+  schemaVersion: 2;
+  id: string;
+  base: string;
+  members: Member[];
+  /** Groups still to test, in order, while a failed batch is being bisected. */
+  pending: number[][];
+}
+
+export interface BatchRun {
+  id: number;
+  workflow: string;
+  status: string;
+  conclusion: string | null;
+  attempt: number;
+  url: string;
+}
+
+export interface Batch {
+  branch: string;
+  tip: string;
+  manifest: Manifest;
+  createdAt: number;
+  runs: BatchRun[];
+}
+
+export interface Observation {
+  now: number;
+  mainSha: string;
+  pulls: QueuedPull[];
+  batches: Batch[];
+}
+
+export type Action =
+  | { kind: "abandon"; batch: Batch; reason: string }
+  | { kind: "retry"; batch: Batch; runs: BatchRun[] }
+  | { kind: "land"; batch: Batch }
+  | { kind: "eject"; number: number; reason: string }
+  | { kind: "build"; members: QueuedPull[]; pending: number[][] }
+  | { kind: "wait"; until: number };
+
+export type Verdict =
+  | { kind: "running" }
+  | { kind: "missing" }
+  | { kind: "passed" }
+  | { kind: "retry"; runs: BatchRun[] }
+  | { kind: "failed"; runs: BatchRun[] };
+
+const PASSING = new Set(["success", "skipped", "neutral"]);
+
+export function isControlPlane(files: string[]): boolean {
+  return files.some((file) => CONTROL_PLANE.some((pattern) => pattern.test(file)));
+}
+
+/** Every workflow the batch push started must pass, and CI must be one of them. */
+export function verdict(batch: Batch, now: number, settings: Settings): Verdict {
+  const ci = batch.runs.filter((run) => run.workflow === CI_WORKFLOW);
+  if (!ci.length)
+    return now - batch.createdAt > settings.startTimeoutMs
+      ? { kind: "missing" }
+      : { kind: "running" };
+  if (batch.runs.some((run) => run.status !== "completed")) return { kind: "running" };
+  const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
+  if (!failed.length) return { kind: "passed" };
+  // One cheap retry of only the failed jobs absorbs flaky tests before blame.
+  if (failed.every((run) => run.attempt < 2)) return { kind: "retry", runs: failed };
+  return { kind: "failed", runs: failed };
+}
+
+function fifo(a: QueuedPull, b: QueuedPull) {
+  return a.queuedAt - b.queuedAt || a.number - b.number;
+}
+
+/** When a PR became ready to batch: queued and green on its current head. */
+export function readyAt(pull: QueuedPull): number {
+  return Math.max(pull.queuedAt, pull.greenAt ?? Infinity);
+}
+
+/**
+ * Choose the next batch. Priority and Version PRs go first; a failed batch's
+ * remaining halves come next; then ready PRs in queue order. CI and batcher
+ * changes run alone.
+ */
+export function nextBatch(
+  pulls: QueuedPull[],
+  pending: number[][],
+  now: number,
+  settings: Settings,
+): Action | null {
+  const ready = pulls.filter((p) => p.greenAt !== null && !p.conflicting).sort(fifo);
+  if (!ready.length) return null;
+  const alone = (p: QueuedPull) => p.version || p.controlPlane;
+
+  const urgent = ready.filter((p) => p.priority || p.version);
+  if (urgent.length) {
+    const first = urgent[0]!;
+    const members = alone(first)
+      ? [first]
+      : urgent.filter((p) => !alone(p)).slice(0, settings.maxBatch);
+    return { kind: "build", members, pending };
+  }
+
+  for (let index = 0; index < pending.length; index++) {
+    const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
+      (p): p is QueuedPull => p !== undefined,
+    );
+    if (!group.length) continue;
+    const rest = pending.slice(index + 1);
+    if (group.some(alone)) {
+      const first = group[0]!;
+      const others = group.filter((p) => p !== first).map((p) => p.number);
+      return { kind: "build", members: [first], pending: others.length ? [others, ...rest] : rest };
+    }
+    return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest };
+  }
+
+  if (alone(ready[0]!)) return { kind: "build", members: [ready[0]!], pending: [] };
+  const members: QueuedPull[] = [];
+  for (const pull of ready) {
+    if (pull.controlPlane) continue;
+    members.push(pull);
+    if (members.length === settings.maxBatch) break;
+  }
+  if (members.length < settings.maxBatch) {
+    const oldest = Math.min(...members.map(readyAt));
+    if (now - oldest < settings.windowMs)
+      return { kind: "wait", until: oldest + settings.windowMs };
+  }
+  return { kind: "build", members, pending: [] };
+}
+
+function split<T>(items: T[]): [T[], T[]] {
+  const half = Math.ceil(items.length / 2);
+  return [items.slice(0, half), items.slice(half)];
+}
+
+/** Decide everything one pass should do, in order. */
+export function decide(observation: Observation, settings: Settings = DEFAULT_SETTINGS): Action[] {
+  const { now, mainSha } = observation;
+  const actions: Action[] = [];
+  let pulls = observation.pulls;
+  let pending: number[][] = [];
+  const byNumber = new Map(pulls.map((p) => [p.number, p]));
+
+  for (const pull of pulls)
+    if (pull.conflicting)
+      actions.push({
+        kind: "eject",
+        number: pull.number,
+        reason: "it conflicts with main. Merge main into the branch, then queue it again.",
+      });
+
+  const batches = [...observation.batches].sort((a, b) => b.createdAt - a.createdAt);
+  for (const extra of batches.slice(1))
+    actions.push({ kind: "abandon", batch: extra, reason: "only one batch runs at a time" });
+  const batch = batches[0];
+
+  if (batch) {
+    const { manifest } = batch;
+    const numbers = manifest.members.map((m) => m.number);
+    // An interrupted batch is tested again first, keeping any bisection.
+    pending = [numbers, ...manifest.pending];
+    const left = manifest.members.find((m) => byNumber.get(m.number)?.headSha !== m.head);
+    const urgent = pulls.some((p) => (p.priority || p.version) && p.greenAt !== null);
+    const isUrgent = manifest.members.some(
+      (m) => m.version || byNumber.get(m.number)?.priority === true,
+    );
+    let reason: string | null = null;
+    if (manifest.base !== mainSha) reason = "main moved since the batch was built";
+    else if (left)
+      reason = byNumber.has(left.number)
+        ? `#${left.number} has a new head`
+        : `#${left.number} left the queue`;
+    else if (urgent && !isUrgent) reason = "a priority PR is ready";
+    if (reason) actions.push({ kind: "abandon", batch, reason });
+    else {
+      const result = verdict(batch, now, settings);
+      if (result.kind === "running") return actions;
+      if (result.kind === "missing") {
+        actions.push({ kind: "abandon", batch, reason: "its CI never started" });
+      } else if (result.kind === "retry") {
+        actions.push({ kind: "retry", batch, runs: result.runs });
+        return actions;
+      } else if (result.kind === "passed") {
+        actions.push({ kind: "land", batch });
+        const landed = new Set(numbers);
+        pulls = pulls.filter((p) => !landed.has(p.number));
+        pending = manifest.pending;
+      } else {
+        actions.push({ kind: "abandon", batch, reason: "its CI failed" });
+        if (numbers.length === 1) {
+          const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
+          actions.push({
+            kind: "eject",
+            number: numbers[0]!,
+            reason: `it failed CI on top of main, also after a retry: ${run.url}`,
+          });
+          pulls = pulls.filter((p) => p.number !== numbers[0]);
+          pending = manifest.pending;
+        } else {
+          // Bisect: test the first half now and keep the second half next in line.
+          const [first, second] = split(numbers);
+          pending = [first, second, ...manifest.pending];
+        }
+      }
+    }
+  }
+
+  const next = nextBatch(
+    pulls.filter((p) => !p.conflicting),
+    pending,
+    now,
+    settings,
+  );
+  if (next) actions.push(next);
+  return actions;
+}
+
+export function batchTitle(id: string, members: { number: number }[]): string {
+  return `Batch ${id}: ${members.map((m) => `#${m.number}`).join(", ")}`;
+}
+
+export function renderManifest(manifest: Manifest): string {
+  return `${batchTitle(manifest.id, manifest.members)}\n\n${MANIFEST_TRAILER}${JSON.stringify(manifest)}\n`;
+}
+
+export function parseManifest(message: string): Manifest | null {
+  const line = message.split("\n").find((l) => l.startsWith(MANIFEST_TRAILER));
+  if (!line) return null;
+  try {
+    const value = JSON.parse(line.slice(MANIFEST_TRAILER.length)) as Manifest;
+    const sha = /^[0-9a-f]{40}$/;
+    if (
+      value.schemaVersion !== 2 ||
+      !/^[0-9a-f]{12}$/.test(value.id) ||
+      !sha.test(value.base) ||
+      !Array.isArray(value.members) ||
+      !value.members.length ||
+      value.members.some(
+        (m) =>
+          !Number.isSafeInteger(m.number) ||
+          typeof m.title !== "string" ||
+          !sha.test(m.head) ||
+          !sha.test(m.tree),
+      ) ||
+      !Array.isArray(value.pending) ||
+      value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n)))
+    )
+      return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/** The landed commit title: the PR title with its number, like a GitHub squash. */
+export function squashTitle(member: Pick<Member, "number" | "title">): string {
+  const title = member.title.trim().replace(/\s*\(#\d+\)$/, "");
+  return `${title} (#${member.number})`;
+}

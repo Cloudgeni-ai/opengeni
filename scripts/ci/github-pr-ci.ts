@@ -70,10 +70,7 @@ export function priorityHold(
     const path = run.path.split("@")[0];
     const main =
       path === ".github/workflows/ci.yml" && run.event === "push" && run.head_branch === "main";
-    const batch =
-      path === ".github/workflows/batch-ci.yml" &&
-      run.event === "push" &&
-      run.head_branch.startsWith("queue/");
+    const batch = isBatchRun(run);
     if (!main && !(lane === "pr" && batch)) continue;
     if (main && mainReleaseApprovalOnly(run, jobs)) continue;
     // Completed testing plus only environment-approval waits is not runner demand.
@@ -82,6 +79,15 @@ export function priorityHold(
       return `${main ? "main" : "batch"} run ${run.id} has priority`;
   }
   return null;
+}
+/** Merge batcher candidate CI: ci.yml on batch/<id>, or the previous batcher's queue/ branches. */
+function isBatchRun(run: Pick<Run, "path" | "event" | "head_branch">): boolean {
+  const path = run.path.split("@")[0];
+  return (
+    run.event === "push" &&
+    ((path === ".github/workflows/ci.yml" && run.head_branch.startsWith("batch/")) ||
+      (path === ".github/workflows/batch-ci.yml" && run.head_branch.startsWith("queue/")))
+  );
 }
 export function docsOnly(paths: string[]): boolean {
   return (
@@ -235,7 +241,7 @@ export async function runPrCiCommand(
     while (timing.now() < deadline) {
       const raw: Run[] = [];
       try {
-        raw.push(...(await activeRuns("ci.yml", "&branch=main&event=push")));
+        raw.push(...(await activeRuns("ci.yml", "&event=push")));
         if (lane === "pr") raw.push(...(await activeRuns("batch-ci.yml", "&event=push")));
       } catch (error) {
         if (!(error instanceof IncompleteInventory)) throw error;
@@ -252,10 +258,7 @@ export async function runPrCiCommand(
           ((r.path.split("@")[0] === ".github/workflows/ci.yml" &&
             r.event === "push" &&
             r.head_branch === "main") ||
-            (lane === "pr" &&
-              r.path.split("@")[0] === ".github/workflows/batch-ci.yml" &&
-              r.event === "push" &&
-              r.head_branch.startsWith("queue/"))),
+            (lane === "pr" && isBatchRun(r))),
       );
       const observations = [];
       for (const run of unique)
