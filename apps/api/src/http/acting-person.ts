@@ -1,6 +1,9 @@
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
-import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
+import {
+  MissingPermissionRefusal,
+  verifiedDelegatedHumanAuthorizationForRequest,
+} from "@opengeni/core";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
@@ -32,7 +35,8 @@ export function isAgentActingAsPerson(c: Context): boolean {
  * The person this agent acts as, for an action in `organizationId` that needs
  * `permission`; null when the request is not an agent acting as a person.
  * Another organization reads as not found; a permission the connection's
- * access setting leaves out is refused.
+ * access setting leaves out is refused in a plain sentence, with the
+ * permission in the error details.
  */
 export function agentActingAsPerson(
   c: Context,
@@ -45,8 +49,8 @@ export function agentActingAsPerson(
     throw new HTTPException(404, { message: "organization not found" });
   }
   if (!proof.permissions.includes(permission)) {
-    throw new HTTPException(403, {
-      message: `This connection's access doesn't include ${permission}.`,
+    throw new MissingPermissionRefusal(permission, {
+      message: "This connection's access doesn't cover this action.",
     });
   }
   return { subjectId: proof.subjectId };
