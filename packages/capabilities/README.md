@@ -49,9 +49,7 @@ expanding Graph's recursive entity graph into every operation. Custom OpenAPI
 sources retain their full schema compilation. The mode participates in the
 immutable revision digest; preview refuses revisions above the persistence bound.
 
-Contacts uses delegated `People.Read` for `/me/people`, and reads the signed-in
-person's own `/me/manager` and `/me/directReports` with `User.Read` (relationship
-edits such as `/me/manager/$ref` are excluded). OneDrive uses
+Contacts uses delegated `People.Read` for `/me/people`. OneDrive uses
 `Files.ReadWrite.All` and excludes the organization-only followed-sites API;
 neither requires organization-wide people or SharePoint permissions merely to
 connect a personal Microsoft account.
@@ -66,11 +64,13 @@ admitted.
 
 Colleague lookup is shared by the work/school definitions: SharePoint and Teams
 both admit read-only `/users` search (`$search` with the `ConsistencyLevel:
-eventual` header), `/users/{user-id}`, that user's `manager` and `directReports`,
-and the signed-in person's own `/me/manager` and `/me/directReports`. SharePoint
-requests `User.ReadBasic.All` (user consent; basic profiles only). Teams, which
-already needs administrator consent, requests `User.Read.All` so profiles include
-job title and department.
+eventual` header), `/users/{user-id}`, `/users/{user-id}/directReports` and
+`/me/directReports`. SharePoint requests `User.ReadBasic.All` (user consent;
+basic profiles only). Teams, which already needs administrator consent, requests
+`User.Read.All`, so profiles include job title and department, and it also
+admits `/users/{user-id}/manager` and `/me/manager`: Microsoft requires
+`User.Read.All` for any manager lookup. Outlook Contacts stays on the `common`
+endpoint without directory permissions, so personal accounts can still connect.
 
 Teams also admits `POST /search/query` as a reviewed read restricted to the
 `chatMessage` entity type: the same Microsoft Search index as the Teams search box,

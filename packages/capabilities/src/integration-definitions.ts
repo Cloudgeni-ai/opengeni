@@ -244,35 +244,49 @@ type ReviewedOperation = NonNullable<
 /**
  * Read-only colleague lookup in the work or school directory, shared by the
  * work-account integrations so it is available whichever of them is connected.
- * The signed-in person's own manager and reports only need User.Read.
+ * Microsoft requires User.Read.All for any manager lookup, so only a connection
+ * with that permission gets the manager tools.
  */
 const directoryLookupOperations = (
   directoryScope: "User.ReadBasic.All" | "User.Read.All",
 ): readonly ReviewedOperation[] => {
-  const fields =
-    directoryScope === "User.Read.All"
-      ? "Profiles include job title, department and office."
-      : "This connection reads basic profiles (name, email and sign-in name); other fields may be empty.";
+  const full = directoryScope === "User.Read.All";
+  const select = full
+    ? "id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation"
+    : "id,displayName,mail,userPrincipalName";
+  const fields = full
+    ? "Profiles include job title, department and office."
+    : "This connection reads basic profiles: name, email and sign-in name.";
+  const manager: readonly ReviewedOperation[] = full
+    ? [
+        {
+          path: "/users/{user-id}/manager",
+          method: "get",
+          requiredScopes: ["User.Read.All"],
+          description:
+            "Read a colleague's manager. user-id is the id from the directory search or the person's sign-in email. A 404 means no manager is set.",
+        },
+        {
+          path: "/me/manager",
+          method: "get",
+          requiredScopes: ["User.Read.All"],
+          description: "Read the signed-in person's manager. A 404 means no manager is set.",
+        },
+      ]
+    : [];
   return [
     {
       path: "/users",
       method: "get",
       odataSkipToken: true,
       requiredScopes: [directoryScope],
-      description: `Find colleagues in the organization's directory. Search by name or email with $search="displayName:anna" OR "mail:anna" and send the header ConsistencyLevel: eventual whenever $search is used. Use $select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation and $top to keep results small. ${fields}`,
+      description: `Find colleagues in the organization's directory. Search by name or email with $search="displayName:anna" OR "mail:anna" and send the header ConsistencyLevel: eventual whenever $search is used. Use $select=${select} and $top to keep results small. ${fields}`,
     },
     {
       path: "/users/{user-id}",
       method: "get",
       requiredScopes: [directoryScope],
       description: `Read a colleague's directory profile. user-id is the id from the directory search or the person's sign-in email (userPrincipalName). ${fields}`,
-    },
-    {
-      path: "/users/{user-id}/manager",
-      method: "get",
-      requiredScopes: [directoryScope],
-      description:
-        "Read a colleague's manager. user-id is the id from the directory search or the person's sign-in email. A 404 means no manager is set.",
     },
     {
       path: "/users/{user-id}/directReports",
@@ -283,18 +297,13 @@ const directoryLookupOperations = (
         "List the people who report directly to a colleague. user-id is the id from the directory search or the person's sign-in email.",
     },
     {
-      path: "/me/manager",
-      method: "get",
-      requiredScopes: ["User.Read"],
-      description: "Read the signed-in person's manager. A 404 means no manager is set.",
-    },
-    {
       path: "/me/directReports",
       method: "get",
       odataSkipToken: true,
-      requiredScopes: ["User.Read"],
+      requiredScopes: [directoryScope],
       description: "List the people who report directly to the signed-in person.",
     },
+    ...manager,
   ];
 };
 
@@ -393,22 +402,7 @@ export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefin
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     schemaMode: "provider_validated_json",
-    // The signed-in person's manager and reports need only User.Read, so personal
-    // accounts can still consent; colleague search lives on SharePoint and Teams.
-    operationPathPrefixes: [
-      "/me/contacts",
-      "/me/contactFolders",
-      "/me/people",
-      "/me/manager",
-      "/me/directReports",
-    ],
-    excludedOperationPathPrefixes: [
-      "/me/manager/$ref",
-      "/me/directReports/{directoryObject-id}",
-      "/me/directReports/$count",
-      "/me/directReports/graph.orgContact",
-      "/me/directReports/graph.user",
-    ],
+    operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read"]),
@@ -592,7 +586,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         searchEntityTypes: ["chatMessage"],
         requiredScopes: ["Chat.Read", "ChannelMessage.Read.All"],
         description:
-          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
+          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size; for messages, total counts only the current page, so use moreResultsAvailable to decide whether to fetch more. Sorting is not supported. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
       },
       {
         path: "/me/joinedTeams",

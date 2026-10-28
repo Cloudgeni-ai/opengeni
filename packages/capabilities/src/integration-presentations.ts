@@ -156,7 +156,7 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
     capabilities: [
       {
         title: "Find people",
-        description: "Look up contacts, people suggestions, and your manager and direct reports.",
+        description: "Look up contacts and relevant people suggestions.",
       },
       {
         title: "Organize contacts",

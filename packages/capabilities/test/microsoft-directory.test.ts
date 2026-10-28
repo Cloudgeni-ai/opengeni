@@ -75,43 +75,42 @@ const compile = (definition: IntegrationDefinition) =>
     readOnlyOperations: integrationDefinitionReadOnlyOperations(definition),
   });
 
-const directoryKeys = [
-  "me.GetManager",
+const lookupKeys = [
   "me.ListDirectReports",
-  "users.GetManager",
   "users.ListDirectReports",
   "users.user.GetUser",
   "users.user.ListUser",
 ];
+const managerKeys = ["me.GetManager", "users.GetManager"];
 
 test.each([
-  [sharepoint, "User.ReadBasic.All"],
-  [teams, "User.Read.All"],
+  [sharepoint, "User.ReadBasic.All", lookupKeys],
+  // Microsoft requires User.Read.All for any manager lookup.
+  [teams, "User.Read.All", [...lookupKeys, ...managerKeys]],
 ] as const)(
   "%# work-account integrations can look up colleagues read-only",
-  (definition, scope) => {
+  (definition, scope, expected) => {
     const compiled = compile(definition);
-    const tools = compiled.tools.filter((tool) => directoryKeys.includes(tool.operationKey));
-    expect(tools.map((tool) => tool.operationKey).sort()).toEqual(directoryKeys);
-    expect(compiled.tools.map((tool) => tool.operationKey)).not.toContain("users.user.CreateUser");
-    expect(compiled.tools.map((tool) => tool.operationKey)).not.toContain("me.UpdateManagerRef");
+    const keys = compiled.tools.map((tool) => tool.operationKey);
+    const tools = compiled.tools.filter((tool) =>
+      [...lookupKeys, ...managerKeys].includes(tool.operationKey),
+    );
+    expect(tools.map((tool) => tool.operationKey).sort()).toEqual([...expected].sort());
+    expect(keys).not.toContain("users.user.CreateUser");
+    expect(keys).not.toContain("users.user.UpdateUser");
+    expect(keys).not.toContain("me.UpdateManagerRef");
     for (const tool of tools) {
       expect(tool).toMatchObject({ safety: "read", approvalMode: "never" });
-      expect(compiled.bindings[tool.id]!.requiredScopeAlternatives).toEqual([
-        [tool.operationKey.startsWith("me.") ? "User.Read" : scope],
-      ]);
+      expect(compiled.bindings[tool.id]!.requiredScopeAlternatives).toEqual([[scope]]);
     }
     expect(definition.authentication.scopes).toContain(scope);
     expect(INTEGRATION_DEFINITION_PRESENTATIONS[definition.id]?.scopeLabels?.[scope]).toBeDefined();
   },
 );
 
-test("Outlook Contacts reads only the signed-in person's manager and reports", () => {
-  const keys = compile(contacts)
-    .tools.map((tool) => tool.operationKey)
-    .sort();
-  expect(keys).toEqual(["me.GetManager", "me.ListContacts", "me.ListDirectReports"]);
-  // No directory-wide scope, so personal Microsoft accounts can still consent.
+test("Outlook Contacts stays free of directory tools so personal accounts can connect", () => {
+  const keys = compile(contacts).tools.map((tool) => tool.operationKey);
+  expect(keys).toEqual(["me.ListContacts"]);
   expect(contacts.authentication.scopes).toEqual([
     "offline_access",
     "User.Read",

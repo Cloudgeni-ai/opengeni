@@ -2023,7 +2023,7 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
   },
   "microsoft-outlook-contacts": {
     description:
-      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account), and read their own manager and direct reports at work.",
+      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
     category: "productivity",
     tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
   },
