@@ -33,7 +33,6 @@ import type {
   Recording,
   RecordingNote,
   RecordingPerson,
-  RecordingTranscriptionModel,
   RecordingTranscriptVersion,
   RecordingTranscriptionModel,
   RecordingVisibility,
