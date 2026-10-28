@@ -130,6 +130,8 @@ const organizationMcpSurfaceFiles = new Set([
   // EU-only: the calling-workspace check covers the organization MCP endpoint too.
   "apps/api/src/mcp/workspace-content-flow.ts",
   "apps/api/src/organization-mcp.ts",
+  // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
+  "apps/api/test/disconnect-audit-postgres.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
   "apps/api/test/workspace-content-flow-e2e.test.ts",
