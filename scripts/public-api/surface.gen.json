@@ -14646,7 +14646,8 @@
         "$.description": "string?",
         "$.name": "string!",
         "$.setupInstructions": "string!",
-        "$.sourceSessionId": "string? null"
+        "$.sourceSessionId": "string? null",
+        "$.visibility": "enum?=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "CreateBrowserIdentityRequest": {
@@ -29161,7 +29162,8 @@
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
         "$.name": "string?",
-        "$.setupInstructions": "string?"
+        "$.setupInstructions": "string?",
+        "$.visibility": "ref(SessionVisibility)?"
       }
     },
     "UpdateBrowserIdentityRequest": {
@@ -31218,6 +31220,7 @@
         "$.sourceSessionId": "string! null",
         "$.updatedAt": "string!",
         "$.viewerAccess": "enum!=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
+        "$.visibility": "ref(SessionVisibility)!",
         "$.workspaceId": "string!"
       }
     },
@@ -32621,6 +32624,7 @@
       "BillingUsageResponse": "type",
       "BotTemplateFile": "type",
       "BotTemplateResponse": "type",
+      "BotTemplateVisibility": "type",
       "BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES": "value",
       "BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX": "value",
       "BROWSER_CONTROL_WEBSOCKET_PROTOCOL": "value",

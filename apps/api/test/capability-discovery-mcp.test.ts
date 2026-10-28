@@ -621,6 +621,72 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("finds a marketplace plugin and posts its install card", async () => {
+    if (!shared) return;
+    const selection: FirstPartyMcpToolName[] = [
+      "capability_catalog_search",
+      "capability_authorization_request",
+    ];
+    const attempt = await seedAttempt(false, selection);
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: selection },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "plugin-discovery-test", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    try {
+      const pluginId = "plugin:marketplace/anthropic/sentry";
+      const search = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query: "Sentry plugin", limit: 20 },
+      });
+      expect(search.isError).not.toBe(true);
+      const body = mcpJson(search) as {
+        matches: Array<{ capabilityId: string; kind: string; setup: unknown }>;
+      };
+      expect(body.matches.find((entry) => entry.capabilityId === pluginId)).toMatchObject({
+        kind: "plugin",
+        setup: {
+          status: "authorization_required",
+          action: "enable",
+          nextAction: { toolName: "capability_authorization_request", capabilityId: pluginId },
+        },
+      });
+      const request = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: pluginId, rationale: "Triage the errors you asked about." },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toMatchObject({
+        capabilityId: pluginId,
+        status: "authorization_requested",
+        action: "enable",
+      });
+      expect(JSON.stringify(mcpJson(request))).toContain("plugin card was posted");
+      const events = (
+        await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+      ).filter((event) => event.type === "tool.auth_needed");
+      expect(events.at(-1)?.payload).toMatchObject({
+        capability: { id: pluginId, action: "enable" },
+      });
+      // Asking is all it does: nothing is installed.
+      const [installs] = await shared.admin<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM capability_plugin_installations
+        WHERE workspace_id = ${workspace.workspaceId}`;
+      expect(installs?.count).toBe(0);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
   test("finds Outlook for a Hotmail request and posts its Connect card; respects availability gates", async () => {
     if (!shared) return;
     const microsoftSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
@@ -804,6 +870,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       // platform started for them (a wake-up, a child's result, a goal
       // continuation), which records no grant of its own.
       sentEarlier = false,
+      capabilityId = "api:integration:microsoft-outlook-mail",
     ) => {
       // The human this agent acts for: a member with exactly these
       // permissions, or (null) someone in their own workspace with no
@@ -884,7 +951,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         const result = await mcp.callTool({
           name: "capability_authorization_request",
           arguments: {
-            capabilityId: "api:integration:microsoft-outlook-mail",
+            capabilityId,
             rationale: "Reading the newest emails needs access to the person's inbox.",
           },
         });
@@ -938,6 +1005,15 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     expect(await request(null, [...conversation, "connections:personal"], true)).toMatchObject({
       message: connectCard,
     });
+    // A plugin is installed for the workspace, so the agent is told who can.
+    const sentry = "plugin:marketplace/anthropic/sentry";
+    expect(await request(conversation, undefined, false, sentry)).toMatchObject({
+      message:
+        "The card was posted, but this person can't install the sentry plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.",
+    });
+    expect(
+      await request([...conversation, "capabilities:manage"], undefined, false, sentry),
+    ).toMatchObject({ message: expect.stringContaining("The sentry plugin card was posted.") });
   }, 60_000);
   test("posts the Connected Machine card without a token, and keeps it useful once machines exist", async () => {
     if (!shared) return;

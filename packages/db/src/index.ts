@@ -70621,6 +70621,26 @@ export function storedSessionAvatar(value: unknown): SessionAvatar | null {
 }
 
 /**
+ * A chat's name and avatar, as a bot shows itself outside the console (its
+ * Slack posts). Null when the chat does not exist in this workspace.
+ */
+export async function getSessionBotIdentity(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ title: string | null; avatar: SessionAvatar | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ title: schema.sessions.title, avatar: schema.sessions.avatar })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return { title: row.title?.trim() || null, avatar: storedSessionAvatar(row.avatar) };
+  });
+}
+
+/**
  * Set a chat's description and/or avatar (display metadata) and append its
  * public `session.profile_set` event under the canonical session event-write
  * lock, like {@link updateSessionTitleWithEvent}. Only the named fields change;

@@ -3013,6 +3013,7 @@ export const englishMessages = {
   "messageTimeline.goalResumed": "Goal resumed",
   "messageTimeline.goalSet": "Goal set",
   "messageTimeline.goalUpdated": "Goal updated",
+  "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
@@ -3037,6 +3038,8 @@ export const englishMessages = {
   "messageTimeline.pausedBecause": "Paused because",
   "messageTimeline.providerProviderdomain": "Provider: {providerDomain}",
   "messageTimeline.providerToolsUnavailable": "{provider} tools unavailable",
+  "messageTimeline.pluginSetupUnavailableHere":
+    "Installing {provider} needs permission to manage this workspace's plugins. Ask a workspace admin to install it.",
   "messageTimeline.providerTryAgain": "{provider}. Try again.",
   "messageTimeline.question": "Question",
   "messageTimeline.ready": "Ready",

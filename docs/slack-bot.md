@@ -178,9 +178,18 @@ bun run slack:manifest
 
 This changes the provider app name, bot display name, slash command, shortcut label, and every provider callback URL. Keep `OPENGENI_SLACK_BOT_DISPLAY_NAME` and `OPENGENI_SLACK_COMMAND` set to the same exact values in the API runtime so installation verification, signed command delivery, and the generated provider manifest cannot drift. For managed Kubernetes, `bun run deployment:runtime-artifacts` carries `OPENGENI_SLACK_CLIENT_ID`, `OPENGENI_SLACK_CLIENT_SECRET`, `OPENGENI_SLACK_SIGNING_SECRET`, `OPENGENI_SLACK_BOT_DISPLAY_NAME`, and `OPENGENI_SLACK_COMMAND` into the generated runtime environment. Populate the three credential values from the matching environment's Slack app before publishing the runtime Secret; a staging release must never reuse the production triplet. `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED` rides the same generated runtime environment and is emitted only when it is set, so leaving it unset keeps the code default, which is now routing **on**. Set it explicitly to `false` in that environment to opt a deployment out. See [Which workspace Slack work lands in](#which-workspace-slack-work-lands-in).
 
-Generate the canonical JSON manifest with `bun run slack:manifest`. Its URL/name overrides remain unchanged; set `OPENGENI_SLACK_ACCESS_MODE=full` only when eligible to request the optional bot search scopes. The separate user grants cover the nine reviewed API tools. `settings.is_mcp_enabled` retains the existing OAuth discovery surface. Bot verification evaluates only granted bot scopes; user grants never widen the bot principal. Reactions and file delivery retain their optional grants and workspace settings. Do not add `channels:join`, `chat:write.public`, `chat:write.customize`, administration, or enterprise-search grants. Slack's native invite prompt handles missing bot membership. The bot allowlist still accepts previously granted safe search scopes without enabling an unusable generic search tool.
+Generate the canonical JSON manifest with `bun run slack:manifest`. Its URL/name overrides remain unchanged; set `OPENGENI_SLACK_ACCESS_MODE=full` only when eligible to request the optional bot search scopes. The separate user grants cover the nine reviewed API tools. `settings.is_mcp_enabled` retains the existing OAuth discovery surface. Bot verification evaluates only granted bot scopes; user grants never widen the bot principal. Reactions and file delivery retain their optional grants and workspace settings. Do not add `channels:join`, `chat:write.public`, administration, or enterprise-search grants. Slack's native invite prompt handles missing bot membership. The bot allowlist still accepts previously granted safe search scopes without enabling an unusable generic search tool.
 
 ## Install and connect the workspace bot
+
+`chat:write.customize` is an optional bot grant that lets a bot chat (a chat
+with an avatar, see [Bots](bots.md)) post its own replies under its name and
+avatar instead of the app's. Slack still labels those posts as the app's, and
+approvals, limits and other notices stay the app's. The manifest requests it,
+so new installs have it; an existing install gets it when a Slack admin
+reinstalls the app. Without the grant, every post is the app's as before. The avatar picture is served from a signed
+`/v1/public/session-avatars/` URL that Slack fetches without credentials; it
+draws only the avatar it was signed for.
 
 `files:write` is an optional bot grant, requested by the canonical manifest but
 not required for existing installations to remain eligible. Apply the generated

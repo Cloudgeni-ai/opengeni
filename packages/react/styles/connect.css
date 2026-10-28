@@ -228,6 +228,7 @@
 .og-plugin-details-header h2 { margin:0; font-size:20px; line-height:1.4; font-weight:600; letter-spacing:-.5px; overflow-wrap:anywhere; }
 .og-plugin-details-header p { margin:7px 0 0; font-size:13px; opacity:.6; }
 .og-plugin-details-meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:22px; font-size:11px; }
+.og-plugin-details-meta:first-child { margin-top:0; }
 .og-plugin-details-meta span { padding:4px 8px; border-radius:5px; background:color-mix(in srgb,currentColor 5%,transparent); text-transform:capitalize; }
 .og-plugin-details-overview { margin:28px 0; font-size:14px; line-height:1.8; }
 .og-plugin-details-overview p { margin:0 0 14px; }

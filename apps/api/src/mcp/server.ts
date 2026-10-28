@@ -410,6 +410,11 @@ import {
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
+import {
+  marketplacePluginCapabilityItem,
+  marketplacePluginCapabilityItems,
+  pluginCapabilitySetup,
+} from "../integrations/marketplace-plugin-catalog";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
   allowanceExhaustedMessage,
@@ -7129,6 +7134,8 @@ function registerCapabilityDiscoveryTools(
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
     });
+  // Indexed marketplace plugins: a person installs one from its card.
+  const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -7182,18 +7189,20 @@ function registerCapabilityDiscoveryTools(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : item.surfaceType === "integration_definition"
-            ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
-            : capabilitySetupProjection(
-                deps,
-                grant.workspaceId,
-                item,
-                availableServerIds,
-                acceptedServerIds,
-                accountSelectionKnown,
-                availableFirstPartyTools,
-                new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-              ),
+          : item.kind === "plugin"
+            ? pluginCapabilitySetup(item)
+            : item.surfaceType === "integration_definition"
+              ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+              : capabilitySetupProjection(
+                  deps,
+                  grant.workspaceId,
+                  item,
+                  availableServerIds,
+                  acceptedServerIds,
+                  accountSelectionKnown,
+                  availableFirstPartyTools,
+                  new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                ),
       ),
     );
   };
@@ -7202,7 +7211,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome; names are matched with typo tolerance, and a match with approximate: true matched only by a near spelling. Matches with kind plugin are plugins: bundles of Skills and MCP servers that the person installs for the workspace from the card. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. When matches is empty, suggestions lists the closest catalog names: check whether one is what the user meant (or ask) before saying an integration does not exist. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -7210,8 +7219,8 @@ function registerCapabilityDiscoveryTools(
     },
     async ({ query, limit }) => {
       await authorize();
-      const current = await catalog();
-      const candidates = [...current.items, ...recommendations()];
+      const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
+      const candidates = [...current.items, ...recommendations(), ...pluginItems];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       const setups = await setupProjections(ranked.map(({ item }) => item));
       const matches = ranked.map(({ item, matchedOn, approximate }, index) => ({
@@ -7279,9 +7288,10 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = [...current.items, ...recommendations()].find(
-        (candidate) => candidate.id === capabilityId,
-      );
+      const item =
+        [...current.items, ...recommendations()].find(
+          (candidate) => candidate.id === capabilityId,
+        ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -7347,14 +7357,18 @@ function registerCapabilityDiscoveryTools(
         action: setup.action,
         eventId,
         message: personCannotConnect
-          ? `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
+          ? item.kind === "plugin"
+            ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
+            : `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
           : item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
               : item.surfaceType === "integration_definition"
                 ? integrationDefinitionCardPostedMessage(item)
-                : "The recommendation was posted for human confirmation. No access has been granted yet.",
+                : item.kind === "plugin"
+                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                  : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );

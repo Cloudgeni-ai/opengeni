@@ -171,6 +171,7 @@ describe("bot templates", () => {
       description: "Keeps the release checklist moving",
       avatar: { kind: "letters", letters: "RO", hue: 120 },
       setupInstructions: "You own releases. Install the release Skill.",
+      visibility: "workspace",
       sourceSessionId: source.id,
       createdBySubjectId: "user:someone",
     });
@@ -180,11 +181,11 @@ describe("bot templates", () => {
       sourceSessionId: source.id,
       createdBySubjectId: "user:someone",
     });
-    expect((await listBotTemplates(client.db, place.workspaceId)).map((row) => row.id)).toEqual([
-      created.id,
-    ]);
+    expect(
+      (await listBotTemplates(client.db, place.workspaceId, "user:else")).map((row) => row.id),
+    ).toEqual([created.id]);
     // Another workspace sees nothing, even by id.
-    expect(await listBotTemplates(client.db, other.workspaceId)).toEqual([]);
+    expect(await listBotTemplates(client.db, other.workspaceId, "user:someone")).toEqual([]);
     expect(await getBotTemplate(client.db, other.workspaceId, created.id)).toBeNull();
     expect(
       await updateBotTemplate(client.db, {
@@ -229,6 +230,7 @@ describe("bot templates", () => {
         description: "",
         avatar: null,
         setupInstructions: "Set up.",
+        visibility: "workspace",
         sourceSessionId: null,
         createdBySubjectId: null,
       });
@@ -237,9 +239,42 @@ describe("bot templates", () => {
     for (const result of results) {
       if (result.status === "rejected") expect(result.reason).toBeInstanceOf(BotTemplateLimitError);
     }
-    expect(await listBotTemplates(client.db, place.workspaceId)).toHaveLength(
+    expect(await listBotTemplates(client.db, place.workspaceId, null)).toHaveLength(
       BOT_TEMPLATES_PER_WORKSPACE_MAX,
     );
+  }, 180_000);
+
+  test("an Only me template is listed only for whoever saved it", async () => {
+    if (!shared) return;
+    const place = await workspace("template-private");
+    const mine = await createBotTemplate(client.db, {
+      ...place,
+      name: "My inbox bot",
+      description: "",
+      avatar: null,
+      setupInstructions: "Sort my inbox.",
+      visibility: "private",
+      sourceSessionId: null,
+      createdBySubjectId: "user:owner",
+    });
+    expect(mine.visibility).toBe("private");
+    const ids = async (reader: string | null) =>
+      (await listBotTemplates(client.db, place.workspaceId, reader)).map((row) => row.id);
+    expect(await ids("user:owner")).toEqual([mine.id]);
+    expect(await ids("user:else")).toEqual([]);
+    expect(await ids(null)).toEqual([]);
+    const opened = await updateBotTemplate(client.db, {
+      workspaceId: place.workspaceId,
+      templateId: mine.id,
+      visibility: "workspace",
+    });
+    expect(opened?.visibility).toBe("workspace");
+    expect(await ids("user:else")).toEqual([mine.id]);
+    // An Only me template always belongs to a person.
+    await expect(
+      shared.admin`insert into bot_templates (account_id, workspace_id, name, setup_instructions, visibility)
+        values (${place.accountId}, ${place.workspaceId}, 'Bot', 'Set up.', 'private')`,
+    ).rejects.toThrow(/bot_templates_private_owner_check/);
   }, 180_000);
 
   test("the database bounds what a template holds", async () => {
