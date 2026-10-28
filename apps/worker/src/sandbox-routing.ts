@@ -434,15 +434,15 @@ async function resolveCurrentHomeBackend(
         ids.workspaceId,
         marked.backgroundCommandEvents,
       );
-      await signalBackgroundCommandWakes(
-        marked.backgroundCommandWakes,
-        backgroundCommandWakeSender(services.wakeSessionWorkflow),
-      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
         leaseEpoch: marked.lease.leaseEpoch,
       });
+      await signalBackgroundCommandWakes(
+        marked.backgroundCommandWakes,
+        backgroundCommandWakeSender(services.wakeSessionWorkflow),
+      );
     }
     throw new RoutingBackendRecoveryRequiredError(
       "resolve_home_backend",
@@ -1293,15 +1293,15 @@ export function wrapTurnBoxWithRouting(
                 ids.workspaceId,
                 marked.backgroundCommandEvents,
               );
-              await signalBackgroundCommandWakes(
-                marked.backgroundCommandWakes,
-                backgroundCommandWakeSender(services.wakeSessionWorkflow),
-              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;
@@ -1597,15 +1597,15 @@ export function wrapLazyTurnBoxWithRouting(
                 ids.workspaceId,
                 marked.backgroundCommandEvents,
               );
-              await signalBackgroundCommandWakes(
-                marked.backgroundCommandWakes,
-                backgroundCommandWakeSender(services.wakeSessionWorkflow),
-              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: backend.providerInstanceId,
                 leaseEpoch: marked.lease.leaseEpoch,
               });
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;

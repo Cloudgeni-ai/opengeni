@@ -1067,16 +1067,16 @@ async function withChannelAOperation<T>(
               expectedInstanceId: live.instanceId,
             }).catch(() => null);
             if (marked?.status === "marked") {
-              await signalBackgroundCommandWakes(
-                marked.backgroundCommandWakes,
-                backgroundCommandWakeSender(services.wakeSessionWorkflow),
-              );
               await appendAndPublishEvents(db, bus, workspaceId, session.id, [
                 {
                   type: "sandbox.box.lost",
                   payload: { sandboxId: live.instanceId },
                 },
               ]).catch(() => undefined);
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
               mappedError = new ApiHttpError(409, {
                 code: "conflict",
                 message: "sandbox instance was lost; retry to restore it",
@@ -1179,16 +1179,17 @@ async function withChannelAOperation<T>(
         expectedInstanceId: live.instanceId!,
       });
       if (marked.status === "marked") {
-        await signalBackgroundCommandWakes(
-          marked.backgroundCommandWakes,
-          backgroundCommandWakeSender(services.wakeSessionWorkflow),
-        );
         await appendAndPublishEvents(db, bus, workspaceId, session.id, [
           {
             type: "sandbox.box.lost",
             payload: { sandboxId: live.instanceId },
           },
-        ]);
+        ]).finally(() =>
+          signalBackgroundCommandWakes(
+            marked.backgroundCommandWakes,
+            backgroundCommandWakeSender(services.wakeSessionWorkflow),
+          ),
+        );
       }
       throw new ApiHttpError(409, {
         code: "conflict",

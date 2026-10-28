@@ -866,12 +866,6 @@ export function wrapChannelABoxWithRouting(
               expectedBackend: homeLease.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
-            if (marked.status === "marked") {
-              await signalBackgroundCommandWakes(
-                marked.backgroundCommandWakes,
-                backgroundCommandWakeSender(services.wakeSessionWorkflow),
-              );
-            }
             if (marked.status === "marked" && bus) {
               await appendAndPublishEvents(db, bus, ids.workspaceId, ids.sessionId, [
                 {
@@ -879,6 +873,12 @@ export function wrapChannelABoxWithRouting(
                   payload: { sandboxId: homeLease.instanceId },
                 },
               ]).catch(() => undefined);
+            }
+            if (marked.status === "marked") {
+              await signalBackgroundCommandWakes(
+                marked.backgroundCommandWakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
             const lease = marked.lease;
             const restore = lease?.recovery.restore.status;

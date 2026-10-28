@@ -917,6 +917,8 @@ import {
   MESSAGE_TIME_ZONE_METADATA_KEY,
   messageTimeZoneFromTurnMetadata,
   normalizeMessageTimeZone,
+  OPENING_TOOLS_METADATA_KEY,
+  openingToolsFromTurnMetadata,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -72152,6 +72154,12 @@ export type InitializeSessionStartInput = {
    */
   initialTimeZone?: string;
   /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection, frozen in the initial turn's metadata. That turn's first model
+   * step loads them as a search by name would.
+   */
+  initialOpeningTools?: readonly string[];
+  /**
    * Codex v2 (M3 PR 3b) frozen by a trusted producer for the first turn: a
    * scheduled firing passes its task's value, which is copied, never
    * recomputed. Omitted by every other caller (the acceptance rule applies).
@@ -72210,10 +72218,16 @@ export type InitializeSessionStartResult = {
 
 /** Trusted per-message facts the create request froze for the initial turn. */
 function initialTurnMetadata(
-  input: Pick<InitializeSessionStartInput, "initialTimeZone">,
+  input: Pick<InitializeSessionStartInput, "initialTimeZone" | "initialOpeningTools">,
 ): Record<string, unknown> {
   const timeZone = normalizeMessageTimeZone(input.initialTimeZone);
-  return timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {};
+  const openingTools = openingToolsFromTurnMetadata({
+    [OPENING_TOOLS_METADATA_KEY]: input.initialOpeningTools,
+  });
+  return {
+    ...(timeZone ? { [MESSAGE_TIME_ZONE_METADATA_KEY]: timeZone } : {}),
+    ...(openingTools.length ? { [OPENING_TOOLS_METADATA_KEY]: openingTools } : {}),
+  };
 }
 
 /**
@@ -88485,6 +88499,7 @@ export async function signalBackgroundCommandWakes(
       // Reporting is best effort too.
     }
   };
+  const unsettled = new Set(unique.values());
   try {
     await Promise.race([
       Promise.all(
@@ -88494,13 +88509,17 @@ export async function signalBackgroundCommandWakes(
             .then(
               () => undefined,
               (error: unknown) => report(error, pending),
-            ),
+            )
+            .finally(() => unsettled.delete(pending)),
         ),
       ),
       timedOut,
     ]);
   } finally {
     clearTimeout(timer);
+  }
+  for (const pending of unsettled) {
+    report(new Error(`wake signal still pending after ${timeoutMs} ms`), pending);
   }
 }
 

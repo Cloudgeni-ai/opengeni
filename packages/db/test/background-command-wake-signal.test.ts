@@ -48,7 +48,11 @@ test("a hung signal is abandoned at the bound and failures are reported, not thr
     },
   );
   expect(Date.now() - started).toBeLessThan(1_000);
-  expect(errors.sort()).toEqual(["rejects: Temporal unavailable", "throws: synchronous"]);
+  expect(errors.sort()).toEqual([
+    "hung: wake signal still pending after 100 ms",
+    "rejects: Temporal unavailable",
+    "throws: synchronous",
+  ]);
 });
 
 test("no signaler or no wakes is a no-op", async () => {

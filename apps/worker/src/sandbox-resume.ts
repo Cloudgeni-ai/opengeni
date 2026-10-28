@@ -2274,15 +2274,15 @@ async function resumeBoxForTurnOnce(
           ids.workspaceId,
           marked.backgroundCommandEvents,
         );
-        await signalBackgroundCommandWakes(
-          marked.backgroundCommandWakes,
-          backgroundCommandWakeSender(services.wakeSessionWorkflow),
-        );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,
           instanceId: live.instanceId,
           leaseEpoch: marked.lease.leaseEpoch,
         });
+        await signalBackgroundCommandWakes(
+          marked.backgroundCommandWakes,
+          backgroundCommandWakeSender(services.wakeSessionWorkflow),
+        );
         throw new SandboxLeaseInstanceLostError(
           ids.sandboxGroupId,
           marked.lease.leaseEpoch,
