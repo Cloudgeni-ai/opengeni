@@ -376,6 +376,20 @@ describe("archiving a chat", () => {
     expect(await directState(chat.sessionId)).toBe("paused");
   });
 
+  test("a busy chat changed in another client says so before asking to pause", async () => {
+    const chat = await freshChat();
+    const response = await rawArchive(chat, await bearer(chat, OWNER), {
+      archived: true,
+      expectedVersion: 99,
+    });
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body.code).toBeUndefined();
+    expect(body.message).toBe("session archive changed in another client");
+    expect(await archivedFor(chat)).toBe(false);
+    expect(await directState(chat.sessionId)).toBe("active");
+  });
+
   test("read-only default archive is denied, explicit hide changes no shared control", async () => {
     const chat = await freshChat();
     const authorization = await bearer(chat, COLLEAGUE, ["sessions:read"]);

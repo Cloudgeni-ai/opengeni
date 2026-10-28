@@ -35878,30 +35878,37 @@ export async function setSessionAttention(
 }
 
 /**
- * Archive or restore one root chat for a single member. Archiving also removes
- * personal pin/follow-up labels so hidden work cannot remain in active rail
- * sections. Descendants inherit visibility from the archived root at list time.
- */
-/**
  * Whether archiving this chat must first ask to pause its work, answered from
  * a plain read before any lock. Archive takes the person's archive lock and the
  * workspace's control lock before it pauses; on a busy workspace those waits
  * last many seconds, and the question must not wait behind them. The locked
  * check in the pause stays the authority for work that starts in between.
- * False when the chat is not one this person can archive here, or is already
- * archived for them, so those requests take the ordinary path.
+ * False when the chat is not one this person can archive here, is already
+ * archived for them, or changed since the version they saw, so those requests
+ * take the ordinary path and get its answer.
  */
 export async function sessionArchiveNeedsPauseConfirmation(
   db: Database,
-  input: { workspaceId: string; subjectId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    expectedVersion?: number | undefined;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
 ): Promise<boolean> {
   return await withWorkspaceSubjectSessionActivityRls(
     db,
     input.workspaceId,
     input.subjectId,
     async (tx) => {
+      await requireSessionPersonalStateWriteAuthority(tx, input);
       const [chat] = await tx
-        .select({ id: schema.sessions.id, archived: schema.sessionPins.archived })
+        .select({
+          id: schema.sessions.id,
+          archived: schema.sessionPins.archived,
+          archiveVersion: schema.sessionPins.archiveVersion,
+        })
         .from(schema.sessions)
         .leftJoin(
           schema.sessionPins,
@@ -35920,6 +35927,12 @@ export async function sessionArchiveNeedsPauseConfirmation(
         )
         .limit(1);
       if (!chat || chat.archived === true) return false;
+      if (
+        input.expectedVersion !== undefined &&
+        input.expectedVersion !== (chat.archiveVersion ?? 0)
+      ) {
+        return false;
+      }
       return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
     },
     undefined,
@@ -35927,6 +35940,11 @@ export async function sessionArchiveNeedsPauseConfirmation(
   );
 }
 
+/**
+ * Archive or restore one root chat for a single member. Archiving also removes
+ * personal pin/follow-up labels so hidden work cannot remain in active rail
+ * sections. Descendants inherit visibility from the archived root at list time.
+ */
 export async function setSessionArchive(
   db: Database,
   input: {

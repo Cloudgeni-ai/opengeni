@@ -1056,6 +1056,8 @@ export async function archiveHumanSessionWorkstream(
       workspaceId: context.workspaceId,
       subjectId: context.subjectId,
       sessionId: context.sessionId,
+      expectedVersion: input.expectedVersion,
+      personalWorkspaceOwnerException: input.personalWorkspaceOwnerException,
     }))
   ) {
     throw new SessionArchiveConfirmationRequiredError();

@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { toast } from "sonner";
+import { toast } from "./toast";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import type { AppContextValue } from "../app-context";
 import { sessionDisplayTitle, type SessionListRow } from "../../session-list-model";
@@ -82,15 +82,22 @@ export function ArchiveConfirmationProvider({ children }: { children: ReactNode 
       // asked for on another page, so ask in a notice they can leave.
       return new Promise((done) => {
         let settled = false;
+        // Settles even if no toaster is mounted to show the notice, so a
+        // missing toaster can never leave archiving stuck.
+        const fallback = setTimeout(() => {
+          settle(false);
+          toast.dismiss(notice);
+        }, LATE_NOTICE_MS * 3);
         const settle = (confirmed: boolean) => {
           if (settled) return;
           settled = true;
+          clearTimeout(fallback);
           done(confirmed);
         };
         const late = input.late ?? input;
-        toast(late.title, {
+        const notice = toast(late.title, {
           description: late.description,
-          duration: 10_000,
+          duration: LATE_NOTICE_MS,
           action: { label: input.confirmLabel, onClick: () => settle(true) },
           onDismiss: () => settle(false),
           onAutoClose: () => settle(false),
@@ -216,12 +223,19 @@ export async function requestSessionArchive(
 }
 
 const CHAT_NAME_MAX = 60;
+const LATE_NOTICE_MS = 10_000;
 
 /** The chat's sidebar title in quotes, shortened to fit a dialog title. */
 export function quotedChatName(chat: SessionListRow): string {
   const title = sessionDisplayTitle(chat).trim();
   if (!title) return "this chat";
+  const characters = Array.from(title);
   const short =
-    title.length > CHAT_NAME_MAX ? `${title.slice(0, CHAT_NAME_MAX - 1).trimEnd()}…` : title;
+    characters.length > CHAT_NAME_MAX
+      ? `${characters
+          .slice(0, CHAT_NAME_MAX - 1)
+          .join("")
+          .trimEnd()}…`
+      : title;
   return `“${short}”`;
 }
