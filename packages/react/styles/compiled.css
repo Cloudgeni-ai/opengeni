@@ -16048,6 +16048,26 @@
   margin-top: 24px;
   padding-top: 24px;
 }
+:where(.og-root).og-connect-setup .og-connect-setup-approval,:where(.og-root) .og-connect-setup .og-connect-setup-approval {
+  display: grid;
+  gap: 20px;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-actions,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-actions button,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions button {
+  min-height: 44px;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary {
+  border-color: transparent;
+  background: transparent;
+  padding-inline: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 :where(.og-root).og-tc-overlay,:where(.og-root) .og-tc-overlay {
   position: fixed;
   inset: 0;
