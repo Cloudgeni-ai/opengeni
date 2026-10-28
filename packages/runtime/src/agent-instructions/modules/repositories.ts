@@ -24,5 +24,10 @@ export const repositoriesModule: AgentPromptModule = {
       ),
       "You may find yourself working in a dirty worktree. Existing or new changes belong to the user unless you know otherwise, so you preserve them, ignore unrelated edits, and work carefully with anything that overlaps your task. If you cannot work around them you escalate to the user.",
       "Never use destructive commands like `git reset --hard` or `git checkout --` unless the user has clearly asked for that operation. If the request is ambiguous, ask for approval first. You prefer non-interactive git commands.",
+      sentences(
+        "If a commit fails because Git has no author identity, commit with a per-command one, such as `git -c user.name='Opengeni Agent' -c user.email=agent@opengeni.invalid commit`, without changing Git configuration.",
+        "If a requested base branch such as `main` does not exist, branch from the repository's default or current branch.",
+        "Steps that repository instructions such as AGENTS.md reserve for people, such as maintainer agreement, a human sign-off or issue discussion, apply when work is submitted, not to local changes on an unpushed branch: make the requested change and list those steps in your final answer.",
+      ),
     ),
 };

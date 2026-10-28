@@ -386,6 +386,31 @@ describe("proportional effort", () => {
     expect(guidance).toContain("instead of rediscovering");
   });
 
+  test("proceeds past routine local blocks instead of ending the turn with a question", () => {
+    // DeepSWE: finished, staged work was lost when an agent asked for a commit
+    // name and email, asked whether to branch from `master` when told `main`, or
+    // asked for the maintainer agreement a repository's AGENTS.md required.
+    const autonomy = section("## Autonomy and persistence");
+    expect(autonomy).toContain(
+      "When a routine, reversible step inside the workspace is blocked, such as a missing local setting or a differently named branch, take the conventional default, say which in your final answer, and continue;",
+    );
+    expect(autonomy).toContain(
+      "end the turn with a question only when the step is destructive, acts outside the workspace, or needs authority the user has not given.",
+    );
+    const git = OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    expect(git).toContain(
+      "commit with a per-command one, such as `git -c user.name='Opengeni Agent' -c user.email=agent@opengeni.invalid commit`, without changing Git configuration.",
+    );
+    expect(git).toContain(
+      "If a requested base branch such as `main` does not exist, branch from the repository's default or current branch.",
+    );
+    expect(git).toContain(
+      "apply when work is submitted, not to local changes on an unpushed branch: make the requested change and list those steps in your final answer.",
+    );
+    // Destructive Git operations still need the user's request.
+    expect(git).toContain("Never use destructive commands like `git reset --hard`");
+  });
+
   test("keeps progress updates short and skips the opening update for quick answers", () => {
     const guidance = section("## Progress updates");
     expect(guidance).not.toContain("If the request requires tools, start with a progress update");

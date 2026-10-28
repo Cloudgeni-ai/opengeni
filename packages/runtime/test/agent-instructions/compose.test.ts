@@ -238,6 +238,21 @@ describe("modular composer: module selection (AC12)", () => {
     expect(result.composed).not.toContain("Repository resources are mounted");
   });
 
+  test("a Connected Machine alone still gets the routine Git fallbacks", () => {
+    // A benchmark or API session with no person to answer: commit identity,
+    // a missing `main` and human-only AGENTS.md steps must not end the turn.
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const composed = compose(capabilities, { ...NO_RESOURCES, connectedMachine: true }).composed;
+      expect(composed).toContain("If a commit fails because Git has no author identity");
+      expect(composed).toContain("If a requested base branch such as `main` does not exist");
+      expect(composed).toContain("not to local changes on an unpushed branch");
+      expect(composed).toContain("When a routine, reversible step inside the workspace is blocked");
+    }
+    expect(compose(allAgentCapabilities(), NO_RESOURCES).composed).not.toContain(
+      "If a commit fails because Git has no author identity",
+    );
+  });
+
   test("the rig block follows its resource; a workspace environment never renders", () => {
     const withBoth = compose(allAgentCapabilities(), ALL_RESOURCES).composed;
     expect(withBoth).not.toContain("workspace environment named");
