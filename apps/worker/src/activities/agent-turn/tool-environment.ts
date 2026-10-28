@@ -29,6 +29,7 @@ import {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
+  createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
@@ -810,6 +811,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
   });
+  const firstPartyInteractionInput = {
+    settings: runSettings,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
+    selectedTools: selectedFirstPartyMcpTools,
+    subjectId: "worker:first-party-mcp",
+    subjectLabel: "Opengeni worker",
+  };
+  // A person-handoff request that leaves its generations out records the
+  // target as it is when the turn pauses.
+  eventing.interactionRequestTargetReader = createFirstPartyInteractionRequestTargetReader(
+    firstPartyInteractionInput,
+  );
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -876,20 +898,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
-      settings: runSettings,
-      ...(credentialRestriction ? { credentialRestriction } : {}),
-      scope: {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: attempt.executionGeneration,
-      },
-      ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
-      selectedTools: selectedFirstPartyMcpTools,
-      subjectId: "worker:first-party-mcp",
-      subjectLabel: "Opengeni worker",
+      ...firstPartyInteractionInput,
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
