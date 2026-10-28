@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "2a6470dbca9fadf171f7506427a8500e7cdfb571f4b9fd3b1a84bb9c213f9e93"
+      "sha256": "571e6ba36406bbdac24eb817ec49e96df5f0b11a78fd158fcfaddb82f93ff572"
     },
     {
       "path": ".github/workflows/merge-content.yml",
