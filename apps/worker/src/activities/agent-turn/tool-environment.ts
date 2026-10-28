@@ -132,8 +132,16 @@ import {
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
-import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
-import { attachSessionTreeSecretValues, currentAttemptSecretValues } from "./secret-values";
+import {
+  attemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
+import {
+  attachSessionTreeSecretValues,
+  attachTaskVaultSecretCapture,
+  currentAttemptSecretValues,
+} from "./secret-values";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -1007,20 +1015,31 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  const maskingPrincipal = {
+    kind: "attempt",
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: attempt.executionGeneration,
+  } as const;
+  const maskingKey = environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null;
   // Best effort: values this session tree used before are masked too.
   attachSessionTreeSecretValues({
     memory: currentAttemptSecretValues(),
     db,
-    encryptionKey: environmentsEncryptionKeyBytes(githubRestMcp.settings) ?? null,
-    principal: {
-      kind: "attempt",
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: turn.id,
-      attemptId: input.attemptId,
-      executionGeneration: attempt.executionGeneration,
-    },
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    observability,
+  });
+  // Secrets that show up in tool output are saved to the task vault.
+  attachTaskVaultSecretCapture({
+    memory: currentAttemptSecretValues(),
+    db,
+    encryptionKey: maskingKey,
+    principal: maskingPrincipal,
+    enabled: secretsCapabilityEnabled(session.agent),
     observability,
   });
   try {

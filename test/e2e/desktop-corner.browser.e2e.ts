@@ -1,22 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
-// Where macOS draws the traffic lights (centred about 28px down, ending about
-// 70px in) and, while the window is shared, the purple sharing badge (about
-// 15-80px across, 18-37px down).
-const WINDOW_CONTROL_POINTS = [
-  [16, 20],
-  [24, 28],
-  [44, 28],
-  [64, 28],
-  [78, 36],
-  [40, 40],
-] as const;
+import { expectWindowTop, simulateWindowsTitleBar, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
 
-describe("the macOS window controls' corner", () => {
+const PLATFORMS = ["browser", "windows", "macos"] as const;
+type Platform = (typeof PLATFORMS)[number];
+
+/** Where the page starts: below the window bar on macOS and Windows. */
+const pageTop = (platform: Platform) => (platform === "browser" ? 0 : WINDOW_BAR_HEIGHT);
+
+describe("the desktop window bar", () => {
   let browser: Browser;
   let web: StartedProcess;
   let url: string;
@@ -52,111 +48,130 @@ describe("the macOS window controls' corner", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("the settings rail keeps the window controls row outside its scrolling list", async () => {
-    for (const platform of ["macos", "windows", "browser"]) {
-      const page = await browser.newPage({ viewport: { width: 1280, height: 420 } });
-      const errors: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${url}?platform=${platform}`);
+  async function open(platform: Platform, query: string, width: number, height: number) {
+    const page = await browser.newPage({ viewport: { width, height } });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    if (platform === "windows") await simulateWindowsTitleBar(page);
+    await page.goto(`${url}?platform=${platform}${query}`);
+    return { page, errors };
+  }
+
+  const setScroll = (page: Page, selector: string, top: "end" | number) =>
+    page.locator(selector).evaluate((element, to) => {
+      element.scrollTop = to === "end" ? element.scrollHeight : to;
+      return element.scrollTop;
+    }, top);
+
+  test("Settings starts below the bar, at rest and scrolled", async () => {
+    const backTop = new Map<Platform, number>();
+    for (const platform of PLATFORMS) {
+      const { page, errors } = await open(platform, "", 1280, 420);
       const rail = page.locator("[data-settings-rail]");
       const back = rail.getByRole("link", { name: "Back to sessions" });
       await back.waitFor({ timeout: 90_000 });
-      const controls = page.locator("[data-settings-window-controls]");
-      const backTop = (await back.boundingBox())!.y;
-      if (platform === "macos") {
-        // A fixed row for the controls, then the list; the back link starts where it did.
-        expect(await controls.count()).toBe(1);
-        expect(await controls.boundingBox()).toMatchObject({ y: 0, height: 44 });
-        expect(
-          await controls.evaluate((element) =>
-            getComputedStyle(element).getPropertyValue("-webkit-app-region"),
-          ),
-        ).toBe("drag");
-        expect((await rail.boundingBox())!.y).toBe(44);
-        expect(backTop).toBe(56);
-        expect(await page.locator("[data-rail-header]").count()).toBe(0);
-      } else {
-        expect(await controls.count()).toBe(0);
-        expect((await rail.boundingBox())!.y).toBe(0);
-        // The brand row sits above the back link outside macOS.
-        expect(await rail.getByRole("link", { name: "Opengeni home" }).count()).toBe(1);
-      }
-      // Scroll the list part-way, so the picker and search sit near the top.
-      await rail.evaluate((element) => {
-        element.scrollTop = 72;
-      });
-      expect(await rail.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-      expect((await back.boundingBox())!.y).toBeLessThan(backTop);
-      if (platform === "macos") {
-        // Nothing in the list is drawn or clickable under the controls or the badge.
-        for (const [x, y] of WINDOW_CONTROL_POINTS) {
-          expect(
-            await page.evaluate(
-              ([px, py]) =>
-                document.elementFromPoint(px, py)?.closest("[data-settings-rail]") != null,
-              [x, y] as const,
-            ),
-          ).toBe(false);
-        }
-        expect(await controls.boundingBox()).toMatchObject({ y: 0, height: 44 });
-        await rail.evaluate((element) => {
-          element.scrollTop = element.scrollHeight;
-        });
-        for (const [x, y] of WINDOW_CONTROL_POINTS) {
-          expect(
-            await page.evaluate(
-              ([px, py]) =>
-                document.elementFromPoint(px, py)?.closest("[data-settings-rail]") != null,
-              [x, y] as const,
-            ),
-          ).toBe(false);
-        }
-      }
+      // One rail layout everywhere: the brand row, then the back link.
+      expect(await rail.getByRole("link", { name: "Opengeni home" }).count()).toBe(1);
+      expect((await rail.boundingBox())!.y).toBe(pageTop(platform));
+      backTop.set(platform, (await back.boundingBox())!.y - pageTop(platform));
+      await expectWindowTop(page, platform);
+      // Scrolled part-way and to the end, the list never reaches the window controls.
+      expect(await setScroll(page, "[data-settings-rail]", 72)).toBeGreaterThan(0);
+      await expectWindowTop(page, platform);
+      await setScroll(page, "[data-settings-rail]", "end");
+      await expectWindowTop(page, platform);
       expect(errors).toEqual([]);
       await page.close();
     }
+    // The rail's own layout is the same on every platform.
+    expect(new Set(backTop.values()).size).toBe(1);
   }, 180_000);
 
-  test("a content page beside a collapsed rail starts past the controls and sharing badge", async () => {
-    const titleLeft = new Map<string, number>();
-    for (const platform of ["browser", "windows", "macos"]) {
-      for (const width of [900, 1280]) {
-        const page = await browser.newPage({ viewport: { width, height: 600 } });
-        const errors: string[] = [];
-        page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(`${url}?view=content&platform=${platform}`);
-        const title = page.getByRole("heading", { name: "Automations", exact: true });
-        await title.waitFor({ timeout: 90_000 });
-        const expanded = (await title.boundingBox())!;
-        await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
-        await page.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
-        const collapsed = (await title.boundingBox())!;
-        // The title is in the window's top row (Windows keeps its caption row clear).
-        if (platform !== "windows") expect(collapsed.y).toBeLessThan(44);
-        if (platform === "macos") {
-          // 32px past the 56px rail, like the session title bar, at every width;
-          // beside the open rail nothing changes.
-          expect(collapsed.x).toBe(Math.max(88, titleLeft.get(`browser-${width}-collapsed`)!));
-          expect(expanded.x).toBe(titleLeft.get(`browser-${width}-expanded`)!);
-        } else {
-          titleLeft.set(`${platform}-${width}-collapsed`, collapsed.x);
-          titleLeft.set(`${platform}-${width}-expanded`, expanded.x);
+  test("content pages start below the bar beside the open and collapsed rail", async () => {
+    const title = new Map<string, { x: number; y: number }>();
+    for (const platform of PLATFORMS) {
+      for (const width of [720, 900, 1280]) {
+        const { page, errors } = await open(platform, "&view=content", width, 600);
+        const heading = page.getByRole("heading", { name: "Automations", exact: true });
+        await heading.waitFor({ timeout: 90_000 });
+        for (const rail of ["expanded", "collapsed"]) {
+          if (rail === "collapsed") {
+            await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+            await page.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
+          }
+          const box = (await heading.boundingBox())!;
+          title.set(`${platform}-${width}-${rail}`, { x: box.x, y: box.y - pageTop(platform) });
+          await expectWindowTop(page, platform);
+          // The collapsed rail stays 56px wide on every platform.
+          if (rail === "collapsed") {
+            expect((await page.locator("nav[data-collapsed='true']").boundingBox())!.width).toBe(
+              56,
+            );
+          }
         }
         expect(errors).toEqual([]);
         await page.close();
       }
     }
-    // The web and Windows layouts are unchanged: 24px past the rail below
-    // 1024px, then the centred column with its 32px inset.
-    expect(Object.fromEntries(titleLeft)).toEqual({
-      "browser-900-collapsed": 80,
-      "browser-900-expanded": 312,
-      "browser-1280-collapsed": 188,
-      "browser-1280-expanded": 320,
-      "windows-900-collapsed": 80,
-      "windows-900-expanded": 312,
-      "windows-1280-collapsed": 188,
-      "windows-1280-expanded": 320,
-    });
+    // Below the bar the layout is the web app's own: same places on every platform.
+    for (const platform of ["windows", "macos"]) {
+      for (const [key, box] of title) {
+        if (!key.startsWith("browser-")) continue;
+        expect({ key, ...title.get(key.replace("browser", platform))! }).toEqual({ key, ...box });
+      }
+    }
+    // And the web app is unchanged: 24px past the rail below 1024px, then the
+    // centred column with its 32px inset.
+    expect(title.get("browser-900-collapsed")!.x).toBe(80);
+    expect(title.get("browser-900-expanded")!.x).toBe(312);
+    expect(title.get("browser-1280-collapsed")!.x).toBe(188);
+    expect(title.get("browser-1280-expanded")!.x).toBe(320);
+  }, 240_000);
+
+  test("menus open next to their buttons below the bar", async () => {
+    const offsets = new Map<Platform, number[]>();
+    for (const platform of PLATFORMS) {
+      const { page, errors } = await open(platform, "&view=content", 1100, 640);
+      await page.getByRole("heading", { name: "Automations", exact: true }).waitFor({
+        timeout: 90_000,
+      });
+      const found: number[] = [];
+      for (const name of [/^Account menu/, /^Session view/, /^Actions for Website redesign/]) {
+        const trigger = page.getByRole("button", { name });
+        const button = (await trigger.boundingBox())!;
+        await trigger.click();
+        const menu = page.getByRole("menu").first();
+        await menu.waitFor();
+        // Let the opening animation settle.
+        await page.waitForTimeout(300);
+        const box = (await menu.boundingBox())!;
+        expect(box.y).toBeGreaterThanOrEqual(pageTop(platform));
+        // Where a menu reaches over the bar in a short window, it stays clickable.
+        if (platform !== "browser") {
+          expect(
+            await menu.evaluate((element) =>
+              getComputedStyle(
+                element.closest("[data-radix-popper-content-wrapper]")!,
+              ).getPropertyValue("-webkit-app-region"),
+            ),
+          ).toBe("no-drag");
+        }
+        // The menu's start and its gap to the button's near edge (the account
+        // menu lists fewer items in the desktop app, so compare edges, not tops).
+        const below = box.y >= button.y + button.height / 2;
+        found.push(
+          Math.round(box.x - button.x),
+          Math.round(below ? box.y - (button.y + button.height) : button.y - (box.y + box.height)),
+        );
+        await page.keyboard.press("Escape");
+        await menu.waitFor({ state: "hidden" });
+      }
+      offsets.set(platform, found);
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+    // A menu sits in the same place relative to its button as in the web app.
+    expect(offsets.get("windows")).toEqual(offsets.get("browser")!);
+    expect(offsets.get("macos")).toEqual(offsets.get("browser")!);
   }, 180_000);
 });

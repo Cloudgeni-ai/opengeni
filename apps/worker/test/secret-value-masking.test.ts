@@ -177,3 +177,45 @@ describe("attempt secret-value masking", () => {
     expect(maskSecretValuesForStorage(`x ${FAKE_SECRET}`)).toBe(`x ${FAKE_SECRET}`);
   });
 });
+
+describe("secret-shaped values in tool output", () => {
+  const FAKE_DB_PASSWORD = "FAKE-db-pw-0000-not-real";
+  const kubectl = [
+    "OPENGENI_BASE_URL=https://example.test",
+    `OPENGENI_DATABASE_URL=postgres://user:${FAKE_DB_PASSWORD}@host:5432/db?sslmode=require`,
+  ].join("\n");
+  const TASK_REF = ref("Task/url-password-0123456789abcdef/password");
+
+  test("incident 1: a printed database URL is captured and shown and stored by reference", async () => {
+    const memory = createAttemptSecretValueMemory();
+    const captured: string[] = [];
+    memory.setShapeCapturer(async (matches) => {
+      captured.push(...matches.map((match) => match.kind));
+      return new Map(matches.map((match) => [match.value, TASK_REF]));
+    });
+    await runWithAttemptSecretValues(memory, async () => {
+      const agent = fakeAgent([fakeExecTool(() => kubectl)]);
+      installToolResultSecretMasking(agent, memory);
+      const shown = String(await invokeFirst(agent));
+      expect(captured).toEqual(["url-password"]);
+      expect(shown).not.toContain(FAKE_DB_PASSWORD);
+      expect(shown).toContain(`postgres://user:${TASK_REF}@host:5432/db?sslmode=require`);
+      expect(shown).toContain("OPENGENI_BASE_URL=https://example.test");
+      // Stored copies (history, events, command output) use the same reference.
+      expect(maskSecretValuesForStorage({ output: kubectl })).toEqual({ output: shown });
+    });
+  });
+
+  test("without capture the password is replaced by a marker and the tool still succeeds", async () => {
+    const memory = createAttemptSecretValueMemory();
+    memory.setShapeCapturer(async () => {
+      throw new Error("vault unavailable");
+    });
+    await runWithAttemptSecretValues(memory, async () => {
+      const agent = fakeAgent([fakeExecTool(() => kubectl)]);
+      installToolResultSecretMasking(agent, memory);
+      const shown = String(await invokeFirst(agent));
+      expect(shown).toContain("postgres://user:[masked url password]@host:5432/db");
+    });
+  });
+});

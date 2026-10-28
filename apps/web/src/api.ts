@@ -1318,9 +1318,8 @@ export function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  // A notice across the top of the app: in the desktop app it is the window's
-  // top row, so it keeps clear of the window controls and moves the window
-  // (apps/web/src/styles.css).
+  // A notice across the top of the app (styled in apps/web/src/styles.css);
+  // in the desktop app it sits below the window bar and also moves the window.
   notice.setAttribute("data-app-notice", "");
   notice.setAttribute("data-window-drag", "");
   const message = document.createElement("span");

@@ -23,7 +23,7 @@ import {
   type SecretPrincipal,
   type SecretResolver,
 } from "@opengeni/contracts";
-import { loadSessionTreeSecretValues } from "@opengeni/core";
+import { createTaskVaultSecretCapturer, loadSessionTreeSecretValues } from "@opengeni/core";
 import { withSecretValueMasking, type Database } from "@opengeni/db";
 import { activeAttemptSecretValues, withAttemptSecretValues } from "@opengeni/runtime";
 
@@ -217,4 +217,44 @@ export function attachSessionTreeSecretValues(input: {
   firstLoad = start().finally(() => {
     firstLoadDone = true;
   });
+}
+
+/**
+ * Secret-shaped values found in tool output (a database URL's password, a
+ * private key, a token) are saved into the run's task vault and replaced by
+ * their reference. With the secrets capability off or no encryption key,
+ * they are masked with a `[masked <kind>]` marker instead. Failures only
+ * produce a metadata-only warning.
+ */
+export function attachTaskVaultSecretCapture(input: {
+  memory: SecretValueMemory | null | undefined;
+  db: Database;
+  encryptionKey: Uint8Array | null;
+  principal: Extract<SecretPrincipal, { kind: "attempt" }>;
+  enabled: boolean;
+  observability?: DiagnosticSink | null;
+}): void {
+  const memory = input.memory;
+  if (!memory) return;
+  if (!input.enabled || input.encryptionKey === null) {
+    memory.setShapeCapturer(undefined);
+    return;
+  }
+  memory.setShapeCapturer(
+    createTaskVaultSecretCapturer({
+      db: input.db,
+      encryptionKey: input.encryptionKey,
+      principal: input.principal,
+      onFailure: (failure) => {
+        try {
+          input.observability?.warn("a secret found in tool output was masked but not saved", {
+            secretKind: failure.kind,
+            errorClass: failure.error,
+          });
+        } catch {
+          // Diagnostics never affect the attempt.
+        }
+      },
+    }),
+  );
 }

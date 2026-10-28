@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
+  CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_ERROR_REVISION_PATTERN,
   CLIENT_ERROR_ROUTE_PATTERN,
   isProjectedClientErrorText,
@@ -484,6 +485,9 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // the exact wire grammar the API route admits.
   ["clientRoute", CLIENT_ERROR_ROUTE_PATTERN],
   ["clientRevision", CLIENT_ERROR_REVISION_PATTERN],
+  // Desktop bridge-missing signal: the desktop app's version from its user
+  // agent (digits, dots and a short prerelease tag), or `unknown`.
+  ["clientAppVersion", new RegExp(`(?:${CLIENT_DESKTOP_APP_VERSION_PATTERN.source})|^unknown$`)],
   // Temporal SDK records (temporal-sdk-logger.ts): the SDK's closed component
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
