@@ -238,6 +238,7 @@ import {
   codexUsageNoticeApplies,
   codexUsageResetText,
   codexUsageResetsAt,
+  codexWaitIsUsageLimit,
   latestCheckpointIsCompaction,
   modelSwitchHeadsUpText,
   needsModelSwitchHeadsUp,
@@ -3233,6 +3234,8 @@ function SessionChatPane(props: {
     pending: boolean;
     error: string | null;
   } | null>(null);
+  // One continuation at a time, even for two calls within one render.
+  const usageContinuationInFlight = useRef(false);
   const usageContinuation =
     usageContinuationState?.sessionId === props.session.id ? usageContinuationState : null;
   // Whether Codex already compacted this remote_v2 chat. Another model then
@@ -3290,12 +3293,18 @@ function SessionChatPane(props: {
       : null;
   // Run the blocked work on `policy`: the chat's own Codex model to continue
   // at the reset (its turn parks until then), or the model the person picked.
-  const continueAfterUsageLimit = async (policy: Parameters<typeof retryFailedSession>[1]) => {
-    if (usageContinuation?.pending) return;
+  // A paused chat is resumed first, so the work isn't held back.
+  const continueAfterUsageLimit = async (
+    policy: Parameters<typeof retryFailedSession>[1],
+    options: { resumeFirst?: boolean } = {},
+  ) => {
+    if (usageContinuationInFlight.current) return;
+    usageContinuationInFlight.current = true;
     const sessionId = props.session.id;
     setUsageContinuation({ sessionId, pending: true, error: null });
     let error: string | null = null;
     try {
+      if (options.resumeFirst) await composer.resume();
       if (
         props.session.status === "failed" &&
         props.failure?.failureEventId &&
@@ -3324,6 +3333,7 @@ function SessionChatPane(props: {
     } catch (failure) {
       error = userErrorText(failure, "Try again.");
     } finally {
+      usageContinuationInFlight.current = false;
       setUsageContinuation({ sessionId, pending: false, error });
       await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
     }
@@ -3345,12 +3355,15 @@ function SessionChatPane(props: {
     });
     if (action === "pause") void composer.pause();
     else if (action === "resume") void composer.resume();
-    else if (action === "run_on_codex")
-      void continueAfterUsageLimit({
-        model: props.session.model,
-        reasoningEffort: props.session.reasoningEffort,
-        latencyMode: props.session.latencyMode,
-      });
+    else if (action === "run_on_codex" || action === "resume_and_run_on_codex")
+      void continueAfterUsageLimit(
+        {
+          model: props.session.model,
+          reasoningEffort: props.session.reasoningEffort,
+          latencyMode: props.session.latencyMode,
+        },
+        { resumeFirst: action === "resume_and_run_on_codex" },
+      );
   };
   // Picking another model in the picker continues the blocked chat with it.
   const usageModelSwitch = useCodexUsageModelSwitch({
@@ -3360,7 +3373,10 @@ function SessionChatPane(props: {
     enabled: codexUsageChoices,
     closePicker: () => setModelPickerSession(null),
     onContinue: (picked) =>
-      void continueAfterUsageLimit({ model: picked, reasoningEffort, latencyMode }),
+      void continueAfterUsageLimit(
+        { model: picked, reasoningEffort, latencyMode },
+        { resumeFirst: usagePaused },
+      ),
   });
   // A wait with no reset in sight keeps the server's own wait message; the
   // picker still continues the chat with another model.
@@ -3369,6 +3385,7 @@ function SessionChatPane(props: {
     codexUsageNoticeApplies({
       status: props.session.status,
       resetsAt: codexUsageResetsAtValue,
+      usageWait: codexWaitIsUsageLimit(props.events),
     })
       ? {
           resetText: codexUsageResetText(codexUsageResetsAtValue),

@@ -17,15 +17,30 @@ export function useCodexUsageModelSwitch(input: {
   closePicker: () => void;
   onContinue: (model: string) => void;
 }) {
-  const [picked, setPicked] = useState<{ sessionId: string; model: string } | null>(null);
+  const [picked, setPicked] = useState<{
+    sessionId: string;
+    model: string;
+    /** The composer's model when it was picked. */
+    from: string;
+  } | null>(null);
   // The picker commits a model with its effort and speed in one update; the
   // chat continues once the composer shows that model.
   const switched =
     picked?.sessionId === input.sessionId && picked.model === input.composerModel
       ? picked.model
       : null;
+  // A pick the composer settled on something else, or one that outlived the
+  // block, is dropped: it never continues the chat later.
+  const abandoned =
+    picked !== null &&
+    (!input.enabled ||
+      picked.sessionId !== input.sessionId ||
+      (input.composerModel !== picked.model && input.composerModel !== picked.from));
   const latest = useRef(input);
   latest.current = input;
+  useEffect(() => {
+    if (abandoned) setPicked(null);
+  }, [abandoned]);
   useEffect(() => {
     if (!switched) return;
     setPicked(null);
@@ -34,7 +49,7 @@ export function useCodexUsageModelSwitch(input: {
   return {
     modelPicked: (modelId: string) => {
       if (!input.enabled || modelId === input.sessionModel) return;
-      setPicked({ sessionId: input.sessionId, model: modelId });
+      setPicked({ sessionId: input.sessionId, model: modelId, from: input.composerModel });
       input.closePicker();
     },
   };

@@ -55,4 +55,22 @@ describe("useCodexUsageModelSwitch", () => {
     expect(calls).toEqual(["close"]);
     await hook.unmount();
   });
+
+  test("a pick the composer never shows does not continue the chat later", async () => {
+    const { calls, hook } = await setup();
+    await actRun(() => hook.result.current.modelPicked("gpt-6-astra"));
+    // The composer kept its model; the block ends, then comes back.
+    await hook.rerender({ composerModel: "codex/gpt-6-sol", enabled: false });
+    await hook.rerender({ composerModel: "codex/gpt-6-sol", enabled: true });
+    await hook.rerender({ composerModel: "gpt-6-astra", enabled: true });
+    expect(calls).toEqual(["close"]);
+    await hook.unmount();
+    // The composer settled on a different model than the pick.
+    const other = await setup();
+    await actRun(() => other.hook.result.current.modelPicked("gpt-6-astra"));
+    await other.hook.rerender({ composerModel: "claude-opus-5.5" });
+    await other.hook.rerender({ composerModel: "gpt-6-astra" });
+    expect(other.calls).toEqual(["close"]);
+    await other.hook.unmount();
+  });
 });

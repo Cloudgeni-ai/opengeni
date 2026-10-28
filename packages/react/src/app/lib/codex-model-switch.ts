@@ -61,8 +61,32 @@ export function codexUsageResetsAt(events: readonly SessionEvent[]): string | nu
       (event.type === "turn.failed" && payloadField(event, "code") === "codex_usage_limit_reached");
     if (usageEvent && (!latest || event.sequence > latest.sequence)) latest = event;
   }
-  const resetsAt = latest ? payloadField(latest, "resetsAt") : null;
+  // A wait whose reason changed later records its reset as `earliestResetAt`.
+  const resetsAt = latest
+    ? (payloadField(latest, "resetsAt") ?? payloadField(latest, "earliestResetAt"))
+    : null;
   return typeof resetsAt === "string" && !Number.isNaN(Date.parse(resetsAt)) ? resetsAt : null;
+}
+
+/** Waits that only capacity coming back (a usage reset) ends. */
+const USAGE_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "no_eligible_capacity",
+  "compaction_provider_locked",
+]);
+
+/**
+ * Whether the newest capacity wait is a usage wait, not one that needs a
+ * person to act (a turned-off or ineligible account, a model not allowed).
+ */
+export function codexWaitIsUsageLimit(events: readonly SessionEvent[]): boolean {
+  let latest: SessionEvent | null = null;
+  for (const event of events) {
+    const wait = event.type === "codex.capacity.waiting" || event.type === "turn.capacity_waiting";
+    if (wait && (!latest || event.sequence > latest.sequence)) latest = event;
+  }
+  if (!latest || payloadField(latest, "actionRequired") === true) return false;
+  const reason = payloadField(latest, "waitReason");
+  return reason === undefined || reason === null || USAGE_WAIT_REASONS.has(String(reason));
 }
 
 function payloadField(event: SessionEvent, key: string): unknown {
@@ -83,31 +107,34 @@ export function codexUsageContinuesAtReset(input: {
 }
 
 /**
- * Whether the usage-limit line describes this chat. A Codex wait with a
- * known reset is a usage limit. A wait with no reset in sight (for example
- * no ChatGPT plan connected any more) keeps the server's own wait message,
- * which names the actual cause.
+ * Whether the usage-limit line describes this chat. A Codex usage wait with
+ * a known reset is a usage limit. A wait with no reset in sight (for example
+ * no ChatGPT plan connected any more) or one that needs a person to act keeps
+ * the server's own wait message, which names the actual cause.
  */
 export function codexUsageNoticeApplies(input: {
   status: Session["status"];
   resetsAt: string | null;
+  usageWait: boolean;
 }): boolean {
-  return input.status !== "waiting_capacity" || input.resetsAt !== null;
+  return input.status !== "waiting_capacity" || (input.usageWait && input.resetsAt !== null);
 }
 
 /**
  * What switching "Continue at reset" to `next` does: pause or resume the
  * waiting chat, or run a stopped chat's work again on its Codex model, which
- * waits for the reset. Null when nothing changes.
+ * waits for the reset (resuming a paused chat first, so that work isn't held
+ * back). Null when nothing changes.
  */
 export function codexUsageContinueAtResetAction(input: {
   status: Session["status"];
   paused: boolean;
   next: boolean;
-}): "pause" | "resume" | "run_on_codex" | null {
+}): "pause" | "resume" | "run_on_codex" | "resume_and_run_on_codex" | null {
   if (input.next === codexUsageContinuesAtReset(input)) return null;
   if (input.status === "waiting_capacity") return input.next ? "resume" : "pause";
-  return input.next ? "run_on_codex" : null;
+  if (!input.next) return null;
+  return input.paused ? "resume_and_run_on_codex" : "run_on_codex";
 }
 
 /**

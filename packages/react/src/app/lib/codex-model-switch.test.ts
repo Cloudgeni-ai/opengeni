@@ -7,6 +7,7 @@ import {
   codexUsageNoticeApplies,
   codexUsageResetText,
   codexUsageResetsAt,
+  codexWaitIsUsageLimit,
   latestCheckpointIsCompaction,
   modelSwitchHeadsUpText,
   needsModelSwitchHeadsUp,
@@ -89,6 +90,33 @@ describe("Codex usage limit reset", () => {
     expect(codexUsageResetsAt([])).toBe(null);
   });
 
+  test("a wait whose reason changed names its reset as earliestResetAt", () => {
+    const reclassified = usage("codex.capacity.waiting", 9, {
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: "2026-10-31T16:05:00.000Z",
+    });
+    expect(codexUsageResetsAt([reclassified])).toBe("2026-10-31T16:05:00.000Z");
+    expect(
+      codexUsageResetsAt([usage("codex.capacity.waiting", 9, { earliestResetAt: null })]),
+    ).toBe(null);
+  });
+
+  test("only a capacity wait that no person needs to act on is a usage wait", () => {
+    const wait = (payload: Record<string, unknown>) => [
+      usage("codex.capacity.waiting", 3, { waitReason: "pinned_account_disabled" }),
+      usage("codex.capacity.waiting", 5, payload),
+    ];
+    expect(codexWaitIsUsageLimit(wait({ waitReason: "no_eligible_capacity" }))).toBe(true);
+    expect(codexWaitIsUsageLimit(wait({ waitReason: "compaction_provider_locked" }))).toBe(true);
+    // An older wait event without a reason.
+    expect(codexWaitIsUsageLimit(wait({}))).toBe(true);
+    expect(
+      codexWaitIsUsageLimit(wait({ waitReason: "pinned_account_disabled", actionRequired: true })),
+    ).toBe(false);
+    expect(codexWaitIsUsageLimit(wait({ waitReason: "model_not_allowed" }))).toBe(false);
+    expect(codexWaitIsUsageLimit([])).toBe(false);
+  });
+
   test("the reset reads as a plain time, or says it is unknown", () => {
     const now = new Date("2026-10-28T09:00:00.000Z");
     const at = { now, locale: "en-GB", timeZone: "UTC" };
@@ -122,6 +150,13 @@ describe("Continue at reset", () => {
     expect(codexUsageContinueAtResetAction({ status: "failed", paused: false, next: true })).toBe(
       "run_on_codex",
     );
+    // A paused chat the limit stopped is resumed first, so the work isn't held back.
+    expect(codexUsageContinueAtResetAction({ status: "idle", paused: true, next: true })).toBe(
+      "resume_and_run_on_codex",
+    );
+    expect(codexUsageContinueAtResetAction({ status: "failed", paused: true, next: true })).toBe(
+      "resume_and_run_on_codex",
+    );
     // No change, no action.
     expect(codexUsageContinueAtResetAction({ ...waiting, next: true })).toBe(null);
     expect(codexUsageContinueAtResetAction({ status: "idle", paused: false, next: false })).toBe(
@@ -129,13 +164,20 @@ describe("Continue at reset", () => {
     );
   });
 
-  test("a wait with no reset in sight keeps the server's own wait message", () => {
+  test("a wait with no reset in sight, or one needing action, keeps the server's message", () => {
     const resetsAt = "2026-10-31T14:05:00.000Z";
-    expect(codexUsageNoticeApplies({ status: "waiting_capacity", resetsAt })).toBe(true);
+    const waiting = { status: "waiting_capacity" as const, usageWait: true };
+    expect(codexUsageNoticeApplies({ ...waiting, resetsAt })).toBe(true);
     // No ChatGPT plan can serve the chat (for example it was disconnected).
-    expect(codexUsageNoticeApplies({ status: "waiting_capacity", resetsAt: null })).toBe(false);
+    expect(codexUsageNoticeApplies({ ...waiting, resetsAt: null })).toBe(false);
+    // A turned-off or ineligible account needs a person, not a reset.
+    expect(codexUsageNoticeApplies({ ...waiting, resetsAt, usageWait: false })).toBe(false);
     // A usage-limit failure names the limit even when its reset is unknown.
-    expect(codexUsageNoticeApplies({ status: "failed", resetsAt: null })).toBe(true);
-    expect(codexUsageNoticeApplies({ status: "idle", resetsAt: null })).toBe(true);
+    expect(codexUsageNoticeApplies({ status: "failed", resetsAt: null, usageWait: false })).toBe(
+      true,
+    );
+    expect(codexUsageNoticeApplies({ status: "idle", resetsAt: null, usageWait: false })).toBe(
+      true,
+    );
   });
 });
