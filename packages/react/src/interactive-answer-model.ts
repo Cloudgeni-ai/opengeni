@@ -98,12 +98,12 @@ export function parseInteractiveAnswer(
  * strings, arrays and objects are closed. Cuts back to the last comma or
  * opening bracket when the tail is a half-written key or literal.
  */
-export function parsePartialJson(text: string): unknown {
+export function parsePartialJson(source: string): unknown {
   const cuts: number[] = [];
   let inString = false;
   let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]!;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
     if (inString) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
@@ -114,10 +114,10 @@ export function parsePartialJson(text: string): unknown {
     else if (char === ",") cuts.push(index);
     else if (char === "{" || char === "[") cuts.push(index + 1);
   }
-  const candidates = [text.length, ...cuts.reverse()];
+  const candidates = [source.length, ...cuts.reverse()];
   // A long body has many cut points; the last few are always enough.
   for (const end of candidates.slice(0, 64)) {
-    const closed = closeJson(text.slice(0, end));
+    const closed = closeJson(source.slice(0, end));
     if (closed === null) continue;
     try {
       return JSON.parse(closed);
@@ -348,6 +348,24 @@ export const EMPTY_INTERACTIVE_ANSWER_STATE: InteractiveAnswerState = {
   sort: null,
   filters: {},
 };
+
+/**
+ * For an answer that stopped mid-stream: leave out a last option that had only
+ * its title when the stream ended, so a half-written option doesn't stay on
+ * screen as an empty card. Options with any detail are kept.
+ */
+export function settleInteractiveAnswer(
+  parsed: InteractiveAnswerParse,
+  state: "complete" | "streaming" | "incomplete",
+): InteractiveAnswerParse {
+  if (state !== "incomplete" || parsed.status !== "partial" || !parsed.spec) return parsed;
+  const spec = parsed.spec;
+  const last = spec.items.at(-1);
+  if (!last || spec.items.length < 2 || spec.fields.length === 0) return parsed;
+  const shown = spec.fields.some((field) => last.values[field.key] !== undefined);
+  if (shown || last.subtitle || last.description || last.badge || last.url) return parsed;
+  return { status: "partial", spec: { ...spec, items: spec.items.slice(0, -1) } };
+}
 
 /** The options shown: filtered, then ordered by the chosen column. */
 export function visibleInteractiveItems(

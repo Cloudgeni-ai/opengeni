@@ -9,6 +9,7 @@ import {
   interactiveSelectionMessage,
   interactiveSelectionWasSent,
   parseInteractiveAnswer,
+  settleInteractiveAnswer,
   toggleInteractiveSelection,
   useInteractiveAnswerHost,
   useInteractiveAnswerState,
@@ -42,7 +43,11 @@ export function NativeInteractiveAnswer({
   renderSource: () => ReactNode;
 }) {
   const parsed = useMemo(
-    () => parseInteractiveAnswer(source, { partial: state !== "complete" }),
+    () =>
+      settleInteractiveAnswer(
+        parseInteractiveAnswer(source, { partial: state !== "complete" }),
+        state,
+      ),
     [source, state],
   );
   if (parsed.status === "invalid") return <Invalid renderSource={renderSource} />;

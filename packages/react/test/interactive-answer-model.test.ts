@@ -9,6 +9,7 @@ import {
   nextInteractiveSort,
   parseInteractiveAnswer,
   parsePartialJson,
+  settleInteractiveAnswer,
   toggleInteractiveSelection,
   visibleInteractiveItems,
   EMPTY_INTERACTIVE_ANSWER_STATE,
@@ -195,4 +196,26 @@ test("the card knows when the current pick is what was sent", () => {
 test("answer keys are stable per body and differ between bodies", () => {
   expect(interactiveAnswerKey(SOURCE)).toBe(interactiveAnswerKey(SOURCE));
   expect(interactiveAnswerKey(SOURCE)).not.toBe(interactiveAnswerKey(`${SOURCE} `));
+});
+
+test("an answer that stopped leaves out a last option that only had its title", () => {
+  const cut = SOURCE.slice(0, SOURCE.indexOf('"Framework 13"') + '"Framework 13"'.length);
+  const partial = parseInteractiveAnswer(cut, { partial: true });
+  expect(partial.status === "partial" ? partial.spec?.items.map((item) => item.id) : null).toEqual([
+    "air",
+    "x1",
+    "fw",
+  ]);
+  // Still streaming: the option keeps growing in place.
+  expect(settleInteractiveAnswer(partial, "streaming")).toBe(partial);
+  const stopped = settleInteractiveAnswer(partial, "incomplete");
+  expect(stopped.status === "partial" ? stopped.spec?.items.map((item) => item.id) : null).toEqual([
+    "air",
+    "x1",
+  ]);
+  // An option with any of its details stays.
+  const withValues = parseInteractiveAnswer(SOURCE.slice(0, SOURCE.lastIndexOf('"os"')), {
+    partial: true,
+  });
+  expect(settleInteractiveAnswer(withValues, "incomplete")).toBe(withValues);
 });

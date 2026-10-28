@@ -18,6 +18,7 @@ import {
   interactiveSelectionWasSent,
   nextInteractiveSort,
   parseInteractiveAnswer,
+  settleInteractiveAnswer,
   toggleInteractiveSelection,
   useInteractiveAnswerHost,
   useInteractiveAnswerState,
@@ -49,7 +50,11 @@ export type InteractiveAnswerProps = {
 
 export function InteractiveAnswer({ source, state, renderSource }: InteractiveAnswerProps) {
   const parsed = useMemo(
-    () => parseInteractiveAnswer(source, { partial: state !== "complete" }),
+    () =>
+      settleInteractiveAnswer(
+        parseInteractiveAnswer(source, { partial: state !== "complete" }),
+        state,
+      ),
     [source, state],
   );
   if (parsed.status === "invalid") return <InvalidAnswer renderSource={renderSource} />;
@@ -587,7 +592,9 @@ function OptionTable({
           type="button"
           onClick={() => onSort(key, field)}
           className={cn(
-            "group/sort inline-flex cursor-pointer items-center gap-1 rounded-og-sm text-og-xs whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45",
+            // align-bottom: an inline-flex box takes its baseline from its first
+            // item, and a leading arrow icon would lift numeric headers.
+            "group/sort inline-flex cursor-pointer items-center gap-1 rounded-og-sm align-bottom text-og-xs whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45",
             active ? "text-og-fg" : "text-og-fg-subtle hover:text-og-fg",
           )}
         >
@@ -756,7 +763,8 @@ function BarChart({
         {field.label}
         {field.unit ? ` (${field.unit})` : ""}
       </figcaption>
-      <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+      {/* Rows share the list's columns (subgrid), so every bar has the same track. */}
+      <ul className="m-0 grid list-none grid-cols-[minmax(0,1fr)_auto] gap-y-0.5 p-0 @md/answer:grid-cols-[minmax(5.5rem,34%)_minmax(0,1fr)_auto]">
         {rows.map((item) => {
           const value = item.values[field.key] as number;
           const on = selected.includes(item.id);
@@ -765,34 +773,35 @@ function BarChart({
           const disabled = !on && atMax;
           const body = (
             <>
-              <span className="min-w-0 truncate text-left text-og-xs leading-6 text-og-fg">
+              <span className="col-start-1 row-start-1 min-w-0 truncate text-left text-og-xs leading-5 text-og-fg @md/answer:leading-6">
                 {item.title}
               </span>
-              <span className="relative flex h-6 min-w-0 items-center">
+              <span className="col-span-2 col-start-1 row-start-2 flex h-4 min-w-0 items-center @md/answer:col-span-1 @md/answer:col-start-2 @md/answer:row-start-1 @md/answer:h-6">
                 <span
                   className={cn(
-                    "h-3.5 rounded-r-[4px] rounded-l-[2px] transition-[width,background-color] duration-300 ease-out motion-reduce:transition-none",
+                    "h-2.5 rounded-r-[4px] rounded-l-[2px] transition-[width,background-color] duration-300 ease-out motion-reduce:transition-none @md/answer:h-3.5",
                     on ? "bg-og-fg/85" : lit ? "bg-og-fg/40" : "bg-og-fg/[0.16]",
                   )}
                   style={{ width }}
                 />
-                <span className="ml-2 shrink-0 text-og-xs whitespace-nowrap text-og-fg-muted tabular-nums">
-                  {formatInteractiveValue(field, value, words, t.locale)}
-                  {best.get(field.key)?.has(item.id) ? (
-                    <span className="ml-1.5 inline-flex align-[-2px]">
-                      <BestMark />
-                    </span>
-                  ) : null}
-                </span>
+              </span>
+              <span className="col-start-2 row-start-1 text-right text-og-xs leading-5 whitespace-nowrap text-og-fg-muted tabular-nums @md/answer:col-start-3 @md/answer:text-left @md/answer:leading-6">
+                {formatInteractiveValue(field, value, words, t.locale)}
+                {best.get(field.key)?.has(item.id) ? (
+                  <span className="ml-1.5 inline-flex align-[-2px]">
+                    <BestMark />
+                  </span>
+                ) : null}
               </span>
             </>
           );
           const rowClass =
-            "grid w-full min-w-0 grid-cols-[minmax(5.5rem,34%)_minmax(0,1fr)] items-center gap-3 rounded-og-sm px-1 -mx-1";
+            "col-span-full grid min-w-0 grid-cols-subgrid items-center gap-x-3 rounded-og-sm px-1 py-1 -mx-1 @md/answer:py-0";
           return (
             <li
               key={item.id}
               data-option-id={item.id}
+              className="col-span-full grid grid-cols-subgrid"
               onPointerEnter={() => onHover(item.id)}
               onPointerLeave={() => onHover(null)}
             >
