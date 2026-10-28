@@ -53,3 +53,18 @@ Contacts uses delegated `People.Read` for `/me/people`. OneDrive uses
 `Files.ReadWrite.All` and excludes the organization-only followed-sites API;
 neither requires organization-wide people or SharePoint permissions merely to
 connect a personal Microsoft account.
+
+SharePoint is its own work/school definition (`microsoft-sharepoint`) on the
+`organizations` endpoint with delegated `Sites.ReadWrite.All`, so OneDrive keeps
+working for personal accounts. It admits an exact reviewed allowlist: site search
+and lookup, followed sites, subsites, document libraries and their files, lists
+and list items (create and update need review), site pages, and Microsoft Search
+(`POST /search/query`). No site, list, page or permission administration is
+admitted.
+
+A reviewed allowlist entry may set `readOnly: true` for a provider action that
+only reads despite its HTTP method, such as `POST /search/query`. The definition
+passes these as `readOnlyOperations` to `compileOpenApiRevision`; provider
+documents and custom APIs cannot relax the method's safety default themselves.
+An entry's `description` replaces the provider's generic text with reviewed
+guidance for the agent.

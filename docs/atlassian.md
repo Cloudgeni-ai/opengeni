@@ -7,6 +7,35 @@ through its encrypted connection broker and applies normal tool permissions.
 Hosted tools follow the connected user's Atlassian access and provider controls.
 They do not use the former native project's or space's source selection.
 
+## Organization admin: allow the Opengeni domain
+
+Atlassian's Rovo MCP server only accepts OAuth connections from domains the
+customer's Atlassian organization allows. Atlassian-supported domains are
+allowed by default; Opengeni's domains are not on that list, so most
+organizations must add the deployment's public origin before anyone can connect.
+Without it, the Atlassian consent screen reports that an organization admin must
+authorize access from the domain, and no connection is created.
+
+An Atlassian organization admin adds it once for the whole organization:
+
+1. Open Atlassian Administration at admin.atlassian.com and select the organization.
+2. Go to **Rovo**, then **Rovo MCP server** (older consoles: **Apps**, **AI settings**,
+   **Rovo MCP server**).
+3. Under **Allowed domains** (or **Domain settings**), select **Add domain** and enter
+   the deployment origin with a path wildcard, for example
+   `https://app.opengeni.ai/**`. Embedded and self-hosted deployments use their own
+   `OPENGENI_PUBLIC_BASE_URL` origin.
+4. Optionally restrict Read, Write and Search per product on the same page.
+
+If the error persists after saving, Atlassian's guidance is to remove the entry,
+add the identical entry again, and retry in a fresh private window. Organizations
+with an Atlassian IP allowlist must also allow Opengeni's egress addresses.
+Removing the domain blocks new connections for the organization; existing grants
+can be revoked from the organization's connected apps.
+
+References: [Control Rovo MCP server settings](https://support.atlassian.com/rovo/docs/control-atlassian-rovo-mcp-server-settings/),
+[OAuth consent block](https://support.atlassian.com/rovo/kb/fix-oauth-consent-block-for-atlassian-rovo-mcp-server-in-atlassian-cloud/).
+
 The native read-only API/Knowledge-sync adapter is retired. It no longer appears
 as a new Connect provider. Native OAuth start, source browsing/selection, live
 reading and resume refuse execution. A pending native callback may settle its
