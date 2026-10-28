@@ -116,7 +116,6 @@ import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { Button } from "@opengeni/react/ui/button";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
@@ -334,6 +333,28 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
+  // A person's own subscriptions are kept in their Personal workspace and
+  // serve them anywhere in the organization (SUB-OWN-03). On a shared
+  // workspace's page anyone who connects their own lists and manages them
+  // here too, read through their Personal workspace.
+  const ownWorkspaceId =
+    workspacePage && !personal && !organizationAdmin && canManageConnections
+      ? workspaces.find((each) => each.personal)?.id
+      : undefined;
+  const ownScope = {
+    client,
+    workspaceId: ownWorkspaceId ?? workspaceId,
+    canManage: canManageConnections,
+  };
+  const ownCodex = useCodexSubscriptions({ ...ownScope, enabled: Boolean(ownWorkspaceId) });
+  const ownGrok = useSuperGrokSubscriptions({
+    ...ownScope,
+    enabled: Boolean(ownWorkspaceId) && !grok.unavailable,
+  });
+  const ownClaude = useClaudeSubscriptions({
+    ...ownScope,
+    enabled: claudeEnabled && Boolean(ownWorkspaceId),
+  });
   // A shared workspace's provider key decides what every session runs on: a
   // setting. Members connect their own accounts instead.
   const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
@@ -472,6 +493,52 @@ export function WorkspaceModelsPageBody({
     openAccess: (id) => nav.openView("model-access", accountKey("claude", id, true)),
     backToList,
   };
+  // Your own subscriptions on a shared workspace's page: tagged "Only you",
+  // opened, reconnected and removed here. Their accounts are read through your
+  // Personal workspace, which keeps them.
+  const ownLabels = { ...labels, workspace: labels.user };
+  // Signing one in again keeps it yours: the step opens with its account.
+  const ownCodexPlaces: CodexPlaces = {
+    ...codexPlaces,
+    personal: true,
+    scope: ownLabels,
+    openConnect: () => nav.openView("connect:codex", account),
+  };
+  const ownGrokPlaces: SuperGrokPlaces = {
+    ...grokPlaces,
+    scope: ownLabels,
+    openConnect: (id) =>
+      nav.openView("connect:supergrok", id ? accountKey("supergrok", id) : account),
+    sharePersonal: undefined,
+  };
+  const ownClaudePlaces: ClaudePlaces = {
+    ...claudePlaces,
+    scope: ownLabels,
+    sharePersonal: undefined,
+  };
+  const ownCodexRows = {
+    ...ownCodex,
+    accounts: ownWorkspaceId
+      ? ownCodex.accounts.filter((each) => each.source !== "organization")
+      : [],
+    sourceDisabled: false,
+    pending: null,
+  };
+  const ownGrokRows = {
+    ...ownGrok,
+    accounts:
+      ownWorkspaceId && !ownGrok.inherited
+        ? ownGrok.accounts.filter((each) => each.scope === "user")
+        : [],
+    pending: null,
+  };
+  const ownClaudeRows = {
+    ...ownClaude,
+    accounts:
+      ownWorkspaceId && !ownClaude.inherited
+        ? ownClaude.accounts.filter((each) => each.scope === "user")
+        : [],
+  };
   const workspaceNameOf = (id: string) => workspaces.find((candidate) => candidate.id === id)?.name;
   const claudePool: OrganizationClaudePool | null =
     organizationAdmin && claudeEnabled && !orgClaude.unavailable
@@ -513,6 +580,23 @@ export function WorkspaceModelsPageBody({
           organization: requestedKey.organization,
         }
       : requestedKey;
+  // An account key names one of your own subscriptions when this workspace
+  // doesn't list it and your Personal workspace does (or is still loading).
+  const ownKey = (() => {
+    if (!ownWorkspaceId || !key || key.organization) return false;
+    const has = (accounts: readonly { id: string }[]) =>
+      accounts.some((each) => each.id === key.id);
+    if (key.provider === "codex")
+      return !has(codex.accounts) && (ownCodex.loading || has(ownCodexRows.accounts));
+    if (key.provider === "supergrok")
+      return !has(grok.accounts) && (ownGrok.loading || has(ownGrokRows.accounts));
+    if (key.provider === "claude")
+      return !has(claude.accounts) && (ownClaude.loading || has(ownClaudeRows.accounts));
+    return false;
+  })();
+  const keyCodex = ownKey ? ownCodex : codex;
+  const keyGrok = ownKey ? ownGrok : grok;
+  const keyClaude = ownKey ? ownClaude : claude;
   useEffect(() => {
     if (!legacyClaude || !claudeEnabled || legacyPool.loading || legacyPool.loadError) return;
     if (!legacyAccountId) {
@@ -709,10 +793,9 @@ export function WorkspaceModelsPageBody({
       </DetailPage>
     );
   } else if ((view === "connect" || view === "connect-workspace") && memberConnects) {
-    // Your own account, for this workspace. A private subscription lives only
-    // in its owner's Personal workspace (the API refuses it anywhere else), so
-    // a shared workspace's member is sent there instead.
-    const personalWorkspaceId = workspaces.find((each) => each.personal)?.id;
+    // Your own account, connected right here. A shared workspace's member
+    // connects their own subscriptions ("Only me"): they're kept in their
+    // Personal workspace and serve them anywhere in the organization.
     page = (
       <ConnectPickerPage
         target="workspace"
@@ -724,31 +807,11 @@ export function WorkspaceModelsPageBody({
               ? "Only you use it."
               : `Connect a subscription or an API key for everyone in ${workspaceName}.`
         }
-        codexAvailable={personal || workspaceAdminConnects}
-        // In a Personal workspace SuperGrok is the person's own account.
-        grok={grok.unavailable || onlyMe ? "hidden" : "available"}
-        claude={claudeEnabled && !onlyMe ? "available" : "hidden"}
+        codexAvailable
+        grok={grok.unavailable ? "hidden" : "available"}
+        claude={claudeEnabled ? "available" : "hidden"}
         gateways={onlyMe ? undefined : gateways}
         personal={personal}
-        empty={
-          onlyMe ? (
-            <EmptyState
-              variant="inline"
-              title="Your own subscriptions are connected in your Personal workspace."
-              description={`They also pay for chats you keep to yourself in ${workspaceName}.`}
-              action={
-                personalWorkspaceId ? (
-                  <Button
-                    variant="secondary"
-                    onClick={() => nav.openWorkspace(personalWorkspaceId, undefined, "connect")}
-                  >
-                    Open your Personal workspace
-                  </Button>
-                ) : undefined
-              }
-            />
-          ) : undefined
-        }
         backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
@@ -958,34 +1021,45 @@ export function WorkspaceModelsPageBody({
         {workspaceOwnedNote(provider, { workspaceName, personal })}
       </p>
     ) : onlyMe ? (
-      <p className="m-0 text-sm leading-5 text-fg-muted">
-        {`Only work you start in ${workspaceName} uses it. Nobody else here can.`}
-      </p>
-    ) : workspaceAdminConnects ? (
+      <p className="m-0 text-sm leading-5 text-fg-muted">{OWN_SUBSCRIPTION_NOTE}</p>
+    ) : // A subscription's admin chooses who uses it below.
+    workspaceAdminConnects && provider !== "supergrok" && provider !== "claude_subscription" ? (
       <p className="m-0 text-sm leading-5 text-fg-muted">
         {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
     page =
       provider === "codex" ? (
-        <CodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} fields={note} />
+        <CodexConnectPage
+          codex={codex}
+          places={codexPlaces}
+          onClose={backToList}
+          fields={note}
+          scope={onlyMe || (key?.provider === "codex" && ownKey) ? "user" : undefined}
+        />
       ) : provider === "supergrok" ? (
         <SuperGrokConnectPage
           grok={grok}
           places={grokPlaces}
           onClose={backToList}
           fields={note}
-          // A private account is connected only in its owner's Personal
-          // workspace; a shared workspace connects its own.
-          scope={onlyMe || personal ? "user" : "workspace"}
+          // Your own in a Personal workspace, as a member, or signing your
+          // own in again; a shared workspace's admin chooses.
+          scope={
+            onlyMe || personal || (key?.provider === "supergrok" && ownKey)
+              ? "user"
+              : workspaceAdminConnects
+                ? undefined
+                : "workspace"
+          }
         />
       ) : provider === "claude_subscription" ? (
         <ClaudeConnectPage
-          claude={claude}
+          claude={key?.provider === "claude" ? keyClaude : claude}
           reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
           scope={(onlyMe || personalOwnConnect) && key?.provider !== "claude" ? "user" : undefined}
           scopeName={workspaceName}
-          allowPrivate={false}
+          allowPrivate={!personal}
           onClose={account ? () => nav.openAccount(account) : backToList}
           onConnected={(id) => (id ? claudePlaces.openAccount(id) : backToList())}
           fields={note}
@@ -1093,11 +1167,11 @@ export function WorkspaceModelsPageBody({
     } else {
       page =
         key.provider === "codex" ? (
-          <CodexAccessPage codex={codex} accountId={key.id} onClose={back} />
+          <CodexAccessPage codex={keyCodex} accountId={key.id} onClose={back} />
         ) : key.provider === "supergrok" ? (
-          <SuperGrokAccessPage grok={grok} accountId={key.id} client={client} onClose={back} />
+          <SuperGrokAccessPage grok={keyGrok} accountId={key.id} client={client} onClose={back} />
         ) : key.provider === "claude" ? (
-          <ClaudeAccessPage claude={claude} accountId={key.id} onClose={back} />
+          <ClaudeAccessPage claude={keyClaude} accountId={key.id} onClose={back} />
         ) : (
           <ProviderAccessPage state={gateways[key.id as GatewayId]} onClose={back} />
         );
@@ -1105,7 +1179,13 @@ export function WorkspaceModelsPageBody({
   } else if (key?.provider === "codex" && key.organization) {
     page = <OrgCodexAccountPage codex={orgCodex} accountId={key.id} places={orgCodexPlaces} />;
   } else if (key?.provider === "codex") {
-    page = <CodexAccountPage codex={codex} accountId={key.id} places={codexPlaces} />;
+    page = (
+      <CodexAccountPage
+        codex={keyCodex}
+        accountId={key.id}
+        places={ownKey ? ownCodexPlaces : codexPlaces}
+      />
+    );
   } else if (key?.provider === "supergrok") {
     page = key.organization ? (
       <SuperGrokAccountPage
@@ -1115,17 +1195,22 @@ export function WorkspaceModelsPageBody({
         client={client}
       />
     ) : (
-      <SuperGrokAccountPage grok={grok} accountId={key.id} places={grokPlaces} client={client} />
+      <SuperGrokAccountPage
+        grok={keyGrok}
+        accountId={key.id}
+        places={ownKey ? ownGrokPlaces : grokPlaces}
+        client={client}
+      />
     );
   } else if (key?.provider === "claude") {
     page = (
       <ClaudeAccountPage
-        claude={key.organization ? orgClaude : claude}
+        claude={key.organization ? orgClaude : keyClaude}
         accountId={key.id}
-        places={key.organization ? orgClaudePlaces : claudePlaces}
+        places={key.organization ? orgClaudePlaces : ownKey ? ownClaudePlaces : claudePlaces}
         models={key.organization ? orgGateways.claude_subscription : gateways.claude_subscription}
         readOnlyCatalog={
-          !key.organization && claude.inherited
+          !key.organization && !ownKey && claude.inherited
             ? {
                 models: catalog.models.filter(
                   (model) => model.provider === "organization-claude-subscription",
@@ -1228,14 +1313,24 @@ export function WorkspaceModelsPageBody({
       listedGateways.length,
       listedOrgGateways.length,
       readyOrgKeys.length,
+      // Your own subscriptions, kept in your Personal workspace.
+      ownWorkspaceId
+        ? codexListedCount(ownCodexRows) +
+          superGrokListedCount(ownGrokRows) +
+          (claudeEnabled ? claudeListedCount(ownClaudeRows) : 0)
+        : 0,
     ];
-    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]! + listed[7]!;
     const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
       (claudeEnabled && (claude.loading || (organizationAdmin && orgClaude.loading))) ||
       (organizationAdmin && orgCodex.loading) ||
+      (Boolean(ownWorkspaceId) &&
+        (ownCodex.loading ||
+          (!ownGrok.unavailable && ownGrok.loading) ||
+          (claudeEnabled && ownClaude.loading))) ||
       (!organizationAdmin && catalog.loading) ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
     // Owners and admins add accounts for everyone; others their own (see memberConnects).
@@ -1298,6 +1393,15 @@ export function WorkspaceModelsPageBody({
                   />
                 ) : null}
                 <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {ownWorkspaceId ? (
+                  <>
+                    <CodexAccountRows codex={ownCodexRows} places={ownCodexPlaces} />
+                    {claudeEnabled ? (
+                      <ClaudeAccountRows claude={ownClaudeRows} places={ownClaudePlaces} />
+                    ) : null}
+                    <SuperGrokAccountRows grok={ownGrokRows} places={ownGrokPlaces} />
+                  </>
+                ) : null}
                 {payAsYouGoListed > 0 ? (
                   <AccountGroupHeading>Pay as you go</AccountGroupHeading>
                 ) : null}
@@ -1562,6 +1666,10 @@ export function payerPhrase(
       return `paid by ${payerSummaryForModel(t, model).toLocaleLowerCase()}`;
   }
 }
+
+/** Where a person's own subscription pays, connected from a shared workspace. */
+const OWN_SUBSCRIPTION_NOTE =
+  "It will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself. Nobody else can use it.";
 
 /** What an account owned by this workspace is, on its connect step, for owners and admins. */
 function workspaceOwnedNote(
@@ -1835,7 +1943,6 @@ export function ConnectPickerPage({
   gateways,
   workspaceKeys = NO_WORKSPACE_KEYS,
   personal = false,
-  empty,
   backLabel = "Models",
   onClose,
   onPick,
@@ -1860,8 +1967,6 @@ export function ConnectPickerPage({
   workspaceKeys?: readonly GatewayId[];
   /** In a Personal workspace, organization keys serve shared workspaces only. */
   personal?: boolean;
-  /** Shown instead of the default when there is nothing to connect here. */
-  empty?: ReactNode;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
@@ -1931,13 +2036,11 @@ export function ConnectPickerPage({
       />
       <div className="mt-6 min-w-0">
         {choices.length === 0 ? (
-          (empty ?? (
-            <EmptyState
-              variant="inline"
-              title="Nothing to connect."
-              description="Only people who can manage connections can add an account."
-            />
-          ))
+          <EmptyState
+            variant="inline"
+            title="Nothing to connect."
+            description="Only people who can manage connections can add an account."
+          />
         ) : (
           <ProviderConnectList
             choices={choices}

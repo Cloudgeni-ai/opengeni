@@ -78,8 +78,9 @@ function requireEnabled(deps: ApiRouteDeps): void {
 }
 
 /**
- * The scope check: a private (`user`) account is managed only from its
- * owner's Personal workspace.
+ * The scope check for a device sign-in. A private (`user`) account lives in
+ * its owner's Personal workspace and is connected from wherever the person is
+ * in the organization; the answer names the workspace that keeps it.
  */
 const requireScopeMutation = (
   c: Context,
@@ -87,7 +88,14 @@ const requireScopeMutation = (
   workspaceId: string,
   scope: "workspace" | "user" | "organization",
 ) =>
-  requireSubscriptionScopeMutation(c, deps, workspaceId, scope, "SuperGrok", "personal_workspace");
+  requireSubscriptionScopeMutation(
+    c,
+    deps,
+    workspaceId,
+    scope,
+    "SuperGrok",
+    "own_personal_workspace",
+  );
 
 function xaiHttpError(error: unknown, fallback: string): HTTPException {
   // A connect poll can lose its database connection after provider login or
@@ -289,8 +297,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid SuperGrok scope",
       },
     );
-    // On the core a private account is connected only from the person's own
-    // Personal workspace: refused here, before the xAI sign-in, elsewhere.
+    // On the core a private account lives in the person's own Personal
+    // workspace: refused here, before the xAI sign-in, when they have none.
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const authority = await requireScopeMutation(c, deps, workspaceId, parsed.scope);
     const authorization = await requireAccessGrantAuthorization(
@@ -419,7 +427,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       const liveAuthority = await requireScopeMutation(c, deps, workspaceId, state.scope);
       if (
         liveAuthority.accountId !== authority.accountId ||
-        liveAuthority.subjectId !== authority.subjectId
+        liveAuthority.subjectId !== authority.subjectId ||
+        liveAuthority.workspaceId !== authority.workspaceId
       )
         throw new HTTPException(403, { message: "SuperGrok connection identity changed" });
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
@@ -430,7 +439,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const id = await coreSuperGrokConnected(c, deps, {
         accountId: authority.accountId,
-        workspaceId,
+        // This workspace, or the owner's Personal workspace for a private account.
+        workspaceId: authority.workspaceId,
         subjectId: authority.subjectId,
         personal: state.scope === "user",
         encryptionKey,
@@ -439,7 +449,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       const { activeCredentialId } = await getSubscriptionCoreXaiWorkspaceProjection(deps.db, {
         accountId: authority.accountId,
-        workspaceId,
+        workspaceId: authority.workspaceId,
         viewerSubjectId: authority.subjectId,
       });
       return c.json({

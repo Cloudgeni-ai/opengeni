@@ -82,23 +82,26 @@ export async function claudeCoreAccount(
 }
 
 /**
- * A private (`user`) Claude account is connected on the core only in the
- * person's own Personal workspace (strictest reading of the personal rule);
- * elsewhere, including any shared workspace, it is refused before a sign-in
- * starts. The connect writer checks the same rule with the exact owner
- * membership and authority generation in its transaction.
+ * A private (`user`) Claude account lives on the core in the person's own
+ * Personal workspace. They connect it from wherever they are in the
+ * organization; it is refused before a sign-in starts only when the caller is
+ * not a person with a Personal workspace there. Answers that workspace. The
+ * route's scope check (`own_personal_workspace`) adds the live membership,
+ * and the connect writer checks the exact owner membership and authority
+ * generation in its transaction.
  */
 export async function requireClaudeCorePersonalWorkspace(
   deps: ApiRouteDeps,
-  scope: { accountId: string; workspaceId: string | null; subjectId: string },
-): Promise<void> {
+  scope: { accountId: string; subjectId: string },
+): Promise<string> {
   const own = scope.subjectId.startsWith("user:")
     ? await namedSubjectPersonalWorkspaceId(deps.db, scope)
     : null;
-  if (own === null || own !== scope.workspaceId)
+  if (own === null)
     throw new HTTPException(403, {
-      message: "Connect a private Claude account from your own Personal workspace.",
+      message: "Private Claude accounts need your own Personal workspace in this organization.",
     });
+  return own;
 }
 
 /** What a person who cannot reconnect this way is told to do instead. */

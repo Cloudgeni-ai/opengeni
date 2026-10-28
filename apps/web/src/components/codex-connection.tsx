@@ -722,10 +722,13 @@ export function useCodexSubscriptions({
   client,
   workspaceId,
   canManage,
+  enabled = true,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   canManage: boolean;
+  /** False reads nothing. */
+  enabled?: boolean;
 }) {
   // The account list is the same shared entry the session account switcher
   // reads: a revisit renders the retained rows at once and re-reads quietly.
@@ -733,7 +736,7 @@ export function useCodexSubscriptions({
     client,
     codexAccountsQueryKey(workspaceId),
     () => client.listCodexAccounts(workspaceId),
-    { staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+    { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
   const data = accountsQuery.error ? null : accountsQuery.data;
   const loading = accountsQuery.loading;
@@ -776,7 +779,10 @@ export function useCodexSubscriptions({
         );
       return result;
     },
-    { enabled: Boolean(data?.accounts.length), staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+    {
+      enabled: enabled && Boolean(data?.accounts.length),
+      staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
+    },
   );
   const overviewMap = overviewQuery.data?.accounts ?? {};
   const refreshingUsage = overviewQuery.loading;
@@ -858,13 +864,22 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
-  /** Start a device-code sign-in. */
+  /**
+   * Start a device-code sign-in. `scope: "user"` connects the person's own
+   * account from here; it is kept in their Personal workspace.
+   */
   const connect = useCallback(
-    async (options?: { onConnected?: (accountId: string | null) => void }) => {
+    async (options?: {
+      onConnected?: (accountId: string | null) => void;
+      scope?: "user" | undefined;
+    }) => {
       const recordOutcome = trackModelConnection("codex", workspaceId);
+      const own = options?.scope === "user";
       setBusy(true);
       try {
-        const start = await client.codexConnectStart(workspaceId);
+        const start = own
+          ? await client.codexConnectStart(workspaceId, { scope: "user" })
+          : await client.codexConnectStart(workspaceId);
         setPending({
           userCode: start.userCode,
           verificationUri: start.verificationUri,
@@ -888,6 +903,8 @@ export function useCodexSubscriptions({
               // Codex list for this workspace, session choices included, re-reads
               // now (mounted) or on its next mount, whether or not this page is.
               await refreshAccounts();
+              // Your own account lists in your Personal workspace too.
+              if (own) await invalidateSharedQueries(client, ["codex-accounts"]);
               if (!cancelled.current) {
                 setPending(null);
                 toast.success(

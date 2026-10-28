@@ -70,6 +70,8 @@ export async function coreCodexConnected(
     accountId: string;
     workspaceId: string | null;
     subjectId: string;
+    /** The person's own subscription: only a personal connection, else refused. */
+    personal?: boolean;
     credential: SubscriptionCoreCodexCredentialInput;
   },
 ) {
@@ -77,6 +79,7 @@ export async function coreCodexConnected(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    ...(input.personal ? { personal: true } : {}),
     ...input.credential,
   });
   if (result.kind === "refused") {
