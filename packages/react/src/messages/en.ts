@@ -1201,6 +1201,7 @@ export const englishMessages = {
   "composerMessages.uploading": "Uploading",
   "composerMessages.useOtherDraft": "Use other draft",
   "composerMessages.workspacePaused": "Workspace paused",
+  "composerTranscriptionControl.discardDictation": "Discard dictation",
   "composerTranscriptionControl.discardSavedRecording": "Discard saved recording",
   "composerTranscriptionControl.dismissErrormessage": "Dismiss: {errorMessage}",
   "composerTranscriptionControl.insertSavedTranscript": "Insert saved transcript",
@@ -1209,8 +1210,8 @@ export const englishMessages = {
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
   "composerTranscriptionControl.recordingIsTooLargeTry":
     "Recording is too large. Try a shorter message.",
-  "composerTranscriptionControl.recordingPressEscapeToStop":
-    "Recording. Press Escape to stop without transcribing.",
+  "composerTranscriptionControl.recordingPressEscapeToDiscard":
+    "Recording. Press Escape to discard.",
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
@@ -1222,7 +1223,6 @@ export const englishMessages = {
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
     "Stops and transcribes in {seconds}s",
-  "composerTranscriptionControl.stopWithoutTranscribing": "Stop without transcribing",
   "composerTranscriptionControl.theRecordingCouldNotBe":
     "The recording could not be read. Try again.",
   "composerTranscriptionControl.transcribeSavedRecording": "Transcribe saved recording",
@@ -1567,8 +1567,9 @@ export const englishMessages = {
   "desktopDictation.settings.anyLanguage": "Any language",
   "desktopDictation.settings.cancelRecording": "Cancel",
   "desktopDictation.settings.cancelShortcutDescription":
-    "Throws away the dictation you're speaking. Esc does this too.",
+    "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
+  "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
   "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
   "desktopDictation.settings.chordToggle":
     "Press the keys together and let go to start. Press them again to finish.",

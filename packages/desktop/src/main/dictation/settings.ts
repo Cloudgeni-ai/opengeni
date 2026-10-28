@@ -263,6 +263,7 @@ function parseHistoryEntry(value: unknown): DesktopDictationHistoryEntry | null 
       typeof audio.durationMilliseconds === "number"
         ? { mimeType: audio.mimeType, durationMilliseconds: audio.durationMilliseconds }
         : null,
+    ...(entry.cancelled === true ? { cancelled: true } : {}),
   };
 }
 
@@ -318,7 +319,10 @@ export class DictationSettingsStore {
       .slice(0, DICTATION_HISTORY_MAX);
   }
 
-  /** Newest first; its speech is kept with it when given. */
+  /**
+   * Newest first; its speech is kept with it when given. A cancelled
+   * dictation is kept only for its speech: without it, it is not kept.
+   */
   remember(entry: DesktopDictationHistoryEntry, audio: DesktopDictationAudio | null = null): void {
     let kept: DesktopDictationHistoryEntry = { ...entry, audio: null };
     if (audio && ENTRY_ID.test(entry.id)) {
@@ -335,6 +339,7 @@ export class DictationSettingsStore {
         // The text is kept without its speech.
       }
     }
+    if (kept.cancelled && !kept.audio) return;
     const history = [kept, ...this.history().filter((item) => item.id !== entry.id)].slice(
       0,
       DICTATION_HISTORY_MAX,
@@ -343,13 +348,18 @@ export class DictationSettingsStore {
     this.pruneAudio(history);
   }
 
-  /** A kept dictation's text, after it was transcribed again. */
+  /** A kept dictation's text, after it was transcribed again; a cancelled one is no longer. */
   replaceText(id: string, text: string): void {
     const history = this.history();
     if (!history.some((entry) => entry.id === id)) return;
     this.save({
       ...this.file(),
-      history: history.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
+      history: history.map((entry) => {
+        if (entry.id !== id) return entry;
+        const next: DesktopDictationHistoryEntry = { ...entry, text };
+        delete next.cancelled;
+        return next;
+      }),
     });
   }
 
