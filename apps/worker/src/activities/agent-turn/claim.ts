@@ -460,7 +460,15 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       db,
       input.workspaceId,
       input.sessionId,
+      {
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: input.attemptId,
+      },
     );
+    if (converted === "fenced") {
+      throw new TurnAttemptFencedError("turn attempt was fenced while switching compaction mode");
+    }
     if (converted) storedCompactionMode = converted.codexCompactionMode;
     session = {
       ...session,

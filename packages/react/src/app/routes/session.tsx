@@ -3301,13 +3301,17 @@ function SessionChatPane(props: {
     setUsageContinuation({ pending: true, error: null });
     let error: string | null = null;
     try {
-      if (props.session.status === "failed") {
+      if (
+        props.session.status === "failed" &&
+        props.failure?.failureEventId &&
+        retryHasRetainedTurn
+      ) {
         // Retry runs the failed turn again on the chosen model.
-        if (props.failure?.failureEventId && retryHasRetainedTurn)
-          await retryFailedSession(props.failure.failureEventId, policy);
+        await retryFailedSession(props.failure.failureEventId, policy);
       } else {
         // A turn waiting for Codex is replaced by this message (a Steer);
-        // after a usage-limit failure it is the next message.
+        // after a usage-limit failure, or a failed turn that cannot be
+        // retried, it is the next message.
         const chat = readChatSendContext();
         if (chat.blocked) error = chat.blocked;
         else {

@@ -3466,7 +3466,7 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  test("switching a Codex remote_v2 chat to another model rebuilds its context from the stored transcript", async () => {
+  async function codexCompactedSession() {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -3533,6 +3533,11 @@ describe("standalone context compaction execution", () => {
       }),
     ).toMatchObject({ applied: true });
 
+    return { grant, workspaceId, session, scope };
+  }
+
+  test("switching a Codex remote_v2 chat to another model rebuilds its context from the stored transcript", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
     const summarized: string[] = [];
     const summarize: CompactionSummarizer = async (_settings, input) => {
       summarized.push(JSON.stringify(input));
@@ -3575,6 +3580,29 @@ describe("standalone context compaction execution", () => {
       "session.context.compaction.started",
       "session.context.compacted",
     ]);
+  });
+
+  test("a model switch whose rebuild does not apply fails instead of keeping the Codex checkpoint", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    // The rebuilt context would not fit the new model, so nothing is installed.
+    const tooLarge: CompactionSummarizer = async () => "summary ".repeat(200_000);
+    await expect(
+      maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        scope,
+        null,
+        tooLarge,
+        { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+      ),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    // The chat keeps Codex mode and its checkpoint, so the next turn on another
+    // model asks for the rebuild again.
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
+    );
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(active.some((row) => row.item.type === "compaction")).toBe(true);
   });
 
   test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {

@@ -108,6 +108,8 @@ export type RemoteCompactionV2Requester = ((
 type CompactionInputRecoveryPayload = {
   compactionInputHistoryRowsOmitted?: number;
   compactionInputInlinePayloadRowsElided?: number;
+  /** A model switch: oldest transcript items too large for one summary request. */
+  modelSwitchEarlierItemsOmitted?: number;
 };
 
 /** Known secret values masked in what a compaction sends to the provider. */
@@ -211,12 +213,21 @@ export async function maybeCompactContext(
         (row) => !isRemoteCompactionItem(row.item) && !isCompactionSummary(row.item),
       )
     : activeHistory.items;
-  const recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
+  let recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
     ? {
         compactionInputHistoryRowsOmitted: activeHistory.recovery.omittedRows,
         compactionInputInlinePayloadRowsElided: activeHistory.recovery.elidedRows,
       }
     : {};
+  if (portableModelSwitch && active.length === 0) {
+    // Nothing readable to rebuild from: fail the turn rather than hand the
+    // Codex checkpoint to another model. The chat stays remote_v2 and the
+    // next turn on another model asks again.
+    throw new EmptyCompactionSummaryError({
+      stage: "portable_model_switch",
+      reason: "no_history",
+    });
+  }
   if (active.length === 0) {
     let requestConsumed = false;
     if (options.clearRequestedCompaction) {
@@ -266,6 +277,7 @@ export async function maybeCompactContext(
     );
     canonicalItems.splice(0, start);
     canonicalTurnIds.splice(0, start);
+    if (start > 0) recoveryPayload = { ...recoveryPayload, modelSwitchEarlierItemsOmitted: start };
   }
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
     const materialized = options.materializeHistory
@@ -290,6 +302,11 @@ export async function maybeCompactContext(
     ...(options.force || portableModelSwitch ? { force: true } : {}),
   });
   if (!decision.shouldCompact) {
+    if (portableModelSwitch)
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_model_switch",
+        reason: decision.reason,
+      });
     return {
       compacted: false,
       reason: decision.reason,
@@ -352,6 +369,15 @@ export async function maybeCompactContext(
     { ...options, inputRecoveryPayload: recoveryPayload, portableModelSwitch },
     projectForWire,
   );
+  if (portableModelSwitch && !outcome.compacted) {
+    // The skip already settled the "Compacting…" landmark; show it, then fail
+    // the turn so another model never runs on Codex's checkpoint.
+    await options.publishLiveEvents?.(outcome.events);
+    throw new EmptyCompactionSummaryError({
+      stage: "portable_model_switch",
+      reason: outcome.reason,
+    });
+  }
   return prependCompactionEvents(started.events, outcome);
 }
 

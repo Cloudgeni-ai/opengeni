@@ -174,6 +174,12 @@ export type TurnInputOptions = {
   mountedFileResources?: readonly ResourceRef[];
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
+  /**
+   * A turn not served by Codex never sends Codex's opaque remote compaction
+   * checkpoint. A model switch rebuilds it before the turn; this is the
+   * backstop when that rebuild has not replaced it.
+   */
+  omitRemoteCompactionItems?: boolean;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -882,7 +888,10 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
+  preparationOptions: Pick<
+    TurnInputOptions,
+    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems"
+  > = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [activeHistory, envelope] = await Promise.all([
@@ -893,7 +902,9 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
-  const stored = activeHistory.items;
+  const stored = preparationOptions.omitRemoteCompactionItems
+    ? activeHistory.items.filter((row) => row.item.type !== "compaction")
+    : activeHistory.items;
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",

@@ -43684,20 +43684,35 @@ export async function requestSessionCompaction(
  * rebuilds a portable summary from the stored transcript and switches the
  * session in the same transaction that installs it, so a failed rebuild is
  * simply requested again by the next such turn. A portable session is left
- * untouched (null).
+ * untouched (null). With `attempt`, the write happens only while that exact
+ * turn attempt still owns the session ("fenced" otherwise), so a stale or
+ * superseded claim never converts the chat.
  */
 export async function convertSessionToPortableCompactionForModelSwitch(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ codexCompactionMode: "remote_v2" | "portable"; compactRequested: boolean } | null> {
+  attempt?: { turnId: string; executionGeneration: number; attemptId: string },
+): Promise<
+  { codexCompactionMode: "remote_v2" | "portable"; compactRequested: boolean } | null | "fenced"
+> {
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    if (attempt) {
+      const fence = await lockTurnAttemptWriteFenceTx(scopedDb as unknown as Database, {
+        workspaceId,
+        sessionId,
+        ...attempt,
+      });
+      if (!fence.allowed) return "fenced";
+    }
     const checkpoint = sql`exists (
       select 1 from session_history_items history
       where history.workspace_id = ${workspaceId}
         and history.session_id = ${sessionId}
         and history.active = true
         and history.item ->> 'type' = 'compaction'
+        and jsonb_typeof(history.item -> 'encrypted_content') = 'string'
+        and history.item ->> 'encrypted_content' <> ''
     )`;
     const [converted] = await scopedDb
       .update(schema.sessions)

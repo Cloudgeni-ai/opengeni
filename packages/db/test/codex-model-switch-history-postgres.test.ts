@@ -180,12 +180,30 @@ describe("switching a Codex remote_v2 chat to another model", () => {
     expect(afterRemote.items.map((row) => row.item.type)).toEqual(["message", "compaction"]);
 
     // The checkpoint is Codex-only, so the chat stays remote_v2 and requests
-    // the rebuild that will switch it.
+    // the rebuild that will switch it. A superseded attempt cannot convert it.
+    const attempt = {
+      turnId: turn.id,
+      executionGeneration: turn.executionGeneration,
+      attemptId,
+    };
     expect(
       await convertSessionToPortableCompactionForModelSwitch(
         client.db,
         fixture.workspaceId,
         fixture.sessionId,
+        { ...attempt, attemptId: crypto.randomUUID() },
+      ),
+    ).toBe("fenced");
+    expect(await sessionRow(fixture)).toEqual({
+      codexCompactionMode: "remote_v2",
+      compactRequested: false,
+    });
+    expect(
+      await convertSessionToPortableCompactionForModelSwitch(
+        client.db,
+        fixture.workspaceId,
+        fixture.sessionId,
+        attempt,
       ),
     ).toEqual({ codexCompactionMode: "remote_v2", compactRequested: true });
 
@@ -259,5 +277,81 @@ describe("switching a Codex remote_v2 chat to another model", () => {
       JSON.stringify("[context cleared]"),
       JSON.stringify("after the clear"),
     ]);
+  });
+
+  test("a Codex compaction after a clear keeps the conversation it summarized", async () => {
+    const fixture = await remoteSession();
+    await withWorkspaceRls(client.db, fixture.workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          turnId: null,
+          position: 0,
+          item: { type: "message", role: "user", content: "before the clear" },
+          active: false,
+        },
+        {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          turnId: null,
+          position: 1,
+          item: clearedContextMarkerItem(),
+          active: true,
+        },
+      ]);
+    });
+    const { turn, attemptId } = await claimTurn(fixture, "question after the clear");
+    const fence = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: attemptId,
+    };
+    const claimed = await readActiveSessionHistory(
+      client.db,
+      fixture.workspaceId,
+      fixture.sessionId,
+    );
+    const next = Math.max(...claimed.items.map((row) => row.position)) + 1;
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...fence,
+        modelToolOutputTruncationTokens: 100,
+        items: [
+          { position: next, item: { type: "message", role: "assistant", content: "answer" } },
+        ],
+      }),
+    ).toBe(true);
+    // remote_v2 retains user messages, so the compaction copies the clear
+    // marker after the rows it summarized. That copy is not a new clear.
+    expect(
+      await applyContextCompaction(client.db, {
+        ...fence,
+        replacementItems: [
+          clearedContextMarkerItem(),
+          { type: "message", role: "user", content: "question after the clear" },
+        ],
+        summaryItem: { type: "compaction", encrypted_content: "opaque-codex-checkpoint" },
+        eventPayload: { trigger: "auto", implementation: "responses_compaction_v2" },
+      }),
+    ).toMatchObject({ applied: true });
+    const transcript = await readActiveSessionHistory(
+      client.db,
+      fixture.workspaceId,
+      fixture.sessionId,
+      { rows: "stored_transcript" },
+    );
+    const texts = transcript.items.map((row) => textOf(row.item));
+    expect(texts).toHaveLength(3);
+    expect(texts[0]).toBe(JSON.stringify("[context cleared]"));
+    expect(texts[1]).toContain("question after the clear");
+    expect(texts[2]).toBe(JSON.stringify("answer"));
+    expect(texts.join("\n")).not.toContain("opaque-codex-checkpoint");
+    expect(texts.join("\n")).not.toContain("before the clear");
   });
 });

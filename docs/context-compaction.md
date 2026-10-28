@@ -17,6 +17,8 @@ are out of scope.
 Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
 later setting changes never move an already-frozen session. It has no UI: any
 session may switch models, so there is no portability choice to make up front.
+A workspace that set `"portable"` earlier keeps it until the API sets
+`"remote_v2"` again.
 
 ### Switching a remote_v2 session to another model
 
@@ -24,22 +26,30 @@ Admission accepts any model on any session. When a turn on a non-Codex model
 claims a `remote_v2` session, the worker
 (`convertSessionToPortableCompactionForModelSwitch`) switches it to `portable`
 at once if no Codex checkpoint is active; otherwise it requests a forced
-compaction and runs that turn as portable. The pre-turn compaction sees the
+compaction and runs that turn as portable. That write is fenced to the exact
+claiming turn attempt. The pre-turn compaction sees the
 opaque checkpoint in active history and rebuilds from the stored transcript
 instead (`readActiveSessionHistory(..., { rows: "stored_transcript" })`): every
 row since the latest context clear, including rows a compaction superseded,
 minus the rows any compaction inserted (identified by the
 `session.context.compacted` receipt's checkpoint position, its
-`replacementFromPosition`, and their shared insert transaction). Compaction
+`replacementFromPosition`, and their shared insert transaction). A clear
+marker that a compaction retained is one of those inserted rows, never a new
+clear. Both bounds are resolved once per read, so the row filter compares
+constants. Compaction
 never deletes rows, so only Codex's opaque checkpoint and encrypted reasoning
 are unreadable; the portable path drops those as usual. The newest complete
 work units that fit the new model's checkpoint request are summarized
-(`portableSwitchTranscriptStart`); older ones are left out. The replacement is
+(`portableSwitchTranscriptStart`); older ones are left out, and the receipt
+records how many (`modelSwitchEarlierItemsOmitted`). The replacement is
 installed with `implementation: "portable_model_switch"` (the timeline says
 "Earlier messages summarized for the new model") and switches
 `codex_compaction_mode` to `portable` in the same transaction, so a failed
 rebuild is requested again by the next non-Codex turn. A session never returns
-to `remote_v2`.
+to `remote_v2`. A rebuild that installs nothing fails the turn
+(`EmptyCompactionSummaryError`, stage `portable_model_switch`) instead of
+running the new model on Codex's checkpoint, and every non-Codex turn omits
+`{ type: "compaction" }` items from its model input as a backstop.
 
 The portable path follows Codex CLI 0.146.0 local compaction (upstream tag
 `rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`) and is used
