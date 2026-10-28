@@ -1,4 +1,4 @@
-//! Run-as against the real kernel: exec, git, PTY, file operations and
+//! Run-as against the real kernel: exec, PTY, file operations and
 //! transactional writes executed as another local user.
 //!
 //! These tests need Linux and an agent-like root process. Elsewhere, or when
@@ -337,32 +337,6 @@ fn transactional_writes_stage_and_publish_as_the_user() {
     assert_eq!(std::fs::read_dir(&private).unwrap().count(), 0);
 }
 
-#[tokio::test]
-async fn git_runs_as_the_user() {
-    let Some(user) = identity() else { return };
-    if std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("skipped: git is not installed");
-        return;
-    }
-    let dir = shared_dir();
-    let platform = NativePlatform::with_root(dir.path());
-    let reply = platform
-        .git(&v1::GitRequest {
-            op: v1::GitOp::Raw as i32,
-            args: vec!["init".into(), "-q".into(), "repo".into()],
-            run_as: USER.into(),
-            ..Default::default()
-        })
-        .await
-        .expect("git init");
-    assert_eq!(reply.exit_code, 0, "{:?}", reply.stderr);
-    assert_eq!(owner(&dir.path().join("repo/.git")), (user.uid, user.gid));
-}
-
 #[test]
 fn pty_children_run_as_the_user_and_own_their_terminal() {
     use std::io::Read as _;
@@ -508,7 +482,7 @@ async fn a_run_as_terminal_opened_through_the_platform_starts_in_the_users_home(
 }
 
 #[tokio::test]
-async fn exec_and_git_enter_their_working_directory_as_the_user() {
+async fn exec_enters_its_working_directory_as_the_user() {
     let Some(_) = identity() else { return };
     let dir = shared_dir();
     let platform = NativePlatform::with_root(dir.path());
@@ -533,15 +507,6 @@ async fn exec_and_git_enter_their_working_directory_as_the_user() {
         Err(error) => assert_eq!(error.code(), v1::ErrorCode::Os, "{error}"),
         Ok(reply) => panic!("exec as the user entered the directory: {reply:?}"),
     }
-    let denied = platform
-        .git(&v1::GitRequest {
-            op: v1::GitOp::Raw as i32,
-            args: vec!["status".into()],
-            cwd: cwd.clone(),
-            run_as: USER.into(),
-        })
-        .await;
-    assert!(denied.is_err(), "git as the user entered the directory");
 
     // The agent itself still can.
     let reply = platform

@@ -1,10 +1,6 @@
 /**
  * Connect and disconnect on the shared subscription core, for any provider.
  *
- * API handlers reach this module only for the provider's `core` cutover
- * disposition, and every write also rechecks the enabled cutover in the
- * database.
- *
  * Authority (SUB-OWN-01/04, design 3.1):
  * - On the organization route an organization administrator creates an
  *   organization-scoped, organization-managed connection. On a shared
@@ -87,7 +83,7 @@ export type SubscriptionCoreConnectRefusal =
   | "identity_unverified"
   /** Personal connections are turned off for this person here. */
   | "personal_connections_disabled"
-  /** The provider's cutover is not enabled (or the caller is not exact). */
+  /** The caller is not exact. */
   | "unavailable"
   /** A fenced reconnect's connection is gone, changed, or not the one this sign-in reaches. */
   | "changed";
@@ -309,12 +305,6 @@ async function connectShared(
 ): Promise<SubscriptionCoreConnectResult> {
   const providerId = subscriptionCoreProviderId(provider);
   const connectionKind = subscriptionCoreConnectionKind(provider);
-  const [cutover] = await rawRows<{ enabled: boolean }>(
-    tx,
-    sql`select enabled from subscription_provider_cutovers
-      where account_id = ${input.accountId}::uuid and provider = ${providerId}`,
-  );
-  if (cutover?.enabled !== true) return { kind: "refused", reason: "unavailable" };
   if (
     !input.providerAccountId ||
     !input.providerSubjectId ||

@@ -16,6 +16,8 @@ export type ComposerLaunchSearch = {
   channelId?: string | undefined;
   /** One installed session-selected Skill to freeze onto the new session. */
   skillCapabilityId?: string | undefined;
+  /** Start the new chat from this bot template: its setup instructions fill the composer. */
+  botTemplateId?: string | undefined;
   /**
    * `?modelSource=default`: the model/effort/latency carry the resolved default
    * (a credit purchase return), not the person's choice.
@@ -48,6 +50,14 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
     ) {
       out.channelId = search.channelId;
     }
+  }
+  if (
+    typeof search.botTemplateId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      search.botTemplateId,
+    )
+  ) {
+    out.botTemplateId = search.botTemplateId;
   }
   if (search.modelSource === "default") out.followDefault = true;
   if (typeof search.skillCapabilityId === "string") {

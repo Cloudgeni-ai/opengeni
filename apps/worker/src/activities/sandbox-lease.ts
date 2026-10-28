@@ -3329,19 +3329,16 @@ export async function probeRetainedProcessAtProvider(
         throw new Error("Provider command output requires durable capture before settlement");
       return;
     }
-    const page = session.getProviderCommandOutput?.(value);
-    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
-      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+    if (session.getProviderCommandOutput?.(value)) {
+      if (
+        typeof value !== "string" ||
+        !session.captureCommandOutput ||
+        !(await session.captureCommandOutput(value))
+      )
         throw new Error("Byte-offset output requires atomic capture before settlement");
       return;
     }
-    if (page) {
-      for (const chunk of page.chunks)
-        if (chunk.text)
-          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
-    } else {
-      await captureRetainedProbeOutput(process.id, value, captureOutput);
-    }
+    await captureRetainedProbeOutput(process.id, value, captureOutput);
     if (typeof value === "string") await session.acknowledgeCommandOutput?.(value);
   };
 
@@ -4466,6 +4463,10 @@ async function terminateDrainableBox(
         // (terminateProviderBox), so it may capture around a request whose
         // owner crashed. It terminates the box right after either way.
         pointInTimeCapture: providerDrainCaptureIsPointInTime(backend, lease.resumeState),
+        // A compute sandbox whose group ended is deleted without a capture
+        // (below), so a request a dead API process or worker left open on it
+        // no longer keeps it running; the claim decides this under its lock.
+        groupEndDiscard: backend === "compute",
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         // An unknown-outcome setup request of a closed attempt never settles
         // on a live box; after the idle grace it no longer pins the drain.
@@ -4508,6 +4509,9 @@ async function terminateDrainableBox(
   // claim fences every arrival), and the persist CAS below re-checks it under
   // the same lock before anything is deleted. The claim stamps its own
   // `teardown_claim` rotation, which is not a rotation of the workspace.
+  // A request whose owner died (an API process during a rollout, a crashed
+  // worker) does not hold the delete up: the claim was taken around it, and
+  // the cold commit settles it only once the box is gone.
   const dispositionLease = captureClaimLease ?? lease;
   if (
     captureDisposition === "capture_required" &&

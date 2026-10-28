@@ -56,7 +56,6 @@ async function fixture(transport: CodexFetch) {
     () => access.mockRestore(),
     () => session.mockRestore(),
   );
-  dbMock("readCodexCutoverDisposition", async () => "core");
   dbMock("resolveSubscriptionCoreCodexConnectionId", async () => CONNECTION);
   dbMock("getSubscriptionCoreCodexWorkspaceProjection", async () => ({
     accounts: [{ id: CONNECTION, source: "workspace", status: "active" }],

@@ -32,7 +32,7 @@ import {
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 import { proveHeadRefresh } from "./head-refresh";
-import type { HeadRefresh } from "./model";
+import type { Ejection, HeadRefresh } from "./model";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -268,6 +268,26 @@ export class LiveReader implements Reader {
     };
   }
 }
+function announcement(ejection: Ejection): Extract<Effect, { kind: "announce" }> {
+  const key = bindingKey(ejection.pull);
+  // A merge conflict shares #6156's per-head key, so one head gets one notice.
+  const conflict = ejection.reason === "merge-tree conflict against candidate predecessor";
+  // A Version PR is regenerated from main rather than rebased: a hand-merged
+  // Version head is no longer one generated commit and cannot be released.
+  const fix =
+    ejection.pull.headRef === "changeset-release/main"
+      ? "Main changed files this Version PR also changes after it was generated, so it cannot land as its exact reviewed delta. Run the Open Version PR workflow to regenerate it from current main; do not rebase or merge main into it. It re-queues automatically once required checks pass."
+      : "Rebase or merge main into it and push; it re-queues automatically once required checks pass.";
+  return {
+    kind: "announce",
+    number: ejection.pull.number,
+    key,
+    ...(conflict ? { commentKey: `conflict:${ejection.pull.headSha}` } : {}),
+    body: conflict
+      ? `Not queued: this PR conflicts with main, an earlier PR in this batch, or a batch ahead of it in the queue. ${fix} Exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
+      : `Merge batcher excluded exact head ${ejection.pull.headSha}: ${ejection.reason}. Batch: ${ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
+  };
+}
 export interface StepResult {
   mode: Config["mode"];
   action: Action;
@@ -338,26 +358,49 @@ export class Controller {
       return result;
     }
     if (action.kind === "build") {
-      try {
-        result.manifest = await this.git.build(action.spec);
-        await this.journal.event(result.manifest, "builtAt", this.clock().toISOString());
-      } catch (error) {
-        if (!(error instanceof MergeConflict)) throw error;
-        const pull = action.spec.pulls.find((p) => p.number === error.number)!;
-        if (this.config.mode === "shadow") {
-          await this.journal.conflict(pull, observation.now);
-          return this.step();
+      // Drop every conflicting member in this step: each is ejected for its
+      // exact head with its comment staged in the same fenced transaction, and
+      // the rest are rebuilt as a canonical spec, so N conflicts cost no steps.
+      let spec = action.spec;
+      const ejections: Ejection[] = [];
+      while (spec.pulls.length) {
+        try {
+          result.manifest = await this.git.build(spec);
+          await this.journal.event(result.manifest, "builtAt", this.clock().toISOString());
+          break;
+        } catch (error) {
+          if (!(error instanceof MergeConflict)) throw error;
+          const pull = spec.pulls.find((p) => p.number === error.number)!;
+          if (this.config.mode === "shadow") {
+            await this.journal.conflict(pull, observation.now);
+            return this.step();
+          }
+          ejections.push({
+            pull,
+            batchId: digest(spec),
+            reason: "merge-tree conflict against candidate predecessor",
+            announced: false,
+          });
+          const pulls = spec.pulls.filter((p) => p.number !== pull.number);
+          if (!pulls.length) break;
+          spec = {
+            ...spec,
+            pulls,
+            createdAt: new Date(
+              Math.max(...pulls.map((p) => Date.parse(p.binding.at))),
+            ).toISOString(),
+          };
         }
-        ledger.ejected.push({
-          pull,
-          batchId: digest(action.spec),
-          reason: "merge-tree conflict against candidate predecessor",
-          announced: false,
-        });
-        result.reason = error.message;
       }
+      for (const ejection of ejections) {
+        ledger.ejected.push(ejection);
+        ledger =
+          this.executor?.prepareLedger?.(ledger, announcement(ejection), observation.now) ?? ledger;
+      }
+      if (ejections.length)
+        result.reason = `Merge conflict in ${ejections.map((e) => `PR #${e.pull.number}`).join(", ")}`;
       if (result.manifest) {
-        if (!action.publish) {
+        if (!action.publish && !ejections.length) {
           if (!checkpoint) {
             await this.stage(observation, result);
             return result;
@@ -365,8 +408,8 @@ export class Controller {
           // A locally built successor must not strand missing-history recovery
           // solely in the disposable journal. Persist monitoring under the same
           // fence, without publishing the speculative candidate.
-        } else {
-          bindings = action.spec.pulls;
+        } else if (action.publish) {
+          bindings = spec.pulls;
           effect = {
             kind: "publish",
             branch: `${this.config.branchPrefix}${result.manifest.batchId}`,
@@ -435,18 +478,7 @@ export class Controller {
       ledger.ejected = ledger.ejected.map((e) =>
         bindingKey(e.pull) === key ? { ...e, announced: true } : e,
       );
-      effect = {
-        kind: "announce",
-        number: action.ejection.pull.number,
-        key,
-        ...(action.ejection.reason === "merge-tree conflict against candidate predecessor"
-          ? { commentKey: `conflict:${action.ejection.pull.headSha}` }
-          : {}),
-        body:
-          action.ejection.reason === "merge-tree conflict against candidate predecessor"
-            ? `Not queued: this PR conflicts with main or an earlier PR in this batch. Rebase or merge main into it and push; it re-queues automatically once required checks pass. Exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
-            : `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
-      };
+      effect = announcement(action.ejection);
     }
     if (this.config.mode === "active") {
       if (

@@ -9,17 +9,44 @@ import {
   hasDesktopCapability,
   type DesktopBridge,
   type DesktopCapability,
+  type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
 
 export const desktopBridge: DesktopBridge | null =
   typeof window === "undefined" ? null : getDesktopBridge();
 
 /**
+ * The platform of the Opengeni desktop app from its user agent, which
+ * Electron writes as `… Opengeni/<version> Chrome/… Electron/<version> …`;
+ * null anywhere else, including other Electron apps.
+ */
+export function desktopPlatformFromUserAgent(userAgent: string): DesktopPlatform | null {
+  if (!/\bOpengeni\/\d[^\s]*\s.*\bElectron\/\d/u.test(userAgent)) return null;
+  if (/\bMacintosh\b|\bMac OS X\b/u.test(userAgent)) return "macos";
+  if (/\bWindows\b/u.test(userAgent)) return "windows";
+  return "linux";
+}
+
+/**
+ * The desktop app's platform. The bridge says so; without it (a page the
+ * shell's preload didn't reach) the app's user agent still does, so the page
+ * keeps room for the native window controls drawn over it. Capabilities come
+ * only from the bridge. A window the page opened (sign-in and connect flows)
+ * has the system title bar and no bridge, so it keeps the web layout; so does
+ * a page in a frame.
+ */
+export const desktopPlatform: DesktopPlatform | null =
+  desktopBridge?.platform ??
+  (typeof window === "undefined" || window.opener || window.top !== window
+    ? null
+    : desktopPlatformFromUserAgent(navigator.userAgent));
+
+/**
  * In the macOS app the window's traffic lights sit in the top-left corner of
  * the page, where the rails put the brand; the Dock and menu bar already name
  * the app, so rails keep that row for the window controls.
  */
-export const windowControlsInPage = desktopBridge?.platform === "macos";
+export const windowControlsInPage = desktopPlatform === "macos";
 
 export function desktopCapability(capability: DesktopCapability): DesktopBridge | null {
   return hasDesktopCapability(desktopBridge, capability) ? desktopBridge : null;
@@ -46,8 +73,8 @@ declare global {
  * window materials), and let the shell navigate client-side.
  */
 export function installDesktopShell(navigate: (path: string) => void): void {
+  if (desktopPlatform) document.documentElement.dataset.desktop = desktopPlatform;
   if (!desktopBridge) return;
-  document.documentElement.dataset.desktop = desktopBridge.platform;
   window.__opengeniDesktopNavigate = (path: string) => {
     if (typeof path === "string" && path.startsWith("/") && !path.startsWith("//")) navigate(path);
   };

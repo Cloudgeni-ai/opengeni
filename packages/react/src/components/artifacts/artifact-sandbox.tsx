@@ -58,6 +58,15 @@ export type ArtifactSandboxProps = {
   toolBridge?: PublishedHtmlArtifactToolBridge | undefined;
   /** Who is viewing, answered to the Site's `site.viewer` over the bridge. */
   viewer?: SiteViewer | undefined;
+  /**
+   * The Site's own address (`/admin?tab=2`), answered to `site.location`.
+   * Omit it to let the frame keep the address itself (starting at `/`, kept
+   * across reloads); pass it with `onSiteLocationChange` to keep it in the
+   * host, for example in its URL.
+   */
+  siteLocation?: string | undefined;
+  /** The Site moved itself with `site.navigate`. */
+  onSiteLocationChange?: ((href: string, options: { replace: boolean }) => void) | undefined;
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
@@ -91,6 +100,18 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
   const [ownFocused, setOwnFocused] = useState(false);
+  const [ownSiteLocation, setOwnSiteLocation] = useState("/");
+  const siteLocation = props.siteLocation ?? ownSiteLocation;
+  const onSiteLocationChangeRef = useRef(props.onSiteLocationChange);
+  onSiteLocationChangeRef.current = props.onSiteLocationChange;
+  const ownsSiteLocation = props.siteLocation === undefined;
+  const onSiteLocationChange = useCallback(
+    (href: string, options: { replace: boolean }) => {
+      if (ownsSiteLocation) setOwnSiteLocation(href);
+      onSiteLocationChangeRef.current?.(href, options);
+    },
+    [ownsSiteLocation],
+  );
   const focused = props.fullScreen ?? ownFocused;
   const setFocused = (next: boolean) => {
     if (props.fullScreen === undefined) setOwnFocused(next);
@@ -260,6 +281,8 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
         {...(props.viewer ? { viewer: props.viewer } : {})}
+        location={siteLocation}
+        onLocationChange={onSiteLocationChange}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",

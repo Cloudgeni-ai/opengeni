@@ -238,6 +238,12 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        */
       liveTranscript: z.boolean().optional(),
       /**
+       * Write a summary into each meeting's notes once its transcript is
+       * ready. On when unset; `false` turns it off. An agent session writes
+       * it, like any chat, and never replaces notes someone already saved.
+       */
+      autoSummary: z.boolean().optional(),
+      /**
        * How long meetings are kept, in days after they were recorded. Unset
        * keeps them until someone deletes them. When `audioDays` passes, the
        * audio is deleted and the transcript stays (0 deletes it as soon as
@@ -267,7 +273,8 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /**
        * meeting (the default) or dictation. A dictation is private and has one
        * microphone track; it is transcribed with the workspace's voice input
-       * model, as text without speakers.
+       * model, as text without speakers. Its `transcription` can name only the
+       * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
@@ -620,6 +627,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -863,6 +875,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;

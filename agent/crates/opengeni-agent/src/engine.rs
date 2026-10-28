@@ -2,12 +2,11 @@
 //!
 //! ONE `Engine` exists per runner process and survives every connection
 //! generation (op ⊥ connection). Every [`WorkspaceLink`](crate::supervisor)
-//! and every legacy adapter drives jobs through it:
+//! drives jobs through it:
 //!
 //! * **Registry** — idempotent begin / cancel tombstones / bounded completed
 //!   retention (`opengeni-agent-engine::registry`). The per-op state stored in
-//!   the registry is [`OpHandles`]: the seq watermark, the terminal record,
-//!   and the (bounded, GC-governed) stashed legacy reply for dedup answers.
+//!   the registry is [`OpHandles`]: the seq watermark and the terminal record.
 //! * **Admission** — fair start-ordering + derived circuit breakers, NEVER a
 //!   throughput governor (LIMITS-DOCTRINE.md). [`Engine::admit`] returns an
 //!   RAII [`AdmissionTicket`]; a queued caller parks until promotion.
@@ -46,7 +45,7 @@ use tracing::{info, warn};
 use crate::inventory::Inventory;
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
 
-/// The admission-fairness origin for request/reply Git work, which carries no
+/// The admission-fairness origin for request/reply work, which carries no
 /// session identity and therefore shares one fairness domain.
 pub const LEGACY_ORIGIN: &str = "legacy";
 
@@ -87,11 +86,6 @@ pub struct EngineBudgets {
     pub retention_memory_bytes: u64,
     /// The global budget for actual retained spool bytes (M2).
     pub spool_budget_bytes: u64,
-    /// Circuit breaker on a legacy adapter's assembled reply buffer: far above
-    /// any publishable reply (the transport caps those at `max_payload`), it
-    /// exists so a pathological command cannot OOM the runner through the
-    /// legacy path while its output is being counted.
-    pub legacy_buffer_max_bytes: u64,
 }
 
 impl EngineBudgets {
@@ -116,14 +110,12 @@ impl EngineBudgets {
             },
             retention_memory_bytes: (capacity.mem_available_bytes / 16).max(64 * 1024 * 1024),
             spool_budget_bytes: capacity.disk_free_bytes / 4,
-            legacy_buffer_max_bytes: (capacity.mem_available_bytes / 16).max(64 * 1024 * 1024),
         }
     }
 }
 
 /// The shared per-op state stored in the registry AND handed to callers: the
-/// pump's seq watermark (answers `OpStatus.next_seq`), the terminal record,
-/// and the encoded legacy reply retained for duplicate-request answers
+/// pump's seq watermark (answers `OpStatus.next_seq`) and the terminal record
 /// (bounded by registry GC — ruling M6).
 #[derive(Debug, Clone, Default)]
 pub struct OpHandles {
@@ -133,8 +125,6 @@ pub struct OpHandles {
     pub exit: Arc<OnceLock<JobExit>>,
     /// Notification delivery only, independent of retained output custody.
     pub completion_received: Arc<std::sync::atomic::AtomicBool>,
-    /// The legacy adapter's encoded `ControlResponse`, for dedup replays.
-    pub legacy_reply: Arc<OnceLock<Vec<u8>>>,
     /// The send window granted at OpStart — the fallback for an `OpAttach`
     /// that carries `window_bytes: 0` (reuse the original grant).
     pub window_bytes: Arc<AtomicU64>,
@@ -182,7 +172,7 @@ pub enum StartOutcome<E> {
     Started(StartedJob),
     /// The spawn closure failed. The registry entry was completed as failed
     /// (typed) so late duplicates see a terminal op; the caller crafts the
-    /// reply and may stash it in [`OpHandles::legacy_reply`].
+    /// reply.
     SpawnFailed {
         /// The spawn error.
         error: E,
@@ -1306,7 +1296,6 @@ mod tests {
         // A starved reading floors at the absolute defaults, never below.
         assert_eq!(small.retention_per_op.memory_max_bytes, 16 * 1024 * 1024);
         assert_eq!(small.retention_per_op.spool_max_bytes, 256 * 1024 * 1024);
-        assert_eq!(small.legacy_buffer_max_bytes, 64 * 1024 * 1024);
         assert_eq!(small.retention_memory_bytes, 64 * 1024 * 1024);
 
         let big = EngineBudgets::derive(&HostCapacity {

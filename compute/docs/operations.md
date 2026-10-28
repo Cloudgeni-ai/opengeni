@@ -171,11 +171,17 @@ enabling it changes no session's backend.
    to the release's OCI images, normally the Opengeni sandbox and desktop
    images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
    the deployment. When a release names an OCI image no stored image was
-   built from, the service has a live host build it (a few minutes, one
-   at a time per host; the host's log says `built and stored a sandbox
-   image`), records it, and new creates of that name start from it; until
-   then they start from the image the name had before. Existing sandboxes
-   keep theirs. A host builds into its state directory's `prepare/`
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
    scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
    for a private registry. `computeControl.storedImages` (`name: <image
    id>`) still pins an image by hand, and is what a name starts from
@@ -1048,6 +1054,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   (the path under `--cgroup`). Its files stay and the agent treats
   the VM's end like a crash. Remove the sandbox through the API once the
   disk is writable again.
+- **Lifting the VMs' memory limit.** `echo max > /sys/fs/cgroup/compute/memory.high`
+  (the group under `--cgroup`) lifts it until the agent next starts, which
+  sets it again. The agent reads it back as it samples, so its count of
+  available memory stops counting the limit at once. Without it, guests
+  bursting together can take the host's memory faster than relief saves
+  them (see Capacity and cost).
 
 ## Network
 
@@ -1129,6 +1141,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   to start the nested profile without a pool. On cgroup v2 without the
   `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
   its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent
@@ -1149,6 +1167,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   Raise it, or the headroom, where saved sandboxes wait long for their
   archive and local disk runs short; `--worker-threads` and
   `--blocking-threads` rarely need changing.
+- **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
+  pages with relief, the agent sets `memory.high` on the VMs' group
+  (`--cgroup`) to the host's memory less the high watermark, and logs it
+  (`memory the VMs may hold together`) as it starts. Sandboxes above
+  their request that reach it together are slowed while relief pauses and
+  saves them, instead of taking the agent's and the guard's memory.
+  A warning at start says the memory capacity is above the limit, which
+  the defaults never do (their headroom is the high watermark): with
+  `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks
+  given, keep the capacity at or under it so requests always fit.
+  `memory.events` in that group counts `high` each time the kernel slowed
+  the VMs.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.

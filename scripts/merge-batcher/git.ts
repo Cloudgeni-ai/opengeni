@@ -213,6 +213,26 @@ export class GitStore {
       ).split("\n")[0]!,
     );
   }
+  /**
+   * Whether `tip` and `head` changed any of the same paths since their merge
+   * base. Release admission accepts a Version landing only as its exact
+   * reviewed delta on moving main, so a path main also changed after the
+   * Version head was generated makes that landing unreleasable even when
+   * merge-tree combines both edits cleanly.
+   */
+  async changedSameFiles(tip: string, head: string): Promise<boolean> {
+    const base = assertSha(await this.exec(["merge-base", assertSha(tip), assertSha(head)]));
+    if (base === tip) return false;
+    const changed = async (to: string) =>
+      new Set(
+        (await this.exec(["diff-tree", "-r", "-z", "--name-only", "--no-renames", base, to]))
+          .split("\0")
+          .filter(Boolean),
+      );
+    const [main, pull] = await Promise.all([changed(tip), changed(head)]);
+    for (const path of pull) if (main.has(path)) return true;
+    return false;
+  }
   async commit(tree: string, parents: string[], message: string, date: string): Promise<string> {
     return assertSha(
       await this.exec(
@@ -237,6 +257,13 @@ export class GitStore {
     for (const [index, pull] of spec.pulls.entries()) {
       let tree: string;
       try {
+        // A Version PR must land as its exact reviewed delta (see
+        // changedSameFiles); otherwise it is regenerated from current main.
+        if (
+          pull.headRef === "changeset-release/main" &&
+          (await this.changedSameFiles(tip, pull.headSha))
+        )
+          throw new MergeConflict(pull.number);
         tree = await this.mergeTree(tip, pull.headSha);
       } catch (e) {
         if (e instanceof GitFailure && e.exitCode === 1) throw new MergeConflict(pull.number);

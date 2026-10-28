@@ -12,7 +12,7 @@ import {
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   retireOrganizationModelProviderCustomModel,
 } from "../src/organization-model-providers";
-import { readSubscriptionCoreRouteFunding } from "../src/subscription-core/route-readiness";
+import { readSubscriptionCoreFunding } from "../src/subscription-core/funding-readiness";
 
 // Claude subscription custom-model admission after the drained cutover
 // (design 5.3, C4): organization-model admission requires explicit caller
@@ -81,13 +81,6 @@ async function fixture() {
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
-
-async function setCutover(input: Fixture, enabled: boolean) {
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${input.grant.accountId}::uuid, 'claude', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
-}
 
 async function addConnection(
   input: Fixture,
@@ -194,21 +187,14 @@ test("runs as the non-owner application role", async () => {
 
 test("organization admission requires serving core capacity; workspace metadata is independent", async () => {
   const input = await fixture();
-  // A new organization is on the core, but has no serving connection.
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
-  await setCutover(input, true);
-  // Core route, but no serving shared Claude connection.
+  // A new organization has no serving shared Claude connection.
   expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   await addConnection(input);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
-  // Maintenance refuses execution, not reading an existing model definition.
-  await setCutover(input, false);
-  expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
 });
 
 test("the serving connection must allow the exact product model", async () => {
   const input = await fixture();
-  await setCutover(input, true);
   await addConnection(input, ["workspace-claude-subscription/claude-sonnet-5-5"]);
   expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   await addConnection(input, ["organization-claude-subscription/claude-opus-5-5"]);
@@ -217,7 +203,6 @@ test("the serving connection must allow the exact product model", async () => {
 
 test("an unhealthy connection does not serve, and a retired model is never admitted", async () => {
   const input = await fixture();
-  await setCutover(input, true);
   const connectionId = await addConnection(input);
   await shared.admin`
     update subscription_connections set status = 'error'
@@ -239,7 +224,6 @@ test("an unhealthy connection does not serve, and a retired model is never admit
 
 test("a personal Claude connection does not admit an organization model, even in its owner's Personal workspace", async () => {
   const input = await fixture();
-  await setCutover(input, true);
   // The same Claude workspace-scope model in the owner's Personal workspace.
   await shared.admin`
     insert into workspace_gateway_custom_models (
@@ -256,14 +240,14 @@ test("a personal Claude connection does not admit an organization model, even in
   // The connection is serviceable: the core funds its owner's own turn in
   // the Personal workspace with it.
   expect(
-    await readSubscriptionCoreRouteFunding(client.db, {
+    await readSubscriptionCoreFunding(client.db, {
       provider: "claude",
       accountId: input.grant.accountId,
       workspaceId: input.personalWorkspaceId,
       subjectId: input.grant.subjectId,
       productModelId: "organization-claude-subscription/claude-opus-5-5",
     }),
-  ).toEqual({ route: "core", value: true });
+  ).toBe(true);
   expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
     organization: false,
@@ -281,7 +265,6 @@ test("a personal Claude connection does not admit an organization model, even in
 
 test("a shared connection scoped to other workspaces does not admit here", async () => {
   const input = await fixture();
-  await setCutover(input, true);
   const [other] = await shared.admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
     values (${input.grant.accountId}, 'Claude admission other workspace') returning id::text as id`;

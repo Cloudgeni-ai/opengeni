@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
@@ -476,5 +477,167 @@ describe("missing quiescence-receipt wake repair", () => {
         and dispatcher.oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure
     `;
     expect(posture).toEqual({ same_owner: true, definer: true, public_execute: false });
+  });
+
+  test("latest-attempt inventory uses the existing exact ownership key", async () => {
+    const waiting = await strandedRecovery({
+      closedSecondsAgo: 300,
+      wakeDeliveredSecondsAgo: 1_200,
+      quiesce: true,
+    });
+    const [definition] = await shared.admin<{ body: string; owner: string }[]>`
+      select p.prosrc as body, r.rolname as owner
+      from pg_proc p join pg_roles r on r.oid=p.proowner
+      where p.oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+    const match = definition!.body.match(/RETURN QUERY\s+([\s\S]*);\s*END\s*$/);
+    if (!match) throw new Error("Unexpected inventory definition");
+    const candidate = match[1]!
+      .replace(/\bp_limit\b/g, "$1")
+      .replace(/\bp_after_workspace_id\b/g, "$2")
+      .replace(/\bp_after_session_id\b/g, "$3");
+    const predicate = "latest.account_id = session.account_id AND ";
+    expect(candidate.split(predicate)).toHaveLength(2);
+    const baseline = candidate.replace(predicate, "");
+
+    // Valid historical identities, inserted administratively to keep fixture
+    // setup bounded rather than executing thousands of unrelated agent turns.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role=replica`;
+      await tx`
+        with historical_turns as (
+          insert into session_turns
+          select (jsonb_populate_record(null::session_turns, to_jsonb(seed_turn) ||
+            jsonb_build_object('id',gen_random_uuid(),'position',n,
+              'status','completed','active_attempt_id',null,'finished_at',now()))).*
+          from session_turns seed_turn cross join generate_series(1,1000) n
+          where seed_turn.id=(select active_turn_id from sessions where id=${waiting.sessionId})
+          returning id
+        )
+        insert into session_turn_attempts
+        select (jsonb_populate_record(null::session_turn_attempts, to_jsonb(seed_attempt) ||
+          jsonb_build_object('id',gen_random_uuid(),'turn_id',historical_turns.id,
+            'execution_generation',generation,'temporal_workflow_run_id',gen_random_uuid()::text,
+            'temporal_activity_id',gen_random_uuid()::text))).*
+        from session_turn_attempts seed_attempt cross join historical_turns cross join generate_series(1,10) generation
+        where seed_attempt.id=${waiting.attemptId}`;
+    });
+    await shared.admin`analyze session_turn_attempts`;
+    await shared.admin`analyze session_turns`;
+    await shared.admin`analyze sessions`;
+
+    const measurements: unknown[] = [];
+    await shared.admin.begin(async (tx) => {
+      await tx.unsafe(`set local role "${definition!.owner.replaceAll('"', '""')}"`);
+      await tx.unsafe(`prepare repair_old(integer,uuid,uuid) as ${baseline}`);
+      await tx.unsafe(`prepare repair_new(integer,uuid,uuid) as ${candidate}`);
+      for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+        await tx.unsafe(`set local plan_cache_mode=${mode}`);
+        const before = await tx.unsafe("execute repair_old(100,null,null)");
+        const after = await tx.unsafe("execute repair_new(100,null,null)");
+        expect(Array.from(after)).toEqual(Array.from(before));
+        expect(after.some((row) => row.candidate_session_id === waiting.sessionId)).toBe(true);
+        const plans = [];
+        for (const side of ["old", "new"]) {
+          const [row] = await tx.unsafe(
+            `explain (analyze,buffers,format json) execute repair_${side}(100,null,null)`,
+          );
+          plans.push(row!["QUERY PLAN"][0]);
+        }
+        type PlanNode = {
+          Plans?: PlanNode[];
+          "Relation Name"?: string;
+          "Index Name"?: string;
+          "Index Cond"?: string;
+          "Shared Hit Blocks": number;
+          "Shared Read Blocks": number;
+        };
+        const nodes = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodes)];
+        const oldScan = nodes(plans[0].Plan).find(
+          (node) => node["Relation Name"] === "session_turn_attempts",
+        )!;
+        const newScan = nodes(plans[1].Plan).find(
+          (node) => node["Relation Name"] === "session_turn_attempts",
+        )!;
+        expect(newScan["Index Name"]).toBe("session_turn_attempts_human_input_owner_uq");
+        expect(newScan["Index Cond"]).toContain("account_id = session.account_id");
+        expect(newScan["Index Cond"]).toContain("turn_id = turn.id");
+        expect(newScan["Shared Hit Blocks"] + newScan["Shared Read Blocks"]).toBeLessThan(
+          (oldScan["Shared Hit Blocks"] + oldScan["Shared Read Blocks"]) / 2,
+        );
+        measurements.push({
+          mode,
+          oldScan,
+          newScan,
+          oldMs: plans[0]["Execution Time"],
+          newMs: plans[1]["Execution Time"],
+        });
+      }
+      await tx.unsafe("deallocate repair_old");
+      await tx.unsafe("deallocate repair_new");
+    });
+    if (process.env.OPENGENI_BENCH_RECOVERY_PLAN === "1") console.log(JSON.stringify(measurements));
+  }, 60_000);
+
+  test("owner-key migration changes only the redundant predicate and preserves routine authority on replay", async () => {
+    const baseline = await readFile(
+      new URL("../drizzle/0977_baseline_01.sql", import.meta.url),
+      "utf8",
+    );
+    const original = baseline.match(
+      /CREATE FUNCTION opengeni_private\.list_quiescence_receipt_wake_repairs_v1\([\s\S]*?\$\$;/,
+    )?.[0];
+    if (!original) throw new Error("Missing original inventory routine");
+    const migration = await readFile(
+      new URL("../drizzle/1014_quiescence_repair_attempt_owner_key.sql", import.meta.url),
+      "utf8",
+    );
+    await shared.admin.begin(async (tx) => {
+      const [scope] = await tx<{ schema: string }[]>`select current_schema() as schema`;
+      const schema = `"${scope!.schema.replaceAll('"', '""')}"`;
+      const readPosture = () => tx`
+        select proowner, proacl::text, prosecdef, provolatile, proconfig,
+          proargtypes::text, proallargtypes::text, proargmodes, proargnames, prorettype
+        from pg_proc where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+      const initialPosture = await readPosture();
+      const installed = await tx<{ body: string }[]>`
+        select prosrc as body from pg_proc
+        where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+      const originalSql = original
+        .replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION")
+        .replaceAll('"{{schema}}"', schema)
+        .replaceAll("{{schema}}", scope!.schema);
+      await tx.unsafe(originalSql);
+      const [old] = await tx<{ body: string }[]>`
+        select prosrc as body from pg_proc
+        where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+      expect(
+        installed[0]!.body.replace("latest.account_id = session.account_id AND ", "").trim(),
+      ).toBe(old!.body.trim());
+      expect(await readPosture()).toEqual(initialPosture);
+      const oldRows =
+        await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`;
+      await tx.unsafe(migration);
+      expect(await readPosture()).toEqual(initialPosture);
+      expect(
+        await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`,
+      ).toEqual(oldRows);
+      await tx.unsafe(migration);
+      expect(await readPosture()).toEqual(initialPosture);
+      expect(
+        await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`,
+      ).toEqual(oldRows);
+      const constraints = await tx`
+        select conname, convalidated, condeferrable, pg_get_constraintdef(oid) as definition
+        from pg_constraint where conrelid in ('sessions'::regclass, 'session_turn_attempts'::regclass)
+          and conname in ('sessions_workspace_account_fk', 'session_turn_attempts_workspace_account_fk')
+        order by conname`;
+      expect(constraints).toHaveLength(2);
+      for (const constraint of constraints) {
+        expect(constraint.convalidated).toBe(true);
+        expect(constraint.condeferrable).toBe(false);
+        expect(constraint.definition).toContain("FOREIGN KEY (workspace_id, account_id)");
+        expect(constraint.definition).toContain("REFERENCES workspaces(id, account_id)");
+      }
+    });
   });
 });

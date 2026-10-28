@@ -184,6 +184,14 @@ rerun the old controller or replay any partially published version.
 It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
 publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
 or moving an existing `latest` tag. Registry first-publication behavior is unchanged.
+Each canary manifest records its exact source commit as `gitHead`
+(`npm view @opengeni/sdk@canary gitHead`). `canary` only moves forward through main
+history: when the source does not descend from the source of the version `canary`
+names now (a staging deploy of an earlier commit, a late dispatch or a re-run
+attempt), the run still publishes its exact versions for pinning, but under
+dist-tag `canary-backfill`, and `canary` stays on the newer source. A canary
+published before sources were recorded does not hold the tag back; a source order
+Git cannot establish fails before any write.
 
 All archives are packed and frozen before the first write. Each topological
 publication retains an intent and a positive library HTTP acknowledgement before
@@ -203,7 +211,8 @@ minute) for one 30-minute window, treating timeouts, 429 and 5xx as "not yet".
 Once every version has been seen it rereads the complete cohort, preserving the
 latest, archive integrity, canary tag and provenance checks, and only then uploads
 `site-package-versions-<source_sha>`. A canary tag already moved to a later canary
-is accepted; an older one is still pending. Waiting reads keep one observation
+is accepted; an older one is still pending. A backfill publication is confirmed the
+same way through `canary-backfill`. Waiting reads keep one observation
 record each; the final complete-cohort reread retains full response custody in
 `canary-confirmation-receipts-<source_sha>-<attempt>`. If npm needs longer than
 one window, re-run the failed `confirm` job: it reuses the publish job's output,

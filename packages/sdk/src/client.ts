@@ -41,6 +41,11 @@ import type {
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   AutomationTemplateResponse,
+  BotTemplateResponse,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -1230,6 +1235,8 @@ export type TranscribeAudioInput = {
   audio: Blob | File | Uint8Array;
   mimeType: string;
   durationSeconds?: number | undefined;
+  /** ISO 639-1 or 639-3 code of what is spoken ("nb", "en"); omitted means detect. */
+  language?: string | undefined;
   signal?: AbortSignal | undefined;
 };
 
@@ -1396,6 +1403,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
+    if (input.language) form.append("language", input.language);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
@@ -5069,7 +5077,13 @@ export class OpenGeniClient {
     ) {
       throw invalidApiResponseError("browser frame evidence does not match its request");
     }
-    return { ...metadata, data };
+    return {
+      ...metadata,
+      data,
+      ...(response.headers.get("x-opengeni-browser-frame-note") === "inexact-scrollbars"
+        ? { inexactScrollbars: true as const }
+        : {}),
+    };
   }
 
   async closeBrowserTarget(
@@ -7848,6 +7862,60 @@ export class OpenGeniClient {
     await this.requestJson<unknown>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+    );
+  }
+
+  // --- Bot templates ----------------------------------------------------------
+  // A bot is a long-lived chat with a name, description and avatar. A bot
+  // template is a saved starting point for one: starting from it opens a new
+  // chat whose first message is the template's setup instructions. Whoever
+  // saved one, or an admin, can change it.
+
+  async listBotTemplates(workspaceId: string): Promise<WorkspaceBotTemplate[]> {
+    const response = await this.requestJson<ListBotTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+    );
+    return response.templates;
+  }
+
+  async getBotTemplate(workspaceId: string, templateId: string): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+    return response.template;
+  }
+
+  async createBotTemplate(
+    workspaceId: string,
+    request: CreateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/bot-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateBotTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateBotTemplateRequest,
+  ): Promise<WorkspaceBotTemplate> {
+    const response = await this.requestJson<BotTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteBotTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
     );
   }
 

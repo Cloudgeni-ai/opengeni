@@ -3,7 +3,7 @@
 // fences, live workspace-row validation, and idempotent audit facts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { readFile } from "node:fs/promises";
+
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { testSettings } from "@opengeni/testing/settings";
@@ -20,8 +20,6 @@ import {
 } from "../src";
 import type { ConnectionBrokerDeps } from "../src/connection-token-resolver";
 import { rawRows } from "../src/database";
-
-const migrationUrl = new URL("../drizzle/0279_workspace_connection_use_lane.sql", import.meta.url);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -179,29 +177,6 @@ async function waitForBlocker(holderPid: number, waiterPid?: number): Promise<vo
 }
 
 describe("workspace connection use lane (migration 0279)", () => {
-  test("the rolling shared-lock migration preserves the hardened resolver", async () => {
-    const source = await readFile(
-      new URL("../drizzle/0876_connection_validation_shared_locks.sql", import.meta.url),
-      "utf8",
-    );
-    expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(source).not.toMatch(/\b(?:ALTER|DROP) TABLE\b/u);
-    if (!available) return;
-    const [row] = await admin<{ definition: string; definer: boolean; config: string[] }[]>`
-      select pg_get_functiondef(oid) as definition, prosecdef as definer, proconfig as config
-      from pg_proc where oid = 'resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)'::regprocedure`;
-    expect(row?.definer).toBe(true);
-    expect(row?.config.some((value) => value.startsWith("search_path=pg_catalog,"))).toBe(true);
-    expect(row?.definition.match(/FOR SHARE;/gu)).toHaveLength(4);
-    expect(row?.definition).not.toMatch(/FOR (?:NO KEY )?UPDATE;/u);
-    expect(row?.definition).toContain(
-      "pg_advisory_xact_lock_shared(hashtextextended('workspace-control:'",
-    );
-    expect(row?.definition).toContain(
-      "pg_advisory_xact_lock(hashtextextended(p_physical_request_id::text, 0))",
-    );
-  });
-
   test("independent validations share the lifecycle rows while a validator is still open", async () => {
     if (!available) return;
     const fixture = await claimedTurnFixture();
@@ -420,19 +395,6 @@ describe("workspace connection use lane (migration 0279)", () => {
     }
   });
 
-  test("declares one rolling redefinition with the workspace lane and re-pinned posture", async () => {
-    const source = await readFile(migrationUrl, "utf8");
-    expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
-    expect(source).toContain("CREATE OR REPLACE FUNCTION resolve_accepted_connection_use(");
-    expect(source).toContain("ELSIF p_subject_scope = 'workspace' THEN");
-    expect(source).toContain("connection_row.authority_scope IS DISTINCT FROM 'workspace'");
-    expect(source).toContain("SET search_path = pg_catalog, %I, public, pg_temp");
-    expect(source).toContain("REVOKE ALL ON FUNCTION");
-    expect(source).toContain("IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app')");
-    expect(source).not.toMatch(/\bALTER TABLE\b/u);
-    expect(source).not.toMatch(/\bDROP TABLE\b/u);
-  });
-
   test("authorizes the live workspace-owned connection inside the lifecycle fences", async () => {
     if (!available) return;
     const fixture = await claimedTurnFixture();
@@ -628,21 +590,5 @@ describe("workspace connection use lane (migration 0279)", () => {
       from (select '{"kind":"frozen-workspace"}'::jsonb as value) snapshot`;
     const resolution = await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
     expect(resolution).toEqual({ status: "denied", reason: "connection_identity_changed" });
-  });
-
-  test("the snapshot lane keeps precedence over the workspace lane in the function source", async () => {
-    // A frozen per-turn personal snapshot for the same server takes the
-    // snapshot lane (checked first), whose scope check denies a
-    // workspace-scope request outright instead of borrowing the workspace
-    // row. Asserted structurally: the workspace lane is reachable only when
-    // no snapshot row was found for the turn + server.
-    const source = await readFile(migrationUrl, "utf8");
-    const snapshotLane = source.indexOf("FROM turn_connection_authority_snapshots");
-    const workspaceLane = source.indexOf("ELSIF p_subject_scope = 'workspace' THEN");
-    const legacyLane = source.indexOf("IS DISTINCT FROM 'legacy_user'");
-    expect(snapshotLane).toBeGreaterThan(0);
-    expect(workspaceLane).toBeGreaterThan(snapshotLane);
-    expect(legacyLane).toBeGreaterThan(workspaceLane);
-    expect(source).toContain("OR p_subject_scope IS DISTINCT FROM 'subject'");
   });
 });

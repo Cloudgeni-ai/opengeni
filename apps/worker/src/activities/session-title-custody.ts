@@ -196,9 +196,9 @@ export async function withSessionTitleCustody<T>(
           getToken: () => track(token.getToken),
           refresh: () => track(token.refresh),
           onUsageHeaders: (snapshot) => {
-            guard.observe(snapshot);
             observeQuota(codexUsageHeadersQuotaObservation(snapshot, credentialVersion));
           },
+          onReportedUsage: (usage) => guard.observe(usage),
           resolveModel,
           nextRequestId,
           turnMetadata: { request_kind: "session_title" },

@@ -1140,6 +1140,56 @@ test("the Site view's toolbar clears the macOS window controls beside a collapse
   }
 }, 30_000);
 
+test("the Site publish form clears the macOS window controls in a narrow Site column", async () => {
+  const backStart = async (desktop: string) => {
+    await page.goto(
+      `${url}?scenario=sites&theme=dark&desktop=${desktop}&rail=collapsed&publish&publishable`,
+    );
+    // The widest chat leaves the Site its narrowest column (under 416px),
+    // where the form's page padding halves. The preview person is
+    // "sidebar-preview"; the Site view reads the width when it opens.
+    await page.evaluate((path) => {
+      localStorage.setItem(
+        "og.site-view.chat:v1:sidebar-preview",
+        JSON.stringify({ width: 720, collapsed: false }),
+      );
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
+    await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
+    const header = form.locator(":scope > header");
+    const back = header.getByRole("button").first();
+    await back.waitFor();
+    const column = await page.locator("[data-site-column]").boundingBox();
+    expect(column!.width).toBeLessThan(416);
+    const box = await back.boundingBox();
+    expect(box).not.toBeNull();
+    // The form keeps one left edge: the title, the fields and the buttons.
+    const edges = await form.evaluate((element) =>
+      [
+        element.querySelector(":scope > header h1"),
+        element.querySelector(":scope > [data-slot='form-body'] > div"),
+        element.querySelector(":scope > footer > div > div"),
+      ].map((node) => Math.round(node!.getBoundingClientRect().left)),
+    );
+    expect(new Set(edges).size).toBe(1);
+    expect(edges[0]).toBe(Math.round(box!.x));
+    return box!.x;
+  };
+
+  // The back link sits in the window's top row, past the controls and the
+  // sharing badge (about 80px in).
+  expect(await backStart("macos")).toBeGreaterThanOrEqual(84);
+  await capture("site-publish-form-macos-narrow-column");
+
+  // Without the macOS controls in the page it keeps its usual spacing.
+  for (const desktop of ["windows", "browser"]) {
+    expect(await backStart(desktop)).toBeLessThan(56 + 24);
+  }
+}, 30_000);
+
 const parentId = conversationId(1);
 const childId = conversationId(11);
 const sessionRowBox = (id: string) =>

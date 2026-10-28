@@ -1,5 +1,13 @@
-export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export {
+  createSiteToolBridge,
+  isSiteCatalogStaleError,
+  SiteToolConsentDeclinedError,
+  SiteToolConnectionRequiredError,
+} from "./site-tool-bridge";
 export type {
+  SiteToolConsentPrompt,
+  SiteToolConsentDecision,
+  SiteToolConnectPrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,
@@ -75,6 +83,123 @@ export const OPENGENI_SITE_LOCAL_CODEMODE_PATH = "/__opengeni/site-tools" as con
 export const OPENGENI_SITE_BRIDGE_VIEWER_METHOD = "viewer" as const;
 /** Bridge request method that asks the host to sign the viewer in (advertised by `viewer: 1`). */
 export const OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD = "auth.signIn" as const;
+/** Bridge request method that returns the Site's current location (advertised by `location: 1`). */
+export const OPENGENI_SITE_BRIDGE_LOCATION_METHOD = "location" as const;
+/** Bridge request method that moves the Site to another of its own addresses (advertised by `location: 1`). */
+export const OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD = "location.navigate" as const;
+/** Host-to-Site notification on a connected port, such as a location change. */
+export const OPENGENI_SITE_BRIDGE_EVENT = "opengeni.site.event" as const;
+
+/**
+ * Where a Site is, as the host's address shows it (the bridge's wire form):
+ * `path` starts with `/`, `search` is empty or starts with `?`, and `hash`
+ * is empty or starts with `#`. On a published Site this is the page's real
+ * address; in the console it is the Site's own address inside the console page.
+ */
+export type OpenGeniSiteLocationValue = {
+  path: string;
+  search: string;
+  hash: string;
+};
+
+/**
+ * The Site's location with conveniences: `href` (`path + search + hash`) and
+ * `params` (the query parsed, `params.get("t")`). Values come from the
+ * address bar: treat them as untrusted input, never as proof of identity.
+ */
+export type OpenGeniSiteLocation = OpenGeniSiteLocationValue & {
+  href: string;
+  params: URLSearchParams;
+};
+
+export type OpenGeniSiteNavigateOptions = {
+  /** Replace the current history entry instead of adding one (no extra Back step). */
+  replace?: boolean;
+};
+
+const SITE_LOCATION_BASE = "https://site.opengeni.invalid";
+
+/** `path + search + hash`. */
+export function openGeniSiteLocationHref(location: OpenGeniSiteLocationValue): string {
+  return `${location.path}${location.search}${location.hash}`;
+}
+
+/**
+ * Resolve `to` (`/admin`, `?tab=2`, `#top`, `../x` or an address on the same
+ * Site) against the current location. Returns null when `to` leaves the Site
+ * (another origin, `javascript:` and so on), is longer than 2,048 characters
+ * or is not a URL at all. A path never starts with `//` (`/.//x` is `/x`), so
+ * no Site address reads as another origin's.
+ */
+export function resolveOpenGeniSiteLocation(
+  current: OpenGeniSiteLocationValue,
+  to: string,
+  siteOrigin: string = SITE_LOCATION_BASE,
+): OpenGeniSiteLocationValue | null {
+  if (to.length > OPENGENI_SITE_LOCATION_MAX_LENGTH) return null;
+  let url: URL;
+  let origin: string;
+  try {
+    const root = new URL(siteOrigin);
+    origin = root.origin;
+    const base = new URL(
+      openGeniSiteLocationHref({ ...current, path: openGeniSitePath(current.path) }),
+      root,
+    );
+    url = new URL(to, base);
+  } catch {
+    return null;
+  }
+  if (origin === "null" || url.origin !== origin) return null;
+  const resolved = { path: openGeniSitePath(url.pathname), search: url.search, hash: url.hash };
+  // Percent-encoding can make the address much longer than what was asked for.
+  return openGeniSiteLocationHref(resolved).length > OPENGENI_SITE_LOCATION_MAX_LENGTH
+    ? null
+    : resolved;
+}
+
+/** The longest address `navigate` accepts, as for sign-in return paths. */
+export const OPENGENI_SITE_LOCATION_MAX_LENGTH = 2048;
+
+/** `path` with repeated leading slashes collapsed (`//x` is `/x`), so it never reads as an origin. */
+export function openGeniSitePath(path: string): string {
+  return path.replace(/^\/{2,}/u, "/");
+}
+
+/**
+ * Addresses a Site never moves to: `/_og/...` belongs to the Opengeni
+ * gateway (sign-in, the Site's own frame) and `/__opengeni/...` to the
+ * preview host, on every host alike.
+ */
+export function isOpenGeniReservedSitePath(path: string): boolean {
+  return ["/_og", "/__opengeni"].some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+/** The wire value when `value` is a well-formed location, else null. */
+export function openGeniSiteLocationValue(value: unknown): OpenGeniSiteLocationValue | null {
+  if (
+    !isRecord(value) ||
+    typeof value.path !== "string" ||
+    !value.path.startsWith("/") ||
+    value.path.startsWith("//") ||
+    typeof value.search !== "string" ||
+    (value.search !== "" && !value.search.startsWith("?")) ||
+    typeof value.hash !== "string" ||
+    (value.hash !== "" && !value.hash.startsWith("#"))
+  )
+    return null;
+  return { path: value.path, search: value.search, hash: value.hash };
+}
+
+function siteLocation(value: OpenGeniSiteLocationValue): OpenGeniSiteLocation {
+  return {
+    path: value.path,
+    search: value.search,
+    hash: value.hash,
+    href: openGeniSiteLocationHref(value),
+    params: new URLSearchParams(value.search),
+  };
+}
 
 /**
  * The person viewing a Site, as the host reports it. Guests of public
@@ -109,6 +234,8 @@ export type OpenGeniSiteBridgeReadyMessage = {
   siteData?: 1;
   /** The host answers the `viewer` and `auth.signIn` bridge methods. */
   viewer?: 1;
+  /** The host answers the `location` and `location.navigate` bridge methods and posts location events. */
+  location?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -134,7 +261,20 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: "invoke"; payload: ToolGatewayInvokeRequest }
   | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
+  | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
+  | {
+      method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
+      payload: { to: string; replace?: boolean };
+    }
 );
+
+/** The host's location changed (back/forward, the address bar, or a navigate call). */
+export type OpenGeniSiteBridgeEventMessage = {
+  type: typeof OPENGENI_SITE_BRIDGE_EVENT;
+  version: typeof OPENGENI_SITE_BRIDGE_VERSION;
+  event: "location";
+  location: OpenGeniSiteLocationValue;
+};
 
 export type OpenGeniSiteBridgeCancelMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CANCEL;
@@ -156,7 +296,8 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | ToolGatewayResolvedTool
         | ToolGatewayInvokeResponse
         | OpenGeniSiteViewer
-        | OpenGeniSiteSignInResult;
+        | OpenGeniSiteSignInResult
+        | OpenGeniSiteLocationValue;
     }
   | {
       ok: false;
@@ -204,6 +345,28 @@ export type OpenGeniSiteClient = {
    * null as "everything the Site declares", as for a workspace member.
    */
   readonly capabilities: Promise<OpenGeniSiteCapabilities | null>;
+  /**
+   * Where the Site is (`await site.location`): `{ path, search, hash, href,
+   * params }`, read from the host each time. On a published Site this is the
+   * visitor's address, so `/unsubscribe?t=abc` gives `path` `/unsubscribe`
+   * and `params.get("t")` `"abc"`. Resolves `null` on hosts that don't report
+   * it (older hosts). Treat the values as untrusted input.
+   */
+  readonly location: Promise<OpenGeniSiteLocation | null>;
+  /**
+   * Move to another address of this Site (`"/admin"`, `"?tab=2"`, `"#top"`)
+   * without reloading the page, adding a history entry unless `replace` is
+   * set, so Back and Forward work. Resolves the new location; rejects with
+   * code `invalid_location` for addresses outside the Site (open those with
+   * a link or `window.open`) and `location_unsupported` on older hosts.
+   */
+  navigate(to: string, options?: OpenGeniSiteNavigateOptions): Promise<OpenGeniSiteLocation>;
+  /**
+   * Call `listener` after every location change: Back/Forward, the address
+   * bar's `#hash`, and `navigate`. Render the page from the location it gets.
+   * Returns a function that stops listening.
+   */
+  onLocationChange(listener: (location: OpenGeniSiteLocation) => void): () => void;
   readonly auth: {
     /**
      * Ask the host to sign the viewer in. On a published Site the host
@@ -232,6 +395,17 @@ export type OpenGeniSiteClientOptions = {
   localCodemodePath?: string | false;
   /** Test/embedding seam for local-preview requests. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * In an Opengeni host that reports the Site's location, ordinary clicks on
+   * links to the Site's own pages (`<a href="/admin">`, `?tab=2`, `../x`)
+   * move the Site with `navigate` instead of loading the address inside the
+   * Site's frame, where it cannot open. Links with a `target`, `download`,
+   * only a `#hash`, another origin, or a modifier key are left alone. Set
+   * `false` to handle links yourself.
+   */
+  links?: boolean;
+  /** Test/embedding seam for the window whose link clicks are handled. */
+  linkTarget?: Pick<EventTarget, "addEventListener" | "removeEventListener">;
 };
 
 export class OpenGeniSiteBridgeError extends Error {
@@ -294,15 +468,54 @@ export function createOpenGeniSiteClient(
       capabilities ??= readSiteCapabilities(transport);
       return capabilities;
     },
+    get location() {
+      return transport.location().then((value) => (value ? siteLocation(value) : null));
+    },
+    navigate: async (to, navigateOptions = {}) =>
+      siteLocation(await transport.navigate(String(to), navigateOptions.replace === true)),
+    onLocationChange: (listener) =>
+      transport.subscribeLocation((value) => listener(siteLocation(value))),
     auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
   };
 }
 
-class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
+/** What both Site transports offer for the Site's location. */
+type SiteLocationTransport = {
+  location(): Promise<OpenGeniSiteLocationValue | null>;
+  navigate(to: string, replace: boolean): Promise<OpenGeniSiteLocationValue>;
+  subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void;
+};
+
+/** Call every listener, keeping one listener's failure from reaching the others. */
+function notifyLocationListeners(
+  listeners: ReadonlySet<(location: OpenGeniSiteLocationValue) => void>,
+  location: OpenGeniSiteLocationValue,
+): void {
+  for (const listener of [...listeners]) {
+    try {
+      listener(location);
+    } catch (error) {
+      // A Site's listener bug must not stop the other listeners.
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  }
+}
+
+function invalidLocation(): OpenGeniSiteBridgeError {
+  return new OpenGeniSiteBridgeError(
+    "invalid_location",
+    "Navigate only to addresses of this Site; open other addresses with a link or window.open",
+  );
+}
+
+class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteLocationTransport {
   readonly toolGatewayMode: "catalog" | "target";
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly basePath: string;
+  private readonly stopListening = new Set<() => void>();
 
   constructor(options: OpenGeniSiteClientOptions) {
     this.toolGatewayMode = options.toolGatewayMode ?? "target";
@@ -313,7 +526,9 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
     ).replace(/\/+$/u, "");
   }
 
-  close(): void {}
+  close(): void {
+    for (const stop of [...this.stopListening]) stop();
+  }
 
   /** Local previews have no published Site, so no Site Data. */
   async siteDataSupported(): Promise<boolean> {
@@ -327,6 +542,36 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
 
   async signIn(): Promise<OpenGeniSiteSignInResult> {
     return { started: false };
+  }
+
+  /** A local preview is the top-level page: its own address is the Site's. */
+  async location(): Promise<OpenGeniSiteLocationValue | null> {
+    return localPageLocation();
+  }
+
+  async navigate(to: string, replace: boolean): Promise<OpenGeniSiteLocationValue> {
+    const current = localPageLocation();
+    const history = globalThis.history;
+    if (!current || !history) throw siteLocationUnsupported();
+    const next = resolveOpenGeniSiteLocation(current, to, globalThis.location.origin);
+    if (!next || isOpenGeniReservedSitePath(next.path)) throw invalidLocation();
+    const href = openGeniSiteLocationHref(next);
+    if (replace) history.replaceState(history.state, "", href);
+    else history.pushState(null, "", href);
+    const now = localPageLocation() ?? next;
+    // Every client on the page hears it, as with a bridge host.
+    notifyLocationListeners(localLocationListeners, now);
+    return now;
+  }
+
+  subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void {
+    const unwatch = watchLocalLocation(listener);
+    const stop = () => {
+      unwatch();
+      this.stopListening.delete(stop);
+    };
+    this.stopListening.add(stop);
+    return stop;
   }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -381,6 +626,88 @@ function shouldUseLocalCodemode(options: OpenGeniSiteClientOptions): boolean {
   return Boolean(siteWindow && siteWindow.parent === siteWindow);
 }
 
+/** The top-level page's own location, or null outside a browser page. */
+function localPageLocation(): OpenGeniSiteLocationValue | null {
+  const location = (globalThis as { location?: Location }).location;
+  if (!location || typeof location.pathname !== "string") return null;
+  return openGeniSiteLocationValue({
+    path: openGeniSitePath(location.pathname || "/"),
+    search: location.search,
+    hash: location.hash,
+  });
+}
+
+/** Location listeners of every local-preview client on this page. */
+const localLocationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
+let stopLocalPopState: (() => void) | null = null;
+
+/** Listen for the page's location changes; Back/Forward is watched only while someone listens. */
+function watchLocalLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void {
+  localLocationListeners.add(listener);
+  if (!stopLocalPopState && typeof globalThis.addEventListener === "function") {
+    const onPopState = () => {
+      const now = localPageLocation();
+      if (now) notifyLocationListeners(localLocationListeners, now);
+    };
+    globalThis.addEventListener("popstate", onPopState);
+    stopLocalPopState = () => globalThis.removeEventListener("popstate", onPopState);
+  }
+  return () => {
+    localLocationListeners.delete(listener);
+    if (localLocationListeners.size > 0) return;
+    stopLocalPopState?.();
+    stopLocalPopState = null;
+  };
+}
+
+function siteLocationUnsupported(): OpenGeniSiteBridgeError {
+  return new OpenGeniSiteBridgeError(
+    "location_unsupported",
+    "This Site host does not support navigation",
+  );
+}
+
+type SiteLinkElement = {
+  getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+};
+
+/**
+ * The address a click should move the Site to: the raw `href` of an ordinary
+ * left click on a link to another page of this Site, else null. Uses the
+ * attribute as written, because the frame's own URL is not the Site's.
+ */
+export function openGeniSiteLinkTarget(event: Event): string | null {
+  const click = event as Partial<MouseEvent>;
+  if (
+    event.defaultPrevented ||
+    (typeof click.button === "number" && click.button !== 0) ||
+    click.metaKey ||
+    click.ctrlKey ||
+    click.shiftKey ||
+    click.altKey
+  )
+    return null;
+  const target = event.target as { closest?: (selector: string) => unknown } | null;
+  const link =
+    target && typeof target.closest === "function"
+      ? (target.closest("a[href]") as SiteLinkElement | null)
+      : null;
+  if (!link || link.hasAttribute("download")) return null;
+  const frameTarget = (link.getAttribute("target") ?? "").trim().toLowerCase();
+  if (frameTarget !== "" && frameTarget !== "_self") return null;
+  const href = (link.getAttribute("href") ?? "").trim();
+  // A bare #hash scrolls within the page, as it always has.
+  if (href === "" || href.startsWith("#")) return null;
+  try {
+    const base = new URL("/", SITE_LOCATION_BASE);
+    if (new URL(href, base).origin !== base.origin) return null;
+  } catch {
+    return null;
+  }
+  return href;
+}
+
 function localCodemodeSuffix(method: string, path: string): string {
   if (method === "GET" && path.endsWith("/tools/catalog")) return "/catalog";
   if (method === "GET" && path.endsWith("/tools/declarations")) return "/declarations";
@@ -416,10 +743,25 @@ export function isOpenGeniSiteBridgeRequestMessage(
     value.method === "catalog" ||
     value.method === "declarations" ||
     value.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD ||
-    value.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD
+    value.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD ||
+    value.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD
   )
     return true;
+  if (value.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD)
+    return isRecord(value.payload) && typeof value.payload.to === "string";
   return ["call", "resolve", "invoke"].includes(String(value.method)) && isRecord(value.payload);
+}
+
+export function isOpenGeniSiteBridgeEventMessage(
+  value: unknown,
+): value is OpenGeniSiteBridgeEventMessage {
+  return (
+    isRecord(value) &&
+    value.type === OPENGENI_SITE_BRIDGE_EVENT &&
+    value.version === OPENGENI_SITE_BRIDGE_VERSION &&
+    value.event === "location" &&
+    openGeniSiteLocationValue(value.location) !== null
+  );
 }
 
 export function isOpenGeniSiteBridgeCancelMessage(
@@ -459,21 +801,54 @@ export function sanitizeOpenGeniSiteToolInvokeRequest(
   };
 }
 
-class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
+class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocationTransport {
   readonly toolGatewayMode: "catalog" | "target";
   private targetTools = false;
   private siteData = false;
   private viewerSupported = false;
+  private locationSupported = false;
+  private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
   private connecting: Promise<MessagePort> | null = null;
   private closed = false;
+  private stopHandlingLinks: (() => void) | null = null;
 
   constructor(options: OpenGeniSiteClientOptions) {
     this.toolGatewayMode = options.toolGatewayMode ?? "target";
     this.options = options;
     this.bootstrap = createSiteBridgeBootstrap(options);
+    this.handleLinks();
+  }
+
+  /**
+   * Send clicks on links to the Site's own pages through `navigate` once the
+   * host reports location support. Listens on the window while the click
+   * bubbles, so the Site's own handlers (on the link, the document or a
+   * router) run first and a `preventDefault` there keeps the link theirs.
+   * Connects right away so the first click already knows; a host that never
+   * answers leaves every link alone.
+   */
+  private handleLinks(): void {
+    if (this.options.links === false) return;
+    const linkTarget =
+      this.options.linkTarget ??
+      (typeof window === "undefined" ? undefined : (window as Window | undefined));
+    if (!linkTarget || typeof linkTarget.addEventListener !== "function") return;
+    const onClick = (event: Event) => {
+      if (!this.locationSupported || this.closed) return;
+      const to = openGeniSiteLinkTarget(event);
+      if (to === null) return;
+      event.preventDefault();
+      this.navigate(to, false).catch((error: unknown) => {
+        // A refused address (for example under /_og) keeps the Site where it is.
+        console.warn("Opengeni Site link was not followed", error);
+      });
+    };
+    linkTarget.addEventListener("click", onClick);
+    this.stopHandlingLinks = () => linkTarget.removeEventListener("click", onClick);
+    queueMicrotask(() => void this.connect().catch(() => undefined));
   }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -502,6 +877,55 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
     if (!this.viewerSupported) return { started: false };
     const value = await this.request({ method: OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }, {});
     return { started: isRecord(value) && value.started === true };
+  }
+
+  async location(): Promise<OpenGeniSiteLocationValue | null> {
+    await this.connect();
+    if (!this.locationSupported) return null;
+    return this.locationResult(
+      await this.request({ method: OPENGENI_SITE_BRIDGE_LOCATION_METHOD }, {}),
+    );
+  }
+
+  async navigate(to: string, replace: boolean): Promise<OpenGeniSiteLocationValue> {
+    await this.connect();
+    if (!this.locationSupported) throw siteLocationUnsupported();
+    return this.locationResult(
+      await this.request(
+        {
+          method: OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD,
+          payload: { to, ...(replace ? { replace: true } : {}) },
+        },
+        {},
+      ),
+    );
+  }
+
+  subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void {
+    this.locationListeners.add(listener);
+    // Connect so the host's events reach this client. A slow host gets a few
+    // more tries while someone listens; one that never answers simply never
+    // calls the listener.
+    const attempt = (retries: number): void => {
+      this.connect().catch(() => {
+        if (retries > 0 && !this.closed && this.locationListeners.size > 0)
+          setTimeout(() => attempt(retries - 1), 1_000);
+      });
+    };
+    attempt(2);
+    return () => {
+      this.locationListeners.delete(listener);
+    };
+  }
+
+  private locationResult(value: unknown): OpenGeniSiteLocationValue {
+    const location = openGeniSiteLocationValue(value);
+    if (!location)
+      throw new OpenGeniSiteBridgeError(
+        "invalid_location",
+        "The Site host returned an invalid location",
+      );
+    return location;
   }
 
   async requestJson<T>(
@@ -549,6 +973,9 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopHandlingLinks?.();
+    this.stopHandlingLinks = null;
+    this.locationListeners.clear();
     this.bootstrap.close();
     this.port?.close();
     this.port = null;
@@ -568,7 +995,12 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
       | { method: "call"; payload: OpenGeniSiteToolCallRequest }
       | { method: "declarations" }
       | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
-      | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD },
+      | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
+      | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
+      | {
+          method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
+          payload: { to: string; replace?: boolean };
+        },
     options: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<unknown> {
     const port = await this.connect();
@@ -669,6 +1101,15 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         this.targetTools = message.targetTools === 1;
         this.siteData = message.siteData === 1;
         this.viewerSupported = message.viewer === 1;
+        this.locationSupported = message.location === 1;
+        if (this.locationSupported)
+          channel.port1.addEventListener("message", (hostEvent: MessageEvent<unknown>) => {
+            if (isOpenGeniSiteBridgeEventMessage(hostEvent.data))
+              notifyLocationListeners(
+                this.locationListeners,
+                openGeniSiteLocationValue(hostEvent.data.location)!,
+              );
+          });
         this.port = channel.port1;
         resolve(channel.port1);
       };

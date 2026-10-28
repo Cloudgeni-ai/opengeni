@@ -25,7 +25,6 @@ import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import {
   subscriptionCoreCapacityFailure,
   subscriptionCoreCapacityWaitPayload,
-  subscriptionCoreCutoverDisabledFailure,
   subscriptionCoreLeaseBusyFailure,
 } from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
@@ -239,8 +238,6 @@ export async function selectCoreSubscriptionTurnCapacity(
       case "not_visible":
       case "attempt_fenced":
         return fenced();
-      case "cutover_not_enabled":
-        throw subscriptionCoreCutoverDisabledFailure(provider.displayName);
       case "lease_busy":
         throw subscriptionCoreLeaseBusyFailure(
           placement.leasedUntil,

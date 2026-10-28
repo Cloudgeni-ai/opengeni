@@ -217,9 +217,9 @@ gateway. That gateway rebuilds the enabled first-party and integration catalog,
 resolves personal/workspace connection authority through the existing broker,
 validates the catalog digest and input, and invokes the same executor as model
 and Codemode calls. The active immutable version's retained tool identities are
-the Site's direct-call allowlist. Calls within that live intersection execute
-without a confirmation dialog or approval capability, including tools whose
-ordinary current-human catalog policy is `human`.
+the Site's direct-call allowlist. Calls within that live intersection that do
+not need approval execute directly. A call that needs approval is confirmed by
+the viewer in the Opengeni frame (see "Host-native consent" below).
 
 This avoids version-scoped bearer issuance entirely. Membership, permission,
 connection, logout, and catalog changes are observed by the parent's ordinary
@@ -379,10 +379,12 @@ catalog changed after the Site was built.
    digest, canonical identity, and arguments over the transferred port.
 4. The parent rejects identities outside the immutable requested set and sends
    the call through the authenticated workspace HTTP adapter.
-5. The parent dispatches an allowed call directly without a confirmation dialog
-   or approval capability. The API verifies that the artifact is active, the
-   version is still current, and the exact identity remains in that version's
-   retained requested-tool set.
+5. The parent dispatches an allowed call. The API verifies that the artifact is
+   active, the version is still current, and the identity (or the canonical
+   connector identity it was routed from) remains in that version's retained
+   requested-tool set. When the call needs approval, an account choice or a
+   connection, the API refuses it with a typed 409 and the parent asks the
+   viewer (see "Host-native consent").
 6. The API rebuilds the current-human gateway from live enabled first-party and
    integration servers, validates digest/input/authorization, resolves current
    connections, and calls the same executor closures as model and Codemode.
@@ -429,3 +431,61 @@ catalog changed after the Site was built.
 - Version provenance retains the exact source session/turn/attempt, but list
   responses redact it and detail links are projected only when the viewer can
   read the source session.
+
+## Host-native consent (2026-10)
+
+"Pressing Send is consent." A Site call that needs approval is confirmed by the
+person viewing the Site, in the Opengeni frame around it. Site code never
+renders, answers or skips that confirmation.
+
+- **Viewer's own account.** A Site version may declare a canonical connector
+  identity (`{ serverId: "gmail", toolName: "send_message" }`). It resolves per
+  viewer to that viewer's own account routes (`site-tool-routing.ts`). A
+  declared account route is honoured exactly for its owner; for anyone else it
+  maps only through a canonical identity the same version declares for that
+  tool. Another member's personal connection is never used. A viewer with
+  several accounts picks one in the confirmation; a viewer with none gets the
+  existing connect card.
+- **Confirmation.** `tools/invoke` answers 409 with `details.code`
+  `tool_gateway_approval_required`, `site_tool_account_required` or
+  `site_tool_connection_required`. The parent bridge (`createSiteToolBridge`
+  with `confirmToolCall`) reads `POST tools/site-consent` (the viewer's own
+  accounts, or what to connect), shows the native dialog (title, From, To,
+  Cc, Bcc, Subject; Send or Confirm; Cancel; "Always allow for this Site"),
+  mints `POST tools/target-approvals` for the chosen route and retries the same
+  operation id with that single-use token. Cancel runs nothing. Site HTTP
+  forwarding cannot reach either endpoint, and Site-supplied approval tokens
+  are stripped.
+- **What the dialog shows comes from the provider.** `site-consent` with the
+  call's exact `arguments` returns the provider's own review on the selected
+  route (the same `reviewContext` agent approvals use). For Gmail that is the
+  message as it would be sent, read from a raw message, a draft or a reply, so
+  Site code cannot hide recipients behind `raw` or `draftId`. Picking another
+  account reads it again. A provider that cannot read what the call would do
+  refuses with 422 `site_tool_review_unavailable`. Without a provider review the
+  rows come from the arguments the tool receives. Send is disabled briefly after
+  the dialog opens and focus starts on Cancel, so a Site cannot time a call
+  into a person's keystroke or click; at most eight questions wait at once.
+- **Connections that need attention.** An approval preflight that finds the
+  connection missing, inactive or needing reconnection answers 409
+  `tool_connection_needs_attention`; nothing reaches the provider. A connector
+  without a connect card tells the Site to connect it in Opengeni.
+- **Always allow for this Site.** A personal row in `site_tool_allowances`
+  (FORCE RLS on its own subject) keyed by person, Site artifact, canonical
+  connector, tool and connection. It applies only to calls from that Site,
+  survives later versions of the Site, never changes the connection-wide tool
+  permission that also governs agents, and never overrides Block. On a tool
+  that needs no approval it only remembers the chosen account. Only a person
+  in an Opengeni frame (a signed-in session, or a product embedding Opengeni
+  for that person) can record one; service keys and external actors cannot.
+  There is no per-Site "forget" control yet: setting the connection's tool to
+  Block, or disconnecting, stops it.
+- **Connection preflight.** Every connection-backed server in the current-human
+  gateway gets a side-effect-free approval preflight: one non-refreshing,
+  non-recording credential lookup of the exact connection. Built-in bridges such
+  as Gmail therefore stay listed and confirmable instead of being hidden.
+- **Published hostnames.** A published page has no Opengeni frame and shares an
+  origin with its tool endpoint, so an in-page dialog could be spoofed by the
+  page itself. A call there that would need consent, an account choice or a
+  connection answers 409 `site_tool_consent_requires_opengeni` ("Open this Site
+  in Opengeni to confirm this action."). Existing allowances still apply there.

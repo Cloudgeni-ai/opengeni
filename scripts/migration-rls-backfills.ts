@@ -11,9 +11,7 @@
  * `INSERT ... SELECT` / `DO $$ ... $$` backfill loop touches ZERO rows and
  * reports success.
  *
- * One mitigation is the owner-only posture window already used by
- * `0009_goal_sessions_first_party_goals_manage.sql` and
- * `0120_durable_goal_wake.sql`:
+ * One mitigation is the owner-only posture window:
  *
  *   ALTER TABLE "t" NO FORCE ROW LEVEL SECURITY;
  *   -- ... the backfill ...
@@ -34,144 +32,18 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitStatements, stripComments } from "../packages/db/src/migration-sql";
 export { splitStatements, stripComments } from "../packages/db/src/migration-sql";
-import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
-import {
-  SESSION_HISTORY_CAPABILITY,
-  sessionHistoryBackfillPlan,
-  sessionHistoryRlsExecutableSql,
-} from "../packages/db/src/migration-session-history-backfills";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
 // Each complete statement here (including comments) only reads catalog source
 // and replaces a routine definition. The writes it names run in that routine,
 // not during migration. Bind this classification to reviewed bytes: changed
-// statements keep conservative analysis, as do every adjacent statement and
-// all migration-time backfills. The grandfather lists below remain frozen.
+// statements keep conservative analysis. DO NOT add a statement that runs a
+// migration-time backfill.
 const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
-  // 0697: one routine source patch.
-  "68249f30d87220cb0cdc78882a237613e32e481122beb96ca5cadde0c64f46e4",
-  // 0855 statements 3 and 4: patch both fork routines, then check the patch.
-  "0b02e5d3e8647e158836970622896e15d0ecc8c0bbd9c1a06583594e648639a3",
-  "2ec24b44e91326ab518e13ea90d1b65bbebafb24ec1361ce589032ebe9c7904b",
-  // 0904: one patch of the event cursor trigger's session projection.
-  "9943693884ffedecf77e8b3a535cb03202d793f91bd1a241e9ff4aec1a54d44e",
+  // 0995 statement 3: patch organization_membership_command_0263's role change.
+  "1b890ad9397f53351e98d62dc8e9973732a3a28596c7fd6ff627632705ee6cf8",
 ]);
-
-/**
- * Migrations that shipped before this class was identified. Their bytes are
- * frozen by the release schema-contract hash ladder and cannot be rewritten, so
- * they are recorded here instead. `0296_force_rls_backfill_noop_repair.sql`
- * repairs the instances that genuinely lost data; the rest are classified in
- * `docs/force-rls-migration-backfills.md`.
- *
- * DO NOT add to this list. A new migration that needs a backfill over a
- * FORCE-RLS table must open the `NO FORCE` window instead.
- */
-export const GRANDFATHERED_MIGRATIONS: readonly string[] = [
-  "0014_repair_orphaned_function_call_results.sql",
-  "0018_sandbox_os.sql",
-  "0045_workspace_memory_v1.sql",
-  "0057_durable_queue_control.sql",
-  "0058_turn_admission_usage_enrollment.sql",
-  "0061_session_workflow_wake_outbox.sql",
-  "0063_session_control_mega_foundation.sql",
-  "0064_rotation_strategy_sharded_backfill.sql",
-  "0065_session_attempt_quiescence.sql",
-  "0068_workspace_control_event_bounds.sql",
-  "0069_session_event_history_backfill.sql",
-  "0094_quarantine_credential_bearing_catalog_urls.sql",
-  "0104_host_export_root_session_backfill.sql",
-  "0111_nested_agent_depth_backfill.sql",
-  "0117_sandbox_recovery_generations.sql",
-  "0122_codex_capacity_same_turn.sql",
-  "0126_document_access_constraints.sql",
-  "0132_connection_subject_isolation.sql",
-  "0135_durable_machine_input_batches.sql",
-  "0136_unified_session_tool_policy.sql",
-  "0138_sandbox_checkpoint_artifacts_and_deadlines.sql",
-  "0143_session_codex_compaction_mode.sql",
-  "0148_session_turn_latency_mode.sql",
-  "0149_workspace_artifacts.sql",
-  "0152_hierarchical_memory_foundation.sql",
-  "0157_session_policy_role_snapshots.sql",
-  "0170_session_control_wake_revision.sql",
-  "0172_retire_model_visible_github_token.sql",
-  "0175_resumable_transcription_provider_deadline.sql",
-  "0180_retained_screenshot_lifecycle_fences.sql",
-  "0184_sandbox_drain_teardown_fence.sql",
-  "0186_sandbox_capture_provider_contract.sql",
-  "0197_knowledge_source_sync_schedules.sql",
-  "0201_company_profile_authority.sql",
-  "0202_document_index_checkpoints.sql",
-  "0212_browser_state_transfer_hardening.sql",
-  "0212_slack_installation_bindings.sql",
-  "0213_browser_interaction_authority.sql",
-  "0215_browser_controller_host.sql",
-  "0216_browser_auth_health_evidence.sql",
-  "0219_organization_tenancy_managed_human_provisioning.sql",
-  "0222_session_visibility_authority_epochs.sql",
-  "0224_slack_post_outcome_reconciliation.sql",
-  "0225_session_visibility_fork_activation.sql",
-  "0226_personal_codex_authority_foundation.sql",
-  "0231_integration_definition_identity_cutover.sql",
-  "0232_integration_facet_authority_cutover.sql",
-  "0233_skill_and_integration_authority_cutover.sql",
-  "0234_xai_subscription_authority.sql",
-  "0235_canonical_human_login_bindings.sql",
-  "0238_goal_persistence_policy.sql",
-  "0238_recover_unclaimed_session_turns.sql",
-  "0240_model_context_user_messages.sql",
-  "0241_atomic_personal_resource_delegation.sql",
-  "0247_terraform_stacks_provenance_repair.sql",
-  "0249_personal_resource_delegation_authority_correction.sql",
-  "0252_scheduled_personal_resource_delegation.sql",
-  "0253_common_user_resource_authority_lifecycle.sql",
-  "0254_scoped_variable_set_authority.sql",
-  "0256_connection_authority_delegation.sql",
-  "0258_three_scope_document_knowledge_authority.sql",
-  "0262_scoped_connected_machines_and_rigs.sql",
-  "0263_organization_membership_lifecycle.sql",
-  "0264_connection_authority_runtime_activation.sql",
-  "0275_scheduled_connection_authority.sql",
-  "0277_workspace_writer_authority_attribution.sql",
-  "0280_connection_and_variable_set_audit_attribution.sql",
-  "0289_session_composer_policy_authority.sql",
-];
-
-/**
- * Migrations whose `DO $$ ... IF EXISTS (SELECT ... FROM <FORCE-RLS table>)
- * ... RAISE EXCEPTION` preflight guard reads zero rows for the same reason, so
- * the guard passes vacuously and never fires. These predate the guard.
- * The safety of those cutovers came from `VALIDATE CONSTRAINT` / `SET NOT NULL`
- * / unique-index builds, which are internal scans and DO bypass RLS - never
- * from the `DO` block.
- *
- * DO NOT add to this list. A new preflight guard over a FORCE-RLS table must
- * open the `NO FORCE` window too, or it is decoration.
- */
-export const GRANDFATHERED_VACUOUS_GUARDS: readonly string[] = [
-  "0057_durable_queue_control.sql",
-  "0063_session_control_mega_foundation.sql",
-  "0106_session_attempt_mcp_approval_policies.sql",
-  "0107_host_export_lineage_contract.sql",
-  "0110_nested_agent_depth_boundary.sql",
-  "0122_codex_capacity_same_turn.sql",
-  "0135_durable_machine_input_batches.sql",
-  "0137_preference_registry.sql",
-  "0157_session_policy_role_snapshots.sql",
-  "0197_knowledge_source_sync_schedules.sql",
-  "0199_workspace_learning_policy.sql",
-  "0225_session_visibility_fork_activation.sql",
-  "0231_integration_definition_identity_cutover.sql",
-  "0232_integration_facet_authority_cutover.sql",
-  "0233_skill_and_integration_authority_cutover.sql",
-  "0240_model_context_user_messages.sql",
-  "0247_terraform_stacks_provenance_repair.sql",
-  "0248_terraform_stacks_component_resolution_fence.sql",
-  "0264_connection_authority_runtime_activation.sql",
-  "0275_scheduled_connection_authority.sql",
-];
 
 export type BackfillFinding = {
   /** Migration file name, e.g. `0296_...sql`. */
@@ -289,6 +161,17 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
         let end = match.index + match[0].length;
         for (; end < statement.length; end += 1) {
           const char = statement[end]!;
+          if (!quoted && char === "$") {
+            // A dollar-quoted literal is opaque text: its parentheses, quotes
+            // and semicolons are routine source, not this call's syntax.
+            const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(statement.slice(end))?.[0];
+            if (tag) {
+              const close = statement.indexOf(tag, end + tag.length);
+              if (close === -1) break;
+              end = close + tag.length - 1;
+              continue;
+            }
+          }
           if (char === "'") {
             if (quoted && statement[end + 1] === "'") {
               end += 1;
@@ -436,7 +319,6 @@ function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null 
 function activatedOwnerCapabilityTables(
   statement: string,
   policies: ReadonlyMap<string, OwnerCapabilityPolicy>,
-  runnerCapabilityGuc?: string,
 ): Set<string> {
   const activeGucs = new Set<string>();
   for (const match of statement.matchAll(
@@ -444,7 +326,6 @@ function activatedOwnerCapabilityTables(
   )) {
     activeGucs.add(match[1]!);
   }
-  if (runnerCapabilityGuc) activeGucs.add(runnerCapabilityGuc);
   return new Set(
     [...policies.values()]
       .filter((policy) => activeGucs.has(policy.guc))
@@ -526,17 +407,7 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
   const findings: BackfillFinding[] = [];
 
   for (const file of files) {
-    const source = readFileSync(join(migrationsDir, file), "utf8");
-    const raw = sessionHistoryRlsExecutableSql(file, source);
-    const runnerSetting = batchedBackfillTransactionLocalSetting(file);
-    const runnerCapabilityGuc = sessionHistoryBackfillPlan(file, source)
-      ? SESSION_HISTORY_CAPABILITY.slice("opengeni.".length)
-      : runnerSetting?.value === "1" &&
-          /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(
-            raw,
-          )
-        ? runnerSetting.guc.slice("opengeni.".length)
-        : undefined;
+    const raw = readFileSync(join(migrationsDir, file), "utf8");
     // Owner-only posture window and tenant GUC state are per-file: the runner
     // executes one file as one implicit transaction.
     const unforced = new Set<string>();
@@ -645,16 +516,11 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       const commentFreeOwnerVisible = activatedOwnerCapabilityTables(
         commentFreeExecutable,
         ownerCapabilityPolicies,
-        runnerCapabilityGuc,
       );
       const ownerVisible = new Set(
-        [
-          ...activatedOwnerCapabilityTables(
-            executable,
-            ownerCapabilityPolicies,
-            runnerCapabilityGuc,
-          ),
-        ].filter((table) => commentFreeOwnerVisible.has(table)),
+        [...activatedOwnerCapabilityTables(executable, ownerCapabilityPolicies)].filter((table) =>
+          commentFreeOwnerVisible.has(table),
+        ),
       );
       const relaxesPosture = (table: string, text: string) =>
         new RegExp(
@@ -699,21 +565,4 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
     }
   }
   return findings;
-}
-
-/** Findings in migrations that are not grandfathered - i.e. real violations. */
-export function unreviewedFindings(findings: readonly BackfillFinding[]): BackfillFinding[] {
-  const allowedWrites = new Set(GRANDFATHERED_MIGRATIONS);
-  const allowedGuards = new Set(GRANDFATHERED_VACUOUS_GUARDS);
-  return findings.filter((finding) =>
-    finding.kind === "write" ? !allowedWrites.has(finding.file) : !allowedGuards.has(finding.file),
-  );
-}
-
-/** Grandfathered entries that no longer match any file (a stale allowlist). */
-export function staleAllowlistEntries(migrationsDir: string): string[] {
-  const files = new Set(readdirSync(migrationsDir).filter((file) => file.endsWith(".sql")));
-  return [...GRANDFATHERED_MIGRATIONS, ...GRANDFATHERED_VACUOUS_GUARDS].filter(
-    (entry) => !files.has(entry),
-  );
 }

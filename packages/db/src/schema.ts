@@ -25,6 +25,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
+  ModelCallProcessingResidencyV1,
   PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
@@ -47,7 +48,7 @@ import {
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
-import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
+import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -77,6 +78,7 @@ import {
 } from "./lossless-columns";
 
 export * from "./automation-templates-schema";
+export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -378,6 +380,47 @@ export const siteSidebarStates = pgTable(
       foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
     }).onDelete("cascade"),
     index("site_sidebar_states_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
+/**
+ * "Always allow for this Site" (migration 1031): one person's standing consent
+ * for one Site to run one tool on one of their own connections. Personal;
+ * consulted only for that Site's calls; never overrides Block and never
+ * changes the connection-wide permission.
+ */
+export const siteToolAllowances = pgTable(
+  "site_tool_allowances",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    connectionId: text("connection_id").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.workspaceId,
+        table.subjectId,
+        table.siteId,
+        table.serverId,
+        table.toolName,
+        table.connectionId,
+      ],
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_tool_allowances_site_idx").on(table.workspaceId, table.siteId),
   ],
 );
 
@@ -3317,6 +3360,11 @@ export const slackInteractionInbox = pgTable(
       table.createdAt,
       table.id,
     ),
+    // Thread-context reads (migration 1013): a mention in a mapped thread
+    // attaches the untagged messages recorded since the last invocation.
+    threadContext: index("slack_interaction_inbox_thread_context_idx")
+      .on(table.connectionId, table.slackChannelId, table.slackThreadTs, table.createdAt.desc())
+      .where(sql`${table.slackThreadTs} is not null`),
   }),
 );
 
@@ -5073,6 +5121,10 @@ export const sessions = pgTable(
     initialModelContext: text("initial_model_context"),
     title: text("title"),
     titleSource: text("title_source"),
+    // Display metadata shown with the title (1008): a one-line description and
+    // an avatar. Never part of the model's context; copied by forks.
+    description: text("description"),
+    avatar: jsonb("avatar").$type<SessionAvatar>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a
@@ -13303,6 +13355,9 @@ export const modelCallFacts = pgTable(
     // Prompt-cache observation and warm-miss classification (see
     // PromptCacheDiagnostics); null before 0979 and for repaired facts.
     promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
+    // Processing residency claim of the route that served the call (see
+    // ModelCallProcessingResidencyV1), never evidence; null before 1030.
+    processingResidency: jsonb("processing_residency").$type<ModelCallProcessingResidencyV1>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -134,12 +134,12 @@ import {
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
-  selectClaudeTurnCapacityByRoute,
+  selectClaudeTurnCapacity,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
 import {
   buildXaiCoreRequestAuthorization,
-  selectXaiTurnCapacityByRoute,
+  selectXaiTurnCapacity,
   xaiCoreTitleCustody,
   type XaiCoreRequestAuthorization,
 } from "./xai-core";
@@ -171,6 +171,7 @@ export function sessionTitleCodexRequestContext(
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
     ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
+    ...(context.onReportedUsage ? { onReportedUsage: context.onReportedUsage } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -699,9 +700,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             } else {
               const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
               if ("exit" in codexCapacity) return codexCapacity.exit;
-              const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
+              const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
               if ("exit" in xaiCapacity) return xaiCapacity.exit;
-              const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
+              const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
               if ("exit" in claudeCapacity) return claudeCapacity.exit;
             }
           }
@@ -881,8 +882,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
-                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    onReportedUsage: (usage) => creditGuard.observe(usage),
                     persistUsageHeaders: async (snapshot) => {
                       if (!coreCodex) return;
                       await recordCoreCodexUsageReading({
@@ -2046,6 +2047,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         sandboxState.setupBoxSession as CodemodeTokenWriterSession,
                         downloadsToMaterialize,
                         {
+                          sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
                           onRuntimeEvent: async (event) => {
                             await eventing.publish!(
                               [{ type: event.type, payload: event.payload }],

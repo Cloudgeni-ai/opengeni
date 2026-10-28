@@ -23,6 +23,7 @@ import {
   isSessionEventPersistenceError,
   issueSelfUserResourceGrant,
   peekSessionWork,
+  PersonalResourceAttachmentAcceptanceError,
   recoverSessionDispatch,
   resolvePersonalMachineConnectionForAttempt,
   resolvePersonalMachineRouteForAttempt,
@@ -473,6 +474,63 @@ describe("live personal machine consent under FORCE RLS", () => {
     expect(await explanation(f.member)).toMatchObject({ isOwner: false });
     await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspaceId} and subject_id = ${f.member}`;
     expect(await explanation(f.member)).toBeNull();
+  });
+
+  test("a message sent just after the chat's access changed is refused as stale, then accepted on resend", async () => {
+    const f = await fixture();
+    const session = await chatOnOwnersMachine(f);
+    const turnCount = async () =>
+      Number(
+        (
+          await shared.admin`select count(*)::int as count from session_turns
+            where session_id = ${session.id}`
+        )[0]!.count,
+      );
+    const before = await turnCount();
+    await transitionSessionVisibility(client.db, {
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: f.owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    // The composer still holds the access version from before the change.
+    let rejected: unknown;
+    try {
+      await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.owner, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: f.accountId,
+            workspaceId: f.workspaceId,
+            sessionId: session.id,
+            subjectId: f.owner,
+            actor: { type: "human", subjectId: f.owner },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Set up the home server",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalResourceAttachment: {
+              mode: "session",
+              expectedAuthorityEpoch: 1,
+              workspaceSharedAcknowledged: true,
+              sharedOutputWarningVersion: 1,
+            },
+          }),
+        ),
+      );
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(PersonalResourceAttachmentAcceptanceError);
+    expect((rejected as PersonalResourceAttachmentAcceptanceError).kind).toBe("stale");
+    expect(isSessionEventPersistenceError(rejected)).toBe(false);
+    expect(await turnCount()).toBe(before);
+    // Resending with the current version is accepted.
+    await submitAs(f, session.id, f.owner, "Set up the home server");
+    expect(await turnCount()).toBe(before + 1);
   });
 
   test("a member's message waits for the owner instead of inheriting the personal machine", async () => {

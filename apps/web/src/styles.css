@@ -155,10 +155,37 @@ html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] dialo
   padding-left: 32px;
 }
 
+/* The publish form takes the Site's place, so its header is then the top row.
+   It is already 32px in, until a narrow column (chat dragged wide) halves its
+   padding; keep the 32px that clears the controls and the sharing badge, for
+   the body and buttons too so the form keeps one left edge. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > :is(header, [data-slot="form-body"]),
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] [data-slot="form-frame"][data-variant="page"] > form > footer > div {
+  padding-left: 32px;
+}
+
 /* A full-window workspace panel (maximized, or the overlay in a narrow
    window) puts its tab row under the traffic lights. */
 html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
   padding-left: 84px;
+}
+
+/* The signed-out page has no rail: its brand row is the window's top row, and
+   the page scrolls beneath the controls. Its 1040px column is centred, so in a
+   window narrower than about 1128px the brand, and the headline and sign-in
+   buttons once scrolled, would reach the controls and the sharing badge. The
+   column (header, page and footer, so they keep one edge) starts 84px in
+   there, and keeps its usual inset in wider windows. */
+html[data-desktop="macos"] [data-signed-out-column] {
+  padding-left: clamp(2.5rem, calc(84px - (100% - 1040px) / 2), 84px);
+}
+
+/* A content page (Automations, Meetings, Knowledge, Library) starts 24px past
+   a collapsed rail in a window narrower than 1024px, at the sharing badge's
+   edge (about 80px in); it starts 32px past it, like the session title bar.
+   Wider windows already use 32px. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] {
+  --og-content-page-start: 2rem;
 }
 
 /* Expanded Sites escape the rail into the modal top layer. Their own header

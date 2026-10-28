@@ -34,7 +34,9 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
   SessionAutomationWaitSummary,
+  SessionAvatar,
 } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -284,6 +286,8 @@ export type ToolGatewayTargetApprovalRequest = {
   operationId: string;
   arguments: Record<string, unknown>;
   expectedDefinitionDigest: string;
+  /** "Always allow for this Site" (this person, this Site, this tool and connection). Site context only. */
+  rememberForSite?: boolean;
   siteArtifactId?: string;
   siteVersionId?: string;
 };
@@ -293,6 +297,38 @@ export type ToolGatewayTargetApprovalResponse = {
   tool: ToolGatewayResolvedTool;
   approvalToken: string;
   expiresAt: string;
+};
+/** The viewer's own accounts for a Site's declared tool (host code only). */
+export type ToolGatewaySiteConsentRequest = {
+  identity: ToolGatewayIdentity;
+  siteArtifactId: string;
+  siteVersionId: string;
+  /** The exact arguments, to review what the call would do on the selected account. */
+  arguments?: Record<string, unknown>;
+};
+export type ToolGatewaySiteConsentAccount = {
+  identity: ToolGatewayIdentity;
+  connector: string;
+  account: string;
+};
+/** The provider's own reading of the call (for Gmail, the message as it would be sent). */
+export type ToolGatewaySiteConsentReview = {
+  kind: "generic" | "gmail";
+  email?: {
+    from: string;
+    to: string;
+    cc: string;
+    bcc: string;
+    subject: string;
+    attachments: number;
+  };
+};
+export type ToolGatewaySiteConsentResponse = {
+  version: 1;
+  accounts: ToolGatewaySiteConsentAccount[];
+  selected: ToolGatewayIdentity | null;
+  review: ToolGatewaySiteConsentReview | null;
+  connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
@@ -1844,6 +1880,10 @@ export type Session = {
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
+  /** Display-only one-line description of what this chat is for. Never sent to the model. */
+  description?: string | null | undefined;
+  /** Display-only avatar. Never sent to the model. */
+  avatar?: SessionAvatar | null | undefined;
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
@@ -2030,6 +2070,8 @@ export type SessionListEntry = Pick<
   | "automationWait"
   | "title"
   | "titleSource"
+  | "description"
+  | "avatar"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -2668,6 +2710,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.profile_set",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
@@ -3859,6 +3902,18 @@ export type CreateSessionRequest = {
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
   /**
+   * The new chat's name, description and avatar, as if a person set them (a
+   * bot started from a template, for example). Display metadata only; never
+   * sent to the model.
+   */
+  profile?:
+    | {
+        title?: string | undefined;
+        description?: string | undefined;
+        avatar?: SessionAvatar | undefined;
+      }
+    | undefined;
+  /**
    * `realtime` creates an idle session shell so realtime voice can be the
    * first interaction. `standard` is the explicit default; `createSession`
    * sends it with a usage limit so servers that predate limits reject the
@@ -4109,6 +4164,7 @@ export type FirstPartyMcpToolName =
   | "session_steer"
   | "session_human_input_respond"
   | "set_other_session_title"
+  | "bot_template_save"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"
@@ -5801,6 +5857,12 @@ export type ManagedOrganizationMembership = {
    * longer sees or starts new work there. Absent means on.
    */
   personalWorkspacesEnabled?: boolean | undefined;
+  /**
+   * The person's current answer to "How do you want to use Opengeni?" for
+   * this organization: get help with everyday things, add agents to a product,
+   * or run agents in the cloud. Absent when the server keeps no answer for them.
+   */
+  signupUseCase?: "everyday" | "embed" | "cloud" | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {
@@ -7139,7 +7201,10 @@ export type UpdateSessionGoalRequest =
     };
 
 export type UpdateSessionRequest = {
-  title: string;
+  title?: string | undefined;
+  /** Empty string clears the description. */
+  description?: string | null | undefined;
+  avatar?: SessionAvatar | null | undefined;
 };
 
 // --- Operator context controls (/clear, /compact) ----------------------------

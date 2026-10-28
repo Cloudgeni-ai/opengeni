@@ -2,8 +2,46 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { ModalRouterProviderCommand } from "@opengeni/contracts";
 import type { ProviderCommandOutput } from "../provider-command-session";
-import { decodePage } from "./modal-legacy-command-control";
 import { MODAL_ROUTER_READ_PAGE_BYTES } from "./modal-command-router-wire";
+
+// A provider batch may end halfway through a UTF-8 character. Keep only that
+// unfinished suffix in protected cursor state; invalid complete bytes still
+// use the usual replacement-character decoding policy.
+function decodePage(prior: string, input: Uint8Array[], terminal: boolean) {
+  const bytes = Buffer.concat([Buffer.from(prior, "base64"), ...input]);
+  let boundary = bytes.length;
+  if (!terminal) {
+    for (let start = Math.max(0, bytes.length - 3); start < bytes.length; start++) {
+      const first = bytes[start]!;
+      const width =
+        first >= 0xc2 && first <= 0xdf
+          ? 2
+          : first >= 0xe0 && first <= 0xef
+            ? 3
+            : first >= 0xf0 && first <= 0xf4
+              ? 4
+              : 0;
+      if (!width || bytes.length - start >= width) continue;
+      const suffix = bytes.subarray(start + 1);
+      if (!suffix.every((byte) => byte >= 0x80 && byte <= 0xbf)) continue;
+      const second = suffix[0];
+      if (
+        second !== undefined &&
+        ((first === 0xe0 && second < 0xa0) ||
+          (first === 0xed && second > 0x9f) ||
+          (first === 0xf0 && second < 0x90) ||
+          (first === 0xf4 && second > 0x8f))
+      )
+        continue;
+      boundary = start;
+      break;
+    }
+  }
+  return {
+    text: bytes.subarray(0, boundary).toString("utf8"),
+    remainder: bytes.subarray(boundary).toString("base64"),
+  };
+}
 
 const RawStream = z
   .object({

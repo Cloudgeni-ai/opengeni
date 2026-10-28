@@ -383,12 +383,35 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // A direct session load shows these icons (tool icons and the
+              // new-chat starters), and lazy pages use them too. Left to
+              // entry-aware grouping they can share a chunk with the recordings
+              // model and the meeting helpers, which pulls that lazy code into
+              // every direct session load.
+              name: "starter-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:blocks|code|graduation-cap)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // The session page shows these icons, and so does the default-machine
               // settings row. Left to entry-aware grouping they share a chunk with
               // that row, which pulls the settings and model pages into every
               // direct session load.
               name: "visibility-glyphs",
               test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:eye|eye-off)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
+              // A direct session load reads these small session helpers, and so
+              // do the settings pages. Left to entry-aware grouping they can
+              // share a chunk with the recordings model, the command-menu
+              // actions or the meeting settings (and through them the
+              // management UI primitives), which pulls that lazy code into
+              // every direct session load.
+              name: "session-read-helpers",
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:lib[\\/]client-config-read|timeline[\\/]tool-details|session-list-model|app[\\/]lib[\\/]session-capabilities|ui[\\/]tooltip)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/]lock-keyhole\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },

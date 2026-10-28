@@ -225,6 +225,7 @@ async fn respond(
             Ok(Progress::Prepared(prepared)) => Reply::Prepared {
                 image: prepared.image,
                 digest: prepared.digest,
+                guest: Some(prepared.guest),
             },
             Err(error) => Reply::Error {
                 message: error.to_string(),
