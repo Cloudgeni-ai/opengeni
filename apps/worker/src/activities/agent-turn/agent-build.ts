@@ -565,6 +565,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     );
   };
+  // The one live read of the video policy: each tool call reads it, never the
+  // turn's startup. The EU gate below reads the same way when EU applies.
+  const readVideoGenerationPolicy = () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
   const unrestrictedVideoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
     !objectStorage ||
     eventing.modelRunSettings.sandboxBackend === "none" ||
@@ -589,7 +592,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 sessionId: input.sessionId,
                 turnId: turn.id,
               }),
-            readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+            readPolicy: readVideoGenerationPolicy,
             resolveCredential: resolveVideoGenerationCredential,
             admit: async ({ policy, credential, toolInput, toolCallId }) => {
               const referenceSandbox = await resolveVideoReferenceSandboxAccess(
@@ -653,10 +656,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // offered; each call also checks the route its live funding policy names.
   const videoGenerationOption = gateVideoGenerationOption(
     runSettings,
-    async () =>
-      videoGenerationRoute(
-        (await getWorkspaceVideoGenerationPolicy(db, input.workspaceId)).fundingSource,
-      ),
+    async () => videoGenerationRoute((await readVideoGenerationPolicy()).fundingSource),
     unrestrictedVideoGenerationOption,
   );
   const serviceTier = serviceTierForLatencyMode(

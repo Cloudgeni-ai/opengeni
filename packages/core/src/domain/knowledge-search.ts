@@ -116,11 +116,13 @@ export async function searchKnowledgeEntries(
   };
   // The embedder is resolved once: the region check, the call and the
   // recorded region all use this one provider. One that cannot be resolved
-  // sends nothing; the provider path below falls back as before.
+  // (it throws, or a host without an embedder returns none) sends nothing;
+  // the provider path below falls back to keyword search as before.
   let provider: DocumentEmbedder | null = null;
   let resolveError: unknown = null;
   try {
-    provider = embedder();
+    provider = (embedder() as DocumentEmbedder | null | undefined) ?? null;
+    if (!provider) resolveError = new Error("Knowledge query embedder is unavailable");
   } catch (error) {
     resolveError = error;
   }

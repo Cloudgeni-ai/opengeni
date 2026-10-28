@@ -106,6 +106,22 @@ test("hybrid fallback keeps lexical recall and passes the exact scope and cursor
     cursor: "page-2",
   });
 });
+test("a host without an embedder keeps the hybrid keyword fallback and refuses vector mode", async () => {
+  // Gateways built without an embedder resolve none; that sends nothing and
+  // answers like any unavailable provider, outside EU as before.
+  const none = () => undefined as never;
+  const result = await searchKnowledgeEntries(
+    {} as never,
+    serviceContext,
+    { query: "Acme renewal" },
+    none,
+  );
+  expect(result.searchMode).toBe("keyword");
+  expect(result.fallbackReason).toBe("provider_unavailable");
+  await expect(
+    searchKnowledgeEntries({} as never, serviceContext, { query: "Acme", mode: "vector" }, none),
+  ).rejects.toThrow("Knowledge query embedder is unavailable");
+});
 test("keyword and explicit search syntax remain unchanged", async () => {
   for (const query of ['"Acme renewal"', "Acme -expired", "Acme OR renewal"]) {
     await searchKnowledgeEntries({} as never, {} as never, { query }, unavailable);
