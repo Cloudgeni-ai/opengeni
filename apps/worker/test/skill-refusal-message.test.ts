@@ -19,7 +19,7 @@ describe("skillRefusalMessage", () => {
       "a workspace Skill or the person's own Skill can still be removed on the Skills page by someone who manages Skills",
     );
     // A Personal workspace owner's chat may remove its workspace Skills
-    // (migration 1014), so the refusal no longer claims a blanket rule.
+    // (migration 1033), so the refusal no longer claims a blanket rule.
     expect(message).not.toContain("(a private chat removes only personal Skills");
   });
 });
