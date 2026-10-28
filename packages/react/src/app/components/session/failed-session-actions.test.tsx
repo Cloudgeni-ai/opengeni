@@ -961,3 +961,42 @@ test("a Codex usage limit offers to continue the same chat with another model", 
   await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
   expect(container.querySelector('[data-testid="continue-with-model"]')).toBeNull();
 });
+
+test("continuing a chat Codex compacted says earlier messages will be re-summarized", async () => {
+  const limited = { ...failure, failureCode: "codex_usage_limit_reached" };
+  const headsUp =
+    "Earlier messages will be re-summarized for GPT-6 Astra, so it may remember less detail.";
+  const continueWith = { label: "GPT-6 Astra", headsUp, onContinue: () => undefined };
+  const container = await render(
+    <FailedSessionBanner failure={limited} actions={actions} continueWith={continueWith} />,
+  );
+  expect(container.querySelector('[data-testid="model-switch-heads-up"]')?.textContent).toBe(
+    headsUp,
+  );
+  // A chat Codex never compacted switches with nothing to rebuild: no line.
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={limited}
+        actions={actions}
+        continueWith={{ ...continueWith, headsUp: null }}
+      />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="continue-with-model"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="model-switch-heads-up"]')).toBeNull();
+});
+
+test("the Codex usage notice carries the re-summary line under its action", async () => {
+  const { CodexUsageNotice } = await import("./continue-with-model");
+  const headsUp =
+    "Earlier messages will be re-summarized for GPT-6 Astra, so it may remember less detail.";
+  const container = await render(
+    <CodexUsageNotice
+      continueWith={{ label: "GPT-6 Astra", headsUp, onContinue: () => undefined }}
+    />,
+  );
+  expect(container.querySelector('[data-testid="model-switch-heads-up"]')?.textContent).toBe(
+    headsUp,
+  );
+});

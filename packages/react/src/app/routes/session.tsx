@@ -227,9 +227,16 @@ import {
 import { UnavailableModelNotice } from "../components/session/unavailable-model-notice";
 import {
   CodexUsageNotice,
+  ModelSwitchHeadsUp,
   type ContinueWithModel,
 } from "../components/session/continue-with-model";
 import { isCodexProductModel } from "../lib/session-model";
+import {
+  CONTEXT_CHECKPOINT_EVENT_TYPES,
+  latestCheckpointIsCompaction,
+  modelSwitchHeadsUpText,
+  needsModelSwitchHeadsUp,
+} from "../lib/codex-model-switch";
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
@@ -3225,6 +3232,57 @@ function SessionChatPane(props: {
     pending: boolean;
     error: string | null;
   }>({ pending: false, error: null });
+  // Whether Codex already compacted this remote_v2 chat. Another model then
+  // rebuilds its earlier messages from a summary, which the switch line says.
+  const remoteV2Chat = props.session.codexCompactionMode === "remote_v2";
+  const loadedCheckpointIsCompaction = useMemo(
+    () => (remoteV2Chat ? latestCheckpointIsCompaction(props.events) : null),
+    [remoteV2Chat, props.events],
+  );
+  const [fetchedCodexCompaction, setFetchedCodexCompaction] = useState<{
+    sessionId: string;
+    compacted: boolean;
+  } | null>(null);
+  useEffect(() => {
+    // The loaded page may start after the latest checkpoint: read the newest ones.
+    if (!remoteV2Chat || loadedCheckpointIsCompaction !== null) return;
+    let cancelled = false;
+    const sessionId = props.session.id;
+    context.client
+      .listEvents(props.session.workspaceId, sessionId, {
+        includeTypes: CONTEXT_CHECKPOINT_EVENT_TYPES,
+        limit: 20,
+        payloadMode: "none",
+      })
+      .then((events) => {
+        if (!cancelled)
+          setFetchedCodexCompaction({
+            sessionId,
+            compacted: latestCheckpointIsCompaction(events) === true,
+          });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    context.client,
+    loadedCheckpointIsCompaction,
+    props.session.id,
+    props.session.workspaceId,
+    remoteV2Chat,
+  ]);
+  const codexCompacted =
+    loadedCheckpointIsCompaction ??
+    (fetchedCodexCompaction?.sessionId === props.session.id && fetchedCodexCompaction.compacted);
+  const switchHeadsUp = (target: string | null | undefined, label: string) =>
+    needsModelSwitchHeadsUp({
+      codexCompactionMode: props.session.codexCompactionMode,
+      codexCompacted,
+      model: target,
+    })
+      ? modelSwitchHeadsUpText(label)
+      : null;
   const continueAfterUsageLimit = async () => {
     if (!usageContinuationModel || usageContinuation.pending) return;
     const row = findPickerRow(modelCatalog.rows, usageContinuationModel.model);
@@ -3277,6 +3335,7 @@ function SessionChatPane(props: {
         label: usageContinuationModel.label,
         pending: usageContinuation.pending,
         error: usageContinuation.error,
+        headsUp: switchHeadsUp(usageContinuationModel.model, usageContinuationModel.label),
         onContinue: () => void continueAfterUsageLimit(),
       }
     : undefined;
@@ -3285,6 +3344,15 @@ function SessionChatPane(props: {
     continueWith && props.session.status !== "failed" && !terminal ? (
       <CodexUsageNotice continueWith={continueWith} />
     ) : null;
+  // The chosen model is about to rebuild a chat Codex compacted. The usage
+  // notice already carries this line for its own model.
+  const chosenModelHeadsUp =
+    !codexUsageNotice && !terminal
+      ? switchHeadsUp(model, selectedPolicyRow?.label ?? unavailableModelName(model))
+      : null;
+  const modelSwitchHeadsUp = chosenModelHeadsUp ? (
+    <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
+  ) : null;
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
@@ -4023,6 +4091,7 @@ function SessionChatPane(props: {
                 header={
                   unavailableModelNotice ||
                   codexUsageNotice ||
+                  modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
@@ -4045,6 +4114,7 @@ function SessionChatPane(props: {
                       ) : null}
                       {unavailableModelNotice}
                       {codexUsageNotice}
+                      {modelSwitchHeadsUp}
                       {usageLimitNotice}
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>

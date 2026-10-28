@@ -14,7 +14,11 @@ import {
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
 import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
-import { ContinueWithModelButton, type ContinueWithModel } from "./continue-with-model";
+import {
+  ContinueWithModelButton,
+  ModelSwitchHeadsUp,
+  type ContinueWithModel,
+} from "./continue-with-model";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -122,7 +126,12 @@ export function FailedSessionBanner({
   };
   const continueAction =
     continueWith && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure ? (
-      <ContinueWithModelButton {...continueWith} />
+      <>
+        <ContinueWithModelButton {...continueWith} />
+        {continueWith.headsUp ? (
+          <ModelSwitchHeadsUp text={continueWith.headsUp} className="order-last basis-full" />
+        ) : null}
+      </>
     ) : null;
   const retryActions =
     trackedActions &&

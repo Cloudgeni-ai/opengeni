@@ -15808,9 +15808,10 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
-    // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
-    // model admission for the life of the session; portable ⇒ plaintext compaction
-    // and free mid-session provider switching (today's behavior).
+    // Set at session create. remote_v2 ⇒ Codex remote compaction while the chat
+    // stays on Codex; switching to another provider's model rebuilds the context
+    // as a portable summary and turns the chat portable. portable ⇒ plaintext
+    // compaction and free mid-session provider switching.
     codexCompactionMode: CodexCompactionMode,
     /**
      * The `code_search` decision frozen at create. A turn gets the tool only when
