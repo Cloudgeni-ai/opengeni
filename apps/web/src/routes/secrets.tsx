@@ -68,7 +68,11 @@ import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructiv
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { orgLabel } from "@opengeni/react/app/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import {
   connectViewProvider,
   type SecretsConnectOwner,
@@ -234,7 +238,11 @@ export function SecretsRoute({
     [context.workspaces, workspace?.accountId],
   );
   const capabilityOff = secretsCapabilityOff(workspace?.settings);
-  const canEditAgentDefaults = can("workspace:admin");
+  const canEditAgentDefaults = canManageWorkspaceSettings(
+    access,
+    workspace,
+    context.managedSelfContext,
+  );
 
   const vaults = useVaults({ enabled: canList });
   const api = vaults.api;

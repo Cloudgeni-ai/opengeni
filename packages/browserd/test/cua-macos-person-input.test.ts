@@ -47,6 +47,10 @@ describe("macOS person input", () => {
     // Ended 2 s ago: input 2.5 s ago, or within the margin after, is the agent's.
     expect(agent.personOnly(2.5)).toBeNull();
     expect(agent.personOnly(2 - AGENT_INPUT_MARGIN_MS / 1000)).toBeNull();
+    // The margin is half a second: input 490 ms after the agent's ended is
+    // the agent's, input 510 ms after it is a person's.
+    expect(agent.personOnly(1.51)).toBeNull();
+    expect(agent.personOnly(1.49)).toBe(1.49);
     expect(agent.personOnly(1)).toBe(1);
     // A failed send counts too: its input may have gone out.
     await agent

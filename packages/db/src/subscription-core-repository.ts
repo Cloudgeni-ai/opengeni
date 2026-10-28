@@ -662,31 +662,6 @@ export type SubscriptionTurnLease = SubscriptionTurnLeaseIdentity & {
 };
 
 /**
- * The organization/provider cutover is disabled unless an explicit row opts
- * in. Callers must check this before reading core state; an absent row must
- * never be interpreted as a partially activated provider.
- */
-export async function isSubscriptionProviderCutoverEnabled(
-  db: Database,
-  input: { accountId: string; provider: ProviderId },
-): Promise<boolean> {
-  return (await readSubscriptionProviderCutoverState(db, input)) === "enabled";
-}
-
-/** Distinguishes a pre-cutover absent row from a deliberately disabled cutover. */
-export async function readSubscriptionProviderCutoverState(
-  db: Database,
-  input: { accountId: string; provider: ProviderId },
-): Promise<"not_configured" | "disabled" | "enabled"> {
-  const [row] = await rawRows<{ enabled: boolean }>(
-    db,
-    sql`select enabled from subscription_provider_cutovers
-      where account_id = ${input.accountId}::uuid and provider = ${input.provider}`,
-  );
-  return row ? (row.enabled ? "enabled" : "disabled") : "not_configured";
-}
-
-/**
  * Acquire the chat-turn lease after core placement and immediately rechecking
  * current eligibility. Replays by the same holder/connection/generation are
  * idempotent. A stale holder can be replaced only after expiry and only by a

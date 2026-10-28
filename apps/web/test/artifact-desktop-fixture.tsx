@@ -1,9 +1,12 @@
 import { createRoot } from "react-dom/client";
 import { ArtifactSandbox } from "../../../packages/react/src/components/artifacts/artifact-sandbox";
+import { installDesktopShell } from "../../../packages/react/src/app/lib/desktop";
 import "../src/styles.css";
 
 // Real viewer and app styles; only the Site content and native platform are
-// fixtures. Browser assertions supply the shell's data-desktop attribute.
+// fixtures. Browser assertions supply the shell's data-desktop attribute, or
+// the desktop app's user agent for the app's own marking (as App.tsx does).
+installDesktopShell(() => undefined);
 createRoot(document.getElementById("root")!).render(
   <main className="h-dvh bg-bg p-8 text-fg">
     <ArtifactSandbox

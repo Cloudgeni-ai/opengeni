@@ -44,7 +44,6 @@ import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "../lo
 import { lockSessionEventWriteRows } from "../session-control";
 import {
   readSubscriptionEffectiveSettings,
-  readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
   isSubscriptionSessionBindingRollingConflict,
   writeSubscriptionSessionBinding,
@@ -53,7 +52,7 @@ import {
   subscriptionCoreProvider,
   subscriptionCoreProviderIds,
 } from "../subscription-core-providers";
-import { subscriptionCoreProviderId, type SubscriptionCoreProvider } from "./provider";
+import { type SubscriptionCoreProvider } from "./provider";
 import {
   projectSubscriptionCoreAccountUsage,
   type SubscriptionCoreAccountUsage,
@@ -196,23 +195,6 @@ function registeredProviders(): SubscriptionCoreChoiceProviders {
   return subscriptionCoreProviderIds().map((providerId) => subscriptionCoreProvider(providerId));
 }
 
-/** The providers whose cutover is enabled for the organization, in the given order. */
-async function enabledProviders(
-  tx: Database,
-  accountId: string,
-  providers: SubscriptionCoreChoiceProviders,
-): Promise<SubscriptionCoreProvider[]> {
-  const enabled: SubscriptionCoreProvider[] = [];
-  for (const binding of providers) {
-    const state = await readSubscriptionProviderCutoverState(tx, {
-      accountId,
-      provider: subscriptionCoreProviderId(binding),
-    });
-    if (state === "enabled") enabled.push(binding);
-  }
-  return enabled;
-}
-
 /**
  * Every connection this caller could name for the session: the pool's shared
  * connections and the caller's own personal ones, per enabled provider.
@@ -226,7 +208,7 @@ async function listChoosableConnections(
   providers: SubscriptionCoreChoiceProviders,
 ): Promise<SubscriptionCoreChoosableConnection[]> {
   const connections: SubscriptionCoreChoosableConnection[] = [];
-  for (const binding of await enabledProviders(tx, input.accountId, providers)) {
+  for (const binding of providers) {
     const providerId = binding.adapter.provider;
     const pool = await readSubscriptionCoreWorkspacePool(tx, binding, {
       ...input,
@@ -994,7 +976,7 @@ export async function writeSubscriptionPersonPreferences(
     // sessions its owner owns, so no other session can place differently.
     const wakes: SubscriptionCoreProviderWake[] =
       row.personal_fallback_opt_in && !own.optIn
-        ? (await enabledProviders(tx, input.accountId, providers)).map((binding) => ({
+        ? providers.map((binding) => ({
             provider: binding.adapter.provider,
             accountId: input.accountId,
             reason: subscriptionCoreWakeReason(binding, "person_preferences_changed"),

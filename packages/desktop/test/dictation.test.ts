@@ -39,6 +39,15 @@ const { hudAction } = await import("../src/main/dictation/hud");
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+/**
+ * Only the owner may read the file. Windows has no such file mode: there the
+ * app's data folder in the person's own profile is what keeps it private.
+ */
+function expectOnlyThePersonCanRead(path: string) {
+  if (process.platform === "win32") return;
+  expect(statSync(path).mode & 0o777).toBe(0o600);
+}
+
 function harness(
   options: {
     settings?: Partial<DesktopDictationSettings>;
@@ -760,6 +769,24 @@ describe("dictation settings", () => {
     }
   });
 
+  test("an app that learns its language later gives the first shortcut that language", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
+    try {
+      let appLanguage: string | null = null;
+      const store = new DictationSettingsStore(dir, "darwin", () => appLanguage);
+      expect(store.read().profiles[0]!.language).toBeNull();
+      // Signing in tells the app its language; nothing was saved yet, so the default follows.
+      appLanguage = "nb";
+      expect(store.read().profiles[0]!.language).toBe("nb");
+      // Once saved, the language stays, whatever the app says next.
+      store.write({ ...store.read(), enabled: true });
+      appLanguage = "en";
+      expect(store.read().profiles[0]!.language).toBe("nb");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("shortcuts: chords need two known keys", () => {
     expect(parseDictationShortcut({ kind: "modifierChord", modifiers: ["fn", "control"] })).toEqual(
       {
@@ -887,7 +914,7 @@ describe("dictation settings", () => {
       // Speech goes when its dictation is no longer kept.
       expect(store.audio("d0")).toBeNull();
       expect(readdirSync(join(dir, "dictation-audio"))).toHaveLength(DICTATION_HISTORY_MAX);
-      expect(statSync(join(dir, "dictation-audio", `${newest}.audio`)).mode & 0o777).toBe(0o600);
+      expectOnlyThePersonCanRead(join(dir, "dictation-audio", `${newest}.audio`));
 
       store.replaceText(newest, "better text");
       expect(store.history()[0]).toMatchObject({ id: newest, text: "better text" });
@@ -917,7 +944,7 @@ describe("dictation settings", () => {
       expect(again.read().enabled).toBe(true);
       expect(again.history()).toHaveLength(DICTATION_HISTORY_MAX);
       expect(again.history()[0]!.id).toBe(`d${DICTATION_HISTORY_MAX + 4}`);
-      expect(statSync(join(dir, "dictation.json")).mode & 0o777).toBe(0o600);
+      expectOnlyThePersonCanRead(join(dir, "dictation.json"));
       again.clearHistory();
       expect(again.history()).toEqual([]);
     } finally {

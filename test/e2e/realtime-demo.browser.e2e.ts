@@ -5,6 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { chooseAnswerRow } from "./answer-choice";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDirectory =
@@ -101,7 +102,7 @@ describe("public realtime React demo browser acceptance", () => {
     const humanInput = existing.locator("[data-human-input-surface]");
     await humanInput.getByText("Choose the next environment", { exact: true }).waitFor();
     expect(await primary.getAttribute("data-phase")).toBe("listening");
-    await humanInput.getByRole("radio", { name: /Staging/ }).check();
+    await chooseAnswerRow(humanInput.getByRole("radio", { name: /Staging/ }));
     await capture(page, "04b-realtime-with-structured-question.png");
     await humanInput.getByRole("button", { name: "Send answer" }).click();
     await existing.locator("[data-human-input-surface]").waitFor({ state: "detached" });

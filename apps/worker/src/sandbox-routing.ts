@@ -69,6 +69,7 @@ import {
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
+  PROVIDER_REGISTRY,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   RoutingMutationOutputRejectedError,
@@ -76,7 +77,6 @@ import {
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
-  selectBackend,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -1338,14 +1338,17 @@ export function wrapLazyTurnBoxWithRouting(
     ? findSessionProcessForTurn(services, ids, args.backendId)
     : undefined;
   const defaultSupportsPty = defaultBackend
-    ? selectBackend(defaultBackend).capabilities.Terminal.pty
+    ? PROVIDER_REGISTRY[defaultBackend].sessionSupportsPty
     : false;
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
-    // The SDK binds shell tools synchronously before lazy provisioning. Preserve
-    // the authoritative descriptor's PTY shape so a Modal home exposes
-    // write_stdin on its first turn operation; the async cancellation transport
-    // below still resolves the exact live route before executing a command.
+    // The SDK binds shell tools synchronously before lazy provisioning, so this
+    // answer decides whether the turn offers write_stdin. It is the provider's
+    // own live-session answer: a turn whose box was resolved before binding (an
+    // attached file, a resumed box) must offer exactly the same tools as one
+    // that binds first, or the tool list flips and the prompt cache misses. The
+    // async cancellation transport below still resolves the exact live route
+    // before executing a command.
     supportsPty: () => defaultSupportsPty,
   };
   const routedResolver = makeActiveBackendResolver({

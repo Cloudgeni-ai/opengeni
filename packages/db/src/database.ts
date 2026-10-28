@@ -227,6 +227,11 @@ export type ManagedUserProfile = {
   id: string;
   name: string | null;
   email: string;
+  /**
+   * The host has verified that this person controls `email`. Only verified
+   * addresses are bound for Site SQL's `:viewer_email`; omitted means unknown.
+   */
+  emailVerified?: boolean;
 };
 
 /** Host identity projection used by organization administration rosters. */

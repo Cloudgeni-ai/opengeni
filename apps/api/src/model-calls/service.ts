@@ -39,7 +39,6 @@ import {
   fetchSubscriptionCoreCodexUsage,
   getWorkspace,
   listSubscriptionCoreCodexOperationCandidates,
-  readCodexCutoverDisposition,
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
   reserveSubscriptionCoreCodexOperationRequest,
@@ -514,12 +513,6 @@ async function withCodexOperation<T>(
   model: ConfiguredModel,
   run: () => Promise<T>,
 ): Promise<T> {
-  const disposition = await readCodexCutoverDisposition(
-    deps.db,
-    input.accountId,
-    input.workspaceId,
-  );
-  if (disposition !== "core") throw subscriptionCapacityUnavailable("Codex");
   const scope: SubscriptionCoreCodexOperationScope = {
     kind: "workspace",
     accountId: input.accountId,

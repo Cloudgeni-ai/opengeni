@@ -279,6 +279,7 @@ export const CLIENT_PAGES = [
   "memory",
   "schedules",
   "automations",
+  "bot-templates",
   "artifacts",
   "settings",
   "organization",

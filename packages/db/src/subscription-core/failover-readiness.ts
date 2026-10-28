@@ -4,17 +4,15 @@ import {
   subscriptionCoreProvider,
   subscriptionCoreProviderIds,
 } from "../subscription-core-providers";
-import { readSubscriptionCoreProviderRoute } from "./provider-route";
 import { subscriptionCoreConnectionKind, type SubscriptionCoreProvider } from "./provider";
 
-/** Registry/receipt/route proof, never connection eligibility or authority.
+/** Registry proof, never connection eligibility or authority.
  * The app role cannot SELECT the private registry or call its old invoker
  * kind lookup. The narrow definer exposes only kind + committed boolean.
- * Isolate a failed read in a savepoint: unreadable means closed, not legacy.
+ * Isolate a failed read in a savepoint: unreadable means closed.
  */
 export async function readSubscriptionCoreFailoverProvider(
   tx: Database,
-  accountId: string,
   providerId: string,
 ): Promise<SubscriptionCoreProvider | null> {
   if (!subscriptionCoreProviderIds().includes(providerId)) return null;
@@ -33,12 +31,7 @@ export async function readSubscriptionCoreFailoverProvider(
         rows[0]!.connection_kind !== subscriptionCoreConnectionKind(provider)
       )
         return null;
-      return (await readSubscriptionCoreProviderRoute(scoped, {
-        accountId,
-        provider: providerId,
-      })) === "core"
-        ? provider
-        : null;
+      return provider;
     });
   } catch {
     return null;

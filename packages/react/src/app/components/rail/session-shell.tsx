@@ -611,6 +611,10 @@ function SessionRouteHeader({
       onPin={(target, pinned) =>
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
+      onUpdateProfile={context.updateSessionProfile}
+      onSaveBotTemplate={(request) =>
+        context.client.createBotTemplate(session.workspaceId, request)
+      }
       onArchive={onArchive}
       repliesMute={repliesMute}
       adminAccess={adminAccess}

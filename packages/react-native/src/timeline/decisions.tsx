@@ -32,14 +32,31 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentRef,
   type ReactNode,
 } from "react";
 import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
-import { Pressable, ScrollView, Text, TextInput, View, type TextStyle } from "react-native";
-import { Button } from "./controls";
+import {
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
+import {
+  DecisionActions,
+  DecisionButton,
+  DecisionCard,
+  DecisionLink,
+  DecisionMark,
+  DecisionMeta,
+} from "./decision-card";
 import { Icon } from "./icon";
 import type { NativeMarkdownRenderer } from "./message-timeline";
-import { blendOver, withAlpha } from "./primitives";
+import { withAlpha } from "./primitives";
 import { SecretQuestionField } from "./secret-field";
 import {
   defaultSecretFieldMessages,
@@ -55,23 +72,10 @@ import { useNativeTimelineMessages } from "./messages";
 import { errorMessage } from "@opengeni/contracts/values";
 
 /* ----------------------------------------------------------------------------
-   Decision surfaces: the web HumanInputSurface/HumanInputForm (waiting tone,
-   question-first, options, Other, Skip / Send answers) and the approval
-   Notice strip, with the shared drafting and validation rules.
+   Decision surfaces: the web HumanInputForm (one question at a time, choice
+   rows, Something else, Skip / Back / Next / Send) and the approval card, on
+   the shared decision card, with the shared drafting and validation rules.
    -------------------------------------------------------------------------- */
-
-function useWaitingTone() {
-  const theme = useNativeTimelineTheme();
-  const waiting = theme.colors["status-waiting"];
-  return {
-    theme,
-    waiting,
-    surface: withAlpha(waiting, 0.05),
-    border: withAlpha(waiting, 0.35),
-    divider: withAlpha(waiting, 0.2),
-    iconBox: withAlpha(waiting, 0.12),
-  };
-}
 
 export interface HumanInputCardProps {
   requests: SessionHumanInputRequest[];
@@ -213,17 +217,21 @@ function HumanInputForm({
   error: string | null;
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
 }) {
-  const tone = useWaitingTone();
-  const { theme } = tone;
+  const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const t = useOpenGeniText();
   const messages = useContext(HumanInputMessagesContext);
   const secretMessages = useContext(SecretFieldMessagesContext);
-  const heading = humanInputHeading(request.questions, messages);
-  const single = request.questions.length === 1;
-  const required = single && request.questions[0]!.required;
+  const questions = request.questions;
+  const total = questions.length;
+  // Several questions are asked one at a time; every step stays mounted so
+  // drafts and typed secrets survive moving back and forth.
+  const [step, setStep] = useState(0);
+  const current = Math.min(step, total - 1);
+  const last = current === total - 1;
+  const heading = humanInputHeading([questions[current]!], messages);
   const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
-    initialDrafts(request.questions),
+    initialDrafts(questions),
   );
   // Secret values stay out of React state: keystrokes land in this ref, which
   // is emptied after a successful submit and when the form goes away.
@@ -232,7 +240,7 @@ function HumanInputForm({
   const secretRegistrars = useRef<Record<string, (clear: (() => void) | null) => void>>({});
   const [secretDrafts, setSecretDrafts] = useState<Record<string, SecretDraft>>(() =>
     Object.fromEntries(
-      request.questions
+      questions
         .filter(isSecretQuestion)
         .map((question) => [question.id, initialSecretDraft(question.secret)]),
     ),
@@ -276,50 +284,61 @@ function HumanInputForm({
       setInFlight(false);
     }
   };
-  const send = () => {
+  const validate = (subset: HumanInputQuestion[]) => {
     const result = answersFromDrafts(
       t,
-      request.questions.filter((question) => !isSecretQuestion(question)),
+      subset.filter((question) => !isSecretQuestion(question)),
       drafts,
       messages,
     );
-    const secret = secretSubmission(
-      request.questions,
-      secretDrafts,
-      secretValues.current,
-      messages.required,
-    );
-    const nextErrors = { ...result.errors, ...secret.errors };
+    const secret = secretSubmission(subset, secretDrafts, secretValues.current, messages.required);
+    return { result, secret, errors: { ...result.errors, ...secret.errors } };
+  };
+  const next = () => {
+    const { errors: stepErrors } = validate([questions[current]!]);
+    setErrors((existing) => ({ ...existing, ...stepErrors }));
+    if (Object.keys(stepErrors).length === 0) setStep(current + 1);
+  };
+  const send = () => {
+    const { result, secret, errors: nextErrors } = validate(questions);
     setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0) return;
+    const firstInvalid = questions.findIndex((question) => question.id in nextErrors);
+    if (firstInvalid >= 0) {
+      // Show the step that needs attention.
+      setStep(firstInvalid);
+      return;
+    }
     const byQuestion = new Map<string, HumanInputAnswer>(
       [...result.answers, ...secret.answers].map((answer) => [answer.questionId, answer]),
     );
     void submit({
       outcome: "answered",
-      answers: request.questions.flatMap((question) => byQuestion.get(question.id) ?? []),
+      answers: questions.flatMap((question) => byQuestion.get(question.id) ?? []),
       ...(secret.secretAnswers.length > 0 ? { secretAnswers: secret.secretAnswers } : {}),
     });
   };
   // Editing a question clears its validation message, as on web.
   const clearError = (id: string) =>
-    setErrors((current) => {
-      if (!(id in current)) return current;
-      const remaining = { ...current };
+    setErrors((existing) => {
+      if (!(id in existing)) return existing;
+      const remaining = { ...existing };
       delete remaining[id];
       return remaining;
     });
-  const update = (id: string, next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
-    setDrafts((current) => ({ ...current, [id]: next(current[id] ?? emptyDraft()) }));
+  const update = (id: string, change: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
+    setDrafts((existing) => ({
+      ...existing,
+      [id]: change(existing[id] ?? emptyDraft()),
+    }));
     clearError(id);
   };
   const updateSecret = (
     question: HumanInputQuestion,
-    next: (draft: SecretDraft) => SecretDraft,
+    change: (draft: SecretDraft) => SecretDraft,
   ) => {
-    setSecretDrafts((current) => ({
-      ...current,
-      [question.id]: next(current[question.id] ?? initialSecretDraft(question.secret)),
+    setSecretDrafts((existing) => ({
+      ...existing,
+      [question.id]: change(existing[question.id] ?? initialSecretDraft(question.secret)),
     }));
     clearError(question.id);
   };
@@ -327,82 +346,60 @@ function HumanInputForm({
     secretValues.current[id] = value;
     if (value) clearError(id);
   };
+  const meta = [
+    total > 1 ? t("humanInputForm.questionOfTotal", { current: current + 1, total }) : null,
+    progressLabel,
+  ];
+  const failure = submitError ?? error;
 
   return (
-    <View
-      style={{
-        borderRadius: theme.radius.lg,
-        borderWidth: 1,
-        borderColor: tone.border,
-        backgroundColor: tone.surface,
-        overflow: "hidden",
-      }}
-    >
+    <DecisionCard>
       <View
         style={{
           flexDirection: "row",
           alignItems: "flex-start",
           gap: 12,
-          padding: 16,
-          paddingBottom: collapsed ? 16 : 14,
+          paddingHorizontal: 16,
+          paddingTop: 16,
+          paddingBottom: collapsed ? 16 : 4,
         }}
       >
-        <View
-          style={{
-            width: 32,
-            height: 32,
-            borderRadius: theme.radius.md,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: tone.iconBox,
-          }}
-        >
-          <Icon name="message-circle-question" size={16} color={tone.waiting} />
-        </View>
-        <View style={{ flex: 1, minWidth: 0 }}>
+        <DecisionMark icon="message-circle-question" />
+        <View style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
           <QuestionText
             text={heading.title}
             tone="body"
             style={{
               ...fontStyle(theme, 600),
               fontSize: theme.size.md,
-              lineHeight: 24,
+              lineHeight: 22,
               color: c.fg,
             }}
-            suffix={required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
           />
-          {heading.description ? (
+          {heading.description && !collapsed ? (
             <QuestionText
               text={heading.description}
               tone="muted"
               style={{
                 ...fontStyle(theme),
-                fontSize: theme.size.sm,
-                lineHeight: 18,
+                marginTop: 2,
+                fontSize: theme.size.base,
+                lineHeight: 19,
                 color: c["fg-muted"],
               }}
             />
           ) : null}
-          {progressLabel ? (
-            <Text
-              style={{
-                ...fontStyle(theme),
-                marginTop: 2,
-                fontSize: theme.size.xs,
-                color: c["fg-subtle"],
-              }}
-            >
-              {progressLabel}
-            </Text>
-          ) : null}
+          <DecisionMeta waiting parts={meta} />
         </View>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={collapsed ? messages.expand : messages.collapse}
           onPress={() => setCollapsed((value) => !value)}
+          hitSlop={6}
           style={{
             width: 32,
             height: 32,
+            marginRight: -6,
             borderRadius: theme.radius.md,
             alignItems: "center",
             justifyContent: "center",
@@ -412,28 +409,28 @@ function HumanInputForm({
         </Pressable>
       </View>
       {collapsed ? null : (
-        <>
-          <ScrollView
-            style={{ maxHeight: 360, borderTopWidth: 1, borderTopColor: tone.divider }}
-            contentContainerStyle={{ paddingHorizontal: 20, paddingVertical: 14, gap: 18 }}
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-          >
-            {request.questions.map((question, index) => (
+        <View
+          style={{
+            paddingHorizontal: 16,
+            paddingTop: 12,
+            paddingBottom: 16,
+            gap: 16,
+          }}
+        >
+          {questions.map((question, index) => (
+            <View key={question.id} style={index === current ? null : { display: "none" }}>
               <QuestionControls
-                key={question.id}
                 question={question}
-                index={single ? null : index + 1}
                 draft={drafts[question.id] ?? emptyDraft()}
                 error={isSecretQuestion(question) ? undefined : errors[question.id]}
                 disabled={busy}
-                onChange={(next) => update(question.id, next)}
+                onChange={(change) => update(question.id, change)}
               >
                 {isSecretQuestion(question) ? (
                   <SecretQuestionField
                     question={question}
                     draft={secretDrafts[question.id] ?? initialSecretDraft(question.secret)}
-                    onDraft={(next) => updateSecret(question, next)}
+                    onDraft={(change) => updateSecret(question, change)}
                     onValue={(value) => setSecretValue(question.id, value)}
                     registerClear={registerSecretClear(question.id)}
                     messages={secretMessages}
@@ -442,67 +439,70 @@ function HumanInputForm({
                   />
                 ) : null}
               </QuestionControls>
-            ))}
-          </ScrollView>
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              gap: 8,
-              paddingHorizontal: 16,
-              paddingVertical: 12,
-              borderTopWidth: 1,
-              borderTopColor: tone.divider,
-              backgroundColor: withAlpha(c["surface-1"], 0.95),
-            }}
-          >
-            {error || submitError ? (
-              <Text
-                style={{
-                  ...fontStyle(theme),
-                  flex: 1,
-                  fontSize: theme.size.xs,
-                  color: c["status-failed"],
-                }}
-              >
-                {submitError ?? error}
-              </Text>
-            ) : null}
-            {request.allowSkip ? (
-              <Button
-                label={messages.skip}
-                variant="ghost"
-                size="form"
-                disabled={busy}
-                onPress={() =>
-                  void submit({ outcome: "skipped" } as SubmitHumanInputResponseRequest)
+            </View>
+          ))}
+          {failure ? (
+            <Text
+              accessibilityRole="alert"
+              style={{
+                ...fontStyle(theme),
+                fontSize: theme.size.sm,
+                lineHeight: 18,
+                color: c["status-failed"],
+              }}
+            >
+              {failure}
+            </Text>
+          ) : null}
+          <DecisionActions
+            primary={
+              <DecisionButton
+                kind="primary"
+                label={
+                  !last
+                    ? t("humanInputForm.next")
+                    : busy
+                      ? messages.submitting
+                      : total === 1
+                        ? (messages.submitOne ?? messages.submit)
+                        : messages.submit
                 }
+                busy={last && busy}
+                disabled={busy}
+                onPress={last ? send : next}
               />
-            ) : null}
-            <Button
-              label={
-                busy
-                  ? messages.submitting
-                  : single
-                    ? (messages.submitOne ?? messages.submit)
-                    : messages.submit
-              }
-              variant="primary"
-              size="form"
-              busy={busy}
-              onPress={send}
-            />
-          </View>
-        </>
+            }
+            secondary={
+              current > 0 ? (
+                <DecisionButton
+                  label={t("humanInputForm.back")}
+                  disabled={busy}
+                  onPress={() => setStep(current - 1)}
+                />
+              ) : undefined
+            }
+            lead={
+              request.allowSkip ? (
+                <DecisionLink
+                  label={messages.skip}
+                  disabled={busy}
+                  onPress={() =>
+                    void submit({
+                      outcome: "skipped",
+                    } as SubmitHumanInputResponseRequest)
+                  }
+                />
+              ) : null
+            }
+          />
+        </View>
       )}
-    </View>
+    </DecisionCard>
   );
 }
 
 function QuestionControls({
   question,
-  index,
   draft,
   error,
   disabled,
@@ -510,81 +510,72 @@ function QuestionControls({
   children,
 }: {
   question: HumanInputQuestion;
-  index: number | null;
   draft: HumanInputAnswerDraft;
   error?: string | undefined;
   disabled: boolean;
-  onChange: (next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
+  onChange: (change: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
   /** A control that replaces the built-in ones (the secret field). */
   children?: ReactNode;
 }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
-  const m = useNativeTimelineMessages();
   const c = theme.colors;
   const messages = useContext(HumanInputMessagesContext);
+  const m = useNativeTimelineMessages();
+  const otherInput = useRef<ComponentRef<typeof TextInput>>(null);
   const multi = question.kind === "multi_select";
-  const label = { ...fontStyle(theme, 500), fontSize: theme.size.sm, lineHeight: 18, color: c.fg };
-  const input = {
-    ...fontStyle(theme),
-    fontSize: theme.size.sm,
-    color: c.fg,
-    minHeight: 32,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: theme.radius.sm,
-    borderWidth: 1,
-    borderColor: error ? c["status-failed"] : c.border,
-    backgroundColor: c["surface-1"],
-  };
   const toggle = (value: string) =>
-    onChange((current) => {
-      if (!multi) return { ...current, values: [value], otherSelected: false };
-      const has = current.values.includes(value);
+    onChange((existing) => {
+      if (!multi) return { ...existing, values: [value], otherSelected: false };
+      const has = existing.values.includes(value);
       return {
-        ...current,
+        ...existing,
         values: has
-          ? current.values.filter((entry) => entry !== value)
-          : [...current.values, value],
+          ? existing.values.filter((entry) => entry !== value)
+          : [...existing.values, value],
       };
     });
+  const chooseOther = () =>
+    onChange((existing) =>
+      multi
+        ? { ...existing, otherSelected: true }
+        : { ...existing, values: [], otherSelected: true },
+    );
   const hint = multi
     ? messages.selectionHint(question.validation?.minSelections, question.validation?.maxSelections)
     : null;
   const secondary: TextStyle = {
     ...fontStyle(theme),
-    fontSize: theme.size.sm,
-    lineHeight: 18,
+    fontSize: theme.size.base,
+    lineHeight: 19,
     color: c["fg-muted"],
   };
-  // A lone question's heading already shows its help unless a label took the title.
-  const help = question.helpText && (index !== null || question.label) ? question.helpText : null;
+  // The heading already shows the help unless a label took the title.
+  const help = question.helpText && question.label ? question.helpText : null;
+  const row = (selected: boolean): ViewStyle => ({
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    minHeight: 48,
+    // A chosen row's border is one point heavier; the padding keeps its content still.
+    paddingHorizontal: selected ? 13 : 14,
+    paddingVertical: selected ? 11 : 12,
+    borderRadius: theme.radius.md,
+    borderWidth: selected ? 2 : 1,
+    borderColor: selected ? withAlpha(c.fg, 0.85) : c.border,
+    backgroundColor: selected ? withAlpha(c.fg, 0.035) : c["surface-1"],
+  });
   return (
     <View style={{ gap: 10 }}>
-      {index !== null ? (
-        <View>
-          <QuestionText
-            prefix={`${index}. `}
-            text={question.label ?? question.prompt}
-            tone="body"
-            style={{
-              ...fontStyle(theme, 600),
-              fontSize: theme.size.sm,
-              lineHeight: 18,
-              color: c.fg,
-            }}
-            suffix={
-              question.required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null
-            }
-          />
-          {question.label ? (
-            <QuestionText text={question.prompt} tone="muted" style={secondary} />
-          ) : null}
-        </View>
-      ) : null}
       {help ? <QuestionText text={help} tone="muted" style={secondary} /> : null}
       {hint ? (
-        <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["fg-subtle"] }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: theme.size.sm,
+            color: c["fg-muted"],
+          }}
+        >
           {hint}
         </Text>
       ) : null}
@@ -596,13 +587,28 @@ function QuestionControls({
           editable={!disabled}
           multiline
           value={draft.values[0] ?? ""}
-          onChangeText={(text) => onChange((current) => ({ ...current, values: [text] }))}
+          onChangeText={(text) => onChange((existing) => ({ ...existing, values: [text] }))}
           placeholder={m.typeYourAnswer}
           placeholderTextColor={c["fg-subtle"]}
-          style={{ ...input, minHeight: 64, textAlignVertical: "top" }}
+          style={{
+            ...fontStyle(theme),
+            // 16pt: smaller text makes iOS zoom into the field.
+            fontSize: 16,
+            lineHeight: 22,
+            color: c.fg,
+            minHeight: 96,
+            paddingHorizontal: 14,
+            paddingTop: 12,
+            paddingBottom: 12,
+            borderRadius: theme.radius.md,
+            borderWidth: 1,
+            borderColor: error ? c["status-failed"] : c.border,
+            backgroundColor: c["surface-1"],
+            textAlignVertical: "top",
+          }}
         />
       ) : (
-        <View style={{ gap: 2 }}>
+        <View style={{ gap: 8 }}>
           {question.options.map((option) => {
             const selected = draft.values.includes(option.id);
             return (
@@ -610,89 +616,75 @@ function QuestionControls({
                 key={option.id}
                 accessibilityRole={multi ? "checkbox" : "radio"}
                 accessibilityState={{ checked: selected, disabled }}
+                accessibilityLabel={option.label}
                 disabled={disabled}
                 onPress={() => toggle(option.id)}
-                style={{
-                  flexDirection: "row",
-                  alignItems: "flex-start",
-                  gap: 10,
-                  minHeight: 36,
-                  paddingVertical: 8,
-                }}
+                style={({ pressed }) => [row(selected), pressed ? { opacity: 0.85 } : null]}
               >
                 <Selector multi={multi} selected={selected} />
-                <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={label}>{option.label}</Text>
+                <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                  <Text
+                    style={{
+                      ...fontStyle(theme, 500),
+                      fontSize: theme.size.md,
+                      lineHeight: 21,
+                      color: c.fg,
+                    }}
+                  >
+                    {option.label}
+                  </Text>
                   {option.description ? (
-                    <QuestionText
-                      text={option.description}
-                      tone="muted"
-                      style={{
-                        ...fontStyle(theme),
-                        fontSize: theme.size.xs,
-                        lineHeight: 16,
-                        color: c["fg-muted"],
-                      }}
-                    />
+                    <QuestionText text={option.description} tone="muted" style={secondary} />
                   ) : null}
                 </View>
               </Pressable>
             );
           })}
           {question.allowOther ? (
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "flex-start",
-                gap: 10,
-                paddingVertical: 8,
+            <Pressable
+              accessibilityRole={multi ? "checkbox" : "radio"}
+              accessibilityState={{ checked: draft.otherSelected, disabled }}
+              accessibilityLabel={messages.other}
+              disabled={disabled}
+              onPress={() => {
+                chooseOther();
+                otherInput.current?.focus();
               }}
+              style={[row(draft.otherSelected), { alignItems: "center", paddingVertical: 0 }]}
             >
-              <Pressable
-                accessibilityRole={multi ? "checkbox" : "radio"}
-                accessibilityState={{ checked: draft.otherSelected, disabled }}
-                accessibilityLabel={messages.other}
-                disabled={disabled}
-                onPress={() =>
-                  onChange((current) =>
-                    multi
-                      ? { ...current, otherSelected: !current.otherSelected }
-                      : { ...current, values: [], otherSelected: true },
-                  )
-                }
-                style={{ paddingTop: 2 }}
-              >
-                <Selector multi={multi} selected={draft.otherSelected} />
-              </Pressable>
-              <View style={{ flex: 1, gap: 6 }}>
-                <Text style={label}>{messages.other}</Text>
-                <TextInput
-                  accessibilityLabel={t("native.timeline.decisions.otherAnswerForLabel", {
-                    label: question.label ?? question.prompt,
-                  })}
-                  editable={!disabled}
-                  value={draft.other}
-                  onFocus={() =>
-                    onChange((current) =>
-                      multi
-                        ? { ...current, otherSelected: true }
-                        : { ...current, values: [], otherSelected: true },
-                    )
-                  }
-                  onChangeText={(text) => onChange((current) => ({ ...current, other: text }))}
-                  placeholder={m.typeAValue}
-                  placeholderTextColor={c["fg-subtle"]}
-                  style={input}
-                />
-              </View>
-            </View>
+              <Selector multi={multi} selected={draft.otherSelected} />
+              <TextInput
+                ref={otherInput}
+                accessibilityLabel={t("native.timeline.decisions.otherAnswerForLabel", {
+                  label: question.label ?? question.prompt,
+                })}
+                editable={!disabled}
+                value={draft.other}
+                onFocus={chooseOther}
+                onChangeText={(text) => onChange((existing) => ({ ...existing, other: text }))}
+                placeholder={t("humanInputForm.somethingElse")}
+                placeholderTextColor={c["fg-subtle"]}
+                style={{
+                  ...fontStyle(theme),
+                  flex: 1,
+                  minHeight: 46,
+                  fontSize: 16,
+                  color: c.fg,
+                  paddingVertical: 10,
+                }}
+              />
+            </Pressable>
           ) : null}
         </View>
       )}
       {error ? (
         <Text
           accessibilityRole="alert"
-          style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] }}
+          style={{
+            ...fontStyle(theme),
+            fontSize: theme.size.sm,
+            color: c["status-failed"],
+          }}
         >
           {error}
         </Text>
@@ -733,9 +725,9 @@ export interface ApprovalStripProps {
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
-  const tone = useWaitingTone();
-  const { theme } = tone;
+  const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const { height } = useWindowDimensions();
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
   const [details, setDetails] = useState<Record<string, boolean>>({});
@@ -753,10 +745,25 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
       });
     }
   };
-  const small = { ...fontStyle(theme), fontSize: theme.size.xs, lineHeight: 16 };
-  const body = { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 20 };
+  const small = {
+    ...fontStyle(theme),
+    fontSize: theme.size.sm,
+    lineHeight: 18,
+  };
+  const body = {
+    ...fontStyle(theme),
+    fontSize: theme.size.base,
+    lineHeight: 20,
+  };
+  const bodyMaxHeight = Math.max(120, Math.round(height * 0.5 - 200));
   return (
-    <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
+    <ScrollView
+      // The cards float above the composer and take at most about 60% of the
+      // screen; several pending approvals scroll as a list within that.
+      style={{ maxHeight: Math.max(320, Math.round(height * 0.6)) }}
+      contentContainerStyle={{ gap: 12 }}
+      nestedScrollEnabled
+    >
       {approvals.map((approval) => {
         const busy = Boolean(pending[approval.id]) || Boolean(settled[approval.id]);
         const toolName = approvalToolName(approval);
@@ -776,146 +783,150 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         const approveLabel = answer?.approve ?? messages.approve;
         const rejectLabel = answer?.reject ?? messages.reject;
         return (
-          <View
-            key={approval.id}
-            accessibilityLabel={review.title}
-            style={{
-              borderRadius: theme.radius.lg,
-              borderWidth: 1,
-              borderColor: withAlpha(tone.waiting, 0.3),
-              // Opaque: the strip floats over scrolling conversation.
-              backgroundColor: blendOver(c.bg, tone.waiting, 0.06),
-              padding: 12,
-              flexDirection: "row",
-              gap: 10,
-            }}
-          >
-            <View style={{ paddingTop: 2 }}>
-              <Icon name="shield-check" size={16} color={tone.waiting} />
-            </View>
-            <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
-              <View style={{ gap: 2 }}>
-                <Text style={{ ...small, color: tone.waiting }}>
-                  {t("toolActionReview.approvalNeeded")}
-                </Text>
-                <Text
-                  accessibilityRole="header"
-                  style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 21, color: c.fg }}
-                >
-                  {review.title}
-                </Text>
-                {review.accountLabel ? (
-                  <Text style={{ ...small, color: c["fg-muted"] }}>{review.accountLabel}</Text>
-                ) : null}
-              </View>
-              {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
-              {facts.effects.length > 0 ? (
-                <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
-                  {facts.effects.map((effect) => (
-                    <Text key={effect} style={{ ...body, color: c.fg }}>
-                      {"\u2022 "}
-                      {effect}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-              {facts.shown.length > 0 ? (
-                <View style={{ gap: 6 }}>
-                  {facts.shown.map((field) => (
-                    <View key={field.path}>
-                      <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
-                      <Text numberOfLines={4} style={{ ...body, color: c.fg }}>
-                        {field.preview}
-                      </Text>
-                    </View>
-                  ))}
-                  {facts.hiddenFields > 0 ? (
-                    <Text style={{ ...small, color: c["fg-subtle"] }}>
-                      {facts.hiddenFields === 1
-                        ? t("toolActionReview.n1MoreValue")
-                        : t("toolActionReview.hiddenfieldsMoreValues", {
-                            hiddenFields: facts.hiddenFields,
-                          })}
-                    </Text>
-                  ) : null}
-                </View>
-              ) : null}
-              {!canApprove ? (
-                <Text style={{ ...body, color: c.fg }}>
-                  {t("toolActionReview.theDetailsOfThisOlder")}
-                </Text>
-              ) : null}
-              {showDetails ? (
-                <ScrollView
-                  style={{
-                    maxHeight: 160,
-                    borderRadius: theme.radius.md,
-                    borderWidth: 1,
-                    borderColor: c.border,
-                    backgroundColor: withAlpha(c["surface-2"], 0.6),
-                  }}
-                  contentContainerStyle={{ padding: 10 }}
-                  nestedScrollEnabled
-                >
-                  <Text
-                    selectable
-                    style={{
-                      ...fontStyle(theme, 400, "mono"),
-                      fontSize: theme.size.sm,
-                      lineHeight: 20,
-                      color: c["fg-muted"],
-                    }}
-                  >
-                    {payload}
-                  </Text>
-                </ScrollView>
-              ) : null}
+          <DecisionCard key={approval.id} accessibilityLabel={review.title}>
+            <View style={{ padding: 16, gap: 12 }}>
               <View
                 style={{
-                  marginTop: 4,
                   flexDirection: "row",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  gap: 8,
+                  alignItems: "flex-start",
+                  gap: 12,
                 }}
               >
-                {review.detailsAvailable ? (
-                  <Button
-                    variant="ghost"
-                    label={
-                      showDetails
-                        ? t("approvalSurface.backToReview")
-                        : t("toolActionReview.details")
-                    }
-                    onPress={() =>
-                      setDetails((current) => ({ ...current, [approval.id]: !showDetails }))
-                    }
+                <DecisionMark icon="shield-check" />
+                <View style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
+                  <Text
+                    accessibilityRole="header"
+                    style={{
+                      ...fontStyle(theme, 600),
+                      fontSize: theme.size.md,
+                      lineHeight: 22,
+                      color: c.fg,
+                    }}
+                  >
+                    {review.title}
+                  </Text>
+                  <DecisionMeta
+                    waiting
+                    parts={[t("toolActionReview.approvalNeeded"), review.accountLabel]}
                   />
-                ) : null}
-                <View style={{ flex: 1 }} />
-                <Button
-                  icon="x"
-                  variant="secondary"
-                  size="form"
-                  label={settled[approval.id] === "reject" ? messages.rejected : rejectLabel}
-                  busy={pending[approval.id] === "reject"}
-                  disabled={busy}
-                  onPress={() => void decide(approval.id, "reject")}
-                />
-                {canApprove ? (
-                  <Button
-                    icon="check"
-                    variant="primary"
-                    size="form"
-                    label={settled[approval.id] === "approve" ? messages.approved : approveLabel}
-                    busy={pending[approval.id] === "approve"}
-                    disabled={busy}
-                    onPress={() => void decide(approval.id, "approve")}
-                  />
-                ) : null}
+                </View>
               </View>
+              {/* The title and the buttons stay pinned; a long review scrolls
+                  between them so the buttons are never pushed off screen. */}
+              <ScrollView
+                style={{ maxHeight: bodyMaxHeight, flexGrow: 0 }}
+                contentContainerStyle={{ gap: 12 }}
+                nestedScrollEnabled
+              >
+                {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
+                {facts.effects.length > 0 ? (
+                  <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
+                    {facts.effects.map((effect) => (
+                      <Text key={effect} style={{ ...body, color: c.fg }}>
+                        {"\u2022 "}
+                        {effect}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+                {facts.shown.length > 0 ? (
+                  <View
+                    style={{
+                      gap: 10,
+                      padding: 12,
+                      borderRadius: theme.radius.md,
+                      backgroundColor: withAlpha(c.fg, 0.035),
+                    }}
+                  >
+                    {facts.shown.map((field) => (
+                      <View key={field.path} style={{ gap: 1 }}>
+                        <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
+                        <Text numberOfLines={6} style={{ ...body, color: c.fg }}>
+                          {field.preview}
+                        </Text>
+                      </View>
+                    ))}
+                    {facts.hiddenFields > 0 ? (
+                      <Text style={{ ...small, color: c["fg-muted"] }}>
+                        {facts.hiddenFields === 1
+                          ? t("toolActionReview.n1MoreValue")
+                          : t("toolActionReview.hiddenfieldsMoreValues", {
+                              hiddenFields: facts.hiddenFields,
+                            })}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+                {!canApprove ? (
+                  <Text style={{ ...body, color: c.fg }}>
+                    {t("toolActionReview.theDetailsOfThisOlder")}
+                  </Text>
+                ) : null}
+                {showDetails ? (
+                  <View
+                    style={{
+                      padding: 12,
+                      borderRadius: theme.radius.md,
+                      borderWidth: 1,
+                      borderColor: c.border,
+                      backgroundColor: withAlpha(c.fg, 0.035),
+                    }}
+                  >
+                    <Text
+                      selectable
+                      style={{
+                        ...fontStyle(theme, 400, "mono"),
+                        fontSize: theme.size.sm,
+                        lineHeight: 20,
+                        color: c["fg-muted"],
+                      }}
+                    >
+                      {payload}
+                    </Text>
+                  </View>
+                ) : null}
+              </ScrollView>
+              <DecisionActions
+                style={{ marginTop: 4 }}
+                primary={
+                  canApprove ? (
+                    <DecisionButton
+                      kind="primary"
+                      label={settled[approval.id] === "approve" ? messages.approved : approveLabel}
+                      busy={pending[approval.id] === "approve"}
+                      disabled={busy}
+                      onPress={() => void decide(approval.id, "approve")}
+                    />
+                  ) : undefined
+                }
+                secondary={
+                  <DecisionButton
+                    label={settled[approval.id] === "reject" ? messages.rejected : rejectLabel}
+                    busy={pending[approval.id] === "reject"}
+                    disabled={busy}
+                    onPress={() => void decide(approval.id, "reject")}
+                  />
+                }
+                lead={
+                  review.detailsAvailable ? (
+                    <DecisionLink
+                      label={
+                        showDetails
+                          ? t("approvalSurface.backToReview")
+                          : t("toolActionReview.details")
+                      }
+                      onPress={() =>
+                        setDetails((current) => ({
+                          ...current,
+                          [approval.id]: !showDetails,
+                        }))
+                      }
+                    />
+                  ) : null
+                }
+              />
             </View>
-          </View>
+          </DecisionCard>
         );
       })}
     </ScrollView>

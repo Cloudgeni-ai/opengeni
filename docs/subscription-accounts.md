@@ -456,8 +456,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-COMPAT-03** Historical shadow comparison precedes one drained move
   per provider, with no dual writes. Preflight failure rolls back the migration
   transaction; after activation, recovery is forward-only and an old binary
-  must not restart. Disabling a cutover fails closed, never back to the legacy
-  path. Verification: pending (rollout).
+  must not restart. Every organization has completed the move, so the
+  per-organization cutover switch is no longer read. Verification: pending
+  (rollout).
 
 ### Security and observability
 
