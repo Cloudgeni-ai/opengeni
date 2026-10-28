@@ -1,5 +1,5 @@
 import { forwardRef, useState, type ComponentProps, type ReactNode, type Ref } from "react";
-import { variableSetVariableNameReservation } from "@opengeni/contracts";
+import { environmentVariableNameReservation } from "@opengeni/contracts";
 import { CircleAlertIcon, EyeIcon, EyeOffIcon, LockIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -249,7 +249,7 @@ export function variableNameIssue(
   if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
     return { kind: "invalid", message: "Use letters, numbers and underscores only." };
   }
-  const reservation = variableSetVariableNameReservation(name);
+  const reservation = environmentVariableNameReservation(name);
   if (reservation?.kind === "prefix") {
     return {
       kind: "reserved",

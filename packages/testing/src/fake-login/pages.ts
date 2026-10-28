@@ -138,6 +138,43 @@ document.getElementById('passkey-login').addEventListener('click', async () => {
 `;
 
 /**
+ * An identifier page that, like large identity providers' sign-in pages,
+ * asks for a passkey through autofill (conditional mediation) as soon as it
+ * loads, alongside an ordinary username field. A browser answers that request
+ * only once the person picks a passkey from autofill.
+ */
+export const PASSKEY_AUTOFILL_SCRIPT = `${WEBAUTHN_CLIENT_HELPERS}
+(async () => {
+  const available = window.PublicKeyCredential && PublicKeyCredential.isConditionalMediationAvailable
+    ? await PublicKeyCredential.isConditionalMediationAvailable()
+    : false;
+  document.getElementById('autofill-state').textContent = available
+    ? 'Passkey autofill offered'
+    : 'Passkey autofill not available';
+  if (!available) return;
+  try {
+    const options = await postJson('/passkey/login/options', {});
+    options.challenge = b64.toBuf(options.challenge);
+    options.allowCredentials = [];
+    const credential = await navigator.credentials.get({ mediation: 'conditional', publicKey: options });
+    const result = await postJson('/passkey/login/verify', {
+      id: credential.id, rawId: b64.fromBuf(credential.rawId), type: credential.type,
+      response: {
+        clientDataJSON: b64.fromBuf(credential.response.clientDataJSON),
+        authenticatorData: b64.fromBuf(credential.response.authenticatorData),
+        signature: b64.fromBuf(credential.response.signature),
+        userHandle: credential.response.userHandle ? b64.fromBuf(credential.response.userHandle) : null,
+      },
+    });
+    setStatus('Signed in as ' + result.username, true);
+    location.href = '/welcome';
+  } catch (error) {
+    setStatus('Passkey autofill failed: ' + (error && error.message ? error.message : error), false);
+  }
+})();
+`;
+
+/**
  * Six single-character boxes that only accept digits delivered as key events
  * (keydown). Text inserted without key events (CDP Input.insertText, paste, IME
  * commit) is discarded, which is exactly what makes `type.mode: "keys"` necessary.

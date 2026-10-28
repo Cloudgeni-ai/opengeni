@@ -26,6 +26,7 @@ import {
   answersFromDrafts,
   choiceOffersOther,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
   secretAnswerFromReading,
@@ -137,7 +138,7 @@ function HumanInputRequestForm({
 }: HumanInputFormProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
+  const messages = mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messageOverrides);
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   // Several questions are asked one at a time; every step stays mounted (hidden)
   // so typed secrets and drafts survive moving back and forth.
@@ -177,7 +178,8 @@ function HumanInputRequestForm({
   ) : (
     description
   );
-  const resolvedSubmitLabel = submitLabel ?? messages.submit;
+  const resolvedSubmitLabel =
+    submitLabel ?? (multi ? messages.submit : (messages.submitOne ?? messages.submit));
   const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
   const titleId = useId();

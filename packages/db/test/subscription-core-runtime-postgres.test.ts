@@ -15,8 +15,6 @@ import {
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   listSubscriptionConnectionsForPlacement,
-  isSubscriptionProviderCutoverEnabled,
-  readSubscriptionProviderCutoverState,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
   persistSubscriptionCodexRefresh,
@@ -52,7 +50,11 @@ function sourcePrivateFunctionReferences(): string[] {
         visit(path);
       } else if (/\.[cm]?tsx?$/.test(entry.name)) {
         const source = readFileSync(path, "utf8");
-        for (const match of source.matchAll(/opengeni_private\.([a-z_][a-z0-9_]*)\s*\(/gi)) {
+        // An insert target's column list also follows the name with "(", so
+        // skip names right after "insert into": those are tables.
+        for (const match of source.matchAll(
+          /(?<!insert\s+into\s+)opengeni_private\.([a-z_][a-z0-9_]*)\s*\(/gi,
+        )) {
           references.add(match[1]!.toLowerCase());
         }
       }
@@ -1441,62 +1443,15 @@ describe("provider-neutral subscription runtime persistence", () => {
         holderId: `worker-${crypto.randomUUID()}`,
         generation: 1,
       };
-      expect(
-        await withSessionRlsActorContext(actor, () =>
-          withRlsContext(
-            client!.db,
-            { accountId: state.accountId, workspaceId: state.workspaceId },
-            (db) =>
-              isSubscriptionProviderCutoverEnabled(db, {
-                accountId: state.accountId,
-                provider: "codex",
-              }),
-          ),
-        ),
-      ).toBe(false);
-      expect(
-        await withSessionRlsActorContext(actor, () =>
-          withRlsContext(
-            client!.db,
-            { accountId: state.accountId, workspaceId: state.workspaceId },
-            (db) =>
-              readSubscriptionProviderCutoverState(db, {
-                accountId: state.accountId,
-                provider: "codex",
-              }),
-          ),
-        ),
-      ).toBe("not_configured");
       await shared!.admin`
         insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'codex', false)`;
+        values (${state.accountId}::uuid, 'codex', true)`;
 
       await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,
           { accountId: state.accountId, workspaceId: state.workspaceId },
           async (db) => {
-            expect(
-              await readSubscriptionProviderCutoverState(db, {
-                accountId: state.accountId,
-                provider: "codex",
-              }),
-            ).toBe("disabled");
-            expect(
-              await isSubscriptionProviderCutoverEnabled(db, {
-                accountId: state.accountId,
-                provider: "codex",
-              }),
-            ).toBe(false);
-            await shared!.admin`
-              update subscription_provider_cutovers set enabled = true
-              where account_id = ${state.accountId}::uuid and provider = 'codex'`;
-            expect(
-              await readSubscriptionProviderCutoverState(db, {
-                accountId: state.accountId,
-                provider: "codex",
-              }),
-            ).toBe("enabled");
             expect(
               await acquireSubscriptionTurnLease(db, { ...first, ttlMs: 60_000 }),
             ).toMatchObject({ generation: 1, turnId: state.turnId });

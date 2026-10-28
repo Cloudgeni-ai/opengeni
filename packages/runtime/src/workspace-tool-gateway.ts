@@ -4,6 +4,8 @@
  * RunState, sandbox, or inference API.
  */
 export {
+  // A connection that cannot serve an approved call; nothing reached the provider.
+  ConnectionApprovalPreflightError,
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,
@@ -17,6 +19,9 @@ export {
 // the same resolver model execution applies after approval.
 export {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
+  type LiteralSecretScope,
   type SecretArgumentMode,
 } from "./secret-argument-resolution";

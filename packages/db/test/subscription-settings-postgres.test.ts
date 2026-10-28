@@ -1,5 +1,5 @@
 // Organization settings with lockable workspace overrides (design 3.3,
-// contract SUB-SET-01..05, migration 0724) on real PostgreSQL. Every check of
+// contract SUB-SET-01..05) on real PostgreSQL. Every check of
 // authority runs as the restricted application role (NOSUPERUSER,
 // NOBYPASSRLS); the superuser handle only seeds rows and reads ground truth.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -15,12 +15,9 @@ import {
   type SubscriptionSettingsPolicy,
 } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
-import postgres from "postgres";
 import {
   createDb,
   ensureManagedAccessForUser,
-  evaluateRuntimeDatabasePosture,
-  inspectRuntimeDatabasePosture,
   readOrganizationSubscriptionSettings,
   readSubscriptionSettingsOverview,
   readWorkspaceSubscriptionSettings,
@@ -44,14 +41,6 @@ setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
-const LOCKS_MIGRATION = "0724_subscription_settings_locks.sql";
-/** Rolling-migration evidence gathered in beforeAll (asserted in its own test). */
-let rolling: {
-  postureViolations: string[];
-  before: unknown;
-  after: unknown;
-} | null = null;
-
 function appUrl(database: OwnerMigratedTestDatabase): string {
   const url = new URL(database.ownerUrl);
   url.username = "opengeni_app";
@@ -60,12 +49,6 @@ function appUrl(database: OwnerMigratedTestDatabase): string {
 }
 
 /** Every listed workspace's effective values and sources, as the overview reads them. */
-async function effectiveSnapshot(db: Database, f: Fixture) {
-  const overview = await readSubscriptionSettingsOverview(db, organization(f));
-  return overview.workspaces
-    .map((row) => ({ id: row.workspaceId, values: row.values, sources: row.sources }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-}
 
 beforeAll(async () => {
   if (!realDb) return;
@@ -73,47 +56,7 @@ beforeAll(async () => {
   // FORCE ROW LEVEL SECURITY engages for the guard's own (owner) read.
   shared = await acquireOwnerMigratedTestDatabase("subscription-settings-locks");
   if (!shared) throw new Error("Real PostgreSQL is required");
-  // Stage the deployment before 0724: every other migration applied and roles
-  // provisioned, with existing workspace overrides in place.
-  const owner = postgres(shared.ownerUrl, { max: 1, onnotice: () => undefined });
-  try {
-    await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${LOCKS_MIGRATION})`;
-    await migrate(shared.ownerUrl);
-    await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
-    await owner`delete from schema_migrations where name = ${LOCKS_MIGRATION}`;
-  } finally {
-    await owner.end();
-  }
-  const staged = createDb(appUrl(shared), { max: 2 });
-  try {
-    client = staged;
-    const f = await fixture();
-    await shared.admin`update subscription_settings set fallback_order = '{"codex/a":["codex/b"]}'::jsonb,
-        personal_fallback_allowed = true
-      where account_id = ${f.accountId}::uuid and workspace_id is null`;
-    await shared.admin`insert into subscription_settings (
-        account_id, workspace_id, rotation, cross_provider_failover, personal_connections_allowed
-      ) values (${f.accountId}::uuid, ${f.alphaId}::uuid, '{"codex":{"mode":"spread"}}'::jsonb, true, false)`;
-    await shared.admin`insert into subscription_settings (account_id, workspace_id, fallback_order)
-      values (${f.accountId}::uuid, ${f.betaId}::uuid, '{"codex/b":[]}'::jsonb)`;
-    const before = await effectiveSnapshot(staged.db, f);
-    // The rolling step: 0724 alone, while the older binary still runs.
-    await migrate(shared.ownerUrl);
-    const options = {
-      rlsStrategy: "force" as const,
-      expectedRole: "opengeni_app",
-      targetSchema: "public",
-    };
-    const postureViolations = evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(staged.db, options),
-      options,
-    );
-    rolling = { postureViolations, before, after: await effectiveSnapshot(staged.db, f) };
-  } finally {
-    client = null;
-    await staged.close();
-  }
+  await migrate(shared.ownerUrl);
   await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
   client = createDb(appUrl(shared), { max: 6 });
 }, 600_000);
@@ -236,14 +179,6 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
       select relforcerowsecurity as forced, pg_get_userbyid(relowner)::text as owner
       from pg_class where oid = 'subscription_settings'::regclass`;
     expect(table).toEqual({ forced: true, owner: shared!.ownerRole });
-  });
-
-  test("rolling: 0724 keeps every effective setting and the older binary's runtime posture", () => {
-    expect(rolling).not.toBeNull();
-    expect(rolling!.postureViolations).toEqual([]);
-    expect(rolling!.after).toEqual(rolling!.before);
-    // The staged data really had workspace overrides to preserve.
-    expect(JSON.stringify(rolling!.before)).toContain('"workspace"');
   });
 
   test("SUB-SET-01: organization administrators read and change organization defaults", async () => {

@@ -253,10 +253,9 @@ export type SessionSandboxRuntime = {
   rigVersion: RigVersion | null;
 };
 
-/** The subject a direct attach resolves under when no human subject drives it
- *  (the same sentinel the attach Variable Set defaults use). It holds no
- *  organization membership, so it can resolve organization and workspace
- *  Sandbox Environments but never a personal one. */
+/** The subject a direct attach resolves under when no human subject drives it.
+ *  It holds no organization membership, so it can resolve organization and
+ *  workspace Sandbox Environments but never a personal one. */
 const SESSION_ATTACH_SUBJECT = "session-attach";
 
 /** Who a direct attach resolves a session's Sandbox Environment as: an explicit
@@ -303,8 +302,7 @@ function isWorkspaceAccessRefusal(error: unknown): boolean {
  * session access the route already enforced, exactly as before. An
  * organization Sandbox Environment, or a personal one used outside its home
  * workspace, keeps its versions in that home workspace, so those resolve
- * through the same scoped authority the attach Variable Set defaults and
- * scheduled tasks use: same organization, active, and visible to the attaching
+ * through the same scoped authority scheduled tasks use: same organization, active, and visible to the attaching
  * subject in the session's workspace.
  */
 async function resolveSessionRigVersion(

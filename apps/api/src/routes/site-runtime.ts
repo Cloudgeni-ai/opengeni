@@ -1110,7 +1110,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
   ): PublishedSiteDataViewer =>
-    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest", {
+      access: viewer.kind,
+      email: viewer.email,
+    });
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's

@@ -4,6 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import type { SessionSidebarEvidence } from "../../apps/web/test/session-sidebar-context";
+import { expectWindowTop, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const redesignId = "00000000-0000-4000-8000-000000000001";
@@ -1093,14 +1094,22 @@ test("a Site row opens the Site beside its conversations; a nested one opens sel
   expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
 }, 30_000);
 
-// macOS draws its window controls over the top-left corner of the page (they
-// end about 72px in), and while the window is shared or recorded it swaps them
-// for a wider purple sharing badge that ends about 80px in. The Site view's
-// top row is the Site's toolbar, so beside the 56px collapsed rail it must
-// start after them, as the session title bar does.
-test("the Site view's toolbar clears the macOS window controls beside a collapsed rail", async () => {
+// On macOS and Windows the window controls sit in the desktop window bar
+// across the top of the window; the Site view starts below it and keeps its
+// own spacing beside the collapsed and the open rail.
+const openSiteView = async (desktop: string, rail: string, query = "") => {
+  await page.goto(`${url}?scenario=sites&theme=dark&desktop=${desktop}&rail=${rail}${query}`);
+  // Chromium has no Windows window controls overlay: stand in for its title bar area.
+  if (desktop === "windows") {
+    await page.evaluate((height) => {
+      document.documentElement.style.setProperty("--og-window-bar-height", `${height}px`);
+    }, WINDOW_BAR_HEIGHT);
+  }
+};
+
+test("the Site view starts below the desktop window bar", async () => {
   const toolbarStart = async (desktop: string, rail: string) => {
-    await page.goto(`${url}?scenario=sites&theme=dark&desktop=${desktop}&rail=${rail}`);
+    await openSiteView(desktop, rail);
     // The collapsed rail has no Site rows; open the Site view the way the
     // router would after a link.
     await page.evaluate((path) => {
@@ -1113,30 +1122,74 @@ test("the Site view's toolbar clears the macOS window controls beside a collapse
     const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
     const first = await toolbar.locator(":scope > div > *").first().boundingBox();
     expect(first).not.toBeNull();
+    await expectWindowTop(page, desktop);
     return first!;
   };
 
-  const mac = await toolbarStart("macos", "collapsed");
-  // Nothing in the toolbar sits under the controls or the sharing badge.
-  expect(mac.x).toBeGreaterThanOrEqual(84);
-  await capture("site-view-macos-collapsed-rail");
-
-  // Full screen keeps its own clearance; the collapsed rail adds nothing.
-  await page.getByRole("button", { name: "Open Site full screen" }).click();
-  const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
-  expect(back!.x).toBeGreaterThanOrEqual(84);
-  expect(back!.x).toBeLessThan(84 + 16);
-  await page.keyboard.press("Escape");
-
-  // Without the macOS controls in the page, or beside the open rail, the
-  // toolbar keeps its usual spacing.
   for (const [desktop, rail, railWidth] of [
+    ["macos", "collapsed", 56],
     ["windows", "collapsed", 56],
     ["browser", "collapsed", 56],
     ["macos", "open", 288],
   ] as const) {
     const start = await toolbarStart(desktop, rail);
     expect(start.x).toBeLessThan(railWidth + 24);
+    expect(start.y).toBeGreaterThanOrEqual(desktop === "browser" ? 0 : WINDOW_BAR_HEIGHT);
+    if (desktop === "macos" && rail === "collapsed") {
+      await capture("site-view-macos-collapsed-rail");
+      // Full screen starts below the bar too, with its usual spacing.
+      await page.getByRole("button", { name: "Open Site full screen" }).click();
+      const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
+      expect(back!.x).toBeLessThan(30);
+      expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
+      await expectWindowTop(page, desktop);
+      await page.keyboard.press("Escape");
+    }
+  }
+}, 30_000);
+
+test("the Site publish form starts below the desktop window bar in a narrow Site column", async () => {
+  const backStart = async (desktop: string) => {
+    await openSiteView(desktop, "collapsed", "&publish&publishable");
+    // The widest chat leaves the Site its narrowest column (under 416px),
+    // where the form's page padding halves. The preview person is
+    // "sidebar-preview"; the Site view reads the width when it opens.
+    await page.evaluate((path) => {
+      localStorage.setItem(
+        "og.site-view.chat:v1:sidebar-preview",
+        JSON.stringify({ width: 720, collapsed: false }),
+      );
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
+    await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
+    const header = form.locator(":scope > header");
+    const back = header.getByRole("button").first();
+    await back.waitFor();
+    const column = await page.locator("[data-site-column]").boundingBox();
+    expect(column!.width).toBeLessThan(416);
+    const box = await back.boundingBox();
+    expect(box).not.toBeNull();
+    // The form keeps one left edge: the title, the fields and the buttons.
+    const edges = await form.evaluate((element) =>
+      [
+        element.querySelector(":scope > header h1"),
+        element.querySelector(":scope > [data-slot='form-body'] > div"),
+        element.querySelector(":scope > footer > div > div"),
+      ].map((node) => Math.round(node!.getBoundingClientRect().left)),
+    );
+    expect(new Set(edges).size).toBe(1);
+    expect(edges[0]).toBe(Math.round(box!.x));
+    await expectWindowTop(page, desktop);
+    return box!.x;
+  };
+
+  // The back link keeps the form's usual spacing on every platform.
+  for (const desktop of ["macos", "windows", "browser"]) {
+    expect(await backStart(desktop)).toBeLessThan(56 + 24);
+    if (desktop === "macos") await capture("site-publish-form-macos-narrow-column");
   }
 }, 30_000);
 

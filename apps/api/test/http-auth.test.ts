@@ -161,44 +161,6 @@ describe("configured deployment perimeter authentication", () => {
     ).toBe(401);
   });
 
-  test("admits only the signed Lens browser handoff and authenticated shared webhook paths", async () => {
-    const app = new Hono();
-    app.use(
-      "*",
-      requireAccessKey(
-        testSettings({
-          productAccessMode: "configured",
-          authRequired: true,
-          accessKey,
-        }),
-      ),
-    );
-    app.all("*", (context) => context.json({ ok: true }));
-
-    for (const request of [
-      new Request(`http://test/v1/workspaces/${workspaceId}/pr-review/github/connect?state=signed`),
-      new Request(
-        `http://test/v1/workspaces/${workspaceId}/pr-review/github/installations/select?state=signed`,
-      ),
-      new Request(
-        `http://test/v1/workspaces/${workspaceId}/pr-review/github/installations/42/configure?state=signed`,
-      ),
-      new Request("http://test/v1/pr-review/github/setup"),
-      new Request("http://test/v1/pr-review/github/oauth/callback"),
-      new Request("http://test/v1/webhooks/pr-review/github", { method: "POST" }),
-    ]) {
-      expect((await app.request(request)).status).toBe(200);
-    }
-    expect(
-      (
-        await app.request(
-          `http://test/v1/workspaces/${workspaceId}/pr-review/github/installations/42`,
-        )
-      ).status,
-    ).toBe(401);
-    expect((await app.request("/v1/webhooks/pr-review/github")).status).toBe(401);
-  });
-
   test("admits only the Connected Machine's self-authenticating protocol routes", async () => {
     const app = new Hono();
     app.use(

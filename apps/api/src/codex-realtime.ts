@@ -17,7 +17,6 @@ import {
   buildSubscriptionCoreCodexConnectionTokenResolver,
   buildSubscriptionCoreCodexOperationFetch,
   listSubscriptionCoreCodexOperationCandidates,
-  readCodexCutoverDisposition,
   readSubscriptionCoreSessionOwner,
   releaseSubscriptionCoreCodexOperationLease,
   renewSubscriptionCoreCodexOperationLease,
@@ -427,15 +426,6 @@ export function buildSessionCodexRealtimeBroker(
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
   const { accountId, workspaceId, sessionId } = context;
   return async (input) => {
-    // The account is required: without it a disabled cutover could not fail closed.
-    const disposition = await readCodexCutoverDisposition(db, accountId, workspaceId);
-    if (disposition === "maintenance") {
-      // A disabled cutover row is maintenance: fail closed, no legacy read.
-      throw new CodexRealtimeBrokerError(
-        "subscription_disabled",
-        "Connected Codex subscription realtime is disabled",
-      );
-    }
     return await brokerSessionCoreCodexRealtime(
       db,
       settings,

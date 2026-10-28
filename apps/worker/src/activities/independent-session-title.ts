@@ -28,7 +28,12 @@ import {
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
   withModelTransportStartedObserver,
 } from "@opengeni/runtime";
-import type { TurnExecutionPolicyV1, SessionEvent } from "@opengeni/contracts";
+import {
+  modelCallProcessingResidency,
+  parseModelCallProcessingResidency,
+  type TurnExecutionPolicyV1,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import type { TurnActivityServices } from "./types";
 import {
   PARALLEL_SESSION_TITLE_TIMEOUT_MS,
@@ -42,6 +47,7 @@ import {
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
   recordModelUsageAndDebitCredits,
+  servedRouteProcessingResidency,
 } from "./agent-turn/model-usage";
 import {
   assertSessionTitleRoute,
@@ -117,6 +123,11 @@ export async function admitIndependentSessionTitle(input: {
     countsTowardTokenCap: input.countsTowardTokenCap,
     pricingJson: titlePricingJson(input.settings, route.modelId),
     serviceTier: input.serviceTier,
+    processingResidency: servedRouteProcessingResidency(
+      input.settings,
+      input.route.resolvedModel,
+      route.modelId,
+    ),
   });
   const operation = await admitSessionTitleOperation(input.db, {
     identity,
@@ -425,6 +436,10 @@ async function completeTitle(
       const events: SessionEvent[] = [];
       let usageMetrics: Parameters<typeof recordAuthoritativeModelUsageMetrics>[0] | null = null;
       const sourceKey = `session-title:${operation.id}`;
+      // The accepted route's residency, frozen with the request at admission.
+      const processingResidency =
+        parseModelCallProcessingResidency(request.processingResidency) ??
+        modelCallProcessingResidency(null);
       const identity = {
         accountId: operation.accountId,
         workspaceId: operation.workspaceId,
@@ -468,6 +483,7 @@ async function completeTitle(
             events.push(...appended);
             return { events: appended, accepted: true, canonicalStartupMilestones: [] };
           },
+          processingResidency,
         });
         if (authoritative && billing) {
           await recordAuthoritativeModelCallFact({
@@ -480,6 +496,7 @@ async function completeTitle(
             model: request.modelId,
             billing,
             subscriptionConnectionId: operation.connectionId,
+            processingResidency,
           });
           usageMetrics = {
             settings,

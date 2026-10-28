@@ -21,6 +21,8 @@ function recorder(overrides: Partial<MeetingRecorder>): MeetingRecorder {
     error: null,
     finished: [],
     recovered: [],
+    uploads: {},
+    retryUpload: () => false,
     ...overrides,
   } as MeetingRecorder;
 }

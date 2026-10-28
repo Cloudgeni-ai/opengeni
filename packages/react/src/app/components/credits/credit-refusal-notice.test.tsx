@@ -21,6 +21,14 @@ mock.module("../../lib/navigation", () => ({
   ),
 }));
 
+let balanceMicros = 0;
+const getBilling = mock(async (_input: { accountId: string }) => ({
+  mode: "stripe" as const,
+  balance: { balanceMicros },
+}));
+const appContext = { client: { getBilling } };
+mock.module("../../app-context", () => ({ useAppContext: () => appContext }));
+
 const { CreditRefusalNotice } = await import("./credit-refusal-notice");
 
 beforeAll(() => {
@@ -37,6 +45,8 @@ afterEach(async () => {
   await act(async () => root?.unmount());
   root = undefined;
   document.body.replaceChildren();
+  balanceMicros = 0;
+  getBilling.mockClear();
 });
 
 const SERVER_MESSAGE =
@@ -65,6 +75,8 @@ async function render(props: Partial<ComponentProps<typeof CreditRefusalNotice>>
       />,
     ),
   );
+  // Let the balance read settle.
+  await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
   return container;
 }
 
@@ -107,7 +119,7 @@ test("without covered models it offers credits and a connection, and can be dism
   });
   expect(container.textContent).not.toContain("Your credits cover");
   const links = [...container.querySelectorAll("a")].map((link) => link.textContent);
-  expect(links).toEqual(["Buy credits", "Connect a model"]);
+  expect(links).toEqual(["Add credits", "Use your own provider account"]);
   await act(async () =>
     container.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!.click(),
   );
@@ -118,6 +130,58 @@ test("people who cannot buy credits are not offered a purchase", async () => {
   const container = await render({ canBuyCredits: false, canConnectModel: false });
   expect(container.querySelectorAll("a")).toHaveLength(0);
   expect(container.textContent).toContain(SERVER_MESSAGE);
+});
+
+test("with no credit for any model it says so plainly, not the promotional-credit advice", async () => {
+  const gap = { modelLabel: "Assistant", covered: [], selectionUsable: false };
+  const billing = { accountId: "org", canReadBilling: true };
+  const container = await render({ gap, ...billing });
+  expect(getBilling).toHaveBeenCalledWith({ accountId: "org" });
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain("Add credits to start chatting");
+  expect(alert.textContent).toContain(
+    "Chats here are paid with Opengeni credits, and you don't have any right now.",
+  );
+  expect(alert.textContent).not.toContain("don't cover");
+  expect(alert.textContent).not.toContain("promotional");
+  await act(async () => root!.unmount());
+  const inChat = await render({ gap, ...billing, continuing: true });
+  expect(inChat.textContent).toContain("Add credits to keep chatting");
+  await act(async () => root!.unmount());
+  const member = await render({ gap, ...billing, canBuyCredits: false });
+  expect(member.textContent).toContain("No credits left");
+  expect(member.textContent).toContain("Ask an organization owner to add some.");
+});
+
+test("credit that covers no model gets the new-chat page's words, not \"you don't have any\"", async () => {
+  balanceMicros = 5_500_000;
+  const gap = { modelLabel: "Assistant", covered: [], selectionUsable: false };
+  const billing = { accountId: "org", canReadBilling: true };
+  const container = await render({ gap, ...billing, continuing: true });
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain("Add credits to use this model");
+  expect(alert.textContent).toContain(
+    "This model can't use the Opengeni credits you have right now. Add credits, or choose another model.",
+  );
+  expect(alert.textContent).not.toContain("don't have any");
+  expect(alert.textContent).not.toContain("promotional");
+  await act(async () => root!.unmount());
+  const member = await render({ gap, ...billing, canBuyCredits: false });
+  expect(member.textContent).toContain("Credits needed for this model");
+  expect(member.textContent).toContain(
+    "This model can't use your organization's Opengeni credits right now.",
+  );
+  expect(member.textContent).not.toContain("No credits left");
+});
+
+test("without the balance it claims neither state", async () => {
+  const gap = { modelLabel: "Assistant", covered: [], selectionUsable: false };
+  const container = await render({ gap, accountId: "org", canReadBilling: false });
+  expect(getBilling).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Add credits to use this model");
+  expect(container.textContent).toContain("This model needs Opengeni credits.");
+  expect(container.textContent).not.toContain("don't have any");
+  expect(container.textContent).not.toContain("you have right now");
 });
 
 test("the refusal shows the server's sentence, not the SDK's status prefix or reference", async () => {

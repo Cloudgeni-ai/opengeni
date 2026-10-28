@@ -11,7 +11,7 @@ import {
 
 export type RigProviderImageDefinition = Pick<
   RigVersion,
-  "setupScript" | "checks" | "credentialHooks" | "defaultVariableSetIds"
+  "setupScript" | "checks" | "credentialHooks"
 >;
 
 function sha256(value: string): string {
@@ -48,7 +48,6 @@ export function rigProviderImageContentHash(input: {
       setupScript: input.definition.setupScript,
       checks: input.definition.checks,
       credentialHooks: input.definition.credentialHooks,
-      defaultVariableSetIds: input.definition.defaultVariableSetIds,
     }),
   );
 }

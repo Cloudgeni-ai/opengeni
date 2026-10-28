@@ -14,7 +14,7 @@ import {
  */
 export function startBrowserHoldRenewalPump(
   renew: () => Promise<BrowserHoldRenewal>,
-  observability?: Pick<Observability, "error">,
+  observability?: Pick<Observability, "error" | "warn">,
   intervalMs = BROWSER_HOLD_RENEWAL_INTERVAL_MS,
 ): () => Promise<void> {
   let stopped = false;
@@ -22,7 +22,16 @@ export function startBrowserHoldRenewalPump(
   const tick = () => {
     if (stopped || running) return;
     running = renew()
-      .then(() => undefined)
+      .then((renewal) => {
+        // More browsers are held than one pass renews: the least recently
+        // used ones fall back to their plain idle release.
+        if (renewal.capped) {
+          observability?.warn("Browser hold renewal reached its per-pass limit", {
+            listed: renewal.listed,
+            held: renewal.held,
+          });
+        }
+      })
       .catch((error: unknown) => {
         observability?.error("Browser hold renewal failed", {
           error: error instanceof Error ? error.message : String(error),

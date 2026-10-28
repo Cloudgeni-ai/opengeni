@@ -671,10 +671,6 @@ jobs:
 
       - name: Run exactly the explained source guards
         timeout-minutes: 16
-        env:
-          # The published-SDK compatibility guard boots the API on real
-          # PostgreSQL; fail closed instead of skipping when docker is missing.
-          OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
@@ -1190,7 +1186,7 @@ jobs:
           OPENGENI_ACCOUNT_EVIDENCE_DIR: /tmp/opengeni-account-acceptance
         run: |
           bun test --max-concurrency=1 --timeout 180000 \
-            ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \
+            ./packages/db/test/managed-auth-session-sets.test.ts \
             ./apps/api/test/managed-auth-session-sets.integration.test.ts
           if [ "$OPENGENI_ACCOUNT_BROWSER_ENGINE" = "chromium" ]; then
             bun scripts/run-browser-e2e.ts ./test/e2e/browser-account-request-observation.browser.e2e.ts

@@ -23,6 +23,14 @@ export type SiteViewProps = {
   toolBridge?: SiteToolBridgeFactory | undefined;
   /** Who is viewing, answered to the Site's `site.viewer`. */
   viewer?: SiteViewer | undefined;
+  /**
+   * The Site's own address (`/admin?tab=2`), answered to `site.location`;
+   * with `onSiteLocationChange` the host keeps it, for example in its URL.
+   * Omit both and the view keeps it itself, starting at `/`.
+   */
+  siteLocation?: string | undefined;
+  /** The Site moved itself with `site.navigate`. */
+  onSiteLocationChange?: ((href: string, options: { replace: boolean }) => void) | undefined;
   theme?: "light" | "dark" | undefined;
   /** Shown instead of the archived notice; the console links to its full page. */
   archivedMessage?: string | undefined;
@@ -73,6 +81,8 @@ export function SiteView({
   siteId,
   toolBridge,
   viewer,
+  siteLocation,
+  onSiteLocationChange,
   theme,
   archivedMessage,
   showTitle = true,
@@ -212,6 +222,8 @@ export function SiteView({
       liveState={liveState}
       toolBridge={bridge}
       viewer={viewer}
+      {...(siteLocation !== undefined ? { siteLocation } : {})}
+      {...(onSiteLocationChange ? { onSiteLocationChange } : {})}
       connectedToolCount={content.requestedTools.length}
       theme={theme}
       {...(showToolbar !== undefined ? { showToolbar } : {})}

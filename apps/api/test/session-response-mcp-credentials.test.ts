@@ -19,8 +19,8 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
-  decryptVariableSetValue,
-  encryptVariableSetValue,
+  decryptEnvironmentValue,
+  encryptEnvironmentValue,
   getSession,
   listSessionMcpServersForRun,
   submitHumanPromptInTransaction,
@@ -91,8 +91,8 @@ async function fixture(type: ResponseType, granted = permissions) {
         url: "https://crm.example.test/mcp",
         requireApproval: ["update_ticket"],
         headersEncrypted: {
-          Authorization: encryptVariableSetValue(encryptionKey, originalToken),
-          "X-Old": encryptVariableSetValue(encryptionKey, "removed-by-replacement"),
+          Authorization: encryptEnvironmentValue(encryptionKey, originalToken),
+          "X-Old": encryptEnvironmentValue(encryptionKey, "removed-by-replacement"),
         },
       },
     ],
@@ -299,7 +299,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     });
     expect(Object.keys(server.headers_encrypted)).toEqual(["Authorization"]);
     expect(server.headers_encrypted.Authorization).not.toBe(refreshedToken);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
     const metadata = await getSession(client.db, f.workspaceId, f.sessionId);
@@ -474,7 +474,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     ).toBe(type === "user.approvalDecision" ? 202 : 200);
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
   });
@@ -491,7 +491,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     expect(((await replay.json()) as SessionEvent).id).toBe(event.id);
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
     expect(await responseEvents(f)).toHaveLength(1);
@@ -515,7 +515,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
     const winner = replies.findIndex((reply) => reply.status === 202);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       [refreshedToken, "Bearer competing-hook-token"][winner]!,
     );
     expect(await responseEvents(f)).toHaveLength(1);
@@ -541,7 +541,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
       expect((await send(app, f)).status).toBe(500);
       const server = await stored(f);
       expect(server.credential_version).toBe(1);
-      expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+      expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
         originalToken,
       );
       expect(await responseEvents(f)).toHaveLength(0);
@@ -571,7 +571,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
         {
           id: "crm",
           headersEncrypted: {
-            Authorization: encryptVariableSetValue(encryptionKey, refreshedToken),
+            Authorization: encryptEnvironmentValue(encryptionKey, refreshedToken),
           },
         },
         { id: "disappeared", headersEncrypted: {} },

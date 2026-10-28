@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isolatedGitEnvironment } from "../../packages/runtime/test/isolated-git-home-fixture";
 import { publishableWorkspacePackages } from "../publishable-workspaces";
-import { DEPRECATION_MESSAGE, deprecationRanges, retiredVersions } from "./deprecate-pre-1.0";
 import {
   LOCKSTEP_RESET_VERSION,
   RETIRED_PRE_RESET_VERSIONS,
@@ -79,35 +78,6 @@ describe("lockstep package versioning", () => {
     expect(retitleChangelog("# x\n\n## 1.0.1\n\n- a\n\n## 1.0.0\n", "1.0.1", "1.0.2")).toBe(
       "# x\n\n## 1.0.2\n\n- a\n\n## 1.0.0\n",
     );
-  });
-
-  test("the operator deprecation plan retires exactly the pre-reset publications", () => {
-    const packument = {
-      versions: {
-        "0.1.0": {},
-        "1.0.1": {},
-        "7.8.1": {},
-        "7.8.1-canary.3": {},
-        "6.0.0": { deprecated: DEPRECATION_MESSAGE },
-        "1.0.0": {},
-        "1.0.2": {},
-        "1.0.3-canary.40000000000001": {},
-      },
-      time: {
-        "0.1.0": "2026-01-01T00:00:00.000Z",
-        "1.0.1": "2026-02-01T00:00:00.000Z",
-        "6.0.0": "2026-05-01T00:00:00.000Z",
-        "7.8.1": "2026-10-04T00:00:00.000Z",
-        "7.8.1-canary.3": "2026-10-04T01:00:00.000Z",
-        "1.0.0": "2026-10-05T00:00:00.000Z",
-        "1.0.2": "2026-10-06T00:00:00.000Z",
-        "1.0.3-canary.40000000000001": "2026-10-07T00:00:00.000Z",
-      },
-    };
-    const versions = retiredVersions(packument);
-    expect(versions).toEqual(["0.1.0", "1.0.1", "7.8.1-canary.3", "7.8.1"]);
-    expect(deprecationRanges(versions)).toEqual(["0.1.0 || 1.0.1 || 7.8.1-canary.3 || 7.8.1"]);
-    expect(() => retiredVersions({ versions: {}, time: {} })).toThrow("not published");
   });
 
   test("changeset version plus the guard moves a patch release off a retired version", async () => {

@@ -35,6 +35,7 @@ export type ModelPreparationPhase =
   | "input_filter_base"
   | "input_filter_genesis"
   | "input_filter_host"
+  | "input_filter_secret_mask"
   | "input_filter_tool_output"
   | "input_filter_modality"
   | "input_filter_context"
@@ -163,10 +164,16 @@ export async function recordModelTransportStarted(): Promise<void> {
     await beforeModelRequest();
     await modelTransportStartedObserver.getStore()?.started?.();
   } catch (error) {
-    const admission = modelTransportAdmission.getStore();
-    if (admission) admission.refusal = { error };
-    throw error;
+    refuseModelTransport(error);
   }
+}
+
+/** Refuse a model request before it is sent. Under the SDK fetch wrapper the
+ * refusal is surfaced once, as this exact error, never retried. */
+export function refuseModelTransport(error: unknown): never {
+  const admission = modelTransportAdmission.getStore();
+  if (admission) admission.refusal = { error };
+  throw error;
 }
 
 /** Synchronous diagnostic after admission: plain fetch entry, or the send

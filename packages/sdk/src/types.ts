@@ -34,7 +34,9 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
   SessionAutomationWaitSummary,
+  SessionAvatar,
 } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -284,6 +286,8 @@ export type ToolGatewayTargetApprovalRequest = {
   operationId: string;
   arguments: Record<string, unknown>;
   expectedDefinitionDigest: string;
+  /** "Always allow for this Site" (this person, this Site, this tool and connection). Site context only. */
+  rememberForSite?: boolean;
   siteArtifactId?: string;
   siteVersionId?: string;
 };
@@ -293,6 +297,38 @@ export type ToolGatewayTargetApprovalResponse = {
   tool: ToolGatewayResolvedTool;
   approvalToken: string;
   expiresAt: string;
+};
+/** The viewer's own accounts for a Site's declared tool (host code only). */
+export type ToolGatewaySiteConsentRequest = {
+  identity: ToolGatewayIdentity;
+  siteArtifactId: string;
+  siteVersionId: string;
+  /** The exact arguments, to review what the call would do on the selected account. */
+  arguments?: Record<string, unknown>;
+};
+export type ToolGatewaySiteConsentAccount = {
+  identity: ToolGatewayIdentity;
+  connector: string;
+  account: string;
+};
+/** The provider's own reading of the call (for Gmail, the message as it would be sent). */
+export type ToolGatewaySiteConsentReview = {
+  kind: "generic" | "gmail";
+  email?: {
+    from: string;
+    to: string;
+    cc: string;
+    bcc: string;
+    subject: string;
+    attachments: number;
+  };
+};
+export type ToolGatewaySiteConsentResponse = {
+  version: 1;
+  accounts: ToolGatewaySiteConsentAccount[];
+  selected: ToolGatewayIdentity | null;
+  review: ToolGatewaySiteConsentReview | null;
+  connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
@@ -1844,6 +1880,10 @@ export type Session = {
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
+  /** Display-only one-line description of what this chat is for. Never sent to the model. */
+  description?: string | null | undefined;
+  /** Display-only avatar. Never sent to the model. */
+  avatar?: SessionAvatar | null | undefined;
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
@@ -1871,12 +1911,6 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetIds?: string[] | undefined;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
@@ -2030,6 +2064,8 @@ export type SessionListEntry = Pick<
   | "automationWait"
   | "title"
   | "titleSource"
+  | "description"
+  | "avatar"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -2677,6 +2713,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.profile_set",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
@@ -3574,17 +3611,17 @@ export type IncidentTelemetrySeriesMetadata = {
 export type IncidentTelemetryDataRoute =
   | { kind: "mcp"; serverId: string }
   | { kind: "first_party"; tool: FirstPartyMcpToolName }
-  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "vault"; vaultName: string; secretNames: string[] }
   | { kind: "rig_credential_hook"; credentialHookId: string };
 
 export type IncidentTelemetryPreflight = {
   requiredResources: ResourceRef[];
   requiredMcpServerIds: string[];
   requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
-  requiredFirstPartyMcpPermissions: Permission[];
+  requiredFirstPartyMcpPermissions: KnownPermission[];
   requiredRig: { name: string; credentialHookIds: string[] } | null;
-  requiredVariableSetNames: string[];
-  requiredVariableNames: string[];
+  requiredVaultNames: string[];
+  requiredSecretNames: string[];
   dataSource: {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
@@ -3603,16 +3640,16 @@ export type IncidentTelemetryPreflightInput = Omit<
   | "requiredFirstPartyMcpTools"
   | "requiredFirstPartyMcpPermissions"
   | "requiredRig"
-  | "requiredVariableSetNames"
-  | "requiredVariableNames"
+  | "requiredVaultNames"
+  | "requiredSecretNames"
 > & {
   requiredResources?: ResourceRef[] | undefined;
   requiredMcpServerIds?: string[] | undefined;
   requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
-  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredFirstPartyMcpPermissions?: KnownPermission[] | undefined;
   requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
-  requiredVariableSetNames?: string[] | undefined;
-  requiredVariableNames?: string[] | undefined;
+  requiredVaultNames?: string[] | undefined;
+  requiredSecretNames?: string[] | undefined;
 };
 
 export type ScheduledTaskAgentConfig = {
@@ -3717,10 +3754,6 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
   /** Vaults every run may resolve secret references from (the task vault is always included). */
@@ -3868,6 +3901,18 @@ export type CreateSessionRequest = {
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
   /**
+   * The new chat's name, description and avatar, as if a person set them (a
+   * bot started from a template, for example). Display metadata only; never
+   * sent to the model.
+   */
+  profile?:
+    | {
+        title?: string | undefined;
+        description?: string | undefined;
+        avatar?: SessionAvatar | undefined;
+      }
+    | undefined;
+  /**
    * `realtime` creates an idle session shell so realtime voice can be the
    * first interaction. `standard` is the explicit default; `createSession`
    * sends it with a usage limit so servers that predate limits reject the
@@ -3938,7 +3983,7 @@ export type CreateSessionRequest = {
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  /** Atomically attach the server-derived personal rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -4118,6 +4163,7 @@ export type FirstPartyMcpToolName =
   | "session_steer"
   | "session_human_input_respond"
   | "set_other_session_title"
+  | "bot_template_save"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"
@@ -4147,6 +4193,8 @@ export type FirstPartyMcpToolName =
   | "secret_get"
   | "secret_move"
   | "secret_delete"
+  | "secret_profile_get"
+  | "secret_profile_set"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -5625,93 +5673,6 @@ export type ClientResumableVoiceInputConfig = {
   providerSegmentSeconds: number;
 };
 
-export type TranscriptionRecordingErrorCode =
-  | "permission_denied"
-  | "not_supported"
-  | "network"
-  | "provider"
-  | "policy_blocked"
-  | "timeout"
-  | "cancelled"
-  | "unavailable"
-  | "too_large"
-  | "invalid_audio"
-  | "unknown"
-  | "insufficient_credits"
-  | "allowance_exhausted"
-  | "monthly_model_cost_limit";
-
-export type TranscriptionRecordingState =
-  | "uploading"
-  | "segmenting"
-  | "ready"
-  | "transcribing"
-  | "complete"
-  | "failed"
-  | "discarded";
-
-export type TranscriptionRecordingSegmentState =
-  | "preparing"
-  | "pending"
-  | "transcribing"
-  | "complete"
-  | "failed";
-
-export type TranscriptionRecordingSegment = {
-  segmentNumber: number;
-  state: TranscriptionRecordingSegmentState;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  byteLength: number;
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-};
-
-export type TranscriptionRecording = {
-  id: string;
-  workspaceId: string;
-  mimeType: string;
-  state: TranscriptionRecordingState;
-  nextChunkNumber: number;
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  segmentCount: number;
-  completedSegmentCount: number;
-  transcriptText: string | null;
-  languages: string[];
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-  objectsCleaned: boolean;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-};
-
-export type TranscriptionRecordingResponse = {
-  recording: TranscriptionRecording;
-  segments: TranscriptionRecordingSegment[];
-  retryAfterMilliseconds?: number;
-};
-
-export type TranscriptionRecordingListResponse = {
-  recordings: TranscriptionRecording[];
-};
-
-export type TranscriptionRecordingChunk = {
-  chunkNumber: number;
-  byteLength: number;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  deduplicated: boolean;
-};
-
-export type UploadTranscriptionRecordingChunkResponse = {
-  recording: TranscriptionRecording;
-  chunk: TranscriptionRecordingChunk;
-};
-
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
 export type TranscribeAudioResponse = {
   text: string;
@@ -5810,6 +5771,12 @@ export type ManagedOrganizationMembership = {
    * longer sees or starts new work there. Absent means on.
    */
   personalWorkspacesEnabled?: boolean | undefined;
+  /**
+   * The person's current answer to "How do you want to use Opengeni?" for
+   * this organization: get help with everyday things, add agents to a product,
+   * or run agents in the cloud. Absent when the server keeps no answer for them.
+   */
+  signupUseCase?: "everyday" | "embed" | "cloud" | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {
@@ -7148,7 +7115,10 @@ export type UpdateSessionGoalRequest =
     };
 
 export type UpdateSessionRequest = {
-  title: string;
+  title?: string | undefined;
+  /** Empty string clears the description. */
+  description?: string | null | undefined;
+  avatar?: SessionAvatar | null | undefined;
 };
 
 // --- Operator context controls (/clear, /compact) ----------------------------
@@ -7979,8 +7949,6 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
-  defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
@@ -8871,120 +8839,6 @@ export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" 
   description?: string | undefined;
 };
 export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
-
-// --- Opengeni Review Bot ------------------------------------------------------------
-
-export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
-export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
-
-export type CreatePrReviewAppRegistrationRequest = {
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl?: string | undefined;
-  appId?: string | undefined;
-  credentialKind: PrReviewCredentialKind;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret: string;
-  webhookUsername?: string | undefined;
-};
-
-export type UpdatePrReviewAppRegistrationRequest = {
-  name?: string | undefined;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret?: string | undefined;
-  webhookUsername?: string | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewAppRegistration = {
-  id: string;
-  sourceId: string;
-  accountId: string;
-  workspaceId: string;
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl: string;
-  appId: string | null;
-  installationId: string | null;
-  providerAccountLogin: string | null;
-  providerAccountType: "User" | "Organization" | null;
-  credentialKind: PrReviewCredentialKind;
-  hasCredential: boolean;
-  accessTokenExpiresAt: string | null;
-  webhookAuthKind: PrReviewWebhookAuthKind;
-  hasWebhookSecret: boolean;
-  webhookUsername: string | null;
-  webhookPath: string;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CreatePrReviewRepositoryBindingRequest = {
-  registrationId: string;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string | number;
-  installationId?: string | number | undefined;
-  projectId?: string | number | undefined;
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type UpdatePrReviewRepositoryBindingRequest = {
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewRepositoryBinding = {
-  id: string;
-  triggerId: string;
-  accountId: string;
-  workspaceId: string;
-  registrationId: string;
-  provider: PrReviewProvider;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string;
-  installationId: string | null;
-  projectId: string | null;
-  model: string | null;
-  additionalInstructions: string | null;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ListPrReviewConfigurationResponse = {
-  registrations: PrReviewAppRegistration[];
-  repositories: PrReviewRepositoryBinding[];
-};
-
-export type PrReviewManagedGitHubInstallation = {
-  registrationId: string;
-  installationId: string;
-  accountLogin: string | null;
-  configureUrl: string | null;
-  repositoryCount: number;
-};
-
-export type PrReviewManagedGitHubSetup = {
-  configured: boolean;
-  status: "unavailable" | "not_connected" | "connected";
-  appName: "Opengeni Lens" | "OpenGeni Lens";
-  connectUrl: string | null;
-  installations: PrReviewManagedGitHubInstallation[];
-  missing: string[];
-};
 
 // --- Capabilities ---------------------------------------------------------------
 

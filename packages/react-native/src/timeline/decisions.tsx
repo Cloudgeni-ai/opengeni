@@ -16,6 +16,7 @@ import {
 import {
   answersFromDrafts,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   humanInputHeading,
   initialDrafts,
@@ -153,7 +154,7 @@ export function HumanInputCard({
 }: HumanInputCardProps) {
   const t = useOpenGeniText();
   const merged = useMemo(
-    () => ({ ...defaultHumanInputFormMessages(t), ...messages }),
+    () => mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messages),
     [t, messages],
   );
   const mergedSecret = useMemo(
@@ -501,7 +502,13 @@ function HumanInputForm({
                 <DecisionButton
                   kind="primary"
                   label={
-                    last ? (busy ? messages.submitting : messages.submit) : t("humanInputForm.next")
+                    !last
+                      ? t("humanInputForm.next")
+                      : busy
+                        ? messages.submitting
+                        : total === 1
+                          ? (messages.submitOne ?? messages.submit)
+                          : messages.submit
                   }
                   busy={last && busy}
                   disabled={busy}
@@ -836,6 +843,32 @@ export interface ApprovalStripProps {
  * through chat) reads as a plain question answered with Allow or Cancel; the
  * raw arguments stay behind Details.
  */
+/**
+ * The scrolling part of an approval card. When the review is taller than its
+ * window, the scroll bar shows once (and stays on Android), so a person can see
+ * there is more to read before approving.
+ */
+function ReviewBody({ maxHeight, children }: { maxHeight: number; children: ReactNode }) {
+  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
+  const flashed = useRef(false);
+  return (
+    <ScrollView
+      ref={scroll}
+      style={{ maxHeight, flexGrow: 0 }}
+      contentContainerStyle={{ gap: 12 }}
+      nestedScrollEnabled
+      persistentScrollbar
+      onContentSizeChange={(_width, contentHeight) => {
+        if (flashed.current || contentHeight <= maxHeight) return;
+        flashed.current = true;
+        scroll.current?.flashScrollIndicators();
+      }}
+    >
+      {children}
+    </ScrollView>
+  );
+}
+
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
@@ -927,11 +960,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
               </View>
               {/* The title and the buttons stay pinned; a long review scrolls
                   between them so the buttons are never pushed off screen. */}
-              <ScrollView
-                style={{ maxHeight: bodyMaxHeight, flexGrow: 0 }}
-                contentContainerStyle={{ gap: 12 }}
-                nestedScrollEnabled
-              >
+              <ReviewBody maxHeight={bodyMaxHeight}>
                 {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
                 {facts.effects.length > 0 ? (
                   <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
@@ -955,7 +984,13 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     {facts.shown.map((field) => (
                       <View key={field.path} style={{ gap: 1 }}>
                         <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
-                        <Text numberOfLines={6} style={{ ...body, color: c.fg }}>
+                        {/* Like the web card: a field reads in full (the body
+                            scrolls), and only a value cut short by the server is
+                            clamped, with all of it under Show details. */}
+                        <Text
+                          numberOfLines={field.truncated ? 6 : undefined}
+                          style={{ ...body, color: c.fg }}
+                        >
                           {field.preview}
                         </Text>
                       </View>
@@ -999,7 +1034,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     </Text>
                   </View>
                 ) : null}
-              </ScrollView>
+              </ReviewBody>
               <DecisionActions
                 style={{ marginTop: 4 }}
                 primary={

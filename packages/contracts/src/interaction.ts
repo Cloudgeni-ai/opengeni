@@ -8,6 +8,7 @@ import {
   replaceReferencesDeep,
   tokenizeSecretText,
 } from "./secret-references";
+import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
@@ -3579,6 +3580,13 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       /** Present on the target this computer was last observed or acted on
        * in, which a call that omits targetId works in. */
       current: z.literal(true).optional(),
+      /** Present when someone other than Opengeni (a person, or other
+       * software) used this computer's keyboard, mouse or trackpad within the
+       * last minute, as of the listing or observation that carries it: how
+       * many whole seconds before it. Input Opengeni's computer sessions on
+       * this computer send does not count. A listing marks every target
+       * alike. */
+      personInputSecondsAgo: z.number().int().min(0).max(60).optional(),
     })
     .strict(),
 );
@@ -4322,93 +4330,39 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
  * typed value into its address. */
 const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 
-/** The forms a value takes in page text and addresses. */
-function secretNeedles(secretValues: InteractionSecretValues): string[] {
-  const needles = new Set<string>();
-  for (const value of Object.values(secretValues)) {
-    if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
-    needles.add(value);
-    // Tools trim the text they report and keep its first line, so a value's
-    // trimmed form and each line of a multi-line value are searched too.
-    for (const part of [value.trim(), ...value.split(/\r?\n|\r/u).map((line) => line.trim())])
-      if (part.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS) needles.add(part);
-    try {
-      needles.add(encodeURIComponent(value));
-      needles.add(encodeURIComponent(value).replaceAll("%20", "+"));
-    } catch {
-      // A lone surrogate has no URI form; the raw value is still searched.
-    }
-    // Submitted forms and URLSearchParams encode more characters (for
-    // example "!" as "%21") than encodeURIComponent does.
-    needles.add(new URLSearchParams({ v: value }).toString().slice(2));
-  }
-  return [...needles].sort((left, right) => right.length - left.length);
-}
-
-/** Length of the longest start of `needle` that `text` ends with, when it is
- * long enough to matter: text clipped to a length can end partway through a
- * value, and that partial value is still the secret's start. */
-function clippedSecretTail(text: string, needle: string): number {
-  const probe = text.slice(-INTERACTION_MIN_REDACTED_SECRET_CHARS);
-  if (probe.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) return 0;
-  let best = 0;
-  for (let at = needle.indexOf(probe); at !== -1; at = needle.indexOf(probe, at + 1)) {
-    const length = at + probe.length;
-    if (length < needle.length && length > best && text.endsWith(needle.slice(0, length)))
-      best = length;
-  }
-  return best;
-}
-
-/** Where text may have been cut: its end, and each truncation mark a tool
- * leaves where it clipped a longer text before adding more after it. */
-const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
+/** How browser and desktop results are masked: the shared known-value engine
+ * with the `[secret]` marker, a four-character minimum (typed values are
+ * often short) for values, their lines and clipped starts (at the end of any
+ * text too), and identifier keys left alone. */
+export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
+  minChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  base64: false,
+  lines: "all",
+  // Typed values are short: every form (lines, percent-encoded) may be clipped.
+  clippedForms: "all",
+  clippedMinChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  clippedMinShare: 0,
+  // An observed field or label clipped to its width ends partway through.
+  clippedTextEndMinChars: 0,
+  skipKey: (key) => NON_TEXT_KEY.test(key),
+};
 
 /** Deep copy with every occurrence of a supplied secret value in a text
  * string (raw or percent-encoded) replaced by `[secret]`, including a value's
  * start left at the end of a clipped string or before a truncation mark.
  * Used on results a driver returns after dispatching materialized values (CUA
  * tools echo typed text; desktop accessibility trees and page fields expose
- * values). */
+ * values). One engine with agent tool-result masking: `maskSecretValues`. */
 export function redactInteractionSecretValues<T>(
   value: T,
   secretValues: InteractionSecretValues | undefined,
 ): T {
   if (secretValues === undefined) return value;
-  const needles = secretNeedles(secretValues);
-  if (needles.length === 0) return value;
-  const redactText = (text: string): string => {
-    let out = text;
-    for (const needle of needles) {
-      if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
-    }
-    const cuts = [...out.matchAll(TRUNCATION_MARK)].map((match) => match.index);
-    // From the last cut back, so the earlier positions stay valid.
-    for (const cut of [out.length, ...cuts.reverse()]) {
-      const before = out.slice(0, cut);
-      let tail = 0;
-      for (const needle of needles) tail = Math.max(tail, clippedSecretTail(before, needle));
-      if (tail > 0)
-        out = before.slice(0, cut - tail) + INTERACTION_REDACTED_SECRET + out.slice(cut);
-    }
-    return out;
-  };
-  const visit = (entry: unknown, key: string | null): unknown => {
-    if (typeof entry === "string") {
-      return key !== null && NON_TEXT_KEY.test(key) ? entry : redactText(entry);
-    }
-    if (Array.isArray(entry)) return entry.map((item) => visit(item, key));
-    if (entry !== null && typeof entry === "object") {
-      return Object.fromEntries(
-        Object.entries(entry as Record<string, unknown>).map(([childKey, child]) => [
-          childKey,
-          visit(child, childKey),
-        ]),
-      );
-    }
-    return entry;
-  };
-  return visit(value, null) as T;
+  const entries = Object.values(secretValues).map((secret) => ({
+    value: secret,
+    label: INTERACTION_REDACTED_SECRET,
+  }));
+  return maskSecretValues(value, entries, INTERACTION_SECRET_MASK_OPTIONS);
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ import {
   hasPermission,
   listInsightsCalls,
   requireAccessContext,
-  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   siteViewerForGrant,
   type ApiRouteDeps,
   type InsightsQueryScope,
@@ -228,7 +228,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/sites", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = parseRequestQuery(
       InsightsSiteUsageQuery,
       insightsQueryParameters(c.req.queries()),
@@ -252,7 +252,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = insightsQueryParameters(c.req.queries());
     if (!insightsRawQuerySupported(query, false, false))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });
@@ -287,7 +287,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/insights/calls", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const query = insightsQueryParameters(c.req.queries());
     if (!insightsRawQuerySupported(query, false, true))
       throw new HTTPException(400, { message: "unsupported interim Insights query" });

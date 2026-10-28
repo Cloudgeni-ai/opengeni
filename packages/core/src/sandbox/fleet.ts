@@ -28,6 +28,7 @@ import {
   getSandbox,
   listEnrollments,
   listSandboxes,
+  meetingSummarySessionScope,
   nestedPostgresSqlState,
   readActiveSandbox,
   readLease,
@@ -44,9 +45,11 @@ import { HTTPException } from "hono/http-exception";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
+  credentialProfileNoteText,
   prepareSecretExec,
   resolveSecretLiteralText,
   runWithSecretCarry,
+  type CredentialEnvironment,
   type SecretExecCarry,
   selfhostedLiveness,
   SelfhostedSession,
@@ -830,6 +833,16 @@ export async function swapActiveSandbox(
   // never touches it); threaded straight into the epoch-fenced setActiveSandbox CAS.
   workingDir?: string | null,
 ): Promise<FleetSwapResult> {
+  // A built-in meeting-summary chat never gets a machine (docs/recordings.md,
+  // "Built-in summary"); the database refuses the same change.
+  if (
+    await meetingSummarySessionScope(services.db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.sessionId,
+    })
+  ) {
+    throw new HTTPException(409, { message: "A meeting notes chat keeps only its meeting tools." });
+  }
   const resolved = await resolveTarget(services, ctx, target);
   if (!resolved.ok) {
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
@@ -1001,6 +1014,8 @@ export type RunOnResult = {
   /** Typed refusal for a personal (Only me) machine this attempt may not use. */
   code?: PersonalMachineRefusalCode;
   notice?: string;
+  /** Exec only: credential profile variables that were skipped and why (never values). */
+  credentialProfileNote?: string;
   /** Present only after the session command ledger accepted a running exec. */
   commandId?: string;
   state?: "running";
@@ -1048,6 +1063,11 @@ export type RunOnSelfhostedMachine = {
    * nothing. Absent: references pass through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The calling session's credential profile: exec receives its variables
+   * in ExecRequest.env (below the command's own assignments). Absent: none.
+   */
+  credentials?: CredentialEnvironment | null;
 };
 
 /**
@@ -1083,6 +1103,7 @@ export async function createRunOnSecretResolver(
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
   secretResolver?: SecretResolver | null;
+  credentials?: CredentialEnvironment | null;
 };
 
 function runOnOperationAdmission(
@@ -1190,6 +1211,7 @@ export async function executeRunOnSelfhostedMachine(
         resolver: machine.secretResolver,
         dialect: null,
         use: secretUse,
+        credentials: machine.credentials ?? null,
       });
       let res: Awaited<ReturnType<typeof session.exec>> | undefined;
       try {
@@ -1207,6 +1229,9 @@ export async function executeRunOnSelfhostedMachine(
           await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
       }
+      // Read after dispatch: the machine may add a delivery note to the same list.
+      const profileNote = credentialProfileNoteText(prepared?.notes);
+      const credentialProfileNote = profileNote ? { credentialProfileNote: profileNote } : {};
       if (res.backgroundCommandId) {
         return {
           target,
@@ -1221,6 +1246,7 @@ export async function executeRunOnSelfhostedMachine(
           deadlineMs,
           notice:
             "Command is still running. Use command_read or command_wait with this commandId; do not restart it.",
+          ...credentialProfileNote,
         };
       }
       const timedOut = res.timedOut === true;
@@ -1249,6 +1275,7 @@ export async function executeRunOnSelfhostedMachine(
         ...(res.backgroundChildrenStopped
           ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
           : {}),
+        ...credentialProfileNote,
       };
     }
     if (op.kind === "read") {
@@ -1518,6 +1545,7 @@ export async function runOnSandbox(
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&
       services.bus?.getOpStreamConnection

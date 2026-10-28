@@ -2,24 +2,20 @@
  * Shared helpers for the migration ordinal tooling.
  *
  * Migrations under `packages/db/drizzle` are linearly ordered by a four-digit
- * ordinal prefix (`0271_scheduled_connection_authority.sql`) and the release
- * schema contract pins per-migration and cumulative chain hashes. Two branches
+ * ordinal prefix (`0271_scheduled_connection_authority.sql`). Two branches
  * that each take the next free ordinal therefore collide the moment the first
  * one merges; the loser must move to the next free ordinal and re-fence every
  * literal that named the old one. These helpers make that mechanical:
  *
  * - `planRenumber` computes the exact file renames and text substitutions;
  * - `findOrdinalCollisions` reports head migrations whose ordinal is already
- *   taken on the base by a different migration (the CI guard);
- * - the release contract hash pins are refreshed by re-running the contract
- *   test and substituting only exact SHA-256 mismatches (`renumber-migration.ts`).
+ *   taken on the base by a different migration (the CI guard).
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 export const MIGRATION_TESTS_DIR = "packages/db/test";
-export const RELEASE_CONTRACT_TEST = "scripts/release-schema-contract.test.ts";
 
 const MIGRATION_FILE = /^(\d{4})_([A-Za-z0-9_]+)\.sql$/;
 
@@ -143,15 +139,32 @@ export function findOrdinalCollisions(
  * combining independent allocations from main and production is not evidence
  * that either branch accepted that collision. SQL names are migration receipt
  * identities, so a published pair must not be "repaired" by replaying a rename.
+ *
+ * When the head ships every part of the schema baseline, the names the
+ * baseline replaced are retired on every base (the head no longer has them),
+ * and the parts are one declared group that shares an ordinal on purpose.
  */
 export function findProtectedOrdinalCollisions(
   head: readonly MigrationName[],
   bases: readonly { ref: string; files: readonly MigrationName[] }[],
+  baseline?: { parts: readonly string[]; replaces: readonly string[] },
 ): { collisions: (OrdinalCollision & { ref: string })[]; duplicates: string[][] } {
+  const headFiles = new Set(head.map((migration) => migration.file));
+  const shipsBaseline =
+    baseline !== undefined &&
+    baseline.parts.length > 0 &&
+    baseline.parts.every((part) => headFiles.has(part));
+  const retired = new Set(shipsBaseline ? baseline.replaces : []);
+  const parts = new Set(shipsBaseline ? baseline.parts : []);
+  bases = bases.map((base) => ({
+    ref: base.ref,
+    files: base.files.filter((migration) => !retired.has(migration.file)),
+  }));
   const published = bases
     .filter((base) => base.ref === "origin/main" || base.ref === "origin/production")
     .map((base) => new Set(base.files.map((migration) => migration.file)));
   const coexists = (files: readonly string[]) =>
+    files.every((file) => parts.has(file)) ||
     published.some((ledger) => files.every((file) => ledger.has(file)));
   const headGroups = new Map<string, string[]>();
   for (const migration of head) {
@@ -361,35 +374,4 @@ export function planRenumber(input: {
   edits.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   unrewrittenBare.sort();
   return { from: input.from, to, renames, edits, contents, unrewrittenBare };
-}
-
-const SHA256 = /"([0-9a-f]{64})"/;
-
-/**
- * Parses one `bun test` failure of the release contract into an exact hash
- * substitution. Only a `"<sha256>"` Expected/Received pair qualifies; anything
- * else means the contract broke for a real reason and must not be auto-pinned.
- */
-export function parseHashMismatch(output: string): { expected: string; received: string } | null {
-  // Pairs must be adjacent within one failure block so a multi-failure run can
-  // never pair an Expected from one block with a Received from another.
-  const pair = /Expected: *"([0-9a-f]{64})"\s*\n\s*Received: *"([0-9a-f]{64})"/.exec(output);
-  if (pair) return { expected: pair[1]!, received: pair[2]! };
-  const objectPair =
-    /Expected: *\{[^}]*sha256: *"([0-9a-f]{64})"[^}]*\}\s*\n\s*Received: *\{[^}]*sha256: *"([0-9a-f]{64})"/.exec(
-      output,
-    );
-  if (objectPair) return { expected: objectPair[1]!, received: objectPair[2]! };
-  // `toMatchObject` prints a unified diff: `-   "sha256": "<expected>",` then
-  // (possibly after other `+` lines) `+   "sha256": "<received>",`.
-  const diffPair =
-    /^- +"sha256": *"([0-9a-f]{64})"[^\n]*\n(?:\+[^\n]*\n)*?\+ +"sha256": *"([0-9a-f]{64})"/m.exec(
-      output,
-    );
-  if (diffPair) return { expected: diffPair[1]!, received: diffPair[2]! };
-  return null;
-}
-
-export function isSha256(value: string): boolean {
-  return SHA256.test(`"${value}"`);
 }

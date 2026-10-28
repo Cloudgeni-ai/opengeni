@@ -2344,6 +2344,7 @@ export type TurnStartupPhase =
   | "model_prepare_input_filter_base"
   | "model_prepare_input_filter_genesis"
   | "model_prepare_input_filter_host"
+  | "model_prepare_input_filter_secret_mask"
   | "model_prepare_input_filter_tool_output"
   | "model_prepare_input_filter_modality"
   | "model_prepare_input_filter_context"

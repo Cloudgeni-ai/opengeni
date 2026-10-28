@@ -8,9 +8,7 @@ import {
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
-  readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   turnCanChangeWorkspaceSettings,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
@@ -33,7 +31,7 @@ import {
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeCoreXaiImageGeneration } from "../xai-image-generation";
-import { rigProviderImageContentHash } from "@opengeni/core";
+import { createSessionCredentialEnvironment, rigProviderImageContentHash } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
@@ -95,6 +93,7 @@ import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-dis
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import { currentAttemptSecretValues } from "./secret-values";
 import {
   attemptQuestionVaultValidator,
   createAttemptSecretResolver,
@@ -396,7 +395,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       // A SuperGrok turn placed by the shared core generates images on its own
       // placed connection under an `image` operation lease; the session
       // binding is never touched. A turn without a core placement offers no
-      // image tool (SuperGrok has no legacy path after its cutover).
+      // image tool.
       const core = providerTurn.xaiSubscriptionCore;
       if (core) {
         const executionGeneration = leases.xai.generation;
@@ -535,12 +534,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ? { fundingSource: "workspace_gateway", ...workspaceCredential }
         : null;
     }
-    const route = await readSubscriptionCoreProviderRouteForWorkspace(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
-    });
-    if (route !== "core" || !eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
+    if (!eventing.modelRunSettings.supergrokSubscriptionEnabled) return null;
     // After the receipt: a shared connection for the session's owner,
     // referenced (never copied) by the operation (EP-T17/EP-N12), only while
     // the deployment enables SuperGrok subscriptions.
@@ -745,6 +739,21 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             ),
         )
       : undefined;
+  // One resolver per attempt, shared by exec references and the credential
+  // profile so approvals, audit and caching stay consistent.
+  const attemptResolver = createAttemptSecretResolver({
+    db,
+    bus,
+    settings: eventing.modelRunSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: turn.executionGeneration,
+    agent: session.agent,
+    vaultAccess: deps.vaultAccess,
+  });
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -807,20 +816,18 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-        // W1: `{{secret:…}}` references resolve at the exec boundary.
-        secretResolver: createAttemptSecretResolver({
+        // W1: `{{secret:…}}` references resolve at the exec boundary, and the
+        // session's credential profile adds its variables to every command
+        // through the same resolver.
+        secretResolver: attemptResolver,
+        credentials: createSessionCredentialEnvironment({
           db,
-          bus,
-          settings: eventing.modelRunSettings,
-          accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          turnId: turn.id,
-          attemptId: input.attemptId,
-          executionGeneration: turn.executionGeneration,
-          agent: session.agent,
-          vaultAccess: deps.vaultAccess,
+          resolver: attemptResolver,
         }),
+        // Every tool result is masked with the attempt's known secret values.
+        secretValueMemory: currentAttemptSecretValues() ?? null,
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },

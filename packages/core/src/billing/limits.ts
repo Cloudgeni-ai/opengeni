@@ -19,9 +19,8 @@ import {
   countWorkspacesForAccount,
   getSpendableCreditBalance,
   isCodexBilledTurn,
-  readSubscriptionCoreRouteFunding,
+  readSubscriptionCoreFunding,
   recordUsageEvent,
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
   sumUsageQuantity,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -96,19 +95,11 @@ export function modelFundingForAdmission(
 }
 
 /**
- * Connected subscriptions whose legacy runtime was deleted after their
- * cutover: only the shared core funds them, so any other route is unfunded.
- */
-const CORE_ONLY_SUBSCRIPTION_PROVIDERS: ReadonlySet<string> = new Set([
-  SUBSCRIPTION_CORE_XAI_PROVIDER,
-]);
-
-/**
  * The shared core's funding answer for a non-Codex connected subscription
  * whose provider has cut over (design 5.3, EP-N19): the provider-neutral form
  * of `isCodexBilledTurn`, with explicit workspace, causal human, accepted
- * work and model. Undefined on the provider's legacy route (one receipt
- * read) and for every other model (no read). Codex keeps `isCodexBilledTurn`.
+ * work and model. Undefined for every other model (no read). Codex keeps
+ * `isCodexBilledTurn`.
  * A provider opts in at its own chat placement step and only while it is
  * enabled on the deployment, as its catalog readiness does.
  */
@@ -132,7 +123,7 @@ export async function coreRoutedSubscriptionFunding(
   const source = resolveModelProviderForTurn(settings, input.model)?.model.credentialSource;
   if (source?.kind !== "connected_subscription") return undefined;
   if (!CORE_ROUTED_FUNDING[source.provider]?.(settings)) return undefined;
-  const answer = await readSubscriptionCoreRouteFunding(db, {
+  return await readSubscriptionCoreFunding(db, {
     provider: source.provider,
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -140,8 +131,6 @@ export async function coreRoutedSubscriptionFunding(
     productModelId: input.model,
     ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
-  if (answer.route === "core") return answer.value;
-  return CORE_ONLY_SUBSCRIPTION_PROVIDERS.has(source.provider) ? false : undefined;
 }
 
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {

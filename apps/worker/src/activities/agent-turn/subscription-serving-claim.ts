@@ -100,7 +100,7 @@ export async function claimServingAttempt(input: {
   const identity = await readSubscriptionCoreTurnIdentity(db, input);
   if (!identity) throw new TurnAttemptFencedError("Serving claim lost accepted turn");
   const ready = await withSubscriptionCoreAcceptedTurn(db, identity, (tx) =>
-    readSubscriptionCoreFailoverProvider(tx, input.accountId, home.provider),
+    readSubscriptionCoreFailoverProvider(tx, home.provider),
   );
   if (ready.status !== "completed" || !ready.value) return null;
   const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
