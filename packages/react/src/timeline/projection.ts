@@ -3589,10 +3589,12 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 
   const firstOccurredAt = groupStartedAt(body[0]) ?? turnEnd.occurredAt;
   const prior = startIndex > 0 ? groups[startIndex - 1] : undefined;
+  // The one-time rebuild for a new model has its own note; no facet repeats it.
   const contextCompactionCount =
     prior?.kind === "item" &&
     prior.item.kind === "context-compaction" &&
-    prior.item.phase === "compacted"
+    prior.item.phase === "compacted" &&
+    prior.item.implementation !== "portable_model_switch"
       ? 1
       : 0;
   const turnGroup: TimelineGroup = {

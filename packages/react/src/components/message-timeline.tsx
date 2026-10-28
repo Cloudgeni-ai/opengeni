@@ -4266,8 +4266,13 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Switching a Codex chat to another model rebuilds its context once; say
+  // that plainly instead of describing an ordinary compaction.
+  const modelSwitch = item.implementation === "portable_model_switch";
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL(t)[item.trigger] : null;
+    item.trigger && item.phase !== "started" && !modelSwitch
+      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
+      : null;
   const before =
     item.estimatedTokensBefore != null
       ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
@@ -4278,14 +4283,18 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       : null;
   const title =
     item.phase === "started"
-      ? t("messageTimeline.compactingConversationHistory")
+      ? modelSwitch
+        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
+        : t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
-        ? before && after
-          ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-          : t("messageTimeline.conversationHistoryCompacted")
+        ? modelSwitch
+          ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+          : before && after
+            ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+            : t("messageTimeline.conversationHistoryCompacted")
         : compactionSkipTitle(t, item.skipReason);
   const subtitle =
-    item.phase === "compacted"
+    item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
         ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)

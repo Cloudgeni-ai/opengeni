@@ -1375,7 +1375,7 @@ export type ComposerModelPickerProps = {
   onChange?: ((modelId: string) => void) | undefined;
   label?: string | undefined;
   className?: string | undefined;
-  /** Filter to Codex models for remote_v2-locked sessions. */
+  /** Offer only Codex models; other providers' models are shown disabled. */
   codexOnly?: boolean | undefined;
 };
 

@@ -13,6 +13,8 @@ import {
 } from "../../lib/turn-failure-analytics";
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
+import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
+import { ContinueWithModelButton, type ContinueWithModel } from "./continue-with-model";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -40,6 +42,7 @@ export function FailedSessionBanner({
   sandboxRecovery,
   analyticsKey,
   shownInTimeline = false,
+  continueWith,
 }: {
   failure: SessionFailureSummary;
   /** Stable identity of this failure for the consent-gated recovery journey. */
@@ -75,6 +78,11 @@ export function FailedSessionBanner({
    * recovery actions here instead of a second headline and Details.
    */
   shownInTimeline?: boolean | undefined;
+  /**
+   * When the ChatGPT/Codex plan is out of usage, offer to continue this chat
+   * with another model (it switches the chat and runs the turn again).
+   */
+  continueWith?: ContinueWithModel | undefined;
 }) {
   useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
@@ -112,6 +120,10 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
+  const continueAction =
+    continueWith && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure ? (
+      <ContinueWithModelButton {...continueWith} />
+    ) : null;
   const retryActions =
     trackedActions &&
     !failure.safetyRefusal &&
@@ -206,15 +218,21 @@ export function FailedSessionBanner({
             <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
-          <SandboxRecoveryActions
-            {...sandboxRecovery}
-            structuralFailure={structuralFailure}
-            retryActions={retryActions}
-          >
-            {!structuralFailure ? retryActions : null}
-          </SandboxRecoveryActions>
+          <>
+            {continueAction}
+            <SandboxRecoveryActions
+              {...sandboxRecovery}
+              structuralFailure={structuralFailure}
+              retryActions={retryActions}
+            >
+              {!structuralFailure ? retryActions : null}
+            </SandboxRecoveryActions>
+          </>
         ) : !structuralFailure ? (
-          retryActions
+          <>
+            {continueAction}
+            {retryActions}
+          </>
         ) : null}
       </div>
     </div>

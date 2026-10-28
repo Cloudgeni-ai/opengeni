@@ -588,7 +588,6 @@ function LiveSession(props: {
           hasImageAttachments={controller.attachments.attachments.some(
             (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
           )}
-          codexOnly={session?.codexCompactionMode === "remote_v2"}
           groupPresentation={{
             opengeni_credits: {
               label: "Opengeni",

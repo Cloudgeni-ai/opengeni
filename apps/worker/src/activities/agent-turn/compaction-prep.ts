@@ -144,6 +144,7 @@ export type CompactionPrepDeps = {
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  portableModelSwitchPending?: ClaimTurnOk["portableModelSwitchPending"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
@@ -698,6 +699,7 @@ export async function runPostAgentCompaction(
     claimedResult,
     turn,
     session,
+    portableModelSwitchPending = false,
     resolvedModel,
     remotePrefix,
     remoteCompactionRequester,
@@ -900,8 +902,14 @@ export async function runPostAgentCompaction(
   // retry, exactly like Codex. Other failures end this turn honestly.
   // Run before every fresh inference. Approval resumes replay their frozen
   // RunState verbatim and recovering attempts already compacted, if needed,
-  // before the first attempt's model boundary.
-  if (attempt.triggerType === "user.message" || attempt.triggerType === "system.update.delivered") {
+  // before the first attempt's model boundary. A chat moving off Codex remote
+  // compaction rebuilds Codex's checkpoint here whatever triggered the turn,
+  // since no other model can read it.
+  if (
+    attempt.triggerType === "user.message" ||
+    attempt.triggerType === "system.update.delivered" ||
+    portableModelSwitchPending
+  ) {
     let forced = false;
     try {
       // Operator /compact (the slash command) sets a durable request flag;

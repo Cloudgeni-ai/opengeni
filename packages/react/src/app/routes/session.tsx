@@ -217,11 +217,19 @@ import {
 } from "../lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
 import {
+  isCodexUsageLimitFailure,
+  latestTurnFailedOnUsageLimit,
+  modelAfterCodexUsageLimit,
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
 } from "../lib/unavailable-session-model";
 import { UnavailableModelNotice } from "../components/session/unavailable-model-notice";
+import {
+  CodexUsageNotice,
+  type ContinueWithModel,
+} from "../components/session/continue-with-model";
+import { isCodexProductModel } from "../lib/session-model";
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
@@ -2904,8 +2912,6 @@ function SessionChatPane(props: {
   );
   const catalogComboValid = Boolean(
     selectedPolicyRow?.selectable &&
-    (props.session.codexCompactionMode !== "remote_v2" ||
-      selectedPolicyRow.catalog.source === "codex") &&
     effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
     (latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
@@ -2961,7 +2967,6 @@ function SessionChatPane(props: {
             rows: modelCatalog.rows,
             defaultSelection: modelCatalog.defaultSelection,
             latencyMode,
-            codexOnly: props.session.codexCompactionMode === "remote_v2",
           })
         : null,
     [
@@ -2970,7 +2975,6 @@ function SessionChatPane(props: {
       modelCatalog.rows,
       modelCatalog.defaultSelection,
       latencyMode,
-      props.session.codexCompactionMode,
     ],
   );
   useEffect(() => {
@@ -3198,6 +3202,89 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  // A ChatGPT/Codex plan out of usage blocks this chat's Codex model. Offer
+  // one other model: the chat switches to it in place (a Codex remote
+  // compaction chat rebuilds its context for it) and the blocked work goes on.
+  const codexUsageBlocked =
+    isCodexProductModel(props.session.model) &&
+    (props.session.status === "waiting_capacity" ||
+      (props.session.status === "failed"
+        ? isCodexUsageLimitFailure(props.failure?.failureCode)
+        : props.session.status === "idle" && latestTurnFailedOnUsageLimit(props.events)));
+  const usageContinuationModel = useMemo(
+    () =>
+      codexUsageBlocked && workspacePermissions.includes("sessions:control")
+        ? modelAfterCodexUsageLimit({
+            rows: modelCatalog.rows,
+            defaultSelection: modelCatalog.defaultSelection,
+          })
+        : null,
+    [codexUsageBlocked, workspacePermissions, modelCatalog.rows, modelCatalog.defaultSelection],
+  );
+  const [usageContinuation, setUsageContinuation] = useState<{
+    pending: boolean;
+    error: string | null;
+  }>({ pending: false, error: null });
+  const continueAfterUsageLimit = async () => {
+    if (!usageContinuationModel || usageContinuation.pending) return;
+    const row = findPickerRow(modelCatalog.rows, usageContinuationModel.model);
+    const choice = row
+      ? coveredModelChoice(row, usageContinuationModel.reasoningEffort, latencyMode)
+      : null;
+    if (!choice) return;
+    setComposerModel(choice.model);
+    setComposerReasoningEffort(choice.effort);
+    if (choice.latencyMode !== null) setComposerLatencyMode(choice.latencyMode);
+    const policy = {
+      model: choice.model,
+      reasoningEffort: choice.effort,
+      latencyMode: choice.latencyMode ?? latencyMode,
+    };
+    setUsageContinuation({ pending: true, error: null });
+    let error: string | null = null;
+    try {
+      if (props.session.status === "failed") {
+        // Retry runs the failed turn again on the chosen model.
+        if (props.failure?.failureEventId && retryHasRetainedTurn)
+          await retryFailedSession(props.failure.failureEventId, policy);
+      } else {
+        // A turn waiting for Codex is replaced by this message (a Steer);
+        // after a usage-limit failure it is the next message.
+        const chat = readChatSendContext();
+        if (chat.blocked) error = chat.blocked;
+        else {
+          const message = {
+            text: "Continue",
+            ...chat.extras,
+            ...policy,
+            clientEventId: crypto.randomUUID(),
+          };
+          if (props.session.status === "waiting_capacity")
+            await context.client.steerMessage(props.session.workspaceId, props.session.id, message);
+          else
+            await context.client.sendMessage(props.session.workspaceId, props.session.id, message);
+        }
+      }
+    } catch (failure) {
+      error = userErrorText(failure, "Try again.");
+    } finally {
+      setUsageContinuation({ pending: false, error });
+      await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+    }
+  };
+  const continueWith: ContinueWithModel | undefined = usageContinuationModel
+    ? {
+        label: usageContinuationModel.label,
+        pending: usageContinuation.pending,
+        error: usageContinuation.error,
+        onContinue: () => void continueAfterUsageLimit(),
+      }
+    : undefined;
+  // A failed chat shows this action in its failure banner.
+  const codexUsageNotice =
+    continueWith && props.session.status !== "failed" && !terminal ? (
+      <CodexUsageNotice continueWith={continueWith} />
+    ) : null;
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
@@ -3423,6 +3510,7 @@ function SessionChatPane(props: {
               `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
             }
             canChooseModel={canChooseRecoveryModel}
+            continueWith={continueWith}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
@@ -3934,6 +4022,7 @@ function SessionChatPane(props: {
                 disabled={terminal}
                 header={
                   unavailableModelNotice ||
+                  codexUsageNotice ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
@@ -3955,6 +4044,7 @@ function SessionChatPane(props: {
                         />
                       ) : null}
                       {unavailableModelNotice}
+                      {codexUsageNotice}
                       {usageLimitNotice}
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
@@ -4147,7 +4237,6 @@ function SessionChatPane(props: {
                       claudeSubscriptionAvailable={
                         context.clientConfig.claudeSubscriptionEnabled === true
                       }
-                      codexOnly={props.session.codexCompactionMode === "remote_v2"}
                       onModelChange={composer.setModel}
                       onEffortChange={composer.setReasoningEffort}
                       onLatencyModeChange={composer.setLatencyMode}

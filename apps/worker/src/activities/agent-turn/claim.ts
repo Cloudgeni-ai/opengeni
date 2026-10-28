@@ -7,6 +7,7 @@ import { readSubscriptionLeaseBusyChain } from "./codex-core-claim";
 import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
+  convertSessionToPortableCompactionForModelSwitch,
   getSessionEvent,
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
@@ -31,11 +32,11 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
-  assertSessionAllowsProductModel,
   resolveCatalogSettings,
   resolveCodexAppsDesignationForRun,
   resolveContinuedConnectionAccounts,
   recordSessionUsageLimitEvent,
+  sessionNeedsPortableModelSwitch,
   settingsWithModelProviderCredentials,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -131,6 +132,12 @@ export type ClaimTurnOk = {
   /** The core Codex Apps designation. */
   codexAppsCoreConnectionId?: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  /**
+   * This turn moves a Codex remote_v2 chat to another model and Codex's
+   * checkpoint still has to be rebuilt in portable form before the first
+   * model call, whatever triggered the turn.
+   */
+  portableModelSwitchPending: boolean;
   servingAttempt?: ServingAttempt;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
@@ -329,7 +336,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the exact live attempt fence. Legacy policy installation stays below.
   // Join every scope before failure handling so no policy operation outlives
   // preparation. No transaction-local RLS scopes overlap on one connection.
-  const [session, mcpSettings, preparedPolicy, trigger] = await Promise.allSettled([
+  const [loadedSession, mcpSettings, preparedPolicy, trigger] = await Promise.allSettled([
     measureTurnStartupPhase(
       observability,
       {
@@ -387,6 +394,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       triggerRead.value,
     ] as const;
   });
+  let session = loadedSession;
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
@@ -441,6 +449,25 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
+  // A Codex remote_v2 chat may switch to any other model. This turn runs with
+  // portable compaction. Codex's opaque checkpoint is unreadable elsewhere, so
+  // when one is active the forced pre-turn compaction requested here rebuilds
+  // a portable summary from the stored transcript before the first model call
+  // and switches the stored session mode with it.
+  let storedCompactionMode = session.codexCompactionMode;
+  if (sessionNeedsPortableModelSwitch(session, installedPolicy.policy.productModelId)) {
+    const converted = await convertSessionToPortableCompactionForModelSwitch(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    if (converted) storedCompactionMode = converted.codexCompactionMode;
+    session = {
+      ...session,
+      codexCompactionMode: "portable",
+      ...(converted ? { compactRequested: converted.compactRequested } : {}),
+    };
+  }
   capabilitySettings = settingsForAcceptedSubscriptionTurn(
     capabilitySettings,
     installedPolicy.policy,
@@ -473,7 +500,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     turnId: turn.id,
     attemptId: input.attemptId,
     executionGeneration: attempt.executionGeneration,
-    compactionMode: session.codexCompactionMode,
+    compactionMode: storedCompactionMode,
     source: turn.source,
     acceptedPolicy: installedPolicy.policy,
     providerIds: servingTurnProviders().map((provider) => provider.id),
@@ -506,7 +533,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     modelLabel: verifiedAcceptedPolicy.model.label,
     providerLabel: verifiedAcceptedPolicy.model.providerLabel,
   };
-  assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
@@ -914,6 +940,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       capabilitySettings,
       codexAppsCoreConnectionId,
       turnExecutionPolicy,
+      portableModelSwitchPending:
+        storedCompactionMode === "remote_v2" && session.codexCompactionMode === "portable",
       ...(servingAttempt ? { servingAttempt } : {}),
       trigger,
       humanInputResume,

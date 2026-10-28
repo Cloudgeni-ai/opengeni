@@ -233,22 +233,19 @@ export function codexSectionVisible(codex: CodexSubscriptions): boolean {
 }
 
 /**
- * The Codex section: how several accounts share work, keeping chats portable,
- * and Turn off Codex last. Which pool new work uses is not a setting here; the
+ * The Codex section: how several accounts share work, Codex Apps, and Turn
+ * off Codex last. Which pool new work uses is not a setting here; the
  * line above the Accounts list says it.
  */
 export function CodexSettingRows({
   codex,
   places,
-  providerSwitch,
   organizationSharing = null,
   onConnectForWorkspace,
   showRotation = true,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
-  /** The "Keep Codex chats portable" row. */
-  providerSwitch: ReactNode;
   /** How the organization's accounts share work, for the people who manage them. */
   organizationSharing?: ReactNode;
   /** Opens Connect Codex for an account owned by this workspace (Codex Apps needs one). */
@@ -310,7 +307,6 @@ export function CodexSettingRows({
           />
         ) : null}
         <CodexAppsRow codex={codex} places={places} onConnectForWorkspace={onConnectForWorkspace} />
-        {providerSwitch}
         {codex.canManage ? (
           <SettingDangerRow
             label="Turn off Codex"

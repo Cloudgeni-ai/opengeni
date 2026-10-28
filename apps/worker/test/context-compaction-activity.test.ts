@@ -3466,6 +3466,117 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
+  test("switching a Codex remote_v2 chat to another model rebuilds its context from the stored transcript", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Codex model switch test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Codex model switch test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "codex/gpt-5.4",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      frozenCodexCompactionMode: "remote_v2",
+    });
+    const conversation = [
+      { type: "message", role: "user", content: "original question" },
+      { type: "message", role: "assistant", content: "original answer" },
+      { type: "message", role: "user", content: "latest ask" },
+    ];
+    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        conversation.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, workspaceId, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    // Codex remote compaction left an opaque checkpoint only Codex can read.
+    expect(
+      await applyContextCompaction(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        replacementItems: [{ type: "message", role: "user", content: "latest ask" }],
+        summaryItem: { type: "compaction", encrypted_content: "opaque-codex-checkpoint" },
+        eventPayload: { trigger: "auto", implementation: "responses_compaction_v2" },
+      }),
+    ).toMatchObject({ applied: true });
+
+    const summarized: string[] = [];
+    const summarize: CompactionSummarizer = async (_settings, input) => {
+      summarized.push(JSON.stringify(input));
+      return "Rebuilt for the new model";
+    };
+    // The turn runs portable on the new model. No force: the Codex checkpoint
+    // alone makes the rebuild unconditional.
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      scope,
+      null,
+      summarize,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(summarized).toHaveLength(1);
+    expect(summarized[0]).toContain("original question");
+    expect(summarized[0]).toContain("original answer");
+    expect(summarized[0]).not.toContain("opaque-codex-checkpoint");
+
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    expect(await isSessionCompactionRequested(client.db, workspaceId, session.id)).toBe(false);
+    const active = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+    expect(active.some((row) => row.item.type === "compaction")).toBe(false);
+    expect(JSON.stringify(active.map((row) => row.item))).toContain("Rebuilt for the new model");
+    const events = await listSessionEvents(client.db, workspaceId, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    const switchEvents = events.filter(
+      (event) =>
+        (event.type === "session.context.compaction.started" ||
+          event.type === "session.context.compacted") &&
+        (event.payload as Record<string, unknown>).implementation === "portable_model_switch",
+    );
+    expect(switchEvents.map((event) => event.type)).toEqual([
+      "session.context.compaction.started",
+      "session.context.compacted",
+    ]);
+  });
+
   test("remote v2 retries one exact overflow with only tool-result bodies projected", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {

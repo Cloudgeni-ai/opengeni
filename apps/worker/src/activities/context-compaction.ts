@@ -25,6 +25,10 @@ import {
   compactionReplacementFingerprint,
   decideCompaction,
   estimateTokens,
+  isCompactionSummary,
+  isRemoteCompactionItem,
+  PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION,
+  portableSwitchTranscriptStart,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
@@ -187,10 +191,26 @@ export async function maybeCompactContext(
   // Over the materialization guard, compaction is the way out: it reads the
   // bounded recovery view (oldest inline payloads, then oldest rows, left out
   // in PostgreSQL) and checkpoints from that instead of failing permanently.
-  const activeHistory = await readActiveSessionHistory(db, scope.workspaceId, scope.sessionId, {
+  let activeHistory = await readActiveSessionHistory(db, scope.workspaceId, scope.sessionId, {
     overLimit: "bounded_recovery",
   });
-  const active = activeHistory.items;
+  // A chat that switched from Codex remote compaction to another model still
+  // holds Codex's opaque checkpoint, which no other model can read. Rebuild
+  // the portable context from the stored transcript instead: the rows that
+  // checkpoint replaced are retained, only superseded.
+  const portableModelSwitch =
+    !useRemoteV2 && activeHistory.items.some((row) => isRemoteCompactionItem(row.item));
+  if (portableModelSwitch) {
+    activeHistory = await readActiveSessionHistory(db, scope.workspaceId, scope.sessionId, {
+      overLimit: "bounded_recovery",
+      rows: "stored_transcript",
+    });
+  }
+  const active = portableModelSwitch
+    ? activeHistory.items.filter(
+        (row) => !isRemoteCompactionItem(row.item) && !isCompactionSummary(row.item),
+      )
+    : activeHistory.items;
   const recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
     ? {
         compactionInputHistoryRowsOmitted: activeHistory.recovery.omittedRows,
@@ -237,6 +257,16 @@ export async function maybeCompactContext(
       canonicalTurnIds.push(row.turnId ?? null);
     }
   }
+  if (portableModelSwitch) {
+    // Keep the newest complete work units that the new model's summarizer can
+    // read in one request; older ones are left out rather than deferred.
+    const start = portableSwitchTranscriptStart(
+      canonicalItems,
+      portableSwitchSummaryBudgetTokens(settings, summarize),
+    );
+    canonicalItems.splice(0, start);
+    canonicalTurnIds.splice(0, start);
+  }
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
     const materialized = options.materializeHistory
       ? await options.materializeHistory(input)
@@ -257,7 +287,7 @@ export async function maybeCompactContext(
     contextReservedOutputTokens: settings.contextReservedOutputTokens,
     contextAutoCompactThresholdTokens: settings.contextAutoCompactThresholdTokens,
     contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
-    ...(options.force ? { force: true } : {}),
+    ...(options.force || portableModelSwitch ? { force: true } : {}),
   });
   if (!decision.shouldCompact) {
     return {
@@ -279,7 +309,11 @@ export async function maybeCompactContext(
     ...(options.requestSizeRecovery
       ? { requestSizeRecovery: options.requestSizeRecovery.size }
       : {}),
-    ...(useRemoteV2 ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION } : {}),
+    ...(useRemoteV2
+      ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION }
+      : portableModelSwitch
+        ? { implementation: PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION }
+        : {}),
   });
   if (!started.recorded) {
     if (started.reason === "request_size_recovery_exhausted")
@@ -315,10 +349,28 @@ export async function maybeCompactContext(
     items,
     decision,
     summarize,
-    { ...options, inputRecoveryPayload: recoveryPayload },
+    { ...options, inputRecoveryPayload: recoveryPayload, portableModelSwitch },
     projectForWire,
   );
   return prependCompactionEvents(started.events, outcome);
+}
+
+/**
+ * Token budget for the stored transcript a model switch summarizes: what one
+ * checkpoint request on the new model can read, with headroom for the wire
+ * projection (attachments, tool disclosures) the local estimate does not see.
+ */
+function portableSwitchSummaryBudgetTokens(
+  settings: Settings,
+  summarize: CompactionSummarizer,
+): number {
+  const outputReserve = compactionSummaryOutputTokens(settings.contextWindowTokens);
+  const structuralBudget = Math.min(
+    contextInputBudgetTokens(settings) || settings.contextWindowTokens - outputReserve,
+    settings.contextWindowTokens - outputReserve,
+  );
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  return Math.max(0, Math.floor((structuralBudget - prefixTokens) * 0.8));
 }
 
 /**
@@ -609,6 +661,8 @@ async function compactContextPortable(
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     requestSizeRecovery?: { maxBytes: number };
     inputRecoveryPayload?: CompactionInputRecoveryPayload;
+    /** Rebuilding a Codex remote_v2 chat's context from its stored transcript. */
+    portableModelSwitch?: boolean;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -640,8 +694,13 @@ async function compactContextPortable(
     // byte. Size recovery and oversized histories still cut a fitting prefix.
     // Always consume it, so a later compaction never sees a stale request.
     const taken = summarize.withheldWireHistory?.();
+    // A model switch summarizes the stored transcript; the withheld request
+    // still carries Codex's checkpoint and never stands in for it.
     const withheld =
-      !options.requestSizeRecovery && taken && withheldHistoryCovers(taken, canonicalItems)
+      !options.requestSizeRecovery &&
+      !options.portableModelSwitch &&
+      taken &&
+      withheldHistoryCovers(taken, canonicalItems)
         ? taken
         : undefined;
     const exact = withheld ? buildCompactionPromptInput(maskCompactionInput(withheld)) : undefined;
@@ -709,11 +768,15 @@ async function compactContextPortable(
     // "Compacting…". This is not an operator-request clear path.
     return await settleSkippedAfterStart(db, scope, options, "summarization_failed");
   }
-  if (previousReplacementFingerprint === replacementFingerprint) {
-    return await settleSkippedAfterStart(db, scope, options, "replacement_unchanged");
-  }
-  if (estimatedTokensAfter >= estimatedTokensBefore) {
-    return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
+  // A model switch must replace Codex's checkpoint even when the rebuilt
+  // context is no smaller than the transcript it summarizes.
+  if (!options.portableModelSwitch) {
+    if (previousReplacementFingerprint === replacementFingerprint) {
+      return await settleSkippedAfterStart(db, scope, options, "replacement_unchanged");
+    }
+    if (estimatedTokensAfter >= estimatedTokensBefore) {
+      return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
+    }
   }
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
@@ -729,8 +792,12 @@ async function compactContextPortable(
       : {}),
     summaryItem: summaryItem as Record<string, unknown>,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    ...(options.portableModelSwitch ? { switchToPortableCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
+      ...(options.portableModelSwitch
+        ? { implementation: PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION }
+        : {}),
       estimatedTokensBefore,
       estimatedTokensAfter,
       compactionInputEstimatedTokens: summarized.preparation.estimatedInputTokens,

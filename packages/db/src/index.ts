@@ -42697,6 +42697,11 @@ export async function applyContextCompaction(
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
+    /**
+     * The replacement is a portable rebuild of a Codex remote_v2 session for
+     * another model: switch the session to portable compaction with it.
+     */
+    switchToPortableCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
@@ -42871,6 +42876,7 @@ export async function applyContextCompaction(
             // post-compaction response install the next authoritative count.
             lastInputTokens: null,
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
+            ...(input.switchToPortableCompaction ? { codexCompactionMode: "portable" } : {}),
             ...(insertedEvents.length > 0
               ? {
                   lastSequence: fence.session.lastSequence + insertedEvents.length,
@@ -43667,6 +43673,55 @@ export async function requestSessionCompaction(
       reason: "compaction_requested",
     });
     return { wakeRevision, temporalWorkflowId };
+  });
+}
+
+/**
+ * Prepare a Codex remote_v2 session for a turn on another provider's model.
+ * Without a Codex checkpoint in its active history the session switches to
+ * portable compaction at once. With one, which only Codex can read, this
+ * requests a forced compaction instead: the turn's pre-turn compaction
+ * rebuilds a portable summary from the stored transcript and switches the
+ * session in the same transaction that installs it, so a failed rebuild is
+ * simply requested again by the next such turn. A portable session is left
+ * untouched (null).
+ */
+export async function convertSessionToPortableCompactionForModelSwitch(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ codexCompactionMode: "remote_v2" | "portable"; compactRequested: boolean } | null> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const checkpoint = sql`exists (
+      select 1 from session_history_items history
+      where history.workspace_id = ${workspaceId}
+        and history.session_id = ${sessionId}
+        and history.active = true
+        and history.item ->> 'type' = 'compaction'
+    )`;
+    const [converted] = await scopedDb
+      .update(schema.sessions)
+      .set({
+        codexCompactionMode: sql`case when ${checkpoint} then 'remote_v2' else 'portable' end`,
+        compactRequested: sql`${schema.sessions.compactRequested} or ${checkpoint}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessions.codexCompactionMode, "remote_v2"),
+        ),
+      )
+      .returning({
+        codexCompactionMode: schema.sessions.codexCompactionMode,
+        compactRequested: schema.sessions.compactRequested,
+      });
+    if (!converted) return null;
+    return {
+      codexCompactionMode: converted.codexCompactionMode === "portable" ? "portable" : "remote_v2",
+      compactRequested: converted.compactRequested,
+    };
   });
 }
 

@@ -58,7 +58,6 @@ import {
   type CodexPlaces,
   type OrganizationCodexPool,
 } from "@/components/models/codex-models";
-import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import { ModelCompactionPage } from "./model-compaction-page";
 import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import {
@@ -1337,12 +1336,6 @@ export function WorkspaceModelsPageBody({
                         organizationAdmin && canManageConnections
                           ? () => nav.openView("connect:codex")
                           : undefined
-                      }
-                      providerSwitch={
-                        <CodexProviderSwitchRow
-                          workspaceId={workspaceId}
-                          canManage={canManageSettings}
-                        />
                       }
                     />
                   </Section>

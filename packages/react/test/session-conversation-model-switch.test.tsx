@@ -26,7 +26,10 @@ const catalogModel = (id: string, label: string, provider: string, source: strin
 });
 
 for (const mode of ["remote_v2", "portable"] as const) {
-  test(`the default conversation picker ${mode === "remote_v2" ? "disables" : "offers"} other providers in a ${mode} session`, async () => {
+  // A remote_v2 Codex chat used to lock the picker to Codex ("Codex-only
+  // session"). Switching now works in the same chat, so both modes offer
+  // every selectable model.
+  test(`the default conversation picker offers other providers in a ${mode} session`, async () => {
     const client = fakeClient({
       getSession: async () =>
         ({ id: SESSION_ID, status: "idle", codexCompactionMode: mode }) as never,
@@ -66,10 +69,8 @@ for (const mode of ["remote_v2", "portable"] as const) {
         document.querySelector<HTMLButtonElement>(`[data-testid="model-picker-choice-${id}"]`);
       await waitFor(() => choice("claude/opus") !== null, "picker rows did not render");
       expect(choice("codex/gpt-5.6-sol")!.disabled).toBe(false);
-      expect(choice("claude/opus")!.disabled).toBe(mode === "remote_v2");
-      expect(choice("claude/opus")!.textContent?.includes("Codex-only session")).toBe(
-        mode === "remote_v2",
-      );
+      expect(choice("claude/opus")!.disabled).toBe(false);
+      expect(choice("claude/opus")!.textContent?.includes("Codex-only session")).toBe(false);
     } finally {
       await view.unmount();
     }

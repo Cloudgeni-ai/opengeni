@@ -179,7 +179,63 @@ export type ActiveSessionHistoryReadOptions = {
    * decoded by the worker. It still throws when not even the newest row fits.
    */
   overLimit?: "throw" | "bounded_recovery";
+  /**
+   * `active` (default) reads the live model history. `stored_transcript`
+   * reads the session's own conversation since its latest context clear:
+   * rows a compaction superseded are included, and every row a compaction
+   * wrote (its summary or Codex checkpoint and the copies it retained) is
+   * left out. Used to rebuild a portable context when a Codex remote
+   * compaction chat switches to another provider's model.
+   */
+  rows?: "active" | "stored_transcript";
 };
+
+/** Same item as `clearedContextMarkerItem()`, the neutral row a context clear inserts. */
+const CLEARED_CONTEXT_MARKER_JSON = JSON.stringify({
+  type: "message",
+  role: "user",
+  content: "[context cleared]",
+});
+
+/**
+ * Row filter for one read. `table` is the SQL name the query uses for
+ * `session_history_items` (an alias, or the quoted table name).
+ */
+function historyRowsFilter(table: string, rows: "active" | "stored_transcript") {
+  const t = sql.raw(table);
+  if (rows === "active") return sql`${t}.active = true`;
+  // A compaction inserts its rows in one transaction, positioned after every
+  // row that existed before it; its receipt names the checkpoint position and,
+  // for newer receipts, where the inserted rows begin. A clear inserts one
+  // marker row (no turn), and nothing before it belongs to the context.
+  return sql`(
+    ${t}.position >= coalesce((
+      select max(marker.position)
+      from session_history_items marker
+      where marker.workspace_id = ${t}.workspace_id
+        and marker.session_id = ${t}.session_id
+        and marker.turn_id is null
+        and marker.item = ${CLEARED_CONTEXT_MARKER_JSON}::jsonb
+    ), '-infinity'::numeric)
+    and not exists (
+      select 1
+      from session_events receipt
+      join session_history_items checkpoint
+        on checkpoint.workspace_id = receipt.workspace_id
+        and checkpoint.session_id = receipt.session_id
+        and checkpoint.position::text = receipt.payload ->> 'summaryPosition'
+      where receipt.workspace_id = ${t}.workspace_id
+        and receipt.session_id = ${t}.session_id
+        and receipt.type = 'session.context.compacted'
+        and checkpoint.created_at = ${t}.created_at
+        and ${t}.position >= case
+          when jsonb_typeof(receipt.payload -> 'replacementFromPosition') = 'number'
+            then (receipt.payload ->> 'replacementFromPosition')::numeric
+          else '-infinity'::numeric
+        end
+    )
+  )`;
+}
 
 /**
  * Model-facing note that replaces an inline image or file left out of a
@@ -391,6 +447,7 @@ export async function readActiveSessionHistory(
     }
   }
   const recoverable = options.overLimit === "bounded_recovery";
+  const rowsMode = options.rows ?? "active";
 
   return await withWorkspaceRls(
     db,
@@ -430,7 +487,7 @@ export async function readActiveSessionHistory(
           and(
             eq(schema.sessionHistoryItems.workspaceId, workspaceId),
             eq(schema.sessionHistoryItems.sessionId, sessionId),
-            eq(schema.sessionHistoryItems.active, true),
+            historyRowsFilter('"session_history_items"', rowsMode),
           ),
         );
       footprint.jsonBytes = safeCount(size?.bytes, "size");
@@ -450,7 +507,7 @@ export async function readActiveSessionHistory(
             cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
             where history.workspace_id = ${workspaceId}
               and history.session_id = ${sessionId}
-              and history.active = true
+              and ${historyRowsFilter("history", rowsMode)}
             limit ${limits.jsonNodes + 1}
           ) bounded_nodes
         `,
@@ -472,7 +529,7 @@ export async function readActiveSessionHistory(
             cross join lateral jsonb_object_keys(object_value) as property
             where history.workspace_id = ${workspaceId}
               and history.session_id = ${sessionId}
-              and history.active = true
+              and ${historyRowsFilter("history", rowsMode)}
             limit ${limits.jsonProperties + 1}
           ) bounded_properties
         `,
@@ -483,7 +540,14 @@ export async function readActiveSessionHistory(
       const over = exceeded as ActiveSessionHistoryLimitExceededError | null;
       if (!over) {
         return {
-          items: await pageActiveHistory(scopedDb, workspaceId, sessionId, pageSize, null),
+          items: await pageActiveHistory(
+            scopedDb,
+            workspaceId,
+            sessionId,
+            pageSize,
+            null,
+            rowsMode,
+          ),
           footprint,
           recovery: null,
         };
@@ -491,12 +555,12 @@ export async function readActiveSessionHistory(
 
       const budget = activeSessionHistoryRecoveryBudget(limits);
       const plan = planActiveSessionHistoryRecovery(
-        await measureActiveHistoryRows(scopedDb, workspaceId, sessionId),
+        await measureActiveHistoryRows(scopedDb, workspaceId, sessionId, rowsMode),
         budget,
       );
       if (!plan) throw over;
       return {
-        items: await pageActiveHistory(scopedDb, workspaceId, sessionId, pageSize, plan),
+        items: await pageActiveHistory(scopedDb, workspaceId, sessionId, pageSize, plan, rowsMode),
         footprint,
         recovery: {
           limitKind: over.limitKind,
@@ -531,6 +595,7 @@ async function measureActiveHistoryRows(
   scopedDb: ScopedDatabase,
   workspaceId: string,
   sessionId: string,
+  rowsMode: "active" | "stored_transcript",
 ): Promise<ActiveSessionHistoryRowMeasure[]> {
   // Recovery only: one content-free measurement row per active item.
   const rows = await rawRows<{
@@ -571,7 +636,7 @@ async function measureActiveHistoryRows(
       from session_history_items history
       where history.workspace_id = ${workspaceId}
         and history.session_id = ${sessionId}
-        and history.active = true
+        and ${historyRowsFilter("history", rowsMode)}
       order by history.position
     `,
   );
@@ -591,6 +656,7 @@ async function pageActiveHistory(
   sessionId: string,
   pageSize: number,
   plan: ActiveSessionHistoryRecoveryPlan | null,
+  rowsMode: "active" | "stored_transcript",
 ): Promise<ActiveSessionHistoryRow[]> {
   const history = schema.sessionHistoryItems;
   const elided = plan
@@ -637,7 +703,7 @@ async function pageActiveHistory(
         and(
           eq(history.workspaceId, workspaceId),
           eq(history.sessionId, sessionId),
-          eq(history.active, true),
+          historyRowsFilter('"session_history_items"', rowsMode),
           ...(plan ? [gte(history.position, plan.startPosition)] : []),
           ...(afterPosition === null ? [] : [gt(history.position, afterPosition)]),
         ),
