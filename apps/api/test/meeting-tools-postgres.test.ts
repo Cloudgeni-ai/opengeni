@@ -11,6 +11,7 @@ import {
   completeRecordingTranscriptVersion,
   createDb,
   createRecording,
+  createWorkspace,
   ensureManagedAccessForUser,
   finalizeRecording,
   listRecordingNotes,
@@ -98,11 +99,14 @@ async function fixture() {
     title: string;
     visibility: "private" | "workspace";
     segments?: Array<{ at: number; label: string; text: string }>;
+    /** Another workspace (and its organization) to store it in; this one by default. */
+    in?: { accountId: string; workspaceId: string };
   }) {
     const recordingId = crypto.randomUUID();
+    const storedIn = { workspaceId: input.in?.workspaceId ?? workspaceId, subjectId: owner };
     await createRecording(db, {
-      ...actor,
-      accountId,
+      ...storedIn,
+      accountId: input.in?.accountId ?? accountId,
       recordingId,
       title: input.title,
       visibility: input.visibility,
@@ -110,7 +114,7 @@ async function fixture() {
     });
     if (!input.segments) return recordingId;
     await reserveRecordingChunks(db, {
-      ...actor,
+      ...storedIn,
       recordingId,
       trackNumber: 0,
       chunks: [
@@ -124,14 +128,14 @@ async function fixture() {
       ],
     });
     await markRecordingChunksUploaded(db, {
-      ...actor,
+      ...storedIn,
       recordingId,
       trackNumber: 0,
       chunkNumbers: [0],
     });
     const versionId = crypto.randomUUID();
     await finalizeRecording(db, {
-      ...actor,
+      ...storedIn,
       recordingId,
       tracks: [{ trackNumber: 0, chunkCount: 1 }],
       transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
@@ -139,13 +143,13 @@ async function fixture() {
     });
     const processingOwner = crypto.randomUUID();
     await claimRecordingTranscriptVersion(db, {
-      ...actor,
+      ...storedIn,
       versionId,
       processingOwner,
       leaseSeconds: 600,
     });
     await completeRecordingTranscriptVersion(db, {
-      ...actor,
+      ...storedIn,
       versionId,
       processingOwner,
       languages: ["en"],
@@ -162,7 +166,31 @@ async function fixture() {
     });
     return recordingId;
   }
-  return { accountId, workspaceId, owner, actor, grantFor, meeting };
+  /** A workspace the owner (and anyone named) belongs to, in this organization or another. */
+  async function workspace(
+    name: string,
+    options: { accountId?: string; members?: string[]; permissions?: string[] } = {},
+  ): Promise<{ accountId: string; workspaceId: string }> {
+    const account =
+      options.accountId ??
+      String(
+        (await shared!.admin`insert into managed_accounts (name) values (${name}) returning id`)[0]!
+          .id,
+      );
+    const created = await createWorkspace(db, { accountId: account, name });
+    const permissions = JSON.stringify(options.permissions ?? ["sessions:read", "sessions:create"]);
+    for (const subjectId of [owner, ...(options.members ?? [])]) {
+      await shared!
+        .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+        values (${account}, ${created.id}, ${subjectId}, ${permissions}::jsonb)`;
+    }
+    return { accountId: account, workspaceId: created.id };
+  }
+  async function leave(fromWorkspaceId: string) {
+    await shared!.admin`delete from workspace_memberships
+      where workspace_id = ${fromWorkspaceId} and subject_id = ${owner}`;
+  }
+  return { accountId, workspaceId, owner, actor, grantFor, meeting, workspace, leave };
 }
 
 describe("meeting tools", () => {
@@ -415,6 +443,97 @@ describe("meeting tools", () => {
       await outsider("meeting_notes_save", { meetingId: hidden, notes: "x", expectedRevision: 0 }),
     ).toMatchObject({ found: false });
   });
+
+  test("the person's own Only me meetings from their other workspaces of the organization, never another organization's", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const colleague = `user:colleague-${crypto.randomUUID()}`;
+    const sales = await scope.workspace("Sales", {
+      accountId: scope.accountId,
+      members: [colleague],
+    });
+    const lines = [{ at: 0, label: "speaker_0", text: "The pipeline doubled." }];
+    const own = await scope.meeting({
+      title: "Pipeline review",
+      visibility: "private",
+      segments: lines,
+      in: sales,
+    });
+    const allHands = await scope.meeting({
+      title: "All hands",
+      visibility: "workspace",
+      in: sales,
+    });
+    const tools = toolsFor(scope.grantFor(scope.owner));
+
+    const found = await tools("meetings_search", { query: "pipeline" });
+    expect(found.meetings).toMatchObject([
+      { id: own, title: "Pipeline review", visibility: "only_me", recordedIn: "Sales" },
+    ]);
+    const read = await tools("meeting_read", { meetingId: own });
+    expect(read.meeting).toMatchObject({ title: "Pipeline review", recordedIn: "Sales" });
+    expect(read.lines).toContain("The pipeline doubled.");
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: own,
+        notes: "- Doubled.",
+        expectedRevision: 0,
+      }),
+    ).toMatchObject({ saved: true, revision: 1 });
+    // Shared with Sales, it stays in Sales.
+    expect(await tools("meeting_read", { meetingId: allHands })).toMatchObject({ found: false });
+    expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      own,
+    ]);
+
+    // A colleague in both workspaces never sees it.
+    const theirs = toolsFor({ ...scope.grantFor(colleague) });
+    expect(await theirs("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect((await theirs("meetings_search", {})).meetings).toEqual([]);
+
+    // Another organization the same person belongs to: nothing crosses, either way.
+    const elsewhere = await scope.workspace("Other organization");
+    const foreign = await scope.meeting({
+      title: "Their board meeting",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Board only." }],
+      in: elsewhere,
+    });
+    const there = toolsFor({ ...scope.grantFor(scope.owner), ...elsewhere });
+    expect(await there("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect(
+      await there("meeting_notes_save", { meetingId: own, notes: "x", expectedRevision: 1 }),
+    ).toMatchObject({ found: false });
+    expect((await there("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      foreign,
+    ]);
+    expect(await tools("meeting_read", { meetingId: foreign })).toMatchObject({ found: false });
+    expect(JSON.stringify(await tools("meetings_search", {}))).not.toContain("board");
+
+    // Only allowed to read in Finance: the agent can read it there, never write.
+    const finance = await scope.workspace("Finance", {
+      accountId: scope.accountId,
+      permissions: ["sessions:read"],
+    });
+    const budget = await scope.meeting({
+      title: "Budget review",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Budget holds." }],
+      in: finance,
+    });
+    expect((await tools("meeting_read", { meetingId: budget })).lines).toContain("Budget holds.");
+    expect(
+      await tools("meeting_notes_save", { meetingId: budget, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
+
+    // Leaving Sales takes its meetings with it.
+    await scope.leave(sales.workspaceId);
+    expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      budget,
+    ]);
+  });
+
   test("a meeting-summary chat reaches only its own meeting", async () => {
     if (!client) return;
     const scope = await fixture();
@@ -423,6 +542,14 @@ describe("meeting tools", () => {
     const otherPrivate = await scope.meeting({ title: "1:1", visibility: "private", segments });
     const allHands = await scope.meeting({ title: "All hands", visibility: "workspace", segments });
     const otherShared = await scope.meeting({ title: "Retro", visibility: "workspace", segments });
+    // The owner's own Only me meeting in another workspace of the organization.
+    const sales = await scope.workspace("Sales", { accountId: scope.accountId });
+    const ownInSales = await scope.meeting({
+      title: "Pipeline",
+      visibility: "private",
+      segments,
+      in: sales,
+    });
 
     /** The summary chat for one meeting, as the worker creates it, and its live attempt's tools. */
     async function summaryTools(
@@ -500,7 +627,7 @@ describe("meeting tools", () => {
         isError: true,
         error: { code: "not_allowed" },
       });
-      for (const elsewhere of [other, otherOfOwner]) {
+      for (const elsewhere of [other, otherOfOwner, ownInSales]) {
         expect(await call("meeting_read", { meetingId: elsewhere })).toMatchObject({
           found: false,
         });

@@ -53,7 +53,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the running commands a returning runner did not answer for (0984), the
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002) and the only writer of
- * the EU-only inference setting and its history (1020). Each is
+ * the EU-only inference setting and its history (1060). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -86,7 +86,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withholds the held-browser inventory; until it is granted, the API
  * renews no browser holds.
- * 1020 withholds the EU-only change function; until it is granted the setting
+ * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
@@ -1901,6 +1901,8 @@ export const FORCE_RLS_TABLES = [
   "knowledge_claim_relations",
   "knowledge_claim_reviews",
   "knowledge_claims",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
@@ -2145,6 +2147,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
@@ -2485,6 +2488,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
@@ -2761,6 +2765,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_entries",
   "knowledge_entry_decisions",
   "knowledge_entry_links",

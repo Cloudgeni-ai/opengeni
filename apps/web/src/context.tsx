@@ -1,4 +1,5 @@
 import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
+import { SiteToolConsentProvider } from "@opengeni/react/app/lib/site-tool-consent";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -470,7 +471,9 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <ArchiveConfirmationProvider>
-        <Outlet />
+        <SiteToolConsentProvider>
+          <Outlet />
+        </SiteToolConsentProvider>
         <CreditRequiredGate
           creditRequired={creditRequired}
           setCreditRequired={setCreditRequired}

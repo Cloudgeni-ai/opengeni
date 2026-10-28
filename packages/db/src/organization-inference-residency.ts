@@ -5,7 +5,7 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
 /**
- * EU-only inference (migration 1020). When on, every model call for the
+ * EU-only inference (migration 1060). When on, every model call for the
  * organization's workspaces must run on an EU route. See
  * docs/organization-tenancy.md.
  */
@@ -128,7 +128,7 @@ export async function isWorkspaceEuOnlyInScope(
 }
 
 /**
- * Whether the runtime may change the setting yet. 1020 withholds EXECUTE on
+ * Whether the runtime may change the setting yet. 1060 withholds EXECUTE on
  * the change function until a later migration grants it (the previous release
  * rejects a runtime grant on a definer it doesn't know); until then the
  * setting stays off. A separate statement: EXECUTE is checked when a

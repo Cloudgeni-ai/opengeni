@@ -168,6 +168,12 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal lookup mode. Preflight must not refresh credentials or record provider usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /**
+   * Approval preflight only: an expired OAuth access token that still has a
+   * refresh token passes, because execution (never the preflight) refreshes
+   * it. Ignored in execution mode.
+   */
+  preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
   /** Attribution already authorized for forwarding to a host resolver; never authorizes local use. */
@@ -828,7 +834,12 @@ export function buildConnectionTokenResolver(
       credentialResolutionMode === "preflight" &&
       cred.kind === "oauth2" &&
       (input.forceRefresh === true ||
-        (cred.expiresAt !== null && cred.expiresAt.getTime() <= now.getTime()))
+        (cred.expiresAt !== null &&
+          cred.expiresAt.getTime() <= now.getTime() &&
+          !(
+            input.preflightAcceptsRefreshableExpiry === true &&
+            stringValue((cred.credential as { refresh_token?: unknown }).refresh_token)
+          )))
     ) {
       return authNeeded(ref, "refresh_failed", cred.id);
     }

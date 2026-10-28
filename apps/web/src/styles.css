@@ -170,6 +170,24 @@ html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-ch
   padding-left: 84px;
 }
 
+/* The signed-out page has no rail: its brand row is the window's top row, and
+   the page scrolls beneath the controls. Its 1040px column is centred, so in a
+   window narrower than about 1128px the brand, and the headline and sign-in
+   buttons once scrolled, would reach the controls and the sharing badge. The
+   column (header, page and footer, so they keep one edge) starts 84px in
+   there, and keeps its usual inset in wider windows. */
+html[data-desktop="macos"] [data-signed-out-column] {
+  padding-left: clamp(2.5rem, calc(84px - (100% - 1040px) / 2), 84px);
+}
+
+/* A content page (Automations, Meetings, Knowledge, Library) starts 24px past
+   a collapsed rail in a window narrower than 1024px, at the sharing badge's
+   edge (about 80px in); it starts 32px past it, like the session title bar.
+   Wider windows already use 32px. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] {
+  --og-content-page-start: 2rem;
+}
+
 /* Expanded Sites escape the rail into the modal top layer. Their own header
    must reserve the native controls, independently of the rail underneath.
    Inline previews and browser/embedded viewers keep their normal spacing. */

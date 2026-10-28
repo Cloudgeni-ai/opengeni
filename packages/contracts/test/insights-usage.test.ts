@@ -123,6 +123,7 @@ function call(): InsightsCall {
     chargedMicros: 0,
     listMicros: null,
     listByClassMicros: null,
+    processingGeography: null,
   };
 }
 

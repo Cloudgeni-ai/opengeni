@@ -5,6 +5,7 @@ import {
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextModelFor,
   transcriptText,
 } from "../src/transcription-service";
@@ -345,6 +346,30 @@ describe("the model a workspace's meetings run", () => {
       settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
     });
     expect(await meetingModelFor(pinned, null, scope)).toEqual(pinned.pinned!);
+  });
+
+  test("a refused deployment model gives way to one the payer doesn't pay credits for", async () => {
+    // The deployment's own Azure account is the default and charges credits.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(signedIn.meetingDefault.providerId).toBe("azure-speech");
+    expect(await meetingModelWithoutCreditsFor(signedIn, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // The workspace's own key counts too, in the deployment's order.
+    expect(
+      await meetingModelWithoutCreditsFor(deploymentWith({ keyed: ["w"], settings: azure }), scope),
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
+    // Nothing connected: nothing to switch to, so the refusal stands.
+    expect(await meetingModelWithoutCreditsFor(deploymentWith({ settings: azure }), scope)).toBe(
+      null,
+    );
+    // A pinned deployment sends audio to its one model only.
+    const pinned = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
+    });
+    expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
   });
 });
 
