@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/batch-ci.yml",
-      "sha256": "5c6d339ad4209caab00df7ff2e4ac099619ee809e521f9efcedf8f5fef3ed186"
+      "sha256": "f245256b432022619f71d62e07ab0f61578fa311aecbacb39d07c9e1ee3901f6"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "9032a957dcd4be51313bed9b733a1d601a7e981432348d10c35ace37128dd5b6"
+      "sha256": "3d75cc016237be8a297a1c09f5b7ffa158aeb2d44c762edf443878080734463f"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -1031,7 +1031,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "e1f55356683c8937af19f0fa2bac80b8205288d19769f966b4e364bc1a3fb8d3"
+      "sha256": "3ac1f2da182ccb0d7b5edc7e9fafe3386d173dceef8231f531d4df4e59070746"
     },
     {
       "workflow": ".github/workflows/ci.yml",

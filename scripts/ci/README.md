@@ -2,7 +2,7 @@
 
 `run-test-shard.ts` uses deterministic longest-first placement, then runs each
 shard's files serially in path order. Timing weights affect placement only: they
-never change the impact plan, test assertions, engine matrix, four-shard ceiling,
+never change the impact plan, test assertions, engine matrix, six-shard ceiling,
 or the 720-second E2E deadline.
 
 `e2e-shard-profile.json` records completed CI file durations. Its evidence names

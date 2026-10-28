@@ -215,9 +215,14 @@ jobs:
   # canary admission requires. The candidate's own ci.yml runs them, so a CI
   # definition change is exercised before it lands. Images are built, never
   # pushed or signed. Batch's receipt-backed unit shards replace main's.
+  #
+  # Operators can switch the lane gate off without a code change by setting the
+  # repository variable BATCH_MAIN_LANES=off: Batch CI then runs and verifies
+  # exactly as before, and main-push attestation refuses those results.
   lanes:
     name: Main CI lanes
     needs: plan
+    if: ${{ vars.BATCH_MAIN_LANES != 'off' }}
     uses: ./.github/workflows/ci.yml
     # Upper bound for ci.yml's job-level grants. Only main-push or Version-PR
     # jobs that are skipped here use the write scopes; images stay build-only.
@@ -238,7 +243,7 @@ jobs:
   lanes-verdict:
     name: Batch main-lane verdict
     needs: [plan, lanes]
-    if: ${{ always() && needs.plan.result == 'success' }}
+    if: ${{ always() && needs.plan.result == 'success' && vars.BATCH_MAIN_LANES != 'off' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -280,7 +285,7 @@ jobs:
       # Main-lane parity: a verifier that knows this contract folds the lane
       # receipt into the source class; an older base verifier ignores it, and
       # the workflow conclusion still fails when a lane fails.
-      BATCH_LANES: required
+      BATCH_LANES: ${{ vars.BATCH_MAIN_LANES != 'off' && 'required' || '' }}
       LANES_RESULT: ${{ needs.lanes.result }}
       LANES_VERDICT_RESULT: ${{ needs.lanes-verdict.result }}
     steps:

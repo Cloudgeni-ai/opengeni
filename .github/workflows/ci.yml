@@ -490,7 +490,10 @@ jobs:
           # adds balancing headroom without increasing any test/attempt budget.
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 12)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
-          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          # Four shards ran a median 653 s and p90 717 s against the 720-second
+          # step deadline (exit 124 on shard 1/4 made red mains without a
+          # culprit). Six keep every shard well inside it; Batch CI reuses them.
+          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'

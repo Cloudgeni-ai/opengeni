@@ -559,6 +559,14 @@ ran, and every landed main SHA has the jobs canary admission needs
   inconclusive lane makes the class unknown, which holds. Base evidence recorded
   before this class existed has no `lanes` entry and cannot clear a lane
   failure. Without components the class stays `source`.
+- **Off-switch.** Setting the repository variable `BATCH_MAIN_LANES=off` skips
+  `Main CI lanes` and the verdict and runs `Batch ready` without
+  `BATCH_LANES`, so Batch CI gates exactly as before this contract. Main-push
+  attestation refuses those results, so main runs its full suite. Leave it unset
+  for the gate.
+- **E2E shards.** Main and Batch run up to six impacted E2E shards. Four ran a
+  median 653 s and p90 717 s against the 720-second deadline, and a deadline is
+  infrastructure that holds a batch after its retry.
 - **Capacity.** The lane call adds main's fan-out to each Batch: measured on 21
   full main pushes, its test lanes are a median 19 jobs and 143 job-minutes, and
   images, deployment and the artifact runtime 17 jobs and 76 job-minutes.

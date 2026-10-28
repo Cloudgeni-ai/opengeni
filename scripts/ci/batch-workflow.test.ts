@@ -241,7 +241,11 @@ test("main CI's own lanes run on the exact candidate and gate readiness", () => 
       ]);
   const verdict = workflow.jobs["lanes-verdict"];
   expect(verdict.needs).toEqual(["plan", "lanes"]);
-  expect(verdict.if).toBe("${{ always() && needs.plan.result == 'success' }}");
+  expect(verdict.if).toBe(
+    "${{ always() && needs.plan.result == 'success' && vars.BATCH_MAIN_LANES != 'off' }}",
+  );
+  // The operator off-switch skips both jobs and restores the pre-lane contract.
+  expect(lanes.if).toBe("${{ vars.BATCH_MAIN_LANES != 'off' }}");
   expect(verdict.env.LANES_RESULT).toBe("${{ needs.lanes.result }}");
   const classify = verdict.steps.find((step: any) => step.run?.includes("batch-lanes.ts")).run;
   expect(classify).toContain("batch-result.ts run --job lanes");
@@ -254,7 +258,7 @@ test("main CI's own lanes run on the exact candidate and gate readiness", () => 
   expect(upload.with.path).toContain("lanes-receipt.json");
   expect(upload.with.path).not.toMatch(/receipt-[a-z]+\.json/);
   expect(workflow.jobs.ready.env).toMatchObject({
-    BATCH_LANES: "required",
+    BATCH_LANES: "${{ vars.BATCH_MAIN_LANES != 'off' && 'required' || '' }}",
     LANES_RESULT: "${{ needs.lanes.result }}",
     LANES_VERDICT_RESULT: "${{ needs.lanes-verdict.result }}",
   });
@@ -267,6 +271,10 @@ test("ci.yml batch mode plans base..tip, builds without publishing and leaves un
   expect(plan.run).toContain('impact.ts --base "$BATCH_BASE_SHA" --head "$GITHUB_SHA"');
   expect(plan.run).toContain("^refs/heads/queue/");
   expect(ci.jobs.plan.outputs.batch).toBe("${{ steps.plan.outputs.batch }}");
+  // Six impacted E2E shards keep every shard inside its 720-second deadline.
+  expect(plan.run).toContain(
+    `e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 6)`,
+  );
   expect(ci.jobs["unit-shards"].if).toContain("needs.plan.outputs.batch != 'true'");
   expect(ci.jobs["release-image-validation"].if).toContain("needs.plan.outputs.batch != 'true'");
   // Publication, attestation, approval and signing stay exact-main-push only.
