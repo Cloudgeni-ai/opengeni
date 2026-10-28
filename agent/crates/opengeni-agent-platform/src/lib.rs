@@ -739,22 +739,75 @@ fn host_arch() -> v1::Arch {
 pub const DEFAULT_GIT_EMAIL: &str = "agent@opengeni.invalid";
 
 /// The `EMAIL` a child process receives: [`DEFAULT_GIT_EMAIL`] only when
-/// neither the request nor the agent's own environment sets `EMAIL`. Git reads
-/// `EMAIL` after `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every
-/// `user.email` setting (system, global, repository), so an identity the
-/// machine, its user or a repository configures always wins. Without it,
-/// `git commit` fails in a container whose hostname has no domain to
-/// auto-detect an address from.
+/// neither the request nor the agent's own environment sets `EMAIL` and Git
+/// cannot guess an address on this machine. Git reads `EMAIL` after
+/// `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every `user.email` setting
+/// (system, global, repository), so an identity the machine, its user or a
+/// repository configures always wins, and a machine whose hostname gives Git a
+/// usable address (a typical laptop) keeps committing with it. Without it,
+/// `git commit` fails in a container whose hostname has no domain.
 #[must_use]
-pub(crate) fn default_git_email(request_sets_email: bool) -> Option<&'static str> {
-    default_git_email_with(request_sets_email, std::env::var_os("EMAIL").as_deref())
+pub(crate) fn default_git_email<'a>(
+    request_env: impl IntoIterator<Item = &'a String>,
+) -> Option<&'static str> {
+    default_git_email_with(
+        request_env.into_iter().any(|name| names_email(name)),
+        std::env::var_os("EMAIL").as_deref(),
+        git_guesses_email,
+    )
+}
+
+/// Environment names are case-insensitive on Windows.
+fn names_email(name: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case("EMAIL")
+    } else {
+        name == "EMAIL"
+    }
 }
 
 fn default_git_email_with(
     request_sets_email: bool,
     ambient: Option<&std::ffi::OsStr>,
+    git_guesses_email: impl FnOnce() -> Option<bool>,
 ) -> Option<&'static str> {
-    (!request_sets_email && ambient.is_none()).then_some(DEFAULT_GIT_EMAIL)
+    if request_sets_email || ambient.is_some() {
+        return None;
+    }
+    (git_guesses_email() == Some(false)).then_some(DEFAULT_GIT_EMAIL)
+}
+
+/// Whether Git, with no identity configured anywhere, derives a usable commit
+/// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
+/// and every email source removed fails exactly when the hostname guess is
+/// unusable. Asked once per process; `None` (Git is not installed) is not
+/// remembered, so a Git installed later is still asked.
+pub(crate) fn git_guesses_email() -> Option<bool> {
+    static GUESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(guesses) = GUESSES.get() {
+        return Some(*guesses);
+    }
+    let unconfigured = std::env::temp_dir().join("opengeni-git-identity-probe-unconfigured");
+    let mut probe = std::process::Command::new("git");
+    probe
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_COMMITTER_NAME", "Opengeni identity probe")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &unconfigured)
+        .env("HOME", &unconfigured)
+        .env("XDG_CONFIG_HOME", &unconfigured)
+        .env("USERPROFILE", &unconfigured)
+        .env_remove("EMAIL")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let guesses = probe.status().ok()?.success();
+    Some(*GUESSES.get_or_init(|| guesses))
 }
 
 /// The platform's default login-shell argv (used when a PTY open names no
@@ -808,13 +861,23 @@ mod tests {
     use std::ffi::OsStr;
 
     #[test]
-    fn default_git_email_fills_only_an_unset_email() {
-        assert_eq!(default_git_email_with(false, None), Some(DEFAULT_GIT_EMAIL));
-        assert_eq!(default_git_email_with(true, None), None);
+    fn default_git_email_fills_only_an_unset_email_git_cannot_guess() {
+        let unguessable = || Some(false);
         assert_eq!(
-            default_git_email_with(false, Some(OsStr::new("me@example.com"))),
+            default_git_email_with(false, None, unguessable),
+            Some(DEFAULT_GIT_EMAIL)
+        );
+        assert_eq!(default_git_email_with(true, None, unguessable), None);
+        assert_eq!(
+            default_git_email_with(false, Some(OsStr::new("me@example.com")), unguessable),
             None
         );
+        // A machine whose hostname gives Git an address keeps it.
+        assert_eq!(default_git_email_with(false, None, || Some(true)), None);
+        // Without Git there is nothing to commit with.
+        assert_eq!(default_git_email_with(false, None, || None), None);
+        assert!(names_email("EMAIL"));
+        assert_eq!(names_email("Email"), cfg!(windows));
         assert_eq!(DEFAULT_GIT_EMAIL, "agent@opengeni.invalid");
     }
 }
