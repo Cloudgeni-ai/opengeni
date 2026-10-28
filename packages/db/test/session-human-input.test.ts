@@ -690,6 +690,20 @@ describe("durable structured human input", () => {
 
     // "Let the agent decide" settles even a request that cannot be skipped,
     // and the agent's resume sees that it was asked to decide.
+    // Only a person can make that choice: an agent (a parent answering for
+    // its child) or the system is refused.
+    for (const respondedBy of [`agent_attempt:${crypto.randomUUID()}`, "system:test"]) {
+      await expect(
+        acceptSessionHumanInputResponse(client.db, {
+          accountId: required.grant.accountId,
+          workspaceId: required.grant.workspaceId!,
+          sessionId: required.session.id,
+          requestId: required.requestId,
+          response: { outcome: "skipped", agentDecides: true },
+          respondedBy,
+        }),
+      ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+    }
     const decided = await acceptSessionHumanInputResponse(client.db, {
       accountId: required.grant.accountId,
       workspaceId: required.grant.workspaceId!,

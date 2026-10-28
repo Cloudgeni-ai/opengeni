@@ -1201,6 +1201,54 @@ describe("child lifecycle notices", () => {
     ))!;
     expect(toollessRow.targetSessionId).toBe(root.session.id);
 
+    // Cancelling the child resolves its question where the question landed.
+    const toollessRequest = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: toollessChild.session.id,
+        turnId: toollessChild.turn.id,
+        turnGeneration: toollessChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(toollessRequest.targetSessionId).toBe(root.session.id);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: toollessChild.session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        }),
+      ),
+    );
+    const [cancelledResolution] = await shared.admin`
+      select target_session_id, lineage from session_system_update_outbox
+      where source_session_id = ${toollessChild.session.id}
+        and kind = 'child_requires_action_resolved'`;
+    expect(cancelledResolution).toMatchObject({
+      target_session_id: root.session.id,
+      lineage: { childSessionId: toollessChild.session.id, parentSessionId: root.session.id },
+    });
+
+    // With no ancestor that can act, the question stays with the parent.
+    const lone = await startSession(grant, { message: "top level" });
+    const loneChild = await startSession(grant, { parent: lone, message: "work" });
+    await shared.admin`
+      update sessions set status = 'failed', active_turn_id = null where id = ${lone.session.id}`;
+    await freezeChild(grant, loneChild);
+    expect(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: loneChild.session.id,
+          turnId: loneChild.turn.id,
+          turnGeneration: loneChild.turn.executionGeneration,
+        }),
+      ))!.targetSessionId,
+    ).toBe(lone.session.id);
+
     // A parent that can act keeps its child's question.
     const able = await startSession(grant, { parent: root, message: "able" });
     const ableChild = await startSession(grant, { parent: able, message: "work" });

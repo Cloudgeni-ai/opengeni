@@ -10535,8 +10535,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * consumer could see that the rendering does not capture: what a field means,
  * the `sourceId`, dedupe keys, classification, summary or lineage the
  * producers write, or how a consumer supersedes, wakes on or renders a notice.
+ *
+ * 2: a child's `child_requires_action` may target the nearest ancestor that
+ * can act instead of a parent that cannot (new lineage `escalatedFromSessionId`),
+ * its resolution follows it there, and it also wakes a parent whose goal is
+ * completed.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 2;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the

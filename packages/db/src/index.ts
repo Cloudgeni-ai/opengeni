@@ -40768,6 +40768,22 @@ export async function acceptSessionHumanInputResponse(
               input.response,
               secretAnswerQuestionIds,
             );
+        // "Let the agent decide" is the person's choice: an agent or the
+        // system cannot hand the decision back to the asking agent this way
+        // (it would skip a request that cannot be skipped and tell the agent
+        // a person chose it).
+        if (
+          response.outcome === "skipped" &&
+          response.agentDecides &&
+          !["human", "api"].includes(
+            childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+          )
+        ) {
+          throw new HumanInputResponseValidationError(
+            "SKIP_NOT_ALLOWED",
+            "Only a person can let the agent decide. Answer the question, or skip it if skipping is allowed.",
+          );
+        }
         if (
           hasSkillReview &&
           !expired &&
