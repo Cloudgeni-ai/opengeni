@@ -109,6 +109,7 @@ async function addConnectionOwner(
     .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${workspace.accountId}, ${subjectId}, 'active', ${personal!.id})`;
   await shared!
     .admin`insert into workspace_memberships (account_id, workspace_id, subject_id) values (${workspace.accountId}, ${workspace.workspaceId}, ${subjectId})`;
+  return { accountId: workspace.accountId, workspaceId: personal!.id as string };
 }
 
 function grant(
@@ -160,6 +161,54 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("a personal account connected in another of the owner's workspaces enables here", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const personal = await addConnectionOwner(workspace, "subject-alice");
+    const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      metadata: { defaultConnectionOwnership: "personal" },
+    });
+    const alice = await createConnection(db, {
+      ...personal,
+      subjectId: "subject-alice",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      grantedScopes: gmailGrantedScopes,
+      credentialEncrypted: encryptedFixture(),
+    });
+    expect(alice.authorityId).toBeTruthy();
+    const enable = (subjectId: string, connectionId?: string) =>
+      enableCapability({
+        db,
+        grant: grant(workspace, subjectId),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: {
+            ...(connectionId ? { connectionId } : {}),
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      });
+    await expect(enable("subject-bob", alice.id)).rejects.toThrow("visible active connection");
+    await enable("subject-alice", alice.id);
+    await enable("subject-alice");
+    const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(installation?.config.connectionRef).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+  });
+
   test("catalog reads serialize savepoints and preserve the enclosing actor", async () => {
     if (!available) throw new Error("Catalog transaction regression requires PostgreSQL");
     const workspace = await freshWorkspace();

@@ -186,7 +186,10 @@ export async function listOwnConnectionAccountsForGrant(
   return [...workspace, ...personal];
 }
 
-async function listOwnConnectionMetadata(
+/** The subject's own personal connections in this organization, whichever of
+ * their workspaces each was created in. A personal account follows its owner,
+ * so connecting it again or using it elsewhere reuses this same connection. */
+export async function listOwnConnectionMetadata(
   db: Database,
   input: {
     accountId: string;
