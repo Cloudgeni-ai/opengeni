@@ -161,9 +161,9 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
         label: "View and manage contacts",
         description: "Read, create, update, and organize contacts and contact folders.",
       },
-      "People.Read.All": {
+      "People.Read": {
         label: "Find relevant people",
-        description: "Use people suggestions available to the connected account.",
+        description: "Use the connected account's own people suggestions.",
       },
     },
   },
@@ -174,11 +174,11 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
     capabilities: [
       {
         title: "Find files and folders",
-        description: "Browse drives, folders, shared items, and sites available to the account.",
+        description: "Browse drives, folders, and items shared with the account.",
       },
       {
         title: "Create and update content",
-        description: "Work with OneDrive and SharePoint files through reviewed tools.",
+        description: "Work with OneDrive files and opened share links through reviewed tools.",
       },
       {
         title: "Manage sharing",
@@ -186,15 +186,40 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
       },
     ],
     permissionSummary:
-      "Microsoft asks for file and site access anywhere the connected account already has access.",
+      "Microsoft asks for access to files the connected account can already open. Connect SharePoint separately to find sites, lists, and libraries.",
     scopeLabels: {
       "Files.ReadWrite.All": {
         label: "Work with accessible files",
         description: "Read, create, update, and organize files available to this account.",
       },
+    },
+  },
+  "microsoft-sharepoint": {
+    providerName: "Microsoft",
+    icon: "files",
+    introduction:
+      "Let agents find and work with SharePoint sites using the work or school account you connect.",
+    capabilities: [
+      {
+        title: "Find sites and content",
+        description: "Search SharePoint and find sites, document libraries, and lists.",
+      },
+      {
+        title: "Read documents and lists",
+        description: "Read library files and list items the account can already access.",
+      },
+      {
+        title: "Update lists",
+        description: "Create and update list items through reviewed tools.",
+      },
+    ],
+    permissionSummary:
+      "Microsoft asks for access to SharePoint sites the connected work or school account can already open. Many organizations require an admin to approve this first. Personal Microsoft accounts are not supported.",
+    scopeLabels: {
       "Sites.ReadWrite.All": {
         label: "Work with accessible sites",
-        description: "Read and update files in SharePoint sites available to this account.",
+        description:
+          "Microsoft grants read and write access to SharePoint sites this account can open. Opengeni uses it to read content and to add or update list items, which ask for approval.",
       },
     },
   },

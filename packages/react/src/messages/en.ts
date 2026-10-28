@@ -1464,7 +1464,7 @@ export const englishMessages = {
   "connectSetup.connectionSetupCouldNotContinue":
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
-  "connectSetup.copyAdminApprovalLink": "Copy admin approval link",
+  "connectSetup.copyAdminApprovalLink": "Copy approval link",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
@@ -1472,9 +1472,9 @@ export const englishMessages = {
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
   "connectSetup.microsoftAdminApprovalMaybe":
-    "Microsoft didn't grant access. If it said your organization needs an admin to approve {product}, a Microsoft 365 admin can approve it for everyone.",
+    "Microsoft didn't grant access. If it asked for admin approval, send this link to your Microsoft 365 admin.",
   "connectSetup.microsoftAdminApprovalRequired":
-    "Your organization needs a Microsoft 365 admin to approve {product} before you can connect.",
+    "Send this link to your Microsoft 365 admin to approve access, then sign in again.",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",

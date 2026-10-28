@@ -17,7 +17,7 @@ function CopyLinkButton({ url }: { url: string }) {
   return (
     <button
       type="button"
-      className="og-connect-setup-secondary"
+      className="og-connect-setup-primary"
       onClick={() =>
         void copyTextToClipboard(url).then((ok) => {
           if (!ok) return;
@@ -47,6 +47,8 @@ export type ConnectSetupProps = {
    * when the provider asks them to finish elsewhere and come back.
    */
   inChat?: boolean;
+  /** Begin a fresh attempt after declined or administrator-gated authorization. */
+  onRetry?: () => void | Promise<unknown>;
 };
 
 /** Controller-backed setup surface, styled by opt-in connect.css. No provider secrets enter React state. Host owns
@@ -72,6 +74,7 @@ function ScopedSetup({
   className,
   authorizeLabel: authorizeLabelProp,
   inChat = false,
+  onRetry,
 }: ConnectSetupProps) {
   const t = useOpenGeniText();
   const authorizeLabel =
@@ -118,7 +121,7 @@ function ScopedSetup({
       {/* A chat card already names the service and whose account it is; a
           sign-in step there needs only its button, and any other step only
           its status. */}
-      {inChat ? (
+      {adminApproval ? null : inChat ? (
         action.type === "authorize" ? null : (
           <p role="status" className="og-connect-setup-status">
             {flow.status}
@@ -145,27 +148,35 @@ function ScopedSetup({
         </div>
       )}
       {adminApproval && (
-        <div className="og-connect-setup-pending" role="alert">
-          <p>
+        <div className="og-connect-setup-approval">
+          <p role="status" className="og-connect-setup-description">
             {adminApproval.required
               ? t("connectSetup.microsoftAdminApprovalRequired")
               : t("connectSetup.microsoftAdminApprovalMaybe")}
           </p>
-          <ol>
-            <li>{t("connectSetup.sendTheApprovalLinkTo")}</li>
-            <li>{t("connectSetup.afterTheyApproveConnectAgain")}</li>
-          </ol>
-          <p className="og-connect-setup-approval-link">
+          {inChat && (
             <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
               {t("connectSetup.adminApprovalLink")}
             </a>
+          )}
+          <div className="og-connect-setup-approval-actions">
             <CopyLinkButton url={adminApproval.url} />
-          </p>
+            {onRetry && (
+              <button
+                type="button"
+                disabled={flow.busy}
+                className="og-connect-setup-secondary"
+                onClick={() => invoke(onRetry)}
+              >
+                {t("connectSetup.trySigningInAgain")}
+              </button>
+            )}
+          </div>
         </div>
       )}
       {flow.errorText && <p role="alert">{flow.errorText}</p>}
       {flow.notice && <p role="status">{flow.notice}</p>}
-      {flow.interactive && (
+      {flow.interactive && !adminApproval && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy || navigating}>
             {flow.formStep ? (
