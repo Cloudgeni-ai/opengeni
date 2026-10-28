@@ -180,6 +180,7 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "../components/session/banners";
+import { HumanInputDelegationRecord } from "../components/session/human-input-delegation-record";
 import {
   ReadOnlySessionNotice,
   sessionReadOnlyArchive,
@@ -3366,6 +3367,15 @@ function SessionChatPane(props: {
       renderContext: { searchTarget: TimelineSearchTarget | null },
     ) => {
       if (item.kind === "user-message") {
+        if (item.humanInputDelegation) {
+          return (
+            <HumanInputDelegationRecord
+              client={context.client}
+              workspaceId={props.session.workspaceId}
+              item={{ ...item, humanInputDelegation: item.humanInputDelegation }}
+            />
+          );
+        }
         return (
           <UserMessageBody
             sessionId={props.session.id}
@@ -3391,6 +3401,7 @@ function SessionChatPane(props: {
       );
     },
     [
+      context.client,
       props.onOpenSandboxFile,
       props.session.id,
       props.session.workspaceId,
@@ -3890,6 +3901,7 @@ function SessionChatPane(props: {
                       client={context.client}
                       workspaceId={props.session.workspaceId}
                       parentSessionId={props.session.id}
+                      events={props.events}
                       waiting={waitingSubSessions}
                       onResolved={props.onDescendantResolved}
                       refreshSignal={props.descendantRefreshSignal}

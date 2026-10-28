@@ -181,7 +181,12 @@ import {
   WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
   waitsForMachineOwnerSql,
 } from "./machine-owner-wait";
-import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  childRequiresActionRouteTx,
+  parentOutboxAuthorityTx,
+  recordedChildNoticeTargetTx,
+  type ChildRequiresActionRoute,
+} from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
   systemUpdatePendingAfterSequenceSql,
@@ -39940,8 +39945,28 @@ function validateSecretHumanInputAnswer(
   }
 }
 
+/**
+ * "Let the agent decide" may settle an agent's own question, but never a
+ * secret question, a Skill review or a secret-use approval card: those stay
+ * with the person.
+ */
+export function humanInputAgentMayDecide(
+  request: Pick<SessionHumanInputRequest, "questions"> &
+    Partial<Pick<SessionHumanInputRequest, "origin">>,
+): boolean {
+  if ((request.origin ?? "tool_call") !== "tool_call") return false;
+  return request.questions.every(
+    (question) =>
+      question.kind !== "secret" &&
+      question.secret == null &&
+      question.skillReview == null &&
+      secretUseApprovalIdFromQuestionId(question.id) === null,
+  );
+}
+
 export function validateHumanInputResponse(
-  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip">,
+  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip"> &
+    Partial<Pick<SessionHumanInputRequest, "origin">>,
   rawResponse: unknown,
   secretAnswerQuestionIds: ReadonlySet<string> = new Set(),
 ): HumanInputResponse {
@@ -39954,6 +39979,15 @@ export function validateHumanInputResponse(
     );
   }
   if (response.outcome === "skipped") {
+    if (response.agentDecides) {
+      if (!humanInputAgentMayDecide(request)) {
+        throw new HumanInputResponseValidationError(
+          "SKIP_NOT_ALLOWED",
+          "Only the person can answer this request",
+        );
+      }
+      return { outcome: "skipped", agentDecides: true };
+    }
     if (!request.allowSkip) {
       throw new HumanInputResponseValidationError(
         "SKIP_NOT_ALLOWED",
@@ -40808,6 +40842,22 @@ export async function acceptSessionHumanInputResponse(
               input.response,
               secretAnswerQuestionIds,
             );
+        // "Let the agent decide" is the person's choice: an agent or the
+        // system cannot hand the decision back to the asking agent this way
+        // (it would skip a request that cannot be skipped and tell the agent
+        // a person chose it).
+        if (
+          response.outcome === "skipped" &&
+          response.agentDecides &&
+          !["human", "api"].includes(
+            childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+          )
+        ) {
+          throw new HumanInputResponseValidationError(
+            "SKIP_NOT_ALLOWED",
+            "Only a person can let the agent decide. Answer the question, or skip it if skipping is allowed.",
+          );
+        }
         if (
           hasSkillReview &&
           !expired &&
@@ -85695,6 +85745,8 @@ type ChildLifecycleNoticeInput = {
   classification: SystemUpdateClassification;
   summary: string;
   lineage?: Record<string, unknown>;
+  /** A child's question routed past a parent that cannot act (childRequiresActionRouteTx). */
+  route?: ChildRequiresActionRoute;
 };
 
 /**
@@ -85712,10 +85764,23 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   input: ChildLifecycleNoticeInput,
 ): Promise<boolean> {
   if (!session.parentSessionId) return false;
+  const route = input.route ?? null;
+  const targetSessionId = route?.targetSessionId ?? session.parentSessionId;
+  // An escalated notice carries the target's own causal turn: the one that
+  // started the branch the child is on.
   const authority = await parentOutboxAuthorityTx(tx, workspaceId, {
-    ...session,
-    parentSessionId: session.parentSessionId,
+    ...(route?.via ?? session),
+    parentSessionId: targetSessionId,
   });
+  const routeLineage =
+    route && route.targetSessionId !== session.parentSessionId
+      ? {
+          childSessionId: session.id,
+          ...(route.escalatedFromSessionId
+            ? { escalatedFromSessionId: route.escalatedFromSessionId }
+            : {}),
+        }
+      : {};
   // Freeze complete content at notice creation, never at parent claim time.
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
@@ -85747,14 +85812,14 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             accountId: session.accountId,
             workspaceId,
             sourceSessionId: session.id,
-            targetSessionId: session.parentSessionId,
+            targetSessionId,
             dedupeKey: input.dedupeKey,
             kind: input.kind,
             classification: input.classification,
             sourceId: session.id,
             summary: input.summary,
             payload: noticePayload,
-            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            lineage: { ...authority.lineage, ...routeLineage, ...(input.lineage ?? {}) },
             personalConnectionDelegations: authority.personalConnectionDelegations,
             mcpAccountBindings: authority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
@@ -85835,6 +85900,13 @@ async function enqueueChildRequiresActionOutboxTx(
     pendingApprovals: input.pendingApprovals,
   });
   if (payload.requests.length === 0 && !payload.truncated) return false;
+  // A parent that cannot act (failed, or without session tools) does not
+  // hold its child's question: the nearest ancestor that can gets it.
+  const route = await childRequiresActionRouteTx(tx, workspaceId, {
+    ...session,
+    parentSessionId: session.parentSessionId,
+  });
+  const summary = childRequiresActionSummary(session.id, payload);
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childRequiresActionDedupeKey({
       childSessionId: session.id,
@@ -85843,9 +85915,12 @@ async function enqueueChildRequiresActionOutboxTx(
     }),
     kind: "child_requires_action",
     classification: "action_required",
-    summary: childRequiresActionSummary(session.id, payload),
+    summary: route.escalatedFromSessionId
+      ? `${summary}\nIts parent session ${route.escalatedFromSessionId} can't act on it, so it came to you; answer it the same way.`
+      : summary,
     payload,
     lineage: { turnId: input.turnId },
+    route,
   });
 }
 
@@ -85873,6 +85948,25 @@ async function enqueueChildRequiresActionResolvedOutboxTx(
     outcome: input.outcome,
     respondedByKind: input.respondedByKind,
   };
+  // The resolution follows its question, so it supersedes the notice where it landed.
+  const recordedTarget = await recordedChildNoticeTargetTx(
+    tx,
+    workspaceId,
+    childRequiresActionDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+    }),
+  );
+  const route =
+    recordedTarget && recordedTarget !== session.parentSessionId
+      ? await childRequiresActionRouteTx(
+          tx,
+          workspaceId,
+          { ...session, parentSessionId: session.parentSessionId },
+          recordedTarget,
+        )
+      : undefined;
   return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
     dedupeKey: childRequiresActionResolvedDedupeKey({
       childSessionId: session.id,
@@ -85886,6 +85980,7 @@ async function enqueueChildRequiresActionResolvedOutboxTx(
     summary: childRequiresActionResolvedSummary(session.id, payload),
     payload,
     lineage: { turnId: input.turnId },
+    ...(route ? { route } : {}),
   });
 }
 
@@ -87895,9 +87990,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // explicit durable obligation, independent of whether the session has
         // a goal, so an immediate child result may wake it. A parent with no
         // goal at all (an ordinary chat that started a worker and promised its
-        // result) is woken by the child's terminal result, and by the child's
-        // blocking question so it can answer it or tell the person; the person
-        // sees the question too, and the first answer wins.
+        // result) is woken by the child's terminal result. A child's blocking
+        // question also wakes a parent whose goal is completed: the worker is
+        // still the parent's work, and the parent should answer what it can
+        // before the person has to. It does not reopen the goal. The person
+        // sees the question too, and the first answer wins. A goal paused by
+        // intent still holds every child notice for its next turn.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -87909,7 +88007,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
             (goalStatus === "active" ||
               waitingForInput ||
               ((input.kind === "child_terminal_result" || input.kind === "child_requires_action") &&
-                goalStatus === null)));
+                goalStatus === null) ||
+              (input.kind === "child_requires_action" && goalStatus === "completed")));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&
