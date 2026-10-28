@@ -55,7 +55,7 @@ const ROUTE_SEGMENT = String.raw`(?:[a-z]+(?:-[a-z]+)*|\$[A-Za-z][A-Za-z0-9]{0,3
 /**
  * A route pattern of at most 160 characters that is `/`, `unknown`, or up to
  * twelve `/`-separated segments that are each either a lowercase literal
- * (`variable-sets`) or a `$param` placeholder. The grammar excludes digits in
+ * (`rigs`) or a `$param` placeholder. The grammar excludes digits in
  * literals, so a concrete id cannot pass as one.
  */
 export const CLIENT_ERROR_ROUTE_PATTERN = new RegExp(
@@ -294,8 +294,6 @@ export const CLIENT_PAGES = [
   "files",
   "agents",
   "secrets",
-  "variable-sets",
-  "environments",
   "rigs",
   "playground",
   "read-only-chats",
