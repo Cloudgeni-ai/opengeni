@@ -293,3 +293,9 @@
 .og-catalog-more, .og-skill-discovery .og-catalog-more { margin-top:12px; min-height:36px; padding:8px 12px; border:1px solid var(--og-color-border,#888); border-radius:8px; background:var(--og-color-surface-1,transparent); color:inherit; font:inherit; font-size:13px; cursor:pointer; }
 .og-catalog-more:focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; }
 .og-plugin-discovery.og-catalog-overview { border-top:1px solid var(--og-color-border,#888); margin-top:24px; padding-top:24px; }
+
+.og-connect-setup .og-connect-setup-approval { display:grid; gap:20px; }
+.og-connect-setup .og-connect-setup-approval-actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.og-connect-setup .og-connect-setup-approval-actions button { min-height:44px; }
+
+.og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary { border-color:transparent; background:transparent; padding-inline:0; text-decoration:underline; text-underline-offset:3px; }
