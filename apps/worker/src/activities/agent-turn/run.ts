@@ -50,7 +50,8 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -134,12 +135,12 @@ import {
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
-  selectClaudeTurnCapacityByRoute,
+  selectClaudeTurnCapacity,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
 import {
   buildXaiCoreRequestAuthorization,
-  selectXaiTurnCapacityByRoute,
+  selectXaiTurnCapacity,
   xaiCoreTitleCustody,
   type XaiCoreRequestAuthorization,
 } from "./xai-core";
@@ -149,6 +150,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -171,6 +173,7 @@ export function sessionTitleCodexRequestContext(
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
     ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
+    ...(context.onReportedUsage ? { onReportedUsage: context.onReportedUsage } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -570,7 +573,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilityServerCategories,
         credentialSubjectId,
         fileAuthoritySubjectId,
-        capabilitySettings,
+        capabilitySettings: claimedCapabilitySettings,
         codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
@@ -584,6 +587,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // EU-ONLY INFERENCE — read the workspace's setting again on every
+      // attempt, before any model call: a setting turned on after the claim
+      // still applies. Every later phase uses these settings, so resolution,
+      // run settings and every client carry the requirement, and this
+      // attempt's transport context is bound to it (never widened).
+      const capabilitySettings = await settingsWithTurnInferenceResidency({
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        settings: claimedCapabilitySettings,
+      });
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
@@ -699,9 +713,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             } else {
               const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
               if ("exit" in codexCapacity) return codexCapacity.exit;
-              const xaiCapacity = await selectXaiTurnCapacityByRoute(capacityDeps);
+              const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
               if ("exit" in xaiCapacity) return xaiCapacity.exit;
-              const claudeCapacity = await selectClaudeTurnCapacityByRoute(capacityDeps);
+              const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
               if ("exit" in claudeCapacity) return claudeCapacity.exit;
             }
           }
@@ -881,8 +895,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
-                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    onReportedUsage: (usage) => creditGuard.observe(usage),
                     persistUsageHeaders: async (snapshot) => {
                       if (!coreCodex) return;
                       await recordCoreCodexUsageReading({
@@ -1417,7 +1431,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             capabilitySettings,
             runSettings,
             rigVersion,
-            workspaceRefs,
           });
           const {
             turnResources: claimedTurnResources,
@@ -2046,6 +2059,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         sandboxState.setupBoxSession as CodemodeTokenWriterSession,
                         downloadsToMaterialize,
                         {
+                          sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
                           onRuntimeEvent: async (event) => {
                             await eventing.publish!(
                               [{ type: event.type, payload: event.payload }],
@@ -2322,7 +2336,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          return runAgentTurn(input, resolvedServices, span);
+          // One known-secret memory per attempt: tool results, model input and
+          // every durable write of this attempt are masked with it.
+          const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
+          // Work that outlives the attempt (process-wide caches started inside
+          // it) neither keeps these values nor masks with them afterwards.
+          // EU-only inference: model requests are refused until the claim
+          // binds this context to the turn's settings.
+          return runWithAttemptSecretValues(secretValues, () =>
+            withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span)),
+          ).finally(() => secretValues.dispose());
         }),
       );
     } catch (error) {

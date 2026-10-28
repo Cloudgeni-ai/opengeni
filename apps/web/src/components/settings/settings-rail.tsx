@@ -43,7 +43,7 @@ import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
 import type {
@@ -351,10 +351,10 @@ export function useSettingsRail(input: {
     });
   } else if (workspace) {
     const workspaceId = workspace.id;
-    const canReadInsights = hasWorkspacePermission(
+    const canReadInsights = canManageWorkspaceSettings(
       context.accessContext,
-      workspaceId,
-      "workspace:admin",
+      workspace,
+      context.managedSelfContext,
     );
     const activityPages = ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
     sections.push({

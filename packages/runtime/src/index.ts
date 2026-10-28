@@ -1,4 +1,16 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  activeAttemptSecretValues,
+  installToolResultSecretMasking,
+  secretMaskedTool,
+  secretValueModelInputFilter,
+  withAttemptSecretValues,
+} from "./tool-result-secret-masking";
+import {
+  firstPartySecretValuesMeta,
+  installToolResultSecretMasking,
+  secretMaskedToolResolver,
+} from "./tool-result-secret-masking";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -42,6 +54,7 @@ export {
   type SingleModelCallTarget,
 } from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
+import { inferenceResidencyRequirement } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
@@ -134,6 +147,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_SECRET_VALUES_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -187,11 +201,15 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
+  type SecretValueMemory,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
   createSecretArgumentResolver,
+  handOffSecretArguments,
+  literalSecretScope,
   secretArgumentMode,
+  type LiteralSecretScope,
   type SecretArgumentMode,
 } from "./secret-argument-resolution";
 import {
@@ -430,6 +448,7 @@ import {
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
   renderCompactionPromptInputForChat,
+  TURN_OPERATIONAL_NOTICE_PREFIX,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -442,7 +461,6 @@ import {
   withCommandNotStartedCallProof,
   withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
-  repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
@@ -509,11 +527,11 @@ import {
   type TurnSandboxCommandSession,
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
+import type { CredentialEnvironment } from "./sandbox/credential-profile-delivery";
 import {
   withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
-import type { ComputerToolMode } from "./legacy-computer-compat";
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
@@ -704,6 +722,14 @@ export {
   warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
+  InferenceRegionRestrictedError,
+  currentInferenceResidency,
+  findInferenceRegionRestrictedError,
+  inferenceResidencyRequirement,
+  resolveInferenceResidency,
+  withInferenceResidency,
+} from "./inference-residency";
+export {
   appendWorkspaceGovernance,
   CompanyProfilePromptLimitError,
   hasActiveWorkspaceInstructionPolicy,
@@ -741,19 +767,9 @@ export {
   type RetainableSessionImageOutputHook,
   type RetainableSessionImageToolName,
 } from "./retained-session-image";
-export {
-  SandboxComputer,
-  ComputerUseCapability,
-  computerUse,
-  ComputerUnavailableError,
-  ScreenshotReadError,
-  ComputerReadOnlyError,
-  ComputerActionError,
-  type SandboxComputerOptions,
-  type ComputerUseArgs,
-  type ComputerToolMode,
-  type ScreenshotReadErrorCode,
-} from "./legacy-computer-compat";
+
+/** How the computer tool reaches the model: screenshots, text only, or not at all. */
+export type ComputerToolMode = "function-image" | "disabled" | "function-text";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -920,7 +936,6 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
-  REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET,
   RETAINED_REPLY_MAX_TOKENS,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -998,6 +1013,8 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal credential lookup mode; preflight never refreshes or records usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /** Approval preflight: an expired access token that has a refresh token passes. */
+  preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
 };
@@ -1264,7 +1281,12 @@ export async function generateSessionTitle(
         ? null
         : new MultiProviderModelProvider(settings).resolveBinding(modelName);
   const target: SingleModelCallTarget = binding
-    ? { client: binding.client, provider: binding.provider, modelId: binding.modelId }
+    ? {
+        client: binding.client,
+        provider: binding.provider,
+        modelId: binding.modelId,
+        residency: inferenceResidencyRequirement(settings),
+      }
     : { model: options.model! };
   const result = await runSingleModelCall(target, {
     messages: [
@@ -1473,7 +1495,12 @@ export async function summarizeForCompaction(
     const claude = new AnthropicMessagesModel(
       provider,
       model,
-      instrumentedModelFetch(provider.id, globalThis.fetch),
+      instrumentedModelFetch(
+        provider.id,
+        globalThis.fetch,
+        false,
+        inferenceResidencyRequirement(settings),
+      ),
     );
     const claudeRequest = (forbidToolCalls: boolean) =>
       anthropicCompactionRequest(input, {
@@ -2537,6 +2564,18 @@ export type BuildAgentOptions = {
    * recorded keeps the references. Omitted: references pass through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The attempt's credential profile: variables added to the environment of
+   * every sandbox command (exec_command and background commands), resolved
+   * through `secretResolver` (so the values are remembered and masked like
+   * any other resolved value). Omitted: commands get no profile variables.
+   */
+  credentials?: CredentialEnvironment | null;
+  /**
+   * The attempt's known secret values (docs/secrets.md, Masking). Every tool
+   * result is masked with it before the model, the run state or history sees it.
+   */
+  secretValueMemory?: SecretValueMemory | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3435,6 +3474,10 @@ export function buildOpenGeniAgent(
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    // Last, so it masks exactly what every other wrapper hands to the model.
+    if (options.secretValueMemory) {
+      installToolResultSecretMasking(agent, options.secretValueMemory);
+    }
     return agent;
   }
 
@@ -3483,6 +3526,7 @@ export function buildOpenGeniAgent(
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -3571,6 +3615,10 @@ export function buildOpenGeniAgent(
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  // Last, so it masks exactly what every other wrapper hands to the model.
+  if (options.secretValueMemory) {
+    installToolResultSecretMasking(agent, options.secretValueMemory);
+  }
   return agent;
 }
 
@@ -4754,6 +4802,7 @@ export function buildAgentCapabilities(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -4783,15 +4832,20 @@ function buildAgentCapabilitiesFromComposition(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   },
 ): ReturnType<typeof Capabilities.default> {
   // A secret resolver needs the controller's wrappers even without a turn
   // signal: they are where references are resolved below every recorder.
   const toolCancellation =
-    options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
+    options.turnCancellationSignal ||
+    options.onToolCancellationFence ||
+    options.secretResolver ||
+    options.credentials
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+          ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
@@ -5021,6 +5075,15 @@ export type ToolPreparationPhaseMeasurement = {
 export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
+  /**
+   * Current-human workspace gateway only: give every connection-backed MCP
+   * server (built-in bridges and remote servers) a side-effect-free approval
+   * preflight, so an approval-required tool can be confirmed by a person. The
+   * preflight resolves the exact connection without refreshing it or
+   * recording provider use, and fails before an approval capability is issued
+   * when the connection is missing, inactive, unbound or needs reconnection.
+   */
+  connectionApprovalPreflight?: boolean;
   /**
    * Attempt-scoped secret resolver. When present and enabled, remote MCP and
    * Codex-app tool arguments have their `{{secret:…}}` references resolved by
@@ -5809,7 +5872,11 @@ export async function prepareAgentTools(
             firstParty && !bestEffort,
             buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
             tool.eager !== true,
-            undefined,
+            options.connectionApprovalPreflight &&
+              config.connectionRef &&
+              !isCodexAppsMcpServer(config)
+              ? connectionApprovalPreflight(options, config.id, config.connectionRef, url)
+              : undefined,
             undefined,
             firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
               ? inputWaitYield
@@ -6871,12 +6938,19 @@ export function attemptToolCallMeta(
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
-    context.transportMeta ?? {};
+  const {
+    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored,
+    [FIRST_PARTY_SECRET_VALUES_META_KEY]: _ignoredValues,
+    ...transportMeta
+  } = context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    // The values this call's arguments resolved to, so the first-party server
+    // masks them in what it stores and returns (docs/secrets.md, Masking).
+    // Never logged; third-party servers never see it.
+    ...(serverId === "opengeni" ? firstPartySecretValuesMeta(context.operationId) : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {
@@ -7221,6 +7295,45 @@ function recordResolvedMcpConnectionId(
     throw new Error("MCP connection identity changed during attempt preparation");
   }
   resolvedMcpConnectionIds.set(config.id, connectionId);
+}
+
+/** Thrown when a connection cannot serve an approved call; nothing was sent to the provider. */
+export class ConnectionApprovalPreflightError extends Error {
+  readonly name = "ConnectionApprovalPreflightError";
+  constructor(readonly reason: string) {
+    super("This connection needs attention before the action can run.");
+  }
+}
+
+/**
+ * The approval preflight of a connection-backed server: one non-refreshing,
+ * non-recording credential lookup of the exact connection for the server's own
+ * destination. An access token past its expiry still passes when it can be
+ * refreshed, because only execution refreshes it.
+ */
+function connectionApprovalPreflight(
+  options: PrepareToolsOptions,
+  serverId: string,
+  connectionRef: McpServerConnectionRef,
+  destinationUrl: string,
+): NonNullable<LocalMcpServerRegistration["preflightCall"]> {
+  return async (toolName, _args, preflightOptions) => {
+    preflightOptions?.signal?.throwIfAborted();
+    if (!options.workspaceId || !options.resolveCredential)
+      throw new ConnectionApprovalPreflightError("missing_connection");
+    const result = await options.resolveCredential({
+      workspaceId: options.workspaceId,
+      serverId,
+      toolName,
+      connectionRef,
+      destinationUrl,
+      forceRefresh: false,
+      credentialResolutionMode: "preflight",
+      preflightAcceptsRefreshableExpiry: true,
+      ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+    });
+    if (result.status !== "ok") throw new ConnectionApprovalPreflightError(result.reason);
+  };
 }
 
 async function resolveConnectionForRequest(
@@ -9682,11 +9795,11 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
+    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
   });
 }
 
-export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
+export { TURN_OPERATIONAL_NOTICE_PREFIX };
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
@@ -9761,15 +9874,7 @@ export async function prepareRunInput(
       "Cannot resume an interrupted tool from leftover SDK run state; the open suffix is the resume authority.",
     );
   }
-  const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
-  if (compatibleRunState.repairs.length > 0) {
-    console.warn("[runtime] repaired incompatible RunState exposedPorts", {
-      errorClass: "RunStateCompatibilityError",
-      errorCode: "incompatible_exposed_ports",
-      origin: "runtime",
-    });
-  }
-  const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
+  const state = await restoreInterruptedRunState(agent, input.serializedRunState);
   // Pre-fix serialized states have no ownership field. Establish application
   // ownership before reading history and choosing the durable append boundary.
   state._historyOwnership = "external";
@@ -9884,6 +9989,11 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+  /**
+   * Masks known secret values in the instructions and input of every model
+   * call, after every filter that can add input (docs/secrets.md, Masking).
+   */
+  secretMaskingInputFilter?: CallModelInputFilter;
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -10274,6 +10384,8 @@ async function runAgentStreamInternal(
             prepared.modelInputAlreadyProjected === true,
           ),
         ),
+        // Secret masking runs after every filter that can add model input.
+        measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
         measuredModelInputFilter(
           "input_filter_context",
           deferCompactionToModelBoundary(
@@ -10441,6 +10553,8 @@ async function runAgentStreamInternal(
         "input_filter_modality",
         modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       ),
+      // Secret masking runs after every filter that can add model input.
+      measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
       measuredModelInputFilter(
         "input_filter_context",
         deferCompactionToModelBoundary(
@@ -10556,7 +10670,7 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
+    resolveMissingFunctionTool: secretMaskedToolResolver(agent, mcpToolResolverForAgent(agent)),
   };
 }
 
@@ -13133,6 +13247,14 @@ function gitCredentialHelperCommandLines(
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
+    // A credential profile that delivered this tool's token variable to the
+    // command wins over the platform binding (docs/secrets.md, "Credential
+    // profiles"): run the real tool with the inherited value.
+    'if [ -n "$token_env" ]; then',
+    '  case ",${OPENGENI_CREDENTIAL_PROFILE_VARS:-}," in',
+    '    *",$token_env,"*) provider= ;;',
+    "  esac",
+    "fi",
     "hash_binding_id() {",
     "  if command -v sha256sum >/dev/null 2>&1; then printf '%s' \"$1\" | sha256sum | cut -c1-32; return; fi",
     "  if command -v shasum >/dev/null 2>&1; then printf '%s' \"$1\" | shasum -a 256 | cut -c1-32; return; fi",

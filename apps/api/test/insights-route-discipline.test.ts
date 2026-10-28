@@ -23,8 +23,8 @@ const routesSrc = readFileSync(resolve(here, "..", "src", "routes", "insights.ts
 const appSrc = readFileSync(resolve(here, "..", "src", "app.ts"), "utf8");
 
 describe("insights route discipline", () => {
-  test("requires workspace:admin before aggregating", () => {
-    const grantCall = 'requireAccessGrant(c, deps, workspaceId, "workspace:admin")';
+  test("requires workspace administration (admin or Personal owner) before aggregating", () => {
+    const grantCall = "requireWorkspaceSettingsGrant(c, deps, workspaceId)";
     const grantAt = routesSrc.indexOf(grantCall);
     expect(grantAt).toBeGreaterThanOrEqual(0);
     const validationAt = routesSrc.indexOf(
@@ -210,9 +210,7 @@ describe("insights route discipline", () => {
 
   test("records bounded route timing across success and failure without changing the response", () => {
     const timerAt = routesSrc.indexOf("const startedAtMs = performance.now()");
-    const grantAt = routesSrc.indexOf(
-      'requireAccessGrant(c, deps, workspaceId, "workspace:admin")',
-    );
+    const grantAt = routesSrc.indexOf("requireWorkspaceSettingsGrant(c, deps, workspaceId)");
     const responseAt = routesSrc.indexOf("WorkspaceInsightsResponse.parse(response)", grantAt);
     const finallyAt = routesSrc.indexOf("} finally {", responseAt);
     const observeAt = routesSrc.indexOf("observeRequest({", finallyAt);

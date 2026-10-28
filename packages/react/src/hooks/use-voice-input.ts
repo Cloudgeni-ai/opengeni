@@ -7,8 +7,10 @@ import {
   type OpenGeniRecordingsTransport,
   type Recorder,
   type RecorderPlatform,
+  type RecordingChunkStore,
   type RecordingTransport,
   type RecordingUploadStatus,
+  uploadRecordingAudio,
 } from "@opengeni/sdk/recordings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { VoiceRecordingStore } from "../voice-recording-store";
@@ -58,10 +60,26 @@ export type UseVoiceInputOptions = {
    */
   language?: string | null | undefined;
   /**
+   * Names and words to listen for, such as the person's vocabulary: at most
+   * 100, each up to 50 characters. Each dictation keeps the ones it started with.
+   */
+  keyterms?: readonly string[] | undefined;
+  /**
    * Asked before each new dictation takes the microphone, such as a host's
    * consent prompt. Resolving false (or throwing) keeps the microphone off.
    */
   beforeStart?: (() => boolean | Promise<boolean>) | undefined;
+  /**
+   * Offer dictations an earlier page, tab or device left in this workspace
+   * (default). Off for a host that dictates somewhere else, such as the
+   * desktop app's dictation from anywhere: the composer offers them instead.
+   */
+  recover?: boolean | undefined;
+  /**
+   * A copy of each dictation's speech once capture ends, for a host that keeps
+   * it on the device (the desktop app's dictation history).
+   */
+  onAudio?: ((audio: VoiceInputAudio) => void) | undefined;
   /** A recordings client, such as a host proxy. Built from `client` otherwise. */
   recordings?: Partial<VoiceInputRecordingsClient> | undefined;
   /** How this device records; the browser's by default. */
@@ -81,6 +99,14 @@ export type UseVoiceInputOptions = {
 
 type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
   Partial<Pick<OpenGeniClient, "requestJson">>;
+
+/** A dictation's speech, as recorded. */
+export type VoiceInputAudio = {
+  /** The dictation's recording; null for one sent in a single request. */
+  recordingId: string | null;
+  audio: Blob;
+  durationMilliseconds: number;
+};
 
 export type UseVoiceInputResult = {
   status: VoiceInputStatus;
@@ -114,6 +140,18 @@ export type UseVoiceInputResult = {
   cancel: () => void;
   /** Intentionally delete the current dictation. */
   discard: () => Promise<void>;
+  /**
+   * Let go of the current dictation without deleting it: a recording stops
+   * and uploads, and a held one stays saved for the next composer to offer.
+   */
+  release: () => void;
+  /**
+   * Transcribe speech this page already has (a dictation kept on the device)
+   * as a new dictation, uploaded the way a recorded one is; its text arrives
+   * as a recorded dictation's does. Resolves false when it can't start: not
+   * idle, or no recordings client.
+   */
+  transcribe: (audio: Blob, options?: { durationMilliseconds?: number }) => Promise<boolean>;
 };
 
 export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 1_000;
@@ -233,6 +271,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   const gatingRef = useRef(false);
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uploaderRef = useRef<RecordingUploader | null>(null);
+  /** The speech of the dictation being recorded, copied as it is saved, for `onAudio`. */
+  const audioCopies = useRef(new Map<string, AudioCopy>());
   const startedAtRef = useRef(0);
   /** Text a one-shot dictation heard while it couldn't go into the draft. */
   const oneShotText = useRef<string | null>(null);
@@ -278,7 +318,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const isCaptureActive = current.isCaptureActive;
       uploaderRef.current = new RecordingUploader({
         client: transport,
-        store: current.createStore(),
+        store: copyingStore(current.createStore(), audioCopies.current),
         ...(current.fetch ? { fetch: current.fetch } : {}),
         ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
       });
@@ -341,7 +381,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     async (generation: number): Promise<void> => {
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
-      if (!client || !latest.current.durable) return;
+      if (!client || !latest.current.durable || latest.current.recover === false) return;
       // Dictations a closed page or crashed app left on this device: finish
       // uploading them here.
       const resumed = await uploader()
@@ -519,6 +559,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         settleIdle();
         return;
       }
+      try {
+        latest.current.onAudio?.({
+          recordingId: null,
+          audio,
+          durationMilliseconds: Math.round(capture.durationSeconds() * 1_000),
+        });
+      } catch {
+        // The host's copy is its own concern; the dictation goes on.
+      }
       const maxBytes = latest.current.capability?.maxSizeBytes;
       if (maxBytes !== undefined && audio.size > maxBytes) {
         settleIdle();
@@ -571,6 +620,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const recorder = recorderRef.current;
       if (!recorder) return;
       const id = recorder.snapshot.recordingId;
+      const elapsed = recorder.snapshot.elapsedMilliseconds;
       setStatus(autoInsert ? "saving" : "recovered");
       setStream(null);
       setRecordingStartedAt(null);
@@ -582,10 +632,27 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         upload = null;
       }
       recorderRef.current = null;
+      const copy = id ? audioCopies.current.get(id) : undefined;
+      if (id) audioCopies.current.delete(id);
       if (generation !== generationRef.current || !id) return;
       if (!upload || upload.discarded) {
         settleIdle();
         return;
+      }
+      const onAudio = latest.current.onAudio;
+      if (copy && onAudio && copy.parts.length > 0 && !upload.failed) {
+        try {
+          onAudio({
+            recordingId: id,
+            audio: new Blob(
+              copy.parts.filter((part): part is Uint8Array => part !== undefined) as BlobPart[],
+              copy.mimeType ? { type: copy.mimeType } : {},
+            ),
+            durationMilliseconds: elapsed,
+          });
+        } catch {
+          // The host's copy is its own concern; the dictation goes on.
+        }
       }
       const dictation = dictationRef.current ?? { recordingId: id, autoInsert, text: null };
       if (upload.failed) {
@@ -679,17 +746,25 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       beginCapture(capture.stream, null);
       return true;
     }
+    const transcription = dictationTranscription(language, current.keyterms);
+    // One dictation at a time: a copy left by an earlier one is dropped.
+    audioCopies.current.clear();
+    const copying = Boolean(current.onAudio);
     const recorder = current.platform.createRecorder({
       client: transport,
       workspaceId: current.workspaceId,
       purpose: "dictation",
       microphone: true,
-      ...(language ? { transcription: { language } } : {}),
+      ...(transcription ? { transcription } : {}),
       uploader: uploader(),
       timesliceMilliseconds: VOICE_RECORDING_TIMESLICE_MILLISECONDS,
       keepAwake: false,
       onChange: (snapshot) => {
         if (recorderRef.current !== recorder) return;
+        // The id is known before the first chunk is saved.
+        if (copying && snapshot.recordingId && !audioCopies.current.has(snapshot.recordingId)) {
+          audioCopies.current.set(snapshot.recordingId, { mimeType: null, parts: [] });
+        }
         setDurationSeconds(snapshot.elapsedMilliseconds / 1_000);
         // The server refused the dictation (voice input turned off, no credits).
         if (snapshot.state === "recording" && snapshot.upload?.failed) {
@@ -728,6 +803,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     const dictation = dictationRef.current;
     settleIdle();
     oneShotText.current = null;
+    audioCopies.current.clear();
     if (oneShot) await oneShot.stop().catch(() => undefined);
     if (recorder) {
       await recorder.discard().catch(() => undefined);
@@ -817,6 +893,75 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     await take(dictation, dictation.text, generation);
   }, [insertText, settleIdle, take]);
 
+  const release = useCallback(() => {
+    generationRef.current += 1;
+    // Capture ends; the upload finishes in the background, as on a workspace change.
+    void recorderRef.current?.stop().catch(() => undefined);
+    void oneShotRef.current?.stop().catch(() => undefined);
+    oneShotText.current = null;
+    audioCopies.current.clear();
+    settleIdle();
+  }, [settleIdle]);
+
+  const transcribe = useCallback(
+    async (audio: Blob, timing: { durationMilliseconds?: number } = {}): Promise<boolean> => {
+      const current = latest.current;
+      const client = current.recordings;
+      if (
+        !client ||
+        !current.durable ||
+        current.disabled ||
+        !current.enabled ||
+        !current.capability?.available ||
+        statusRef.current !== "idle" ||
+        audio.size === 0
+      ) {
+        return false;
+      }
+      const generation = ++generationRef.current;
+      const newId = crypto.randomUUID();
+      const transcription = dictationTranscription(current.language || null, current.keyterms);
+      // Held like a recorded dictation from here on, so Cancel and Escape keep it.
+      const dictation: Dictation = { recordingId: newId, autoInsert: true, text: null };
+      dictationRef.current = dictation;
+      setRecordingId(newId);
+      setError(null);
+      setStatus("saving");
+      let upload: RecordingUploadStatus;
+      try {
+        upload = await uploadRecordingAudio({
+          uploader: uploader(),
+          workspaceId: current.workspaceId,
+          recordingId: newId,
+          audio,
+          durationMilliseconds: timing.durationMilliseconds ?? 0,
+          create: { purpose: "dictation", ...(transcription ? { transcription } : {}) },
+        });
+      } catch (cause) {
+        if (generation !== generationRef.current) return false;
+        settleIdle();
+        setStatus("error");
+        setError(errorCode(cause));
+        return false;
+      }
+      if (generation !== generationRef.current) return true;
+      if (upload.discarded || upload.failed) {
+        await uploader()
+          .discard(newId)
+          .catch(() => undefined);
+        settleIdle();
+        setStatus("error");
+        setError(upload.failed ? voiceInputCode(upload.failed.code) : "invalid_audio");
+        return false;
+      }
+      if (dictation.autoInsert) setStatus("transcribing");
+      else hold(dictation, "recovered");
+      void watch(dictation, uploader().finalized.get(newId)?.transcript.id ?? null, generation);
+      return true;
+    },
+    [hold, settleIdle, uploader, watch],
+  );
+
   // A transcript that arrived while a send held the composer goes in once it is free.
   useEffect(() => {
     const dictation = dictationRef.current;
@@ -904,6 +1049,57 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     insertSavedTranscript,
     cancel,
     discard,
+    release,
+    transcribe,
+  };
+}
+
+/** The speech of one dictation, copied chunk by chunk as it is saved. */
+type AudioCopy = { mimeType: string | null; parts: Array<Uint8Array | undefined> };
+
+/** The recording options a dictation sends: its language and the words to listen for. */
+function dictationTranscription(
+  language: string | null,
+  keyterms: readonly string[] | undefined,
+): { language?: string; keyterms?: string[] } | null {
+  const terms = (keyterms ?? []).map((term) => term.trim()).filter(Boolean);
+  if (!language && terms.length === 0) return null;
+  return {
+    ...(language ? { language } : {}),
+    ...(terms.length > 0 ? { keyterms: terms.slice(0, 100) } : {}),
+  };
+}
+
+/**
+ * The recorder's local store, also copying the microphone's chunks of each
+ * recording in `copies` as they are saved.
+ */
+function copyingStore(
+  store: RecordingChunkStore,
+  copies: Map<string, AudioCopy>,
+): RecordingChunkStore {
+  return {
+    putRecording: async (recording) => {
+      const copy = copies.get(recording.recordingId);
+      if (copy && !copy.mimeType) {
+        copy.mimeType =
+          recording.create.tracks.find((track) => track.trackNumber === 0)?.mimeType ?? null;
+      }
+      await store.putRecording(recording);
+    },
+    getRecording: (recordingId) => store.getRecording(recordingId),
+    listRecordings: () => store.listRecordings(),
+    deleteRecording: (recordingId) => store.deleteRecording(recordingId),
+    putChunk: async (chunk) => {
+      await store.putChunk(chunk);
+      const copy = copies.get(chunk.recordingId);
+      if (copy && chunk.trackNumber === 0) copy.parts[chunk.chunkNumber] = chunk.bytes;
+    },
+    listChunks: (recordingId) => store.listChunks(recordingId),
+    readChunk: (recordingId, trackNumber, chunkNumber) =>
+      store.readChunk(recordingId, trackNumber, chunkNumber),
+    deleteChunks: (recordingId, trackNumber, chunkNumbers) =>
+      store.deleteChunks(recordingId, trackNumber, chunkNumbers),
   };
 }
 

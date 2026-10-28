@@ -36,6 +36,7 @@ import {
   type NativeTimelineTheme,
 } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { tableColumns, tableLayout } from "./markdown-table-layout";
 
 /**
  * One parser for every message, configured like the web's `remark-gfm`: no typographic
@@ -291,18 +292,6 @@ function tableRows(table: AstNode): string[][] {
   return rows;
 }
 
-/**
- * Content-sized columns, as a browser's auto table layout lays them out: short
- * columns keep their natural width on one line, long ones share the rest.
- */
-function tableColumns(rows: string[][]): { width?: number; grow: number }[] {
-  const count = Math.max(0, ...rows.map((row) => row.length));
-  return Array.from({ length: count }, (_, index) => {
-    const longest = Math.max(1, ...rows.map((row) => row[index]?.length ?? 0));
-    return longest <= 14 ? { width: Math.ceil(longest * 8.4) + 20, grow: 0 } : { grow: longest };
-  });
-}
-
 /** A cell's column: its sibling index in the row (set by the AST builder). */
 function cellIndex(node: { index?: unknown }): number {
   return typeof node.index === "number" && node.index >= 0 ? node.index : 0;
@@ -310,25 +299,6 @@ function cellIndex(node: { index?: unknown }): number {
 
 /** Explicit column widths for a measured table; empty until the table lays out. */
 const TableColumnsContext = createContext<number[]>([]);
-
-function columnWidths(columns: { width?: number; grow: number }[], available: number): number[] {
-  const fixed = columns.reduce((sum, column) => sum + (column.width ?? 0), 0);
-  const growth = columns.reduce(
-    (sum, column) => sum + (column.width === undefined ? column.grow : 0),
-    0,
-  );
-  const rest = Math.max(0, available - fixed);
-  if (growth === 0) return columns.map((column) => column.width ?? 0);
-  // Long columns share the rest by length, each keeping a readable minimum.
-  return columns.map((column) =>
-    column.width !== undefined ? column.width : Math.max(64, (rest * column.grow) / growth),
-  );
-}
-
-/** A column's comfortable width when the table is wider than the screen. */
-function naturalColumnWidth(column: { width?: number; grow: number }): number {
-  return column.width ?? Math.min(280, Math.max(120, Math.ceil(column.grow * 7.6) + 20));
-}
 
 function MarkdownTable({
   node,
@@ -343,16 +313,15 @@ function MarkdownTable({
   const m = useNativeTimelineMessages();
   const rows = useMemo(() => tableRows(node), [node]);
   const columns = useMemo(() => tableColumns(rows), [rows]);
-  const natural = useMemo(() => columns.map(naturalColumnWidth), [columns]);
-  const naturalWidth = natural.reduce((sum, width) => sum + width, 0);
   const [available, setAvailable] = useState(0);
   // Web wraps tables in overflow-x-auto: a table that cannot fit keeps readable
   // columns and scrolls sideways instead of crushing every cell.
-  const scrolls = available > 0 && naturalWidth > available;
-  const widths = useMemo(
-    () => (available > 0 ? (scrolls ? natural : columnWidths(columns, available)) : []),
-    [available, columns, natural, scrolls],
+  const layout = useMemo(
+    () => (available > 0 ? tableLayout(columns, available) : { widths: [], scrolls: false }),
+    [available, columns],
   );
+  const { widths, scrolls } = layout;
+  const scrollWidth = widths.reduce((sum, width) => sum + width, 0);
   const [copied, setCopied] = useState(false);
   // A soft edge says "more columns this way" until the reader reaches the end.
   const [atEnd, setAtEnd] = useState(false);
@@ -381,7 +350,7 @@ function MarkdownTable({
             }}
             accessibilityHint={m.scrollTableHint}
           >
-            <View style={{ width: naturalWidth }}>{body}</View>
+            <View style={{ width: scrollWidth }}>{body}</View>
           </ScrollView>
           {atEnd ? null : (
             <Svg

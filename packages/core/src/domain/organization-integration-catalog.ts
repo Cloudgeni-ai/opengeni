@@ -48,7 +48,6 @@ const dedicated = [
   { key: "slack-bot", label: "Slack workspace bots" },
   { key: "github-personal", label: "GitHub personal accounts" },
   { key: "github-app", label: "GitHub App installations" },
-  { key: "github-lens", label: "GitHub PR review" },
   { key: "fiken", label: "Fiken" },
   { key: "x", label: "X" },
   { key: "reddit", label: "Reddit" },

@@ -108,13 +108,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex waits fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The organization's seeded settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -152,13 +146,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function enableCodexCutover(accountId: string, enabled = true): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 async function sharedConnection(
@@ -398,7 +385,6 @@ async function waiterRows(
 describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core", () => {
   test("a disabled explicit pin needs action and an existing waiter publishes its changed reason once", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const pinned = await sharedConnection(org, "disabled-pin");
     await sharedConnection(org, "available-other");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -495,7 +481,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("a placement wait parks the turn on the core waiter and resumes it when capacity returns", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "parked");
     const resetAt = Date.now() + 3_600_000;
     await exhaust(org, connectionId, resetAt);
@@ -615,7 +600,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     // Reset credits are redeemed from the workspace that manages the connection.
     const connectionId = await sharedConnection(org, "reset-weekly", {
       managedBy: org.sharedWorkspaceId,
@@ -729,9 +713,8 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     });
   });
 
-  test("arming refuses a stale attempt and a disabled cutover", async () => {
+  test("arming refuses a stale attempt", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "stale-arm");
     await exhaust(org, connectionId, Date.now() + 60_000);
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -739,15 +722,12 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       action: "stale",
       events: [],
     });
-    await enableCodexCutover(org.accountId, false);
-    expect(await arm(turn, null)).toEqual({ action: "stale", events: [] });
     expect(await rowState(turn)).toMatchObject({ turn_status: "running" });
     expect(await waiterRows(turn)).toEqual([]);
   });
 
   test("a wake fans out across workspaces through the outbox and a wake during evaluation stays pending", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "fanout");
     await exhaust(org, connectionId, Date.now() + 3_600_000);
     const first = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -881,20 +861,10 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(abandoned).toEqual({ delivered: true, last_error: "signal_attempts_exhausted" });
     // The waiter's own revision stays unobserved for the workflow's next peek.
     expect(await waiterRows(second)).toMatchObject([{ wake_revision: "2", observed: "1" }]);
-
-    // A disabled cutover wakes nothing.
-    await enableCodexCutover(org.accountId, false);
-    expect(
-      await wakeSubscriptionCoreCodexCapacityWaiters(client!.db, {
-        accountId: org.accountId,
-        reason: "quota_observed_available",
-      }),
-    ).toEqual([]);
   });
 
   test("a changed session or revoked authority supersedes the waiter without running the turn", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "supersede");
     await exhaust(org, connectionId, Date.now() + 60_000);
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -924,7 +894,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("Steer and Cancel remove the blocked turn's core waiter; a left-behind row is checked at once", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "steer-cancel");
     const resetAt = new Date(Date.now() + 5 * 3_600_000);
     await exhaust(org, connectionId, resetAt.getTime());
@@ -1046,7 +1015,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("a 403 quarantines the leased connection until its retry time; a revoked sign-in stays down", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const first = await sharedConnection(org, "health-a");
     const second = await sharedConnection(org, "health-b");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1126,22 +1094,10 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     const [relogin] = await shared!.admin<{ status: string; health_retry_at: Date | null }[]>`
       select status, health_retry_at from subscription_connections where id = ${refused}::uuid`;
     expect(relogin).toEqual({ status: "needs_relogin", health_retry_at: null });
-
-    // With the cutover off the seam refuses.
-    await enableCodexCutover(org.accountId, false);
-    expect(
-      await quarantineSubscriptionCoreCodexConnection(
-        client!.db,
-        waiter.identity,
-        leaseOf(waiter, refused),
-        { kind: "forbidden", refreshGeneration: 1 },
-      ),
-    ).toBe(false);
   });
 
   test("health recovery reaches only connections the recovering turn could lease", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const personalId = await personalConnection(org, "recover-personal");
     await shared!.admin`update subscription_connections
       set status = 'error', last_error = 'model request was forbidden for this credential',
@@ -1228,7 +1184,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("an error the quarantine did not write is never cleared by health recovery", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "admin-error");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
@@ -1280,7 +1235,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("a plan-entitlement refusal cools the model down; a rotated id_token with a new plan clears it", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "plan");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
@@ -1347,7 +1301,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("a plan cooldown on a connection whose quota row holds only the model catalog still excludes the model", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const connectionId = await sharedConnection(org, "plan-catalog-first");
     // The model catalog writer creates the quota row without a quota
     // observation (no observed refresh generation).
@@ -1381,7 +1334,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("an explicit pin refused mid-turn waits on the pinned account instead of failing over", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const pinned = await sharedConnection(org, "pin-refused");
     const other = await sharedConnection(org, "pin-other");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1445,7 +1397,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("refusals accumulate per turn across connections and repeats", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const first = await sharedConnection(org, "count-a");
     const second = await sharedConnection(org, "count-b");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
@@ -1510,7 +1461,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     ).toEqual([]);
 
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     const bound = await sharedConnection(org, "bound");
     const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     expect(await place(turn)).toMatchObject({
@@ -1600,12 +1550,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     };
     const empty = { version: 2 as const, personal: [] };
 
-    // Before the cutover nothing is written: v1 stays authoritative.
-    expect(await resolve(org.sharedWorkspaceId, privateSession, org.ownerSubjectId)).toBeNull();
-    await enableCodexCutover(org.accountId, false);
-    expect(await resolve(org.sharedWorkspaceId, privateSession, org.ownerSubjectId)).toBeNull();
-    await enableCodexCutover(org.accountId);
-
     expect(await resolve(org.sharedWorkspaceId, privateSession, org.ownerSubjectId)).toEqual(
       personal,
     );
@@ -1680,7 +1624,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
 
   test("the owner's initial message and its goal continuation carry the same frozen authority", async () => {
     const org = await organization();
-    await enableCodexCutover(org.accountId);
     await personalConnection(org, "goal-personal");
     const sessionId = await ownedSession(org, org.sharedWorkspaceId, "user_private");
     await initializeSessionStartAtomically(client!.db, {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
+import * as primitives from "./primitives";
 
 /**
  * Recordings: captured conversations (meetings, interviews, site walks) with
@@ -237,6 +238,12 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
        * it when the recording is done.
        */
       liveTranscript: z.boolean().optional(),
+      /**
+       * Write a summary into each meeting's notes once its transcript is
+       * ready. On when unset; `false` turns it off. An agent session writes
+       * it, like any chat, and never replaces notes someone already saved.
+       */
+      autoSummary: z.boolean().optional(),
       /**
        * How long meetings are kept, in days after they were recorded. Unset
        * keeps them until someone deletes them. When `audioDays` passes, the
@@ -621,6 +628,11 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     transcript: RecordingTranscriptVersion.nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    /**
+     * Set when the person's own Only me meeting is listed or opened in another
+     * workspace of its organization than the one that stores it (`workspaceId`).
+     */
+    sourceWorkspace: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Recording = z.infer<typeof Recording>;
@@ -864,6 +876,11 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
      * or the price is unknown.
      */
     usdPerHour: z.number().nullable(),
+    /**
+     * Transcribing with it is charged in credits, so a payer without credits
+     * is refused. Absent from older servers, which tell it by `usdPerHour`.
+     */
+    chargedInCredits: z.boolean().optional(),
   }),
 );
 export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;
@@ -1118,3 +1135,19 @@ export type RecordingEventData = {
   noteRevision?: number;
   sessionId?: string | null;
 };
+
+/** Limits of durable (chunked, resumable) dictation, advertised in client config. */
+export const ClientResumableVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      maxDurationSeconds: primitives.positiveInteger.max(8 * 60 * 60),
+      maxSizeBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
+      maxChunkSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
+      providerSegmentSeconds: z.number().int().positive().max(600),
+    })
+    .strict(),
+);
+export type ClientResumableVoiceInputConfig = z.infer<typeof ClientResumableVoiceInputConfig>;
+
+/** Audio is sent to a transcription provider in segments of at most this length. */
+export const TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS = 50;

@@ -11,7 +11,6 @@
 //                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
-//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
@@ -25,6 +24,7 @@
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
+//   /workspaces/:id/bot-templates            → bot templates saved in the workspace (start, import, export)
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -252,6 +252,10 @@ const LazyEventSourceDetailRoute = lazyRouteComponent(
 const LazyAutomationTemplatesRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "AutomationTemplatesRoute",
+);
+const LazyBotTemplatesRoute = lazyRouteComponent(
+  () => import("@/routes/bot-templates"),
+  "BotTemplatesRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -574,22 +578,6 @@ const workspaceSecretsItemRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
     search.view === "edit" ? { view: "edit" } : {},
 });
-// Variable sets became Secrets (Q-48): old links land on the same place.
-const workspaceVariableSetsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets",
-  component: SecretsRedirect,
-});
-const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets/$variableSetId",
-  component: SecretsRedirect,
-});
-const workspaceEnvironmentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "environments",
-  component: SecretsRedirect,
-});
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs",
@@ -771,6 +759,11 @@ const workspaceAutomationTemplatesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "automations/templates",
   component: AutomationTemplates,
+});
+const workspaceBotTemplatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "bot-templates",
+  component: BotTemplates,
 });
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
@@ -1052,9 +1045,6 @@ const routeTree = rootRoute.addChildren([
       workspaceSecretsVaultRoute,
       workspaceSecretsItemRoute,
     ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
@@ -1072,6 +1062,7 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
     workspaceLegacyScheduleDetailRoute,
@@ -1217,21 +1208,6 @@ function Secrets() {
   );
 }
 
-function SecretsRedirect() {
-  const { workspaceId, variableSetId } = useParams({ strict: false });
-  if (!workspaceId) return null;
-  // A variable set's id is kept by its vault, so its page maps one to one.
-  return variableSetId ? (
-    <Navigate
-      to="/workspaces/$workspaceId/secrets/$vaultId"
-      params={{ workspaceId, vaultId: variableSetId }}
-      replace
-    />
-  ) : (
-    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
-  );
-}
-
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
@@ -1340,6 +1316,11 @@ function EventSourceDetail() {
 function AutomationTemplates() {
   const { workspaceId } = workspaceAutomationTemplatesRoute.useParams();
   return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
+}
+
+function BotTemplates() {
+  const { workspaceId } = workspaceBotTemplatesRoute.useParams();
+  return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
 }
 
 function LegacySchedulesRedirect() {
@@ -1514,7 +1495,7 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
+  const { conversation, new: startNew, page } = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
@@ -1522,6 +1503,7 @@ function SiteViewPage() {
       siteId={siteId}
       conversation={conversation}
       startNew={startNew === true}
+      page={page}
     />
   );
 }

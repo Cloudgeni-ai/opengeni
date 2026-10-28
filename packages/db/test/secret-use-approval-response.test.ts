@@ -10,6 +10,7 @@ import {
   createDb,
   createSession,
   listSessionHumanInputRequests,
+  listSessionSystemUpdatesForTurn,
   postSecretUseApprovalCard,
   requestSecretUseApproval,
   submitHumanPromptInTransaction,
@@ -317,6 +318,60 @@ describe("Opengeni's secret approval cards", () => {
     expect(accepted.events.map((event) => event.type)).toContain("user.humanInputResponse");
     expect((await approvalRow(fixture)).status).toBe("approved");
     expect((await inboxQuestion(fixture))[0]?.status).toBe("resolved");
+  });
+
+  test("the answer resumes the agent as the person, in their own context", async () => {
+    const fixture = await blockedUse();
+    // The worker's turn start makes the person's request the receiving context.
+    const started = await applySessionTurnSettlement(client.db, fixture.workspaceId, {
+      sessionId: fixture.session.id,
+      turnId: fixture.turn.id,
+      triggerEventId: fixture.turn.triggerEventId,
+      attemptId: fixture.attemptId,
+      turnStatus: "running",
+      sessionStatus: "running",
+      activeTurnId: fixture.turn.id,
+      events: [{ type: "turn.started", payload: { turnId: fixture.turn.id } }],
+    });
+    expect(started.action).toBe("settled");
+    await completeTurn(fixture);
+    const accepted = await respond(fixture, { values: ["session"] });
+    expect(accepted.action).toBe("accepted");
+    const [update] = await shared.admin<Array<{ id: string; lineage: Record<string, unknown> }>>`
+      select id::text, lineage from session_system_updates
+      where session_id = ${fixture.session.id}::uuid and kind = 'secret_use_approval_decided'`;
+    expect(update?.lineage).toEqual({ causalTurnId: fixture.turn.id });
+
+    const resumed = await claimSessionWorkForAttempt(client.db, fixture.workspaceId, {
+      sessionId: fixture.session.id,
+      workflowId: `session-${fixture.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (resumed.action !== "claimed") throw new Error(`not claimed: ${resumed.reason}`);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      fixture.workspaceId,
+      fixture.session.id,
+      resumed.turn.id,
+    );
+    expect(delivered.map((row) => row.id)).toEqual([update!.id]);
+    // The person's vaults and accounts resolve for the resumed run, as they
+    // would had they typed "go ahead" themselves.
+    const [authority] = await shared.admin<
+      Array<{
+        initiating_human_subject_id: string | null;
+        execution_context_turn_id: string | null;
+      }>
+    >`
+      select initiating_human_subject_id, execution_context_turn_id
+      from session_turns where id = ${resumed.turn.id}`;
+    expect(authority).toEqual({
+      initiating_human_subject_id: fixture.grant.subjectId,
+      execution_context_turn_id: fixture.turn.id,
+    });
   });
 
   test("only the person the run acts for can answer, signed in themselves", async () => {

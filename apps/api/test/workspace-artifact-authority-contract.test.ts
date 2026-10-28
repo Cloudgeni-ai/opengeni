@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 
@@ -8,9 +8,10 @@ const source = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
 const workspaceArtifacts = source("packages/db/src/workspace-artifacts.ts");
 const sessionSchema = source("packages/db/src/schema.ts");
 const authorizationContracts = source("packages/contracts/src/index.ts");
-const initiatingHumanMigration = source(
-  "packages/db/drizzle/0157_session_policy_role_snapshots.sql",
-);
+const migrationBaseline = readdirSync(resolve(repoRoot, "packages/db/drizzle"))
+  .filter((name) => name.startsWith("0977_baseline_"))
+  .map((name) => source(`packages/db/drizzle/${name}`))
+  .join("\n");
 const agents = source("AGENTS.md");
 const lifecycle = source("docs/run-lifecycle.md");
 const architecture = source("docs/architecture.md");
@@ -43,10 +44,8 @@ describe("workspace artifact causal-human authority contract", () => {
   });
 
   test("documents the immutable selector without turning it into standalone authority", () => {
-    expect(initiatingHumanMigration).toContain("session_turns_initiating_human_immutable");
-    expect(initiatingHumanMigration).toContain(
-      "turn initiating human is immutable after acceptance",
-    );
+    expect(migrationBaseline).toContain("session_turns_initiating_human_immutable");
+    expect(migrationBaseline).toContain("turn initiating human is immutable after acceptance");
     expect(sessionSchema).toContain("It never authorizes by itself");
     expect(authorizationContracts).toContain("Durable causal-human selector");
     expect(authorizationContracts).toContain("authorizes by itself and is null");

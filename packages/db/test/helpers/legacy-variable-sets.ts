@@ -1,6 +1,15 @@
 import { sql } from "drizzle-orm";
-import type { VariableSet } from "@opengeni/contracts";
+import { withWorkspaceSessionActivityRls } from "../../src";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../../src/database";
+
+/** The header shape the legacy SQL listing returns (no variable values). */
+type VariableSet = {
+  id: string;
+  name: string;
+  scope: "organization" | "workspace" | "user";
+  generation: number;
+  [key: string]: unknown;
+};
 
 /**
  * Test-only fixture for legacy Variable Sets. The product no longer creates
@@ -68,5 +77,25 @@ export async function listLegacyVariableSets(
       ) value`,
     );
     return rows.map((row) => row.value);
+  });
+}
+
+/**
+ * Test-only: attach legacy Variable Sets to an existing session. Sessions can
+ * no longer select sets, but rows attached before the removal still exist and
+ * the database fences keep honouring them until the tables are dropped.
+ */
+export async function attachLegacyVariableSets(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; variableSetIds: string[] },
+): Promise<void> {
+  await withWorkspaceSessionActivityRls(db, input.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      update sessions
+      set variable_set_ids = ${JSON.stringify(input.variableSetIds)}::jsonb,
+          variable_set_id = ${input.variableSetIds.at(-1) ?? null}::uuid,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+    `);
   });
 }

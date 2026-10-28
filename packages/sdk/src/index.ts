@@ -15,6 +15,14 @@ export type {
   AutomationTemplateResponse,
   AutomationTemplateSchedule,
   AutomationTemplateTrigger,
+  BotTemplateFile,
+  BotTemplateResponse,
+  SessionAvatar,
+  SessionAvatarIcon,
+  CreateBotTemplateRequest,
+  ListBotTemplatesResponse,
+  UpdateBotTemplateRequest,
+  WorkspaceBotTemplate,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
   CreateAutomationTemplateRequest,
@@ -267,8 +275,16 @@ export type {
   PluginDiscoveryItem,
   PluginDiscoveryPage,
 } from "@opengeni/contracts/plugin-discovery";
-export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export {
+  createSiteToolBridge,
+  isSiteCatalogStaleError,
+  SiteToolConsentDeclinedError,
+  SiteToolConnectionRequiredError,
+} from "./site-tool-bridge";
 export type {
+  SiteToolConsentPrompt,
+  SiteToolConsentDecision,
+  SiteToolConnectPrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,
@@ -356,6 +372,10 @@ export type {
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalRequest,
   ToolGatewayTargetApprovalResponse,
+  ToolGatewaySiteConsentRequest,
+  ToolGatewaySiteConsentAccount,
+  ToolGatewaySiteConsentReview,
+  ToolGatewaySiteConsentResponse,
   ToolGatewayManifestRequest,
   ToolGatewayManifestResponse,
   ToolGatewayCallResponse,
@@ -399,8 +419,6 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
 export type { OpenGeniReadRetryOptions } from "./read-retry";
-export { parseDeprecationNotice } from "./deprecation";
-export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -1263,18 +1281,6 @@ export type {
   GitCredentialProvider,
   GitCredentialBindingId,
   GitRepositoryAccess,
-  PrReviewProvider,
-  PrReviewCredentialKind,
-  PrReviewWebhookAuthKind,
-  PrReviewAppRegistration,
-  PrReviewManagedGitHubInstallation,
-  PrReviewManagedGitHubSetup,
-  PrReviewRepositoryBinding,
-  CreatePrReviewAppRegistrationRequest,
-  UpdatePrReviewAppRegistrationRequest,
-  CreatePrReviewRepositoryBindingRequest,
-  UpdatePrReviewRepositoryBindingRequest,
-  ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
   ListOrganizationSessionsOptions,
   ListConnectionsResponse,

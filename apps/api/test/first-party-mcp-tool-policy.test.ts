@@ -246,6 +246,13 @@ describe("first-party MCP tool visibility policy", () => {
       "secret_search",
     ]);
     expect(secretTools(["secrets:list"], all)).toEqual(["secret_search"]);
+    // Credential profile tools: reading needs secrets:list, changing secrets:write.
+    const profiles: FirstPartyMcpToolName[] = ["secret_profile_get", "secret_profile_set"];
+    expect(secretTools(["secrets:list", "secrets:write"], profiles)).toEqual([
+      "secret_profile_get",
+      "secret_profile_set",
+    ]);
+    expect(secretTools(["secrets:list"], profiles)).toEqual(["secret_profile_get"]);
     // Capability off: the resolved selection holds no secret tools.
     expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], ["session_get"])).toEqual(
       [],
@@ -884,9 +891,6 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).not.toContain('"const":"shared"');
       expect(serialized).not.toContain('"enum":["shared"');
       expect(serialized).toContain("machineTarget");
-      // Variable Sets were replaced by vaults: no legacy selection fields.
-      expect(serialized).not.toContain("variableSetId");
-      expect(serialized).not.toContain("environmentId");
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
@@ -1714,6 +1718,18 @@ describe("app-action tools", () => {
           name,
         ).toContain("workspaceId");
       }
+      // The credential profile tools stay findable for credential setup
+      // without crowding out unrelated chat and workspace searches.
+      for (const query of [
+        "give every command GH_TOKEN from a saved secret",
+        "credential profile environment variables",
+      ]) {
+        const names = index.rank(query, 8).map((tool) => tool.name);
+        expect(names, query).toContain("opengeni__secret_profile_set");
+      }
+      expect(index.rank("show the credential profile", 8).map((tool) => tool.name)).toContain(
+        "opengeni__secret_profile_get",
+      );
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

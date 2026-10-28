@@ -47,7 +47,6 @@ function client(
     baseUrl: "https://api.example.test",
     apiKey: "key",
     fetch,
-    onDeprecation: false,
     // Fast, deterministic-enough backoff for tests; the default policy is covered below.
     readRetry: readRetry ?? { initialDelayMs: 1, maxDelayMs: 5 },
   });
@@ -212,7 +211,6 @@ describe("OpenGeniClient safe-read retry", () => {
         throw new TypeError("Cannot read properties of undefined (reading 'token')");
       },
       fetch,
-      onDeprecation: false,
       readRetry: { initialDelayMs: 1, maxDelayMs: 5 },
     });
     const error = await broken.getSession("workspace-1", "session-1").catch((cause) => cause);
@@ -299,11 +297,11 @@ describe("OpenGeniClient safe-read retry", () => {
 
   test("a success body that fails the client's shape check is not transient", async () => {
     const { fetch, calls } = scriptedFetch([
-      json({ recordings: "not a list" }),
-      json({ recordings: [] }),
+      json({ browserSessionId: "another-session", targetId: "target-1" }),
+      json({ browserSessionId: "browser-1", targetId: "target-1" }),
     ]);
     const error = await client(fetch)
-      .listTranscriptionRecordings("workspace-1")
+      .getBrowserTargetState("workspace-1", "browser-1", "target-1")
       .catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect(error).toMatchObject({ status: 502 });

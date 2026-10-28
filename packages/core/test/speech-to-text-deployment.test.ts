@@ -5,6 +5,7 @@ import {
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
+  meetingModelWithoutCreditsFor,
   speechToTextModelFor,
   transcriptText,
 } from "../src/transcription-service";
@@ -14,6 +15,7 @@ import {
 } from "../src/recording-transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
 import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
+import { createOpenAiTranscriptionProvider } from "../src/transcription-service/providers/openai";
 
 const azure = {
   recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
@@ -345,6 +347,30 @@ describe("the model a workspace's meetings run", () => {
     });
     expect(await meetingModelFor(pinned, null, scope)).toEqual(pinned.pinned!);
   });
+
+  test("a refused deployment model gives way to one the payer doesn't pay credits for", async () => {
+    // The deployment's own Azure account is the default and charges credits.
+    const signedIn = deploymentWith({ signedIn: ["w"], settings: azure });
+    expect(signedIn.meetingDefault.providerId).toBe("azure-speech");
+    expect(await meetingModelWithoutCreditsFor(signedIn, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+    // The workspace's own key counts too, in the deployment's order.
+    expect(
+      await meetingModelWithoutCreditsFor(deploymentWith({ keyed: ["w"], settings: azure }), scope),
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
+    // Nothing connected: nothing to switch to, so the refusal stands.
+    expect(await meetingModelWithoutCreditsFor(deploymentWith({ settings: azure }), scope)).toBe(
+      null,
+    );
+    // A pinned deployment sends audio to its one model only.
+    const pinned = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
+    });
+    expect(await meetingModelWithoutCreditsFor(pinned, scope)).toBe(null);
+  });
 });
 
 describe("dictation over the shared providers", () => {
@@ -413,6 +439,53 @@ describe("dictation over the shared providers", () => {
     // The language a dictation names reaches the provider.
     await service.transcribe({ ...request, preferredProvider: "elevenlabs", language: "nb" });
     expect(heard.at(-1)?.language).toBe("nb");
+  });
+
+  test("the vocabulary reaches a model that takes keyterms, and no other", async () => {
+    const heard: Array<readonly string[] | undefined> = [];
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const listening = fakeTextProvider("elevenlabs", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    listening.models[0]!.capabilities = { ...listening.models[0]!.capabilities, keyterms: true };
+    const deaf = fakeTextProvider("xai_subscription", "workspace_key", async (input) => {
+      heard.push(input.keyterms);
+      return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "hi" };
+    });
+    const service = createTranscriptionService({
+      settings,
+      db: {} as never,
+      deployment: createSpeechToTextDeployment(
+        { settings },
+        { providers: [listening, deaf], loadWorkspaceKey: async () => "workspace-key" },
+      ),
+    });
+    const keyterms = ["Kubernetes", "Ada Lovelace"];
+    await service.transcribe({ ...request, preferredProvider: "elevenlabs", keyterms });
+    await service.transcribe({ ...request, preferredProvider: "xai_subscription", keyterms });
+    expect(heard).toEqual([keyterms, undefined]);
+  });
+
+  test("OpenAI hears the vocabulary as its prompt", async () => {
+    const forms: FormData[] = [];
+    const provider = createOpenAiTranscriptionProvider({
+      apiKey: "key",
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4o-transcribe",
+      fetch: (async (_url: string, init: RequestInit) => {
+        forms.push(init.body as FormData);
+        return Response.json({ text: "Kubernetes" });
+      }) as unknown as typeof fetch,
+    });
+    expect(provider.models[0]!.capabilities.keyterms).toBe(true);
+    const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav" };
+    await provider.transcribe(
+      { audio, model: "gpt-4o-transcribe", diarize: false, keyterms: ["Kubernetes", " Ada "] },
+      {},
+    );
+    await provider.transcribe({ audio, model: "gpt-4o-transcribe", diarize: false }, {});
+    expect(forms.map((form) => form.get("prompt"))).toEqual(["Kubernetes, Ada", null]);
   });
 
   test("an unauthorized provider falls back to the next one before any text", async () => {

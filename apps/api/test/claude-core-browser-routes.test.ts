@@ -1,7 +1,6 @@
 /**
  * M4 C2b: the Claude routes on the shared subscription core as a person's
- * managed browser session, on real PostgreSQL as the application role. The
- * organization routes and OAuth complete fail closed in maintenance; an OAuth
+ * managed browser session, on real PostgreSQL as the application role. An OAuth
  * attempt completes only on the runtime it started on; the organization
  * routes (setup token, OAuth sign-in, list, rename, allocator, activate,
  * rotation, access, disconnect) answer from core connections, including by a
@@ -263,43 +262,6 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     delete oldAttempt.runtime;
     await shared!
       .admin`update integration_oauth_pending_states set state_encrypted = ${opengeniDb.encryptEnvironmentValue(encryptionKey, JSON.stringify(oldAttempt))} where id = ${legacyAttempt!.attemptId}::uuid`;
-  });
-
-  test("maintenance: the organization routes and OAuth complete fail closed", async () => {
-    await shared!
-      .admin`update subscription_provider_cutovers set enabled = false where provider = 'claude'`;
-    const id = crypto.randomUUID();
-    for (const [path, method, body] of [
-      [organization("/claude/accounts"), "GET", undefined],
-      [organization("/claude/settings"), "PATCH", { rotationEnabled: false }],
-      [organization(`/claude/accounts/${id}`), "PATCH", { label: "x" }],
-      [organization(`/claude/accounts/${id}/activate`), "POST", {}],
-      [
-        organization(`/claude/accounts/${id}/allocator`),
-        "PATCH",
-        { enabled: false, expectedVersion: 1 },
-      ],
-      [organization(`/claude/accounts/${id}`), "DELETE", undefined],
-      [
-        organization("/claude/accounts/setup-token"),
-        "POST",
-        { token: setupToken(), scope: "workspace" },
-      ],
-      [organization(`/model-connections/claude_subscription/${id}/access`), "GET", undefined],
-      [`${oauth(organization(""))}/start`, "POST", { scope: "workspace" }],
-      [`${oauth(organization(""))}/complete`, "POST", { attemptId: id, code: "a#b" }],
-      [`${oauth(workspace(sharedWorkspaceId, ""))}/complete`, "POST", legacyAttempt],
-      [`${oauth(workspace(personalWorkspaceId, ""))}/start`, "POST", { scope: "user" }],
-    ] as const) {
-      const response = await browser(path, method, body);
-      expect({ path, method, ...response }).toMatchObject({
-        path,
-        method,
-        status: 503,
-        body: { reason: "subscription_core_cutover_disabled" },
-      });
-    }
-    expect(exchanges).toBe(0);
   });
 
   test("an OAuth attempt started on the legacy path never completes on the core", async () => {

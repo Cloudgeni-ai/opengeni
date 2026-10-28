@@ -23,7 +23,7 @@ const SESSIONS = `/workspaces/${WORKSPACE_ID}/sessions`;
 const API = "https://api.example.com";
 /** No request ever answers: the shell renders its chrome without data. */
 const never = () => new Promise<never>(() => undefined);
-const client = new OpenGeniBrowserClient({ baseUrl: API, fetch: never, onDeprecation: false });
+const client = new OpenGeniBrowserClient({ baseUrl: API, fetch: never });
 const api: AppApiHost = {
   apiBaseUrl: API,
   request: never,

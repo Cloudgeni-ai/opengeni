@@ -57,6 +57,7 @@ import {
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
+  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
@@ -124,6 +125,7 @@ import {
   settleOpenSuffixResumeIfNeeded,
 } from "../open-suffix-resume";
 import {
+  modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
   withPublicApprovalFields,
@@ -177,6 +179,7 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import {
@@ -200,7 +203,11 @@ import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./own
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type {
+  ModelCallProcessingResidencyV1,
+  PromptCacheRequestFingerprint,
+  TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -214,6 +221,7 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
+import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 
 export type TurnStreamAttemptDeps = {
@@ -488,6 +496,14 @@ export async function runTurnStreamAttempt(
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
+  // Where this turn's route processes data, recorded on every call it serves.
+  // The title records its own route's residency once that route is chosen.
+  const turnProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
+  let titleProcessingResidency: ModelCallProcessingResidencyV1 | null = null;
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let independentTitleAdmission: Promise<void> | null = null;
   let beginIndependentTitleAdmission: (() => Promise<void>) | null = null;
@@ -539,6 +555,9 @@ export async function runTurnStreamAttempt(
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
         leaseLostMessage: "Provider credential lease expired during session title generation",
+        // The title's own route; a title whose route was never resolved is
+        // unknown, never the turn's residency.
+        processingResidency: titleProcessingResidency ?? modelCallProcessingResidency(null),
       });
     }
     if (!generated.title) {
@@ -984,6 +1003,7 @@ export async function runTurnStreamAttempt(
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
+    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1041,7 +1061,15 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          onModelVisibleContext: async (snapshot) => {
+          // Final guard: no known secret value reaches the provider, whatever
+          // path brought it into the model input (docs/secrets.md, Masking).
+          ...(attemptSecretValues
+            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
+            : {}),
+          onModelVisibleContext: async (rawSnapshot) => {
+            const snapshot = attemptSecretValues
+              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
+              : rawSnapshot;
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1349,6 +1377,7 @@ export async function runTurnStreamAttempt(
             latestPromptCacheRequest = null;
             return request;
           },
+          processingResidency: turnProcessingResidency,
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -2052,6 +2081,7 @@ export async function runTurnStreamAttempt(
               servingAccountHash: aggregateAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,
+              processingResidency: turnProcessingResidency,
             });
             if (aggregateAuthoritative && billing) {
               await recordAuthoritativeModelCallFact({
@@ -2070,6 +2100,7 @@ export async function runTurnStreamAttempt(
                 subscriptionConnectionId:
                   subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
                 contextContributions: eventing.companyBrainContextContributions,
+                processingResidency: turnProcessingResidency,
               });
               recordAuthoritativeModelUsageMetrics({
                 observability,
@@ -2576,6 +2607,11 @@ export async function runTurnStreamAttempt(
       ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
       : undefined;
     titleUsageModelId = titleRoute.usageModelId;
+    titleProcessingResidency = servedRouteProcessingResidency(
+      settings,
+      titleRoute.resolvedModel,
+      titleRoute.usageModelId ?? turnExecutionPolicy.productModelId,
+    );
     if (
       startSessionTitleWorkflow &&
       titleRoute.resolvedModel &&

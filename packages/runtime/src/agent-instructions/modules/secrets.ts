@@ -26,7 +26,7 @@ export const secretsModule: AgentPromptModule = {
       bullets(
         sentences(
           "Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).",
-          "A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.",
+          "A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on.",
           search && "Find saved items and their ready references with `secret_search`.",
         ),
         `Sign in yourself, in this order: ${ladder.join("; ")}.`,

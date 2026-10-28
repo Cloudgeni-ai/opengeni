@@ -1287,6 +1287,12 @@ export type ComputerTarget = {
   /** Present on the target this computer was last observed or acted on in,
    * which a call that omits targetId works in. */
   current?: true | undefined;
+  /** Present when someone other than Opengeni (a person, or other software)
+   * used this computer's keyboard, mouse or trackpad within the last minute,
+   * as of the listing or observation that carries it: how many whole seconds
+   * before it. Input Opengeni's computer sessions on this computer send does
+   * not count. */
+  personInputSecondsAgo?: number | undefined;
 };
 
 export type ComputerObservation = {
@@ -2827,7 +2833,15 @@ export type BrowserFrameMetadata = {
   capturedAt: string;
 };
 
-export type BrowserFrame = BrowserFrameMetadata & { data: Uint8Array };
+export type BrowserFrame = BrowserFrameMetadata & {
+  data: Uint8Array;
+  /**
+   * Set when a full-page capture could not keep the space of some scrollbars
+   * (horizontal ones, or ones inside shadow trees), so content beside them
+   * may be offset by up to a scrollbar's width.
+   */
+  inexactScrollbars?: true;
+};
 
 export type BrowserScreenshotOptions = {
   /** Capture the document content instead of the visible viewport. */

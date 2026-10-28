@@ -44,7 +44,7 @@ import { errorMessage } from "@opengeni/contracts/values";
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
 // fns + the REAL createSessionForRequest resolution against a THROWAWAY postgres
-// (pgvector/pgvector:pg16, the 0000_initial CREATE EXTENSION vector). Mirrors the
+// (pgvector/pgvector:pg16, the migration baseline's CREATE EXTENSION vector). Mirrors the
 // sandbox-leases harness: package fns connect as the NON-superuser opengeni_app
 // (so FORCE RLS applies); accounts/workspaces are seeded as the superuser.
 //

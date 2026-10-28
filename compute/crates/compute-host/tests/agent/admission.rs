@@ -428,3 +428,43 @@ async fn a_sandbox_paused_for_memory_wakes_by_itself_after_a_restart() {
 async fn sleep_a_little() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
+
+/// The VMs' limit counts as what is available: with plenty free on the
+/// host but no room left under the limit, a sandbox in use above its
+/// request is paused and saved, as when the host itself runs short, and it
+/// wakes by itself once the limit leaves room again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_vms_limit_relieves_pressure_like_host_memory() {
+    let sandbox = id(32);
+    let lab = Lab::new(Delays::default(), memory_policy(true)).await;
+    // The fake's VMs hold 100 MiB: above this request.
+    let config = SandboxConfig {
+        memory_request_mib: Some(64),
+        ..SandboxConfig::new(1, 256, NEVER)
+    };
+    let created = lab
+        .client
+        .call(&Request::Create {
+            id: sandbox,
+            config,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created, Reply::Done);
+    woke(&lab.wake(sandbox).await);
+    sleep_a_little().await;
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Running
+    );
+
+    *lab.world.memory_room.lock().unwrap() = Some(0);
+    lab.wait_until("the sandbox saved for the VMs' limit", |status| {
+        Lab::sandbox(status, sandbox).level == LevelName::Saved
+    })
+    .await;
+
+    *lab.world.memory_room.lock().unwrap() = Some(1 << 40);
+    lab.wait_level(sandbox, LevelName::Running).await;
+    lab.assert_clean();
+}

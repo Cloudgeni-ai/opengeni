@@ -53,7 +53,6 @@ const INTERNAL_PACKAGE_SUBPATHS: Record<string, readonly string[]> = {
  * out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
-  "POST /v1/webhooks/automations/:endpointId",
   "GET /v1/workspaces/:workspaceId/models",
   "POST /v1/workspaces/:workspaceId/chat/completions",
 ];

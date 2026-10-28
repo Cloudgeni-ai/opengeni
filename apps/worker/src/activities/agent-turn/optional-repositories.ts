@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import { resourceMountPath, type ResourceRef } from "@opengeni/contracts";
-import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import { areGitHubRepositoriesAllowedForWorkspace, type Database } from "@opengeni/db";
 import {
   findInaccessibleGitHubAppInstallationRepositories,
@@ -81,9 +80,6 @@ function optionalGitHubAppRepositoryCandidate(
   }
   const [selection] = selections;
   if (!selection || selections.length !== 1 || selection.repositoryIds.length !== 1) return null;
-  // PR-review bindings are authorized by their own registration, not the
-  // workspace allowlist; they are never automatically attached.
-  if (prReviewRegistrationIdFromCredentialBinding(selection.credentialBindingId)) return null;
   return {
     resource,
     installationId: selection.installationId,

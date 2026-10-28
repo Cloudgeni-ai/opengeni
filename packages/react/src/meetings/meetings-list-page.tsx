@@ -316,7 +316,18 @@ function MeetingsListPageContent({
                     leading={<LogoTile icon={<AudioLinesIcon />} />}
                     title={meetingTitle(recording, msg)}
                     titleAddon={
-                      recording.visibility === "private" ? (
+                      recording.sourceWorkspace ? (
+                        // The person's own Only me meeting, stored in another
+                        // workspace of the organization: say which.
+                        <MetaChip icon={<LockIcon />}>
+                          <span className="sr-only">
+                            {msg("meetings.listPage.onlyMeRecordedIn", {
+                              workspace: recording.sourceWorkspace.name,
+                            })}
+                          </span>
+                          <span aria-hidden="true">{recording.sourceWorkspace.name}</span>
+                        </MetaChip>
+                      ) : recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
                           <span className={narrow ? "sr-only" : undefined}>
                             {msg("meetings.listPage.onlyMe")}

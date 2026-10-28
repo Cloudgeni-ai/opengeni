@@ -779,6 +779,11 @@ pub enum Reply {
         /// The digest of the image manifest built, for an index the one
         /// for this host's platform.
         digest: String,
+        /// The digest of the guest programs it was built with
+        /// ([`crate::fleet::Capacity::guest`]); `None` from a host of an
+        /// earlier release.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest: Option<String>,
     },
     /// The copy [`Request::Capture`] made is being stored: ask again.
     Capturing,

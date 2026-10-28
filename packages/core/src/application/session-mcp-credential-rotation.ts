@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { RotateSessionMcpCredentialsRequest, type AccessGrant } from "@opengeni/contracts";
 import {
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getWorkspaceGrant,
   subjectHasLiveWorkspaceAuthorityInScope,
   type Database,
@@ -133,7 +133,7 @@ export async function rotateSessionMcpCredentialsForRequest(
               headersEncrypted: Object.fromEntries(
                 Object.entries(update.headers).map(([name, value]) => [
                   name,
-                  encryptVariableSetValue(encryptionKey, value),
+                  encryptEnvironmentValue(encryptionKey, value),
                 ]),
               ),
             },

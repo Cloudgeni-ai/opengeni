@@ -271,7 +271,7 @@ export function NativeConnectSetup({
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
               controller={controller}
-              {...(["github-app", "github-lens"].includes(request.providerId)
+              {...(request.providerId === "github-app"
                 ? {
                     onSelectAccount: (accountId: string) => {
                       const signal = navigation.current?.signal;

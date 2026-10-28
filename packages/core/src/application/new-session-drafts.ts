@@ -211,9 +211,6 @@ async function hydrateNewSessionDraft(
   }
 
   const options = { ...mapped.options };
-  // Variable Sets were replaced by vaults: stale draft selections are dropped.
-  delete options.variableSetIds;
-  delete options.variableSetId;
   if (options.rigId) {
     const rig = await getRig(deps.db, { ...grant, workspaceId }, options.rigId);
     if (!rig?.activeVersion) delete options.rigId;
