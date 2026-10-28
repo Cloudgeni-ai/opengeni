@@ -78,6 +78,11 @@ test("expanded Sites start below the desktop window bar", async () => {
         expect(bounds!.x).toBeLessThan(30);
         const fullWindow = (await page.locator("[data-artifact-fullscreen]").boundingBox())!;
         expect(fullWindow.y).toBe(desktopBar ? WINDOW_BAR_HEIGHT : 0);
+        // An open full-window layer marks the document, so the host's window
+        // chrome (the macOS app's sidebar toggle) can step aside.
+        const layerOpen = () =>
+          page.evaluate(() => document.documentElement.hasAttribute("data-window-layer-open"));
+        expect(await layerOpen()).toBe(true);
         // On macOS it is the window's inset, rounded main panel: 4px in from
         // the window's sides and bottom, like the pane it covers.
         const inset = platform === "macos" ? 4 : 0;
@@ -108,6 +113,7 @@ test("expanded Sites start below the desktop window bar", async () => {
         // Pointer and keyboard both exit; neither remounts the live Site.
         await back.click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
+        expect(await layerOpen()).toBe(false);
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
         expect(
           await page.locator("iframe").evaluate((el, original) => el === original, originalIframe),
