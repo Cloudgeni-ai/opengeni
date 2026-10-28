@@ -119,9 +119,20 @@ export type SiteViewSearch = {
    * Site's `site.location`; the Site's root when omitted.
    */
   page?: string | undefined;
-};
+} & SiteViewArtifactsReturn;
+
+/**
+ * Opened from the Artifacts page (`browse`), with that page's own query, so
+ * the Site view's Back returns to it as it was. Absent when the Site was
+ * opened any other way (the rail, a chat, a link).
+ */
+export type SiteViewArtifactsReturn = Pick<
+  ArtifactReturnSearch,
+  "browse" | "fromSession" | "kind" | "q" | "sort" | "status"
+>;
 
 export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch {
+  const back = siteViewArtifactsReturn(search);
   return {
     conversation:
       typeof search.conversation === "string" && UUID.test(search.conversation)
@@ -132,7 +143,31 @@ export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch 
       typeof search.page === "string" && search.page.startsWith("/") && search.page !== "/"
         ? search.page
         : undefined,
+    // Every key, set or not: the router merges this over the raw search, so
+    // an omitted key would let an unchecked raw value through.
+    browse: back.browse,
+    fromSession: back.fromSession,
+    kind: back.kind,
+    q: back.q,
+    sort: back.sort,
+    status: back.status,
   };
+}
+
+/** The Artifacts page a Site view was opened from, or nothing; only its set keys. */
+export function siteViewArtifactsReturn(search: Record<string, unknown>): SiteViewArtifactsReturn {
+  const library = artifactReturnSearch(search);
+  if (library.browse !== true) return {};
+  return Object.fromEntries(
+    Object.entries({
+      browse: true,
+      fromSession: library.fromSession,
+      kind: library.kind,
+      q: library.q,
+      sort: library.sort,
+      status: library.status,
+    }).filter(([, value]) => value !== undefined),
+  ) as SiteViewArtifactsReturn;
 }
 
 export function workspaceSitePath(

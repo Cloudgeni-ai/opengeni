@@ -100,6 +100,8 @@ mock.module("../lib/app-api", () => ({
 }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async (options: unknown) => void navigations.push(options),
+  useSearch: () => ({}),
+  useStringifySearch: () => () => "",
   Link: ({
     children,
     to,

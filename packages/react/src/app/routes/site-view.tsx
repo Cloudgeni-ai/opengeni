@@ -6,6 +6,7 @@ import {
 import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
+  ArrowLeftIcon,
   InfoIcon,
   Maximize2Icon,
   MoreHorizontalIcon,
@@ -28,6 +29,7 @@ import {
 } from "react";
 import { SiteView } from "../../artifacts";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
+import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
 import { NewConversation } from "../../components/new-conversation";
 import type {
   CreatedConversation,
@@ -52,6 +54,7 @@ import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
+import type { SiteViewArtifactsReturn } from "../lib/routes";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { sessionSiteOrigin } from "../lib/session-site-origin";
 import {
@@ -114,6 +117,7 @@ export function SiteViewRoute({
   conversation,
   startNew = false,
   page,
+  artifactsReturn,
 }: {
   workspaceId: string;
   siteId: string;
@@ -123,10 +127,21 @@ export function SiteViewRoute({
   startNew?: boolean | undefined;
   /** The Site's own address (`?page=/admin`), answered to its `site.location`; its root when omitted. */
   page?: string | undefined;
+  /**
+   * The Artifacts page the Site was opened from: the Site's toolbar starts
+   * with a Back to it, and the Site's own moves keep it.
+   */
+  artifactsReturn?: SiteViewArtifactsReturn | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
   const viewer = useConsoleSiteViewer();
+  // By value: a host may pass a new object on every render.
+  const backKey = artifactsReturn?.browse ? JSON.stringify(artifactsReturn) : "";
+  const back = useMemo<SiteViewArtifactsReturn | undefined>(
+    () => (backKey ? (JSON.parse(backKey) as SiteViewArtifactsReturn) : undefined),
+    [backKey],
+  );
   // The Site's address lives in this page's URL, so Back/Forward, reloads
   // and copied links keep the Site where it was.
   const onSiteLocationChange = useCallback(
@@ -135,12 +150,13 @@ export function SiteViewRoute({
         to: SITE_ROUTE,
         params: { workspaceId, siteId },
         search: {
+          ...back,
           ...(conversation ? { conversation } : {}),
           ...(href === "/" ? {} : { page: href }),
         },
         ...(options.replace ? { replace: true } : {}),
       }),
-    [conversation, navigate, siteId, workspaceId],
+    [back, conversation, navigate, siteId, workspaceId],
   );
   // Anyone who can open the Site sees whether it is published and its
   // address; Publish and the publish form are for people who can publish.
@@ -190,6 +206,9 @@ export function SiteViewRoute({
     [artifact, live.failed],
   );
   const { check } = live;
+  const backControl = back ? (
+    <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
+  ) : undefined;
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
@@ -211,17 +230,24 @@ export function SiteViewRoute({
           </Suspense>
         ) : null}
         {artifact?.status === "archived" ? (
-          <p className="p-4 text-sm text-fg-muted">
-            This Site is archived.{" "}
-            <Link
-              to="/workspaces/$workspaceId/artifacts/$artifactId"
-              params={{ workspaceId, artifactId: siteId }}
-              search={{ tab: "settings" }}
-              className="font-medium text-fg underline underline-offset-2"
-            >
-              {canPublish ? "Restore it from Site details" : "View Site details"}
-            </Link>
-          </p>
+          <>
+            {backControl ? (
+              <div className="flex min-h-12 shrink-0 items-center border-b border-border/80 px-3 sm:px-4">
+                {backControl}
+              </div>
+            ) : null}
+            <p className="p-4 text-sm text-fg-muted">
+              This Site is archived.{" "}
+              <Link
+                to="/workspaces/$workspaceId/artifacts/$artifactId"
+                params={{ workspaceId, artifactId: siteId }}
+                search={{ tab: "settings" }}
+                className="font-medium text-fg underline underline-offset-2"
+              >
+                {canPublish ? "Restore it from Site details" : "View Site details"}
+              </Link>
+            </p>
+          </>
         ) : (
           // Hidden, not unmounted, behind the form: the Site keeps its page.
           <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", publishing && "hidden")}>
@@ -233,6 +259,7 @@ export function SiteViewRoute({
               viewer={viewer}
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
+              toolbarStart={backControl}
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={
@@ -276,6 +303,7 @@ export function SiteViewRoute({
         conversation={conversation}
         startNew={startNew}
         page={page}
+        artifactsReturn={back}
         onEvent={(event) => {
           // A publish or restore from this conversation shows at once.
           if (siteMayHaveChanged(event)) check();
@@ -286,6 +314,40 @@ export function SiteViewRoute({
 }
 
 const PAGE_SIZE = 30;
+
+/**
+ * "← Artifacts" at the start of the Site's toolbar, when the Site was opened
+ * from the Artifacts page: back to that page with its tab, search and sort
+ * (and its scroll, which the page keeps). A real link, so it also opens in a
+ * new tab.
+ */
+function ArtifactsBackLink({
+  workspaceId,
+  artifactsReturn,
+}: {
+  workspaceId: string;
+  artifactsReturn: SiteViewArtifactsReturn;
+}) {
+  const back = useArtifactsBackLink(workspaceId, artifactsReturn.fromSession, artifactsReturn);
+  return (
+    <Button
+      asChild
+      variant="ghost"
+      size="sm"
+      className="-ml-1.5 h-8 shrink-0 gap-1.5 px-2 text-fg-muted hover:text-fg"
+    >
+      <a
+        href={back.href}
+        onClick={back.onClick}
+        aria-label="Back to Artifacts"
+        title="Back to Artifacts"
+      >
+        <ArrowLeftIcon aria-hidden="true" className="size-4" />
+        {back.label}
+      </a>
+    </Button>
+  );
+}
 
 /**
  * The Site's newest conversations for this viewer, newest activity first.
@@ -377,6 +439,7 @@ function SiteChatPanel({
   conversation,
   startNew: startNewRequested,
   page,
+  artifactsReturn,
   onEvent,
 }: {
   workspaceId: string;
@@ -389,6 +452,8 @@ function SiteChatPanel({
   startNew: boolean;
   /** The Site's own address, kept when another conversation is chosen. */
   page?: string | undefined;
+  /** The Artifacts page the Site was opened from, kept when another conversation is chosen. */
+  artifactsReturn?: SiteViewArtifactsReturn | undefined;
   /** Each new event in the open conversation, so the Site can follow its edits. */
   onEvent: (event: SessionEvent) => void;
 }) {
@@ -444,10 +509,10 @@ function SiteChatPanel({
         to: SITE_ROUTE,
         params: { workspaceId, siteId },
         // Choosing a conversation keeps the Site where it is.
-        search: page ? { ...search, page } : search,
+        search: { ...artifactsReturn, ...search, ...(page ? { page } : {}) },
         ...(replace ? { replace: true } : {}),
       }),
-    [navigate, page, siteId, workspaceId],
+    [artifactsReturn, navigate, page, siteId, workspaceId],
   );
 
   // A link may name a conversation that isn't this Site's, or one since

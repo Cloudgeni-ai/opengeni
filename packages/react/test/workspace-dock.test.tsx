@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { act, type ReactNode, useState } from "react";
-import { WorkspaceDock } from "../src/components/workspace-dock";
+import { WorkspaceDock, useWorkspacePanelOwnsExpand } from "../src/components/workspace-dock";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -292,6 +292,72 @@ describe("WorkspaceDock", () => {
     expect(rendered.container.querySelector('[title="Open workspace"]')).toBeNull();
     // Maximize remains: a distinct mode, not an open/close duplicate.
     expect(rendered.container.querySelector('[title="Maximize"]')).not.toBeNull();
+
+    await rendered.unmount();
+  });
+
+  test("a panel with its own expand has that one expand; other panels keep Maximize", async () => {
+    function SitePanel({ showsSite }: { showsSite: boolean }) {
+      useWorkspacePanelOwnsExpand(showsSite);
+      return showsSite ? (
+        <button type="button" aria-label="Expand Site to full window">
+          Site
+        </button>
+      ) : (
+        <div>Artifact list</div>
+      );
+    }
+    function Dock({ showsSite }: { showsSite: boolean }) {
+      const [tab, setTab] = useState("artifacts");
+      return (
+        <WorkspaceDock
+          autoSaveId="og.test.workspace-dock-panel-expand"
+          primary={<div>Chat pane</div>}
+          activeTab={tab}
+          onActiveTabChange={setTab}
+          tabs={[
+            { id: "files", label: "Files", content: <div>Files content</div> },
+            {
+              id: "artifacts",
+              label: "Artifacts",
+              content: <SitePanel showsSite={showsSite} />,
+            },
+          ]}
+        />
+      );
+    }
+    const expands = (container: HTMLElement) =>
+      [...container.querySelectorAll("button")]
+        // What is on screen: not the hidden panels' content.
+        .filter((button) => button.closest("[hidden]") === null)
+        .map((button) => button.getAttribute("aria-label") ?? "")
+        .filter((label) => /maximi[sz]e|expand|full/iu.test(label));
+    const tab = (container: HTMLElement, label: string) =>
+      [...container.querySelectorAll('[role="tab"]')].find(
+        (candidate) => candidate.textContent === label,
+      ) ?? null;
+
+    const rendered = await renderComponent(<Dock showsSite />);
+    // A Site on screen: its own expand only, not the dock's look-alike.
+    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    expect(rendered.container.querySelector('[title="Hide workspace"]')).not.toBeNull();
+
+    // Another panel keeps the dock's Maximize; the hidden Site panel's claim
+    // does not reach it.
+    await click(tab(rendered.container, "Files"));
+    expect(expands(rendered.container)).toEqual(["Maximize dock"]);
+
+    // Maximized from there, the Site panel still offers Restore.
+    await click(rendered.container.querySelector('[title="Maximize"]'));
+    await click(tab(rendered.container, "Artifacts"));
+    expect(rendered.container.querySelector('[title="Restore (Esc)"]')).not.toBeNull();
+    await click(rendered.container.querySelector('[title="Restore (Esc)"]'));
+    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+
+    // The list (no Site on screen) gives the dock's Maximize back.
+    await rendered.rerender(<Dock showsSite={false} />);
+    await flush();
+    expect(expands(rendered.container)).toEqual(["Maximize dock"]);
 
     await rendered.unmount();
   });
