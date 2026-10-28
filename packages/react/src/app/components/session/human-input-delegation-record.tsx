@@ -1,6 +1,6 @@
 // The person's "Let the agent decide" message in the chat whose agent was
 // handed a sub-session's question: the question, then what the agent chose
-// once the sub-session's request settles. A settled request is read no more.
+// once the sub-session's request settles. Polling stops once it is settled.
 import type { OpenGeniClient, SessionHumanInputRequest } from "@opengeni/sdk";
 import { CheckIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
