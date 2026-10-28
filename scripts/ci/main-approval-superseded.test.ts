@@ -178,11 +178,15 @@ test("retries the newest full main run's failed jobs once", () => {
   const deferred = fullRun(4, 0.1, { runAttempt: 1, conclusion: "cancelled" });
   expect(retryableMainRun([deferred, fullRun(3, 0.5)])).toBe(3);
   // Only the newest full run: an older failure was superseded.
-  expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "success" }), fullRun(2, 1.5)])).toBeNull();
+  expect(
+    retryableMainRun([fullRun(3, 0.5, { conclusion: "success" }), fullRun(2, 1.5)]),
+  ).toBeNull();
   // Once only: a failure on the retry stays failed.
   expect(retryableMainRun([fullRun(3, 0.5, { runAttempt: 3 })])).toBeNull();
   // Not while it runs, not after success or cancellation, not for Version merges.
-  expect(retryableMainRun([fullRun(3, 0.5, { status: "in_progress", conclusion: null })])).toBeNull();
+  expect(
+    retryableMainRun([fullRun(3, 0.5, { status: "in_progress", conclusion: null })]),
+  ).toBeNull();
   expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "success" })])).toBeNull();
   expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "cancelled" })])).toBeNull();
   expect(retryableMainRun([fullRun(3, 0.5, { runAttempt: 1, versionMerge: true })])).toBeNull();
