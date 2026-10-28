@@ -24,6 +24,8 @@ import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markd
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
 import * as Haptics from "expo-haptics";
 import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
@@ -109,6 +111,12 @@ function fullAccessMenuAction(access: SessionFullAccess | null): MenuAction[] {
       ]
     : [];
 }
+
+/** Interactive answers remember picks and what was sent across app launches. */
+const answerStore: InteractiveAnswerStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+};
 
 export default function SessionScreen() {
   const { id, at, workspace } = useLocalSearchParams<{
@@ -538,6 +546,7 @@ function LiveSession(props: {
         client={props.client}
         models={props.models}
         renderMarkdown={renderMarkdown}
+        answerStore={answerStore}
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
