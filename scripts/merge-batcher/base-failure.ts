@@ -8,17 +8,13 @@ import {
 
 /**
  * Main CI jobs in the `lanes` class: every gating lane Batch CI runs through
- * its `Main CI lanes` call besides source contracts and unit shards, which
- * keep their own classes. Aggregates and main-only release jobs are excluded.
+ * its `Main CI lanes` call, including that call's own source contracts job.
+ * Unit shards keep their own class (Batch skips them inside the call), and
+ * aggregates and main-only release jobs are excluded.
  */
 export function mainLaneJob(name: string): boolean {
   return (
-    ATTESTED_SKIPPED_LANES.some(
-      (lane) =>
-        lane !== "Source and type contracts" &&
-        lane !== "Unit tests (shard" &&
-        name.startsWith(lane),
-    ) ||
+    ATTESTED_SKIPPED_LANES.some((lane) => lane !== "Unit tests (shard" && name.startsWith(lane)) ||
     name === "Deployment artifacts" ||
     name.startsWith("Build exact artifact runtime inputs") ||
     /^Build [A-Za-z -]+ workload image$/.test(name)
@@ -80,7 +76,10 @@ export function baseJobClasses(
   const lanesVerdict = (): "green" | "red" | "unknown" => {
     if (lanes.some((j) => j.status === "completed" && j.conclusion === "failure")) return "red";
     const ran = lanes.filter((j) => j.conclusion !== "skipped");
+    // Source contracts alone never prove the lane fan-out ran: a real main
+    // run lists every lane job, skipped or not.
     if (
+      !lanes.some((j) => j.name !== "Source and type contracts") ||
       !ran.length ||
       ran.some((j) => j.status !== "completed" || j.conclusion !== "success") ||
       lanes.some((j) => j.status !== "completed")

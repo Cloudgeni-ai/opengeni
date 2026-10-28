@@ -533,9 +533,18 @@ ran, and every landed main SHA has the jobs canary admission needs
   gets the ordinary one-retry). A failed setup, checkout, install, download,
   login or upload step, a deadline (`timed_out` or exit 124), runner loss, a
   signal, an unreadable log or a fail-fast cancellation alone is
-  infrastructure. An aggregate (`Typecheck and unit tests`, `Workload image
-  builds`, `Validation before release image`) counts only when no other lane
-  failed.
+  infrastructure. Image builds (`docker/build-push-action`) write no process
+  exit line, so a `buildx failed with:` job reads the error lines of the 200
+  lines before it (`classifyBuildFailure`): a registry, download, timeout or
+  disk error is infrastructure; otherwise the last failed Dockerfile step's
+  exit decides (137 stays infrastructure), a missing build input or Dockerfile
+  error is a code failure, and anything else holds no verdict. On this week's
+  main failures this gives 75 for the `ort-sys` prebuilt download timeout and 1
+  for the broken web bundle. An aggregate (`Typecheck and unit tests`,
+  `Workload image builds`, `Validation before release image`) counts only when
+  no other lane failed, and only as a code failure when every other lane
+  settled `success` or `skipped`; next to a cancelled or unsettled lane it is
+  infrastructure.
 - **Folded into `source`.** `Batch ready` runs with `BATCH_LANES=required`.
   The aggregator (`foldLanes` in `scripts/ci/batch-result.ts`) folds the lane
   receipt into the `source` task: cancellation wins, then a code failure (70
@@ -551,7 +560,7 @@ ran, and every landed main SHA has the jobs canary admission needs
 - **Failed-cohort comparison.** When the folded `source` task fails and its
   components reproduce it exactly, the verifier names the failing components:
   `source` maps to main's `Source and type contracts`, and `lanes` maps to
-  main's real-service shards, real-service and recovery tests, impacted E2E
+  main's source contracts (the lane call runs its own), real-service shards, real-service and recovery tests, impacted E2E
   shards, browser and visual acceptance, package and bundle contracts, the real
   Chromium browser controller, `Deployment artifacts`, the artifact runtime and
   every `Build * workload image` job (`mainLaneJob`). Impact-skipped lanes are
@@ -564,6 +573,13 @@ ran, and every landed main SHA has the jobs canary admission needs
   `BATCH_LANES`, so Batch CI gates exactly as before this contract. Main-push
   attestation refuses those results, so main runs its full suite. Leave it unset
   for the gate.
+- **Planning range.** Batch mode plans the batch's own range (base to tip).
+  A main push that does not attest plans its full suite, so a landing whose
+  batch was impact-selected can still meet an unselected main failure; identical
+  trees attest and skip that difference.
+- **Registry login.** The image jobs keep main's `packages: write` token and
+  log in to GHCR on queue refs as they do on main; image pushes stay disabled
+  outside exact main pushes.
 - **E2E shards.** Main and Batch run up to six impacted E2E shards. Four ran a
   median 653 s and p90 717 s against the 720-second deadline, and a deadline is
   infrastructure that holds a batch after its retry.

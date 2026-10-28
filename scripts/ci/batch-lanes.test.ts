@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { classifyLanes, laneJobs, readAttemptJobs, readJobLog, type LaneJob } from "./batch-lanes";
+import {
+  classifyBuildFailure,
+  classifyLanes,
+  laneJobs,
+  readAttemptJobs,
+  readJobLog,
+  type LaneJob,
+} from "./batch-lanes";
 
 const caller = "Main CI lanes";
 let nextId = 1;
@@ -151,6 +158,113 @@ test("a code failure wins over infrastructure siblings; fail-fast alone is infra
     (await classifyLanes("failure", [...green, job("Real-service shard 2/6", "cancelled")], noLog))
       .exitCode,
   ).toBe(75);
+});
+
+test("only an aggregate failing beside a cancelled or unsettled lane is infrastructure", async () => {
+  const withAggregate = (extra: LaneJob) => [
+    ...green.filter((row) => row.name !== "Typecheck and unit tests"),
+    extra,
+    job("Typecheck and unit tests", "failure", "Require every lane"),
+  ];
+  expect(
+    await classifyLanes(
+      "failure",
+      withAggregate(job("Real-service shard 2/6", "cancelled")),
+      noLog,
+    ),
+  ).toMatchObject({ exitCode: 75, failed: [] });
+  expect(
+    (
+      await classifyLanes(
+        "failure",
+        withAggregate(job("Impacted E2E shard 2/4", null, undefined, "in_progress")),
+        noLog,
+      )
+    ).exitCode,
+  ).toBe(75);
+  // Beside settled green or skipped lanes the aggregate is still a code verdict.
+  expect(
+    (
+      await classifyLanes(
+        "failure",
+        withAggregate(job("Impacted E2E shard 2/4", "skipped")),
+        log(1),
+      )
+    ).exitCode,
+  ).toBe(1);
+});
+
+const buildxLog = (...lines: string[]) =>
+  [
+    "2026-10-28T05:20:00Z #100 [build 4/9] RUN cargo build",
+    ...lines,
+    "2026-10-28T05:28:04Z ##[error]buildx failed with: ERROR: failed to build: failed to solve: see above",
+    "2026-10-28T05:28:05Z Post job cleanup.",
+  ].join("\n");
+const imageJob = () => job("Build speakers workload image", "failure", "Build and push");
+
+test("image build failures read buildx errors, not a process exit line", async () => {
+  const one = async (text: string) =>
+    (await classifyLanes("failure", [...green, imageJob()], async () => text)).exitCode;
+  // The real ort-sys prebuilt download timeout on main (job 122639851486).
+  expect(
+    await one(
+      buildxLog(
+        "#107 1858.3 error: ort-sys@2.0.0-rc.15: extraction of prebuilt binaries downloaded from `https://cdn.pyke.io/0/x.tar.lzma2` failed: Failed to extract to '/root/.cache/libonnxruntime.a': timeout: global",
+        "#107 1858.3 error: build script logged errors",
+        '#107 ERROR: process "/bin/sh -c xx-cargo build --locked --release" did not complete successfully: exit code: 101',
+      ),
+    ),
+  ).toBe(75);
+  // A compile error inside a Dockerfile step is a code failure.
+  expect(
+    await one(
+      buildxLog(
+        "#100 41.2 error[E0425]: cannot find value `speaker` in this scope",
+        '#100 ERROR: process "/bin/sh -c cargo build --locked" did not complete successfully: exit code: 101',
+      ),
+    ),
+  ).toBe(1);
+  expect(
+    await one(
+      buildxLog(
+        '#12 ERROR: failed to calculate checksum of ref abc::def: "/apps/missing": not found',
+        'ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref: "/apps/missing": not found',
+      ),
+    ),
+  ).toBe(1);
+  expect(
+    await one(
+      buildxLog(
+        "#5 ERROR: failed to do request: Head https://ghcr.io/v2/x/manifests/y: 429 Too Many Requests",
+      ),
+    ),
+  ).toBe(75);
+  expect(
+    await one(
+      buildxLog(
+        '#100 ERROR: process "/bin/sh -c cargo build" did not complete successfully: exit code: 137',
+      ),
+    ),
+  ).toBe(137);
+  expect(await one(buildxLog("#100 ERROR: something unexpected"))).toBe(75);
+  // A buildx failure wins over an unrelated earlier exit line.
+  expect(
+    await one(
+      `##[error]Process completed with exit code 1.\n${buildxLog("#5 ERROR: unexpected EOF")}`,
+    ),
+  ).toBe(75);
+});
+
+test("build classification ignores non-error lines and uses the last failing step", () => {
+  expect(
+    classifyBuildFailure([
+      "#87 48.78 Selecting previously unselected package libgpg-error0:amd64.",
+      "#87 50.00 Get:84 http://deb.debian.org timeout-tools 1.0",
+      '#100 ERROR: process "/bin/sh -c bun run build" did not complete successfully: exit code: 2',
+    ]),
+  ).toEqual({ exitCode: 1, reason: "Dockerfile step exited 2" });
+  expect(classifyBuildFailure([]).exitCode).toBe(75);
 });
 
 const response = (body: unknown, init: ResponseInit = {}) =>

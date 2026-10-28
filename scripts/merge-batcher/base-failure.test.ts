@@ -153,6 +153,14 @@ test("main lane failures compare against main's own lanes, not its source or uni
     // A source-only cohort failure is not held by a red main lane.
     expect(failedBaseHold(run, sha, evidence(classes))).toBeNull();
   }
+  // Batch's lane call runs its own source contracts job, so main's is lane evidence too.
+  expect(baseJobClasses(lanes({ "Source and type contracts": "failure" }), 12)).toEqual({
+    source: "red",
+    units: "green",
+    lanes: "red",
+  });
+  // Source contracts alone do not prove the fan-out ran.
+  expect(baseJobClasses([job(1, "Source and type contracts")], 12).lanes).toBe("unknown");
   // Aggregates and main-only jobs are not lane evidence.
   expect(
     baseJobClasses(

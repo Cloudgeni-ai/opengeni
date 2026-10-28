@@ -1312,7 +1312,7 @@ describe("wire adapters and CLI", () => {
     );
     expect(result.sha).toBe(sha);
     if (kind === "red")
-      expect(result.classes).toEqual({ source: "red", units: "unknown", lanes: "unknown" });
+      expect(result.classes).toEqual({ source: "red", units: "unknown", lanes: "red" });
   });
   test.each([
     "success",

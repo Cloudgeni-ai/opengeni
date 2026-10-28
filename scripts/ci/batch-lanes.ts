@@ -60,6 +60,16 @@ const SETUP_STEP =
 const INFRA_LOG =
   /(has exceeded the maximum execution time|has timed out after|The runner has received a shutdown signal|lost communication with the server|The operation was canceled)/;
 const EXIT_LINE = /##\[error\]Process completed with exit code (\d+)\./;
+/** docker/build-push-action reports its failure here instead of a process exit line. */
+const BUILDX_ERROR = /##\[error\]buildx failed with:/;
+const BUILD_STEP_EXIT = /did not complete successfully: exit code: (\d+)/;
+/** Registry, download and runner-resource failures inside an image build. */
+const BUILD_INFRA =
+  /(\btimed? ?out\b|\btimeout\b|connection (reset|refused|closed)|TLS handshake|Too Many Requests|\b429\b|Service Unavailable|Bad Gateway|Gateway Time-?out|could not resolve|name resolution|no such host|unexpected EOF|context deadline exceeded|failed to do request|no space left on device|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)/i;
+/** Deterministic Dockerfile and build-context errors. */
+const BUILD_DEFINITION =
+  /(dockerfile|failed to compute cache key|failed to calculate checksum|unknown instruction|parse error|not found)/i;
+const BUILD_WINDOW_LINES = 200;
 
 export function isInfrastructureExit(code: number): boolean {
   return code === 75 || code === 124 || code === 126 || code === 127 || code >= 128;
@@ -119,6 +129,13 @@ export async function classifyFailedJob(
   }
   if (log === null) return verdict(75, "job log unavailable");
   const lines = log.split(/\r?\n/);
+  const buildx = lines.findIndex((line) => BUILDX_ERROR.test(line));
+  if (buildx >= 0) {
+    const { exitCode, reason } = classifyBuildFailure(
+      lines.slice(Math.max(0, buildx - BUILD_WINDOW_LINES), buildx + 1),
+    );
+    return verdict(exitCode, `${step?.name ?? "image build"}: ${reason}`);
+  }
   const recorded = lines.map((line) => EXIT_LINE.exec(line)).find(Boolean);
   if (recorded) {
     const code = normalizeExit(Number(recorded[1]));
@@ -127,6 +144,33 @@ export async function classifyFailedJob(
   if (lines.some((line) => INFRA_LOG.test(line)))
     return verdict(124, "runner deadline, loss or provider cancellation");
   return verdict(75, `no recorded step exit${step ? ` for ${step.name}` : ""}`);
+}
+
+/**
+ * An image build failed inside buildx. Only error lines of the failing build
+ * count: a registry, download, timeout or disk failure is infrastructure; a
+ * failed Dockerfile step or a missing build input is a code failure with that
+ * step's exit (137 and other signals stay infrastructure). Anything else holds
+ * no verdict.
+ */
+export function classifyBuildFailure(window: readonly string[]): {
+  exitCode: number;
+  reason: string;
+} {
+  const errors = window.filter((line) => /error/i.test(line));
+  const network = errors.find((line) => BUILD_INFRA.test(line));
+  if (network) return { exitCode: 75, reason: "registry, download or runner failure during build" };
+  const step = errors
+    .map((line) => BUILD_STEP_EXIT.exec(line))
+    .filter(Boolean)
+    .at(-1);
+  if (step) {
+    const code = normalizeExit(Number(step[1]));
+    return { exitCode: code, reason: `Dockerfile step exited ${step[1]}` };
+  }
+  if (errors.some((line) => BUILD_DEFINITION.test(line)))
+    return { exitCode: 1, reason: "Dockerfile or build context error" };
+  return { exitCode: 75, reason: "build failed without a step verdict" };
 }
 
 /** The single receipt exit code for every main lane of this attempt. */
@@ -168,8 +212,25 @@ export async function classifyLanes(
   const failing = jobs.filter(
     (job) => job.conclusion === "failure" || job.conclusion === "timed_out",
   );
-  // Aggregates only repeat another lane's failure; they count when nothing else failed.
-  const real = failing.filter((job) => !(LANE_AGGREGATES as readonly string[]).includes(job.name));
+  // Aggregates only repeat another lane's failure. One that fails while every
+  // other lane is green or skipped is a topology verdict (a code failure);
+  // next to a cancelled or unsettled lane it holds no verdict.
+  const aggregate = (job: LaneJob) => (LANE_AGGREGATES as readonly string[]).includes(job.name);
+  const real = failing.filter((job) => !aggregate(job));
+  if (
+    !real.length &&
+    failing.length &&
+    jobs.some(
+      (job) =>
+        !aggregate(job) &&
+        (job.status !== "completed" || !["success", "skipped"].includes(job.conclusion ?? "")),
+    )
+  )
+    return {
+      exitCode: 75,
+      reason: "Only aggregates failed, next to a cancelled or unsettled lane",
+      failed: [],
+    };
   const selected = real.length ? real : failing;
   if (!selected.length)
     return {
