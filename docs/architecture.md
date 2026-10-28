@@ -3102,59 +3102,22 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
-The standalone merge batcher (`scripts/merge-batcher/`) is an operational
-controller, not part of the API or Temporal workers. Active mode requires an
-explicitly operator-initialized ledger, never automatically recreated. Initialization
-requires proven stopped/zero-instance operation. The controller reconstructs state
-from Git objects and GitHub, builds one merge commit per admitted PR without checking
-out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
-run-attempt receipts distinguish assertion failures from infrastructure and
-cancellation. Landing requires the exact tested tree, a fast-forward base fence and
-a final head/readiness reread. Normally the tested tip itself lands; a narrowly
-verified merge-main-only head refresh may append same-tree ancestry commits for
-native PR merge identity, retaining immutable tested-tip/run evidence and explicit
-old/new-head linkage. `scripts/merge-batcher/head-refresh.ts` proves clean main-only
-merge ancestry and whole-batch tree identity; the final executor recomputes it
-before CAS. Late PR-head races require post-land reconciliation,
-never a claim that the newer head was tested. Post-merge CI retains its full test
-inventory and independent service/e2e/image gates. Main pushes can reuse complete
-unit coverage from a successful Batch attempt only with identical-tree, canonical
-manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
-Impact-selected subsets or missing/unknown evidence run the ordinary main units;
-the full-green release receipt contract is unchanged.
-Separately, a non-Version, non-control-plane, non-CI-definition batcher landing whose exact tree passed
-a trusted `queue/live` Batch attempt skips main's test lanes by attestation
-(`scripts/ci/batch-attestation.ts`); artifacts, images and the unchanged receipts
-still run; release admission refuses such receipts. This is a documented
-coverage reduction (see docs/merge-batcher.md).
-Candidate plan/source/selected-unit/ready success may land on red or unknown
-full-main CI. A two-hour latency breaker retains raw measurements and deducts only
-bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
-trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
-parked without attribution, while unrelated ready heads proceed. Parking survives
-main advancement and label churn for the same PR head; new heads or explicit native
-auto-merge re-enables after parking can re-enter. Intake accepts a current native
-auto-merge request or queue-ready label with exact-head checks. Parking durably
-disables auto-merge; native MERGED readback is distinct from ledger landing/closure.
-Comparable base evidence and trusted same-way failure fingerprints are not yet
-available; neither full-main success nor matching job names proves member blame.
-`queue-health.yml` records provider batch timing separately from the controller's
-admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
-writes. The separately authorized CI-shadow stage pushes candidate refs only,
-with one hosted candidate in flight; it never updates main or PR readiness.
-Its portable container and deployment/rollback boundary are documented in
-[merge batcher](merge-batcher.md); the historical measurements and inactive
-native/vendor configurations remain in [merge queue](merge-queue.md).
-The offline [administration bundle](merge-batcher-admin/README.md) keeps legacy
-version 3 plans verifiable and offers explicit version 4 App-only plans with an
-App-bound guiding check. Both retain exact saved Manual rollback; an offline
-plan is not authorization or qualification for a live policy transition.
+The merge batcher (`scripts/batcher/`, run by `.github/workflows/merge-batcher.yml`)
+is a stateless GitHub Actions pass, not part of the API or Temporal workers. Each
+pass reads the queued PRs, the `batch/<id>` branch and that branch's CI from
+GitHub, takes the next step and exits. It builds a candidate with GitHub's merge
+API, tests it with ordinary `ci.yml` planned from the candidate's base, and lands
+each member as one squash commit through the pull request merge API after checking
+that every landed tree equals the tested tree. Main runs the full suite on a
+cadence (`scripts/ci/main-approval-superseded.ts`); that run, not a batch, is the
+release gate. See [merge batcher](merge-batcher.md); historical native-queue
+measurements remain in [merge queue](merge-queue.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
-| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
+| Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---

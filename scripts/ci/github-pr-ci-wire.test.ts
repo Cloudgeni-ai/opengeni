@@ -193,11 +193,10 @@ test("priority uses five-minute low-call polling and waits on provider rate hint
     calls++;
     expect(init?.method).toBe("GET");
     const url = new URL(String(input));
-    expect(/\/actions\/workflows\/(ci|batch-ci)\.yml\/runs$/.test(url.pathname)).toBe(true);
+    expect(url.pathname.endsWith("/actions/workflows/ci.yml/runs")).toBe(true);
     expect(url.searchParams.get("event")).toBe("push");
     // ci.yml push demand covers main and batch/<id> candidates.
-    if (url.pathname.includes("/workflows/ci.yml/"))
-      expect(url.searchParams.get("branch")).toBeNull();
+    expect(url.searchParams.get("branch")).toBeNull();
     if (calls === 1) return new Response("", { status: 429, headers: { "retry-after": "60" } });
     return Response.json({
       workflow_runs:
@@ -230,7 +229,7 @@ test("priority uses five-minute low-call polling and waits on provider rate hint
     },
   );
   expect(sleeps).toEqual([60000, 300000]);
-  expect(calls).toBe(21);
+  expect(calls).toBe(11);
 });
 
 test("short provider inventory holds then rescans without admitting partial demand", async () => {
@@ -258,38 +257,35 @@ test("short provider inventory holds then rescans without admitting partial dema
     },
   );
   expect(now).toBe(300000);
-  expect(paths).toHaveLength(11);
+  expect(paths).toHaveLength(6);
   expect(paths.every((path) => path.includes("/workflows/"))).toBe(true);
 });
 
-test.each(["pr", "batch"] as const)(
-  "persistent incomplete %s priority inventory expires held without a write",
-  async (lane) => {
-    let now = 0,
-      calls = 0;
-    const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      calls++;
-      expect(init?.method).toBe("GET");
-      return Response.json({ total_count: 1, workflow_runs: [] });
-    }) as typeof fetch;
-    await expect(
-      runPrCiCommand(
-        "priority",
-        { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
-        transport,
-        lane,
-        {
-          now: () => now,
-          sleep: async (ms) => {
-            now += ms;
-          },
+test("persistent incomplete priority inventory expires held without a write", async () => {
+  let now = 0,
+    calls = 0;
+  const transport = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    calls++;
+    expect(init?.method).toBe("GET");
+    return Response.json({ total_count: 1, workflow_runs: [] });
+  }) as typeof fetch;
+  await expect(
+    runPrCiCommand(
+      "priority",
+      { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture" },
+      transport,
+      "pr",
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms;
         },
-      ),
-    ).rejects.toThrow("did not clear");
-    expect(calls).toBe(60);
-    expect(now).toBe(5 * 60 * 60 * 1000);
-  },
-);
+      },
+    ),
+  ).rejects.toThrow("did not clear");
+  expect(calls).toBe(60);
+  expect(now).toBe(5 * 60 * 60 * 1000);
+});
 
 test("continuous new main pushes cannot reset the PR priority yield deadline", async () => {
   let now = 0;
@@ -439,8 +435,8 @@ test("a read that hits a gateway error or a dropped connection is repeated with 
     return Response.json({ total_count: 0, workflow_runs: [] });
   }) as typeof fetch;
   await runPrCiCommand("priority", priorityEnv, transport, "pr", timing);
-  // Four failed reads, then the ten inventory reads (two workflows, five statuses).
-  expect(calls).toBe(14);
+  // Four failed reads, then the five inventory reads (one per run status).
+  expect(calls).toBe(9);
   // 2 s, 4 s, 8 s, 16 s, each with half of it as jitter (random 0.5 gives 3/4).
   expect(clock.sleeps).toEqual([1500, 3000, 6000, 12000]);
 });
@@ -468,7 +464,7 @@ test("a read that times out is repeated", async () => {
     return Response.json({ total_count: 0, workflow_runs: [] });
   }) as unknown as typeof fetch;
   await runPrCiCommand("priority", priorityEnv, transport, "pr", timing);
-  expect(calls).toBe(11);
+  expect(calls).toBe(6);
   expect(clock.sleeps).toEqual([1500]);
 });
 

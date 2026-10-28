@@ -118,13 +118,24 @@ export type MainRun = {
 /** How often main runs the full suite while it changes (docs/merge-batcher.md). */
 export const MAIN_CI_INTERVAL_MS = 30 * 60 * 1000;
 
+/** The repository variable MAIN_CI_INTERVAL_MINUTES overrides the interval (minimum 5). */
+export function mainCiInterval(minutes: string | undefined): number {
+  const value = Number(minutes);
+  return minutes && Number.isFinite(value) && value >= 5 ? value * 60_000 : MAIN_CI_INTERVAL_MS;
+}
+
 /**
  * With MAIN_CI_DEFERRED, ordinary main pushes cancel their own first attempt.
  * Re-run the newest main SHA's run when no full run is in progress and the last
  * one started at least the interval ago. A full run is any re-run, or a
  * Version merge's first attempt; a run parked on an approval is not in progress.
  */
-export function dueMainRun(runs: MainRun[], mainSha: string, now: number): number | null {
+export function dueMainRun(
+  runs: MainRun[],
+  mainSha: string,
+  now: number,
+  intervalMs = MAIN_CI_INTERVAL_MS,
+): number | null {
   const head = runs.find((r) => r.headSha === mainSha);
   if (
     !head ||
@@ -140,7 +151,7 @@ export function dueMainRun(runs: MainRun[], mainSha: string, now: number): numbe
     -Infinity,
     ...full.map((r) => Date.parse(r.runStartedAt)).filter(Number.isFinite),
   );
-  return now - last >= MAIN_CI_INTERVAL_MS ? head.id : null;
+  return now - last >= intervalMs ? head.id : null;
 }
 
 async function main() {
@@ -273,6 +284,7 @@ async function main() {
       })),
       mainSha,
       Date.now(),
+      mainCiInterval(process.env.MAIN_CI_INTERVAL_MINUTES),
     );
     console.log(
       due ? `re-run ${due} for main ${mainSha}${dryRun ? " (dry run)" : ""}` : "main CI is not due",

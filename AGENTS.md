@@ -797,111 +797,46 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 ## Reviewed merges to main
 
-Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
-and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Admission uses GitHub: an open, non-draft PR with native auto-merge requested
-(`gh pr merge --auto --squash`) **or** `queue-ready`, and the configured
-required fast GitHub-hosted checks (lint, types and selected unit tests) passing
-on its exact current head, not the full PR suite. Agent comments,
-VM attestations and reviewer session UUIDs are not admission requirements.
-Approval requirements come from the existing repository protection policy;
-the batcher adds no separate human or agent approval gate. Follow the repository's
-development validation guidance and report failures honestly, but do not invent
-an attestation requirement for queue intake. A changed head needs its own required
-checks; old-head success does not transfer. Version PRs remain singletons.
+Follow [`docs/merge-batcher.md`](docs/merge-batcher.md). To land a PR, mark it
+ready with native auto-merge (`gh pr merge --auto --squash`) **or** the
+`queue-ready` label; either suffices. The merge batcher takes it once **PR CI**
+has passed on its exact current head, tests it together with other ready PRs on
+a `batch/<id>` branch (CI runs exactly what the combined change affects,
+including integration, end-to-end and browser lanes) and lands each PR as one
+squash commit, so the PR shows as merged. Agent comments, VM attestations and
+reviewer session UUIDs are not admission requirements, and the batcher adds no
+human or agent approval gate beyond the repository's protection policy.
 
-GitHub native queue enforcement and vendor installation stay off. Only the
-rollout owner's explicit go permits activation of the reviewed controller and rules.
-Candidate-only CI shadow permission is not permission to control main or change
-rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
-does not activate anything; keep main control inactive until the rollout owner
-gives a separate explicit go with the matching core/workflow implementation.
-Merge mode follows **readable current GitHub rules**, not an owner-local receipt
-or whether a controller happens to be running. Read
-`gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
-inventory/details (including inherited rules), as described in
-the [agent readback procedure](docs/merge-batcher-admin/README.md#agent-readable-merge-mode).
-GitHub may omit `bypass_actors` for ordinary readers; that expected omission is
-not malformed policy and does not by itself force hold. Exact App/bypass checks
-belong to the activation operator, not ordinary agents selecting a merge path.
-Before activation or after a complete verified OFF restoration, the original
-squash-only PR admission plus non-FF/deletion protection, with no batcher writer
-restriction or partial guard transition, means normal reviewed squash after the
-required GitHub checks and existing protection policy. A private receipt is not a
-prerequisite for that read-only determination. A partial transition, inaccessible
-effective-policy readback or unknown mode is **hold**: do not merge. Once the
-readable effective policy shows the complete intended main writer restriction
-alongside admission and immutable protection, choose queue-only (never direct
-merge) without requiring hidden bypass data. For the update rule, exactly
-`{type:"update"}` (parameters absent) is equivalent to exactly
-`{type:"update",parameters:{update_allows_fetch_and_merge:false}}`.
-Explicit true, empty/null parameters, nonboolean values, extra fields or duplicate
-rules are not that equivalence; unknown or mixed policy remains hold. The batcher
-is the **only normal path to main**; this queue-only instruction takes effect with
-that activation without waiting for another source edit. Submit the documented
-ready signal (`gh pr merge --auto --squash` **or** `queue-ready`; either suffices) and
-observe the **Batch ready** result and exact landed SHA. Do not directly squash or
-merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
-create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
-Stopping the controller alone does **not** restore the manual merge path. The
-authorized operator's one-command OFF must prove writer stop and restore the exact
-prior rules, then publish its verified manual-mode receipt for the audit. Agents
-independently confirm restoration through the same readable GitHub rules; the
-owner's local receipt is not their only source. A ruleset name alone is never
-proof of mode, identity or bypass scope. Organization administrators have an
-emergency bypass on writer/admission restrictions, not on the separate immutable
-non-FF/deletion guard. GitHub does not enforce the word "emergency": this is an
-operator policy, never permission for routine queue bypass. Do not rebase merely
-because main advanced: the batcher tests the
-combined tree. Any head change invalidates earlier check results and requires a new
-candidate. Version PRs always occupy their own batch.
+The batcher is the **only normal path to main**. Do not squash or merge a PR to
+main directly, use `--admin`, call a merge API or push main. Do not create,
+update or delete `batch/*` or `batch-build/*` branches, or rerun or cancel their
+CI: the batcher retries failed jobs once and splits a failing batch to find the
+PR that broke it. A PR removed from the queue gets a comment saying why; fix it
+and add the label again. Do not rebase or merge main into a PR merely because
+main advanced: the batch tests the combined tree. A conflict with main is the
+only reason to update the branch. Version PRs and PRs that change `.github/`,
+`scripts/ci/` or `scripts/batcher/` always land in a batch of their own, and
+changes to the batcher or its CI control files need explicit independent review.
 
-Queue-green is not release-green. Releases require full main CI on the exact
-released tip, with verified Version ancestry and matching image provenance.
-A batcher landing whose exact tree passed a trusted Batch CI attempt satisfies
-main CI by attestation: its test lanes are skipped, while artifacts, images and
-receipts still run (`scripts/ci/batch-attestation.ts`). Version PR, control-plane
-and CI-definition landings never attest, and release admission refuses attested
-receipts, so a released tip always has the full suite.
-The required batch suite is plan/source/impact-selected units/Batch ready on the
-exact stacked candidate tree. Its verified latest-attempt success may land even
-when full-main CI is red or unknown; full main CI remains an independent backstop,
-not a candidate admission gate. Development validation is not a comment-based
-admission gate. The controller may retry a failed candidate's entire Batch CI once,
-using exact-attempt evidence classified as trusted code failure, verified
-infrastructure failure, provider cancellation, no-job-logs, or positive
-failed/timed-out job evidence.
-After a trusted second code failure, split the cohort and durably park failing
-singleton heads without blame or ejection,
-while other ready heads proceed. A new ready event or main advancement does not
-retry a parked head; a changed head may re-enter. Comparable base evidence remains
-unavailable, and full-main CI success is not a substitute. Current receipts lack
-trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.
-Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input retry; unknown evidence never
-authorizes it, and a second unknown/infrastructure outcome remains held. Do not stack manual
-or in-job retries on it, or silently resubmit an ejected unchanged head.
-Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
-the plan and task receipts are deliberately bound to one run attempt.
-Full main CI also requires **Re-run all jobs** when recovering a release candidate:
-the Full CI and canary image receipts must belong to the same selected attempt.
-A partial rerun can turn the provider run green while leaving the SHA ineligible
-for release. Changes to
-the batcher or its CI control files require an isolated batch and explicit
-independent review of those control-plane changes.
+Batch-green is not release-green. `main` runs the full suite (every lane plus
+release images) on a cadence, at most every 30 minutes while it changes, not on
+every push; see "Main CI cadence" in the runbook. Releases require full main CI
+on the exact released tip, with verified Version ancestry and matching image
+provenance. When recovering a release candidate, use **Re-run all jobs**: the
+Full CI and canary image receipts must belong to the same attempt.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
 explicit in the PR description, labelled `test-policy-change`, and confirmed in
 independent review. Never conceal a failing check by weakening it.
 The documented `hotfix/*` → `production` incident lane stays separate; ordinary
-main changes never bypass the queue. See the incident and rollback steps in the
-queue runbook before any exceptional main action.
+main changes never bypass the queue. An exceptional main action needs the
+incident owner's explicit authorization, with the reason and evidence recorded.
 
-If full post-merge main CI goes red, identify and reproduce the culprit against
-the last fully green SHA, then **revert the culprit PR first through the queue**
-and fix it afterwards. Do not leave main red while developing the forward fix.
-Coalesced runs can contain several PRs: the tip PR is not automatically the culprit.
-Cancelled runs are not failures. Automatic blind reverts are not authorized.
+If full main CI goes red, find the culprit against the last fully green SHA and
+fix it forward promptly with a PR labelled `queue-ready` and `queue-priority`,
+which is tested ahead of other batches. Do not leave main red. One cadence run
+can contain several PRs: the newest PR is not automatically the culprit.
+Cancelled runs are not failures.
 
 ## Deployment Work Notes
 

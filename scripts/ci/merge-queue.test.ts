@@ -126,23 +126,6 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
 });
 
-test("ordinary PR events cannot starve reconciliation or publish public alerts", () => {
-  const health = workflow("queue-health");
-  expect(health.on.workflow_run.workflows).toContain("Batch CI");
-  expect(health.jobs.report.if).toContain(
-    "github.event.workflow_run.path == '.github/workflows/batch-ci.yml'",
-  );
-  expect(health.concurrency).toBeUndefined();
-  expect(health.jobs.report.if).toContain("github.event.workflow_run.event == 'merge_group'");
-  expect(health.jobs.report.if).toContain(
-    "github.event.workflow_run.path == '.github/workflows/ci.yml'",
-  );
-  expect(health.jobs.report.concurrency.group).toContain("'event' || 'reconcile'");
-  const run = health.jobs.report.steps.find((step: any) => step.env?.QUEUE_HEALTH_ALERTS);
-  expect(run.env.QUEUE_HEALTH_ALERTS).toContain("vars.QUEUE_HEALTH_ALERTS == 'true'");
-  expect(run.env.QUEUE_HEALTH_ALERTS).toContain("github.event_name != 'workflow_run'");
-});
-
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
   expect(ci.concurrency["cancel-in-progress"]).toBe(
     "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
