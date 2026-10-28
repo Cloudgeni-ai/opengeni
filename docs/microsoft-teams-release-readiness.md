@@ -296,3 +296,8 @@ after Connector authentication and help distinguish ignored activity shape from
 rollout, bot identity and installer-policy denials. They do not prove a reply was
 delivered. HTML representations remain rejected with other attachments until a
 separately tested message-normalization change admits them.
+
+Teams inline `text/html` representations accompanying canonical `activity.text`
+are accepted, matching Microsoft's [receive-message payload](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability#receive-a-message-activity).
+Only the canonical text is consumed. HTML is never parsed or fetched; URL-backed
+HTML, files, images, and mixed attachment arrays remain rejected.

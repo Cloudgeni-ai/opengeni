@@ -53,10 +53,43 @@ describe("Teams actor and transport boundary", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("private-");
     expect(JSON.stringify(diagnostics)).not.toContain(tenant);
   });
-  test("keeps HTML text representations and files rejected while exposing attachment shape only", () => {
+  test("accepts documented inline HTML representations using canonical text only", () => {
+    for (const contentUrl of [undefined, null]) {
+      const diagnostics: unknown[] = [];
+      const message = normalizeTeamsMessage(
+        {
+          ...activity(),
+          textFormat: "plain",
+          attachments: [
+            {
+              contentType: "text/html",
+              content: "<div>Different <strong>HTML</strong></div>",
+              contentUrl,
+            },
+          ],
+        },
+        (value) => diagnostics.push(value),
+      );
+      expect(message).toEqual(normalizeTeamsMessage(activity()));
+      expect(diagnostics).toEqual([]);
+    }
+    expect(
+      normalizeTeamsMessage({
+        ...activity(),
+        text: "",
+        attachments: [{ contentType: "text/html", content: "<p>HTML is not a text fallback</p>" }],
+      }),
+    ).toBeNull();
+  });
+  test("rejects files, images, URL-backed HTML and mixed attachments without logging content", () => {
+    const html = { contentType: "text/html", content: "<p>private-html-marker</p>" };
     for (const attachments of [
-      [{ contentType: "text/html", content: "<p>private-html-marker</p>" }],
+      [{ ...html, contentUrl: "https://private-file-marker.test/file" }],
+      [{ contentType: "text/html", content: { unexpected: "private-marker" } }],
       [{ contentType: "application/pdf", contentUrl: "https://private-file-marker.test/file" }],
+      [{ contentType: "image/png", contentUrl: "https://private-file-marker.test/image" }],
+      [html, { contentType: "application/pdf" }],
+      [null],
     ]) {
       const diagnostics: unknown[] = [];
       expect(
@@ -65,8 +98,9 @@ describe("Teams actor and transport boundary", () => {
       expect(diagnostics).toEqual([
         {
           reason: "attachments",
-          attachmentCount: 1,
-          htmlAttachmentCount: attachments[0]?.contentType === "text/html" ? 1 : 0,
+          attachmentCount: attachments.length,
+          htmlAttachmentCount: attachments.filter((value) => value?.contentType === "text/html")
+            .length,
         },
       ]);
       expect(JSON.stringify(diagnostics)).not.toContain("private-");
