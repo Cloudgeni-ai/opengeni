@@ -243,6 +243,17 @@ export function connectedAccountsNotice(
 }
 
 /**
+ * Tools a search matched that every request already carries. Search only
+ * loads deferred tools, so without this a search for one of them reads as
+ * "this tool does not exist".
+ */
+export function alreadyAvailableNotice(names: readonly string[]): string {
+  return names.length === 1
+    ? `${names[0]} is already in your tool list; call it directly.`
+    : `${names.join(", ")} are already in your tool list; call them directly.`;
+}
+
+/**
  * The exact (not spelling-approximate) capability_catalog_search matches whose
  * next step is a Connect card the person completes themselves (connect or add
  * credentials), not one a workspace admin must enable. Accepts the MCP content
@@ -406,6 +417,8 @@ export class LazyToolRuntime {
   readonly controlTools: Tool[];
   private routerWasExposed: boolean;
   private searchIndex: ToolSearchIndex | undefined;
+  /** Ranks the tools every request already carries, for alreadyAvailableNotice. */
+  private visibleIndex: ToolSearchIndex | undefined;
   /** Whether a search this turn already named the person's connected accounts. */
   private connectedAccountsNamed = false;
 
@@ -563,6 +576,7 @@ export class LazyToolRuntime {
     }
     this.currentTools = tools;
     this.searchIndex = undefined;
+    this.visibleIndex = undefined;
     this.functionTools.clear();
     this.searchableToolNames.clear();
     const modelServerIds = this.modelMcpServerIds();
@@ -704,6 +718,49 @@ export class LazyToolRuntime {
     return unavailable.length ? { unavailableSources: unavailable } : {};
   }
 
+  /** Function tools every request carries: search never loads them. */
+  private visibleTools(): Tool[] {
+    return this.currentTools.filter(
+      (tool) =>
+        isFunctionTool(tool) &&
+        !this.searchableToolNames.has(tool.name) &&
+        !this.controlTools.includes(tool),
+    );
+  }
+
+  /**
+   * Already-visible tools a search asked for: those named exactly, or for a
+   * query, those it names or clearly matches among the visible tools.
+   */
+  private alreadyAvailable(query: string, names: readonly string[] | undefined): string[] {
+    const visible = this.visibleTools().filter(isFunctionTool);
+    if (!visible.length) return [];
+    if (names !== undefined)
+      return visible.filter((tool) => names.includes(tool.name)).map((tool) => tool.name);
+    if (!query.trim()) return [];
+    this.visibleIndex ??= new ToolSearchIndex(visible);
+    return [
+      ...new Set([
+        ...toolsNamedInQuery(visible, query).map((tool) => tool.name),
+        ...this.visibleIndex
+          .strongMatches(query)
+          .filter(isFunctionTool)
+          .map((tool) => tool.name),
+      ]),
+    ];
+  }
+
+  private withAlreadyAvailable(
+    result: GenericSearchMarker,
+    query: string,
+    names: readonly string[] | undefined,
+  ): GenericSearchMarker {
+    const available = this.alreadyAvailable(query, names);
+    return available.length
+      ? this.withNotice(result, "alreadyAvailable", alreadyAvailableNotice(available))
+      : result;
+  }
+
   search(rawArguments: unknown): Tool[] {
     return searchToolPool(this.searchableTools(this.currentTools), rawArguments);
   }
@@ -735,7 +792,12 @@ export class LazyToolRuntime {
     const tools = (
       names === undefined ? this.matches(rawArguments) : this.search(rawArguments)
     ).filter(isFunctionTool);
-    const unavailable = names ? unresolvedToolNames(tools, names) : [];
+    // A name every request already carries is not unavailable: the notice
+    // tells the model to call it directly.
+    const visible = names ? new Set(this.alreadyAvailable("", names)) : new Set<string>();
+    const unavailable = names
+      ? unresolvedToolNames(tools, names).filter((name) => !visible.has(name))
+      : [];
     // A short name several servers share loads one of them; the others stay
     // reachable as unloaded alternatives under their full names.
     const pool = names ? this.searchableTools(this.currentTools).filter(isFunctionTool) : [];
@@ -769,11 +831,15 @@ export class LazyToolRuntime {
     await this.ensurePrepared();
     const { query, names, limit } = parseSearchArgs(rawArguments);
     if (names !== undefined) {
-      return {
-        version: 2,
-        output: this.genericSearchOutput(rawArguments),
-        tools: structuredClone(this.searchDisclosure(rawArguments)),
-      };
+      return this.withAlreadyAvailable(
+        {
+          version: 2,
+          output: this.genericSearchOutput(rawArguments),
+          tools: structuredClone(this.searchDisclosure(rawArguments)),
+        },
+        query,
+        names,
+      );
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
@@ -817,9 +883,11 @@ export class LazyToolRuntime {
       ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
       : result;
     const accounts = this.connectedAccountsNotice(withConnectable);
-    return accounts
-      ? this.withNotice(withConnectable, "connectedAccounts", accounts)
-      : withConnectable;
+    return this.withAlreadyAvailable(
+      accounts ? this.withNotice(withConnectable, "connectedAccounts", accounts) : withConnectable,
+      query,
+      undefined,
+    );
   }
 
   /**
