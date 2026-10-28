@@ -112,8 +112,12 @@ every catalog read, session create, approval-policy read and worker claim.
   each time, so removing the connection or the membership leaves nothing).
   Workspace-scoped connections and other people's connections never follow.
 - Personal's own installation of the same capability, enabled or disabled,
-  wins, as does an organization integration policy that does not allow
-  `custom:mcp`. Shared workspaces are unchanged.
+  wins. The organization integration policy must allow each connector under
+  the key the owner's own setup of it in Personal would check: a dedicated
+  adapter's key (`gmail`, `google-drive`, `google-calendar`, `slack-personal`)
+  for those curated connectors, `custom:mcp` for other catalog connectors, and
+  `custom:mcp` (plus any dedicated key) for workspace-defined custom servers.
+  Shared workspaces are unchanged.
 - The Connections page lists a carried connector as connected, labelled
   **From <workspace>**; it is managed in the origin workspace. Its owner can
   still set its approvals in Personal, stored for the Personal workspace like

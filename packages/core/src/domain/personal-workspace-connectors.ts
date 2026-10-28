@@ -16,11 +16,43 @@ import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organi
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 
 /**
- * Generic MCP enablement is classified as this key (see `prepareCapabilityEnable`),
- * so a Personal workspace may carry a connector only while its owner could also
- * add one there.
+ * Generic MCP enablement is classified as this key (see `prepareCapabilityEnable`
+ * and the `mcp-*` Connect adapters).
  */
 const MCP_INTEGRATION_KEY = "custom:mcp";
+
+/**
+ * Reviewed MCP endpoints a dedicated Connect adapter owns, with the policy key
+ * that adapter checks (see `integrationKeyForConnectProvider`).
+ */
+const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
+  "gmailmcp.googleapis.com": "gmail",
+  "drivemcp.googleapis.com": "google-drive",
+  "calendarmcp.googleapis.com": "google-calendar",
+  "mcp.slack.com": "slack-personal",
+};
+
+/**
+ * The organization policy keys the owner's own setup of this connector in
+ * Personal would check: a curated connector served by a dedicated adapter uses
+ * that adapter's key, any other curated connector the generic MCP key, and a
+ * workspace-authored custom server always the custom MCP key (plus the
+ * dedicated key when it points at a reviewed endpoint).
+ */
+function integrationKeysForCarriedServer(
+  server: Pick<OriginMcpCapabilityServer, "url" | "catalogScope">,
+): string[] {
+  let host: string | null = null;
+  try {
+    host = new URL(server.url).hostname.toLowerCase();
+  } catch {
+    host = null;
+  }
+  const dedicated = host ? DEDICATED_MCP_INTEGRATION_KEYS[host] : undefined;
+  if (server.catalogScope === "workspace")
+    return dedicated ? [MCP_INTEGRATION_KEY, dedicated] : [MCP_INTEGRATION_KEY];
+  return [dedicated ?? MCP_INTEGRATION_KEY];
+}
 
 /** Where a Personal workspace's carried connector comes from. */
 export type PersonalWorkspaceConnectorOrigin = {
@@ -89,7 +121,8 @@ function personalSubjectRef(
  * Derived on every read and never persisted. Only the workspace's own owner
  * (by the Personal pointer) receives anything; the owner must still hold live
  * authority in each origin workspace; the organization's integration policy
- * must allow MCP connectors; workspace-held credential headers never travel
+ * must allow each connector under the key its own setup in Personal would
+ * check (`integrationKeysForCarriedServer`); workspace-held credential headers never travel
  * (only a subject reference that binds the owner's own accounts). The Personal
  * workspace's own settings win: any installation of the same capability
  * (enabled, or explicitly disabled), or a server it already serves with the
@@ -121,11 +154,11 @@ export async function personalWorkspaceExtensionMcpServers(
   });
   if (origins.length === 0) return [];
   const policy = await readOrganizationIntegrationPolicyForServing(db, { accountId });
-  if (
-    policy.mode !== "unrestricted" &&
-    !policy.allowedIntegrationKeys.includes(MCP_INTEGRATION_KEY)
-  )
-    return [];
+  const allowedByPolicy = (server: OriginMcpCapabilityServer) =>
+    policy.mode === "unrestricted" ||
+    integrationKeysForCarriedServer(server).every((key) =>
+      policy.allowedIntegrationKeys.includes(key),
+    );
   const personalInstallations = new Set(
     (await listCapabilityInstallations(db, input.workspaceId))
       .filter((installation) => installation.kind === "mcp")
@@ -146,6 +179,7 @@ export async function personalWorkspaceExtensionMcpServers(
       );
       if (
         !connection ||
+        !allowedByPolicy(server) ||
         personalInstallations.has(server.capabilityId) ||
         takenIds.has(server.id) ||
         takenEndpoints.has(canonicalUrl(server.url))

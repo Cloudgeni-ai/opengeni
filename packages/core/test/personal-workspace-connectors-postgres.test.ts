@@ -571,3 +571,59 @@ test("losing origin membership, a removed connection, Personal's own choices and
   expect(await carried()).toEqual([f.custom.serverId, f.curated.serverId].sort());
   await sql`delete from organization_integration_policies where account_id = ${f.accountId}`;
 }, 60_000);
+
+test("each carried connector needs the policy key its own setup in Personal would check", async () => {
+  if (!shared) return;
+  const f = fixture;
+  // A curated connector served by a dedicated adapter (Gmail) is gated by its
+  // own key, not by the custom MCP switch.
+  const suffix = crypto.randomUUID().slice(0, 8);
+  const gmail = {
+    id: `registry:gmail-${suffix}`,
+    serverId: `gmail-${suffix}`,
+    endpoint: "https://gmailmcp.googleapis.com/mcp/v1",
+    providerDomain: "gmailmcp.googleapis.com",
+  };
+  await catalogItem({ ...gmail, accountId: null, workspaceId: null, name: "Gmail" });
+  await installation({
+    accountId: f.accountId,
+    workspaceId: f.team,
+    capabilityId: gmail.id,
+    config: {
+      connectionRef: {
+        providerDomain: gmail.providerDomain,
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    },
+  });
+  const miaGmail = await connection({
+    accountId: f.accountId,
+    workspaceId: f.team,
+    subjectId: f.mia,
+    providerDomain: gmail.providerDomain,
+  });
+  const carried = async () =>
+    ids((await personalServers({ workspaceId: f.miaPersonal, subjectId: f.mia })).servers);
+  const policy = async (keys: string[], revision: number) => {
+    await sql`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+      values (${f.accountId}, 'restricted', ${sql.json(keys)}, ${revision})
+      on conflict (account_id) do update
+        set allowed_integration_keys = excluded.allowed_integration_keys, revision = excluded.revision`;
+  };
+  try {
+    expect(await carried()).toEqual([f.custom.serverId, f.curated.serverId, gmail.serverId].sort());
+    await policy(["custom:mcp"], 1);
+    expect(await carried()).toEqual([f.custom.serverId, f.curated.serverId].sort());
+    await policy(["gmail"], 2);
+    expect(await carried()).toEqual([gmail.serverId]);
+    await policy(["gmail", "custom:mcp"], 3);
+    expect(await carried()).toEqual([f.custom.serverId, f.curated.serverId, gmail.serverId].sort());
+  } finally {
+    await sql`delete from organization_integration_policies where account_id = ${f.accountId}`;
+    await sql`delete from connections where id = ${miaGmail}`;
+    await sql`delete from capability_installations
+      where workspace_id = ${f.team} and capability_id = ${gmail.id}`;
+    await sql`delete from capability_catalog_items where id = ${gmail.id}`;
+  }
+}, 60_000);
