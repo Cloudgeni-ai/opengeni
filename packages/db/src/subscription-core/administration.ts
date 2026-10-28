@@ -29,6 +29,7 @@ import {
 } from "../subscription-core-repository";
 import { organizationAdministeredConnection } from "./access";
 import { SubscriptionCoreError } from "./errors";
+import { liveWorkspaceAssignment } from "./personal-reach";
 import {
   lockSubscriptionSettings,
   SUBSCRIPTION_SETTINGS_TRANSACTION,
@@ -266,7 +267,8 @@ export async function readSubscriptionCoreWorkspacePool(
           exists (select 1 from subscription_connection_workspaces assignment
             where assignment.account_id = connection.account_id
               and assignment.connection_id = connection.id
-              and assignment.workspace_id = ${input.workspaceId}::uuid)
+              and assignment.workspace_id = ${input.workspaceId}::uuid
+              and ${liveWorkspaceAssignment("assignment")})
           or (connection.allow_personal_workspaces and ${workspaceKind} = 'personal')))
         or (${input.includeOwnPeopleScope === true} and connection.scope_kind = 'people'
           and exists (select 1 from subscription_connection_people assignment
@@ -474,6 +476,8 @@ export async function readSubscriptionCoreOrganizationPool(
               from subscription_connection_workspaces assignment
               where assignment.account_id = connection.account_id
                 and assignment.connection_id = connection.id
+                -- A connecting person's Personal workspace (migration 1064) isn't listed.
+                and assignment.personal_reach_subject_id is null
                 and assignment.workspace_id in (
                   select inventory.workspace_id
                   from list_organization_workspace_ids(connection.account_id) inventory)

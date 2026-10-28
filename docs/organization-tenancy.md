@@ -529,6 +529,13 @@ revoked membership cannot be re-invited or accepted again. A future rejoin
 contract would need a new generation identity propagated through the immutable
 retention ledger; 0263 deliberately does not reset or reuse that evidence.
 
+A shared subscription a person connected in a shared workspace may also reach
+that person's own Personal workspace (migration 1064, SUB-OWN-10 in
+`docs/subscription-accounts.md`). That reach ends with their access: it serves
+only while they still have a membership in that workspace, and triggers delete
+it when that membership is removed or the organization membership is
+suspended, offboarded or deleted. Reactivation does not restore it.
+
 The managed-human API surface is:
 
 - `GET /v1/organization-invitations` (bounded to 100 with the same deterministic

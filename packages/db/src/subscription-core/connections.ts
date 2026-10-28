@@ -16,6 +16,11 @@
  *   taken over, including one the caller cannot see.
  * - In a person's own Personal workspace, connect creates or reconnects that
  *   person's personal connection through the owner-scoped database writer.
+ * - A new workspace account connected by a signed-in person (a `user:`
+ *   subject who belongs to that workspace) also reaches that person's own
+ *   Personal workspace, and nobody else's (migration 1064). It stays the
+ *   workspace's own. API keys, service principals and reconnects add no
+ *   such reach.
  * - An organization administrator deletes any shared connection; the
  *   managing workspace's administrator only the workspace's own account
  *   (migration 0777). A personal connection is deleted by its owner from
@@ -31,7 +36,9 @@
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
 import { withLosslessContentWriteVersion } from "../lossless-json";
+import { nestedPostgresSqlState } from "../persistence-errors";
 import * as schema from "../schema";
+import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
 import {
   isSubscriptionCoreRlsRefusal,
@@ -42,6 +49,7 @@ import {
   type SubscriptionCoreWake,
 } from "./administration";
 import { organizationAdministeredConnection } from "./access";
+import { personalReachSubject } from "./personal-reach";
 import {
   subscriptionCoreConnectionKind,
   subscriptionCoreProviderId,
@@ -448,9 +456,19 @@ async function connectShared(
   // The insert policies decide who may create which; anyone else is refused.
   if (!admin && input.workspaceId === null) return { kind: "refused", reason: "forbidden" };
   const workspaceScoped = input.workspaceId !== null;
+  const personalReach =
+    input.workspaceId === null
+      ? null
+      : await connectorPersonalWorkspaceId(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          connectedBySubjectId,
+        });
   // The id is chosen here, not returned: a workspace administrator sees a
   // workspace-scoped connection only once its workspace link exists.
   const createdId = crypto.randomUUID();
+  let reachedPersonal = false;
   try {
     await tx.transaction(async (savepoint) => {
       const write = savepoint as unknown as Database;
@@ -471,6 +489,22 @@ async function connectShared(
       await write.execute(sql`insert into subscription_connection_workspaces
         (account_id, connection_id, workspace_id)
       values (${input.accountId}::uuid, ${createdId}::uuid, ${input.workspaceId}::uuid)`);
+      if (personalReach === null) return;
+      // The connecting person's own Personal workspace, through this one. A
+      // refusal leaves the account connected for this workspace only.
+      try {
+        await write.transaction(async (inner) => {
+          await (inner as unknown as Database).execute(sql`insert into
+            subscription_connection_workspaces (account_id, connection_id, workspace_id,
+              personal_reach_subject_id, personal_reach_via_workspace_id)
+            values (${input.accountId}::uuid, ${createdId}::uuid, ${personalReach}::uuid,
+              ${input.subjectId}, ${input.workspaceId}::uuid)`);
+        });
+        reachedPersonal = true;
+      } catch (error) {
+        const state = nestedPostgresSqlState(error);
+        if (state !== "42501" && state !== "23514") throw error;
+      }
     });
   } catch (error) {
     if (isSubscriptionCoreRlsRefusal(error)) return { kind: "refused", reason: "forbidden" };
@@ -494,9 +528,62 @@ async function connectShared(
     id: created.id,
     isNew: true,
     ownership: "shared",
-    wake,
+    wake:
+      reachedPersonal && personalReach !== null
+        ? {
+            ...wake,
+            workspaceIds: [...(wake.workspaceIds ?? []), personalReach],
+          }
+        : wake,
     version: Number(created.version),
   };
+}
+
+/**
+ * The Personal workspace a new workspace account also reaches: the connecting
+ * person's own, when that person is the signed-in human making this request
+ * (a `user:` subject recorded as the connecting person, never an API key or
+ * service principal) and belongs to the workspace. Null otherwise. Read in
+ * this transaction; the membership read's lifecycle setting is restored.
+ */
+async function connectorPersonalWorkspaceId(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectedBySubjectId: string | null;
+  },
+): Promise<string | null> {
+  if (!personalReachSubject(input.connectedBySubjectId)) return null;
+  if (input.connectedBySubjectId !== input.subjectId) return null;
+  const [member] = await rawRows<{ present: number }>(
+    tx,
+    sql`select 1 as present from workspace_memberships
+      where account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
+        and subject_id = ${input.subjectId} limit 1`,
+  );
+  if (!member) return null;
+  const [prior] = await rawRows<{ lifecycle: string }>(
+    tx,
+    sql`select coalesce(current_setting('opengeni.organization_tenancy_lifecycle', true), '')
+      as lifecycle`,
+  );
+  try {
+    const personal = await namedSubjectPersonalWorkspaceId(tx, {
+      accountId: input.accountId,
+      subjectId: input.subjectId,
+    });
+    return personal === input.workspaceId ? null : personal;
+  } catch (error) {
+    // Without a readable Personal workspace the account still connects here.
+    if (nestedPostgresSqlState(error) === "42501") return null;
+    throw error;
+  } finally {
+    await tx.execute(
+      sql`select set_config('opengeni.organization_tenancy_lifecycle', ${prior?.lifecycle ?? ""}, true)`,
+    );
+  }
 }
 
 export type SubscriptionCoreDisconnectOutcome =

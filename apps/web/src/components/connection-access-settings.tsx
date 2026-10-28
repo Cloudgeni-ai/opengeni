@@ -155,8 +155,21 @@ function samePolicy(a: ModelConnectionAccessPolicy, b: ModelConnectionAccessPoli
     list(a.allowedModels) === list(b.allowedModels) &&
     list(a.allowedWorkspaces) === list(b.allowedWorkspaces) &&
     a.allowPersonalWorkspaces === b.allowPersonalWorkspaces &&
-    list(a.allowedPeople) === list(b.allowedPeople)
+    list(a.allowedPeople) === list(b.allowedPeople) &&
+    (a.connectorPersonalWorkspace ?? false) === (b.connectorPersonalWorkspace ?? false)
   );
+}
+
+/**
+ * The Personal workspace a workspace's own account also reaches, for the
+ * access list: "Your Personal workspace" for the person who connected it,
+ * else theirs by name.
+ */
+export function connectorPersonalLabel(
+  owner: ModelConnectionAccessResponse["connectorPersonalWorkspaceOwner"],
+): string {
+  if (owner?.yours) return "Your Personal workspace";
+  return `Personal workspace of ${owner?.name ?? "the person who connected it"}`;
 }
 
 /** "1 person", "3 people". */
@@ -178,14 +191,21 @@ export function workspacesShort(
     return policy.allowedPeople.length === 0 ? "No one" : peopleCount(policy.allowedPeople.length);
   }
   const personal = personalSupported && policy.allowPersonalWorkspaces;
+  // The connecting person's own Personal workspace, unless every one is included.
+  const connector = !personal && policy.connectorPersonalWorkspace === true;
   const count =
     policy.allowedWorkspaces === null
       ? null
       : new Set([...policy.allowedWorkspaces, ...localWorkspaceIds]).size;
-  if (count === 0) return personal ? "Personal workspaces only" : "No workspaces";
+  if (count === 0)
+    return personal
+      ? "Personal workspaces only"
+      : connector
+        ? "1 Personal workspace"
+        : "No workspaces";
   const shared =
     count === null ? "All workspaces" : count === 1 ? "1 workspace" : `${count} workspaces`;
-  return personal ? `${shared} + Personal` : shared;
+  return personal ? `${shared} + Personal` : connector ? `${shared} + 1 Personal` : shared;
 }
 
 /** The short value for the "Models it can serve" row. */
@@ -255,6 +275,13 @@ export function ConnectionAccessRows({
             access.data!.personalWorkspacesSupported,
             access.data!.localWorkspaceIds,
           )}
+          disabled={!canManage}
+          onOpen={onEdit}
+        />
+      ) : policy.connectorPersonalWorkspace ? (
+        <SettingNavRow
+          label="Also available in"
+          value={connectorPersonalLabel(access.data!.connectorPersonalWorkspaceOwner)}
           disabled={!canManage}
           onOpen={onEdit}
         />
@@ -347,10 +374,26 @@ export function ConnectionAccessFormPage({
     scope === "only" &&
     draft.allowedWorkspaces!.length === 0 &&
     local.length === 0 &&
+    draft.connectorPersonalWorkspace !== true &&
     !(data.personalWorkspacesSupported && draft.allowPersonalWorkspaces),
   );
   const reachesNoOne = scope === "people" && draft!.allowedPeople!.length === 0;
   const keptNote = scope === "people" && !reachesNoOne && local.length > 0;
+  // The connecting person's own Personal workspace: it can be removed, never added.
+  const connectorChoice =
+    draft && data?.policy.connectorPersonalWorkspace ? (
+      <CheckboxField
+        label={connectorPersonalLabel(data.connectorPersonalWorkspaceOwner)}
+        description={
+          draft.connectorPersonalWorkspace === false
+            ? "Once saved, it can't be added back."
+            : undefined
+        }
+        disabled={disabled}
+        checked={draft.connectorPersonalWorkspace !== false}
+        onCheckedChange={(checked) => setDraft({ ...draft, connectorPersonalWorkspace: checked })}
+      />
+    ) : null;
   /** A workspace choice; `allowedPeople` is cleared only when people were saved. */
   const withoutPeople = (policy: ModelConnectionAccessPolicy): ModelConnectionAccessPolicy => {
     const { allowedPeople: _dropped, ...rest } = policy;
@@ -540,7 +583,7 @@ export function ConnectionAccessFormPage({
             ) : null}
             {/* Personal workspaces are their own choice, not one of the shared workspaces above. */}
             {scope === "people" ? null : (
-              <div className="mt-2 border-t border-border pt-4">
+              <div className="mt-2 flex min-w-0 flex-col gap-3 border-t border-border pt-4">
                 {data.personalWorkspacesSupported ? (
                   <CheckboxField
                     label="Personal workspaces"
@@ -559,6 +602,7 @@ export function ConnectionAccessFormPage({
                     checked={false}
                   />
                 )}
+                {draft.allowPersonalWorkspaces ? null : connectorChoice}
               </div>
             )}
             {reachesNoWorkspace ? (
@@ -567,6 +611,13 @@ export function ConnectionAccessFormPage({
               </EmptyChoiceHint>
             ) : null}
           </div>
+        ) : connectorChoice ? (
+          <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
+            <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">
+              Also available in
+            </legend>
+            {connectorChoice}
+          </fieldset>
         ) : null}
         <div className="flex min-w-0 flex-col gap-3">
           <ChoiceCards

@@ -21,6 +21,8 @@ export type ModelConnectionAccess = {
   /** Chosen people (organization membership ids); shared core connections only. */
   allowedPeople?: string[] | null | undefined;
   sharePersonal?: true | undefined;
+  /** Reported (true) while it also reaches its connecting person's Personal workspace; false removes that. */
+  connectorPersonalWorkspace?: boolean | undefined;
   version: number;
 };
 

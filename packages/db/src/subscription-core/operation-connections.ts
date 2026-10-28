@@ -27,6 +27,7 @@ import {
   subscriptionCoreRefreshPolicy,
 } from "./credential-resolver";
 import { SubscriptionCoreError } from "./errors";
+import { liveWorkspaceAssignment } from "./personal-reach";
 import {
   subscriptionCoreOperations,
   subscriptionCoreQuotaBlocksNow,
@@ -641,7 +642,8 @@ async function assignedConnectionIds(
             select 1 from subscription_connection_workspaces assignment
             where assignment.account_id = connection.account_id
               and assignment.connection_id = connection.id
-              and assignment.workspace_id = ${scope.workspaceId}::uuid)))`,
+              and assignment.workspace_id = ${scope.workspaceId}::uuid
+              and ${liveWorkspaceAssignment("assignment")})))`,
   );
   return new Set(rows.map((row) => row.id));
 }

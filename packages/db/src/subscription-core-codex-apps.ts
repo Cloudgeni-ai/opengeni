@@ -29,6 +29,7 @@ import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import { liveWorkspaceAssignment } from "./subscription-core/personal-reach";
 import {
   reserveSubscriptionCoreCodexAppsRequest,
   settleSubscriptionCoreCodexAppsRequest,
@@ -220,7 +221,8 @@ export async function designateSubscriptionCoreCodexApps(
               select 1 from subscription_connection_workspaces assignment
               where assignment.account_id = connection.account_id
                 and assignment.connection_id = connection.id
-                and assignment.workspace_id = ${input.workspaceId}::uuid))) as in_scope
+                and assignment.workspace_id = ${input.workspaceId}::uuid
+                and ${liveWorkspaceAssignment("assignment")}))) as in_scope
         from subscription_connections connection
         where connection.account_id = ${input.accountId}::uuid and connection.provider = 'codex'
           and connection.id = ${connectionId}::uuid`,

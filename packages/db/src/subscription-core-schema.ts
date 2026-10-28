@@ -114,6 +114,14 @@ export const subscriptionConnectionWorkspaces = pgTable(
     accountId: uuid("account_id").notNull(),
     connectionId: uuid("connection_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
+    /**
+     * Set on the one row that gives a workspace's own connection to the
+     * Personal workspace of the person who connected it (migration 1064):
+     * that person, and the shared workspace it came through. It serves only
+     * while they still belong to that workspace.
+     */
+    personalReachSubjectId: text("personal_reach_subject_id"),
+    personalReachViaWorkspaceId: uuid("personal_reach_via_workspace_id"),
   },
   (table) => ({
     assignment: primaryKey({
@@ -124,6 +132,13 @@ export const subscriptionConnectionWorkspaces = pgTable(
       table.accountId,
       table.workspaceId,
       table.connectionId,
+    ),
+    personalReach: check(
+      "subscription_connection_workspaces_personal_reach_chk",
+      sql`(${table.personalReachSubjectId} is null and ${table.personalReachViaWorkspaceId} is null)
+        or (${table.personalReachSubjectId} like 'user:%'
+          and ${table.personalReachViaWorkspaceId} is not null
+          and ${table.personalReachViaWorkspaceId} <> ${table.workspaceId})`,
     ),
   }),
 );

@@ -408,6 +408,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 0907: the invoker-rights trigger that keeps a workspace's own
   // subscription connection serving only that workspace.
   "guard_subscription_workspace_owner_reach()",
+  // Migration 1064: the invoker-rights trigger that drops a person's Personal
+  // workspace reach when their workspace or organization membership ends.
+  "drop_subscription_personal_reach()",
   // Migration 0909: the invoker-rights trigger that mirrors a message event's
   // text into session_message_search_texts (triggers fire without the
   // writing role holding EXECUTE).

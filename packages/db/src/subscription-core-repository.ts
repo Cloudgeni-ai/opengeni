@@ -12,6 +12,7 @@ import type {
 import { quotaAfterRateLimitReset, storedQuotaDocument } from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
+import { liveWorkspaceAssignment } from "./subscription-core/personal-reach";
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -171,9 +172,11 @@ export async function listSubscriptionConnectionsForPlacement(
     workspace_id: string;
   }>(
     db,
-    sql`select connection_id::text as connection_id, workspace_id::text as workspace_id
-      from subscription_connection_workspaces
-      where account_id = ${input.accountId}::uuid`,
+    sql`select assignment.connection_id::text as connection_id,
+        assignment.workspace_id::text as workspace_id
+      from subscription_connection_workspaces assignment
+      where assignment.account_id = ${input.accountId}::uuid
+        and ${liveWorkspaceAssignment("assignment")}`,
   );
   const peopleAssignments = await rawRows<{
     connection_id: string;

@@ -18,8 +18,13 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess, workspacesShort } =
-  await import("./connection-access-settings");
+const {
+  ConnectionAccessFormPage,
+  ConnectionAccessRows,
+  connectorPersonalLabel,
+  useConnectionAccess,
+  workspacesShort,
+} = await import("./connection-access-settings");
 const { modelsScopeLabels, organizationReachLabel } =
   await import("@opengeni/react/app/components/models/models-ui");
 
@@ -638,6 +643,134 @@ test("a refused or failed read says what to do, never the raw API error", async 
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("the connecting person's Personal workspace is listed by whose it is and can be removed, never added", async () => {
+  expect(connectorPersonalLabel({ yours: true, name: null })).toBe("Your Personal workspace");
+  expect(connectorPersonalLabel({ yours: false, name: "Alice" })).toBe(
+    "Personal workspace of Alice",
+  );
+  expect(connectorPersonalLabel({ yours: false, name: null })).toBe(
+    "Personal workspace of the person who connected it",
+  );
+  const owned = {
+    allowedModels: null,
+    allowedWorkspaces: ["team"],
+    allowPersonalWorkspaces: false,
+    connectorPersonalWorkspace: true,
+    version: 1,
+  };
+  expect(workspacesShort(owned, true, ["team"])).toBe("1 workspace + 1 Personal");
+  expect(workspacesShort({ ...owned, allowPersonalWorkspaces: true }, true, ["team"])).toBe(
+    "1 workspace + Personal",
+  );
+  expect(workspacesShort({ ...owned, connectorPersonalWorkspace: undefined }, true, ["team"])).toBe(
+    "1 workspace",
+  );
+
+  for (const yours of [true, false]) {
+    let policy: Record<string, unknown> = {
+      allowedModels: null,
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: false,
+      connectorPersonalWorkspace: true,
+      version: 1,
+    };
+    const writes: Record<string, unknown>[] = [];
+    const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+      requestJson: async (method: string, _path: string, body: Record<string, unknown>) => {
+        if (method === "PUT") {
+          writes.push(structuredClone(body));
+          const { connectorPersonalWorkspace: _removed, ...rest } = body;
+          policy = { ...rest, version: Number(policy.version) + 1 };
+          return policy;
+        }
+        return {
+          policy,
+          models: [{ id: "model-a", label: "Model A" }],
+          workspaces: [],
+          personalWorkspacesSupported: false,
+          ...(policy.connectorPersonalWorkspace
+            ? { connectorPersonalWorkspaceOwner: { yours, name: yours ? null : "Alice" } }
+            : {}),
+        };
+      },
+    });
+    function Page() {
+      const [editing, setEditing] = useState(false);
+      const access = useConnectionAccess({
+        client,
+        workspaceId: "team",
+        kind: "supergrok",
+        connectionId: "account",
+      });
+      return editing ? (
+        <ConnectionAccessFormPage
+          access={access}
+          organization={false}
+          canManage
+          name="Team plan"
+          onClose={() => setEditing(false)}
+        />
+      ) : (
+        <ConnectionAccessRows
+          access={access}
+          organization={false}
+          canManage
+          onEdit={() => setEditing(true)}
+        />
+      );
+    }
+    const label = yours ? "Your Personal workspace" : "Personal workspace of Alice";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    try {
+      await act(async () => root.render(<Page />));
+      await settle();
+      const rows = () =>
+        [...container.querySelectorAll<HTMLElement>('[data-slot="setting-nav-row"]')].map(
+          (row) => row.textContent ?? "",
+        );
+      expect(rows()[0]).toContain("Also available in");
+      expect(rows()[0]).toContain(label);
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[data-slot="setting-nav-row"] button')!.click(),
+      );
+      const box = [...container.querySelectorAll("label")].find(
+        (candidate) => candidate.textContent === label,
+      );
+      expect(box).toBeDefined();
+      const input = document.getElementById(box!.htmlFor) as HTMLInputElement;
+      expect(input.checked).toBe(true);
+      expect(container.textContent).not.toContain("Once saved, it can't be added back.");
+      await act(async () => input.click());
+      expect(container.textContent).toContain("Once saved, it can't be added back.");
+      const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === "Save",
+      )!;
+      expect(submit.disabled).toBe(false);
+      await act(async () => submit.closest("form")!.requestSubmit());
+      await settle();
+      await settle();
+      expect(writes).toEqual([
+        {
+          allowedModels: null,
+          allowedWorkspaces: null,
+          allowPersonalWorkspaces: false,
+          connectorPersonalWorkspace: false,
+          version: 1,
+        },
+      ]);
+      // Removed: the row is gone and nothing offers to add it back.
+      expect(rows().some((row) => row.includes("Also available in"))).toBe(false);
+      expect(container.textContent).not.toContain(label);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   }
 });
 

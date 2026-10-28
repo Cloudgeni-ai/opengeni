@@ -23,6 +23,12 @@ export const ModelConnectionAccessPolicy = /* @__PURE__ */ defineSchema(() =>
       allowedPeople: z.array(primitives.uuid).max(1000).nullable().optional(),
       /** Explicit owner consent to convert a personal subscription into a shared account. */
       sharePersonal: z.literal(true).optional(),
+      /**
+       * True while a workspace's own subscription also reaches the Personal
+       * workspace of the person who connected it there (reported only then).
+       * Send false to remove that Personal workspace; it can't be added here.
+       */
+      connectorPersonalWorkspace: primitives.boolean.optional(),
       version: primitives.positiveInteger,
     })
     .strict(),
@@ -61,5 +67,13 @@ export const ModelConnectionAccessResponse = /* @__PURE__ */ defineSchema(() =>
     managedByWorkspaceId: z.string().uuid().nullable().optional(),
     /** Exact personal owner is also an organization administrator; sharing requires explicit consent. */
     personalSharingSupported: primitives.optionalBoolean,
+    /**
+     * Whose Personal workspace the account also reaches, for the access list:
+     * `yours` when it is the viewer's, else the connecting person's name in
+     * the workspace (null when unknown). Absent when it reaches none that way.
+     */
+    connectorPersonalWorkspaceOwner: z
+      .object({ yours: primitives.boolean, name: primitives.nullableString })
+      .optional(),
   }),
 );

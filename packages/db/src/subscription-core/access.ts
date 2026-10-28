@@ -6,10 +6,12 @@
  *
  * Every shared connection has one owner (D-50, SUB-OWN-04): the
  * organization, or one shared workspace whose own connection reaches only
- * that workspace. The organization route reads all of them; it changes a
+ * that workspace (and, since migration 1064, possibly the Personal workspace
+ * of the person who connected it there). The organization route reads all of them; it changes a
  * workspace's own connection only by giving it more reach, which makes it the
  * organization's. The workspace route reads and edits only the models of the
- * workspace's own connection. The organization route also lets an exact
+ * workspace's own connection, and can take the connecting person's Personal
+ * workspace off it. The organization route also lets an exact
  * personal owner who is an organization administrator explicitly share that
  * named connection. It never inventories personal connections.
  *
@@ -41,6 +43,12 @@ export type SubscriptionCoreAccessPolicy = {
   /** The chosen people (organization membership ids), or null when not limited to people. */
   allowedPeople?: string[] | null | undefined;
   sharePersonal?: true | undefined;
+  /**
+   * The connection also reaches the Personal workspace of the person who
+   * connected it in its workspace (true, reported only then). False removes
+   * that reach; it is never added here.
+   */
+  connectorPersonalWorkspace?: boolean | undefined;
   version: number;
 };
 
@@ -64,6 +72,12 @@ export type SubscriptionCoreAccess = {
    */
   peopleSupported: boolean;
   personalSharingSupported?: boolean;
+  /**
+   * Whose Personal workspace the connection also reaches (the person who
+   * connected it in its workspace), for the access list: never the
+   * workspace itself. Absent when it reaches none that way.
+   */
+  connectorPersonalWorkspace?: { yours: boolean; name: string | null } | undefined;
 };
 
 /** A requested access policy names a workspace outside the organization's shared workspaces. */
@@ -215,6 +229,51 @@ async function organizationSharedWorkspaceIds(tx: Database, accountId: string) {
   return new Set(rows.map((row) => row.workspace_id));
 }
 
+type PersonalReachRow = {
+  workspace_id: string;
+  subject_id: string;
+  name: string | null;
+};
+
+/**
+ * The live Personal-workspace reach of a connection (migration 1064): the row
+ * whose person still belongs to the workspace it came through, with that
+ * person's label in that workspace. Read under the route's RLS: in a
+ * workspace only that person and its administrators see it.
+ */
+async function connectorPersonalReach(
+  tx: Database,
+  accountId: string,
+  connectionId: string,
+): Promise<PersonalReachRow | null> {
+  const [row] = await rawRows<PersonalReachRow>(
+    tx,
+    sql`select assignment.workspace_id::text as workspace_id,
+        assignment.personal_reach_subject_id as subject_id, member.subject_label as name
+      from subscription_connection_workspaces assignment
+      join workspace_memberships member on member.account_id = assignment.account_id
+        and member.workspace_id = assignment.personal_reach_via_workspace_id
+        and member.subject_id = assignment.personal_reach_subject_id
+      where assignment.account_id = ${accountId}::uuid
+        and assignment.connection_id = ${connectionId}::uuid
+        and assignment.personal_reach_subject_id is not null
+      order by assignment.workspace_id
+      limit 1`,
+  );
+  return row ?? null;
+}
+
+function connectorPersonalWorkspaceOf(
+  reach: PersonalReachRow | null,
+  target: SubscriptionCoreAccessTarget,
+): Pick<SubscriptionCoreAccess, "connectorPersonalWorkspace"> {
+  if (!reach) return {};
+  const yours = reach.subject_id === target.subjectId;
+  return {
+    connectorPersonalWorkspace: { yours, name: yours ? null : reach.name },
+  };
+}
+
 async function projection(
   tx: Database,
   provider: SubscriptionCoreProvider,
@@ -222,6 +281,9 @@ async function projection(
   connection: AccessRow,
 ): Promise<SubscriptionCoreAccess> {
   const version = Number(connection.access_version);
+  const personalReach = await connectorPersonalReach(tx, target.accountId, connection.id);
+  const connectorPersonalWorkspace = connectorPersonalWorkspaceOf(personalReach, target);
+  const reachPolicy = personalReach ? { connectorPersonalWorkspace: true } : {};
   // A workspace's own account is never offered to other workspaces from there.
   if (target.workspaceId !== null)
     return {
@@ -230,11 +292,13 @@ async function projection(
         allowedWorkspaces: null,
         allowPersonalWorkspaces: false,
         allowedPeople: null,
+        ...reachPolicy,
         version,
       },
       localWorkspaceIds: [],
       managedByWorkspaceId: null,
       peopleSupported: false,
+      ...connectorPersonalWorkspace,
     };
   const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
   const owner = connection.managed_by_workspace_id;
@@ -243,6 +307,7 @@ async function projection(
     localWorkspaceIds: owner !== null && shared.has(owner) ? [owner] : [],
     managedByWorkspaceId: connection.managed_by_workspace_id,
     peopleSupported: connection.managed_by_workspace_id === null,
+    ...connectorPersonalWorkspace,
   };
   if (connection.scope_kind === "organization")
     return {
@@ -306,6 +371,7 @@ async function projection(
       allowedWorkspaces,
       allowPersonalWorkspaces: connection.allow_personal_workspaces,
       allowedPeople: null,
+      ...reachPolicy,
       version,
     },
   };
@@ -429,8 +495,13 @@ async function chosenPeople(tx: Database, accountId: string, connectionId: strin
  *   today's when the choice is "all, including new ones") plus every Personal
  *   workspace when they are allowed, with the reach kept for later ones.
  * A workspace's own connection stays its own while it reaches only that
- * workspace; any other reach makes it the organization's (D-50). In a
- * workspace, only the models of the workspace's own connection change.
+ * workspace and, at most, the Personal workspace of the person who connected
+ * it there; any other reach makes it the organization's (D-50). That Personal
+ * workspace stays unless the policy removes it (`connectorPersonalWorkspace:
+ * false`), chooses people or the whole organization, or allows every Personal
+ * workspace (it is then an ordinary assignment). In a workspace, only the
+ * models of the workspace's own connection change, and that Personal
+ * workspace can be removed.
  */
 export async function updateSubscriptionCoreConnectionAccess(
   db: Database,
@@ -489,6 +560,7 @@ export async function updateSubscriptionCoreConnectionAccess(
       return null;
     const id = current.id;
     const models = textArray(policy.allowedModels);
+    const removeReach = policy.connectorPersonalWorkspace === false;
     if (target.workspaceId !== null) {
       const [updated] = await rawRows<AccessRow>(
         tx,
@@ -498,6 +570,13 @@ export async function updateSubscriptionCoreConnectionAccess(
           returning ${ACCESS_COLUMNS}`,
       );
       if (!updated) return null;
+      // The person who connected it, or the workspace's administrators.
+      if (removeReach)
+        await tx.execute(sql`delete from subscription_connection_workspaces assignment
+          where assignment.account_id = ${target.accountId}::uuid
+            and assignment.connection_id = ${id}::uuid
+            and assignment.personal_reach_subject_id is not null
+            and assignment.personal_reach_via_workspace_id = ${target.workspaceId}::uuid`);
       return await projection(tx, provider, target, updated);
     }
 
@@ -558,6 +637,9 @@ export async function updateSubscriptionCoreConnectionAccess(
             ...(policy.allowPersonalWorkspaces ? personal : []),
           ],
     );
+    // The connecting person's Personal workspace stays while the reach stays
+    // chosen workspaces without every Personal workspace.
+    const keepReach = !removeReach && people === null && !policy.allowPersonalWorkspaces;
     // The owner changes first, so the reach written next is checked against
     // the connection's new owner.
     const [updated] = await rawRows<AccessRow>(
@@ -575,7 +657,15 @@ export async function updateSubscriptionCoreConnectionAccess(
     await tx.execute(sql`delete from subscription_connection_workspaces assignment
       where assignment.account_id = ${target.accountId}::uuid
         and assignment.connection_id = ${id}::uuid
-        and assignment.workspace_id <> all(${assigned})`);
+        and assignment.workspace_id <> all(${assigned})
+        and (assignment.personal_reach_subject_id is null or not ${keepReach}::boolean)`);
+    // Every Personal workspace chosen: the reach is an ordinary assignment now.
+    await tx.execute(sql`update subscription_connection_workspaces assignment
+      set personal_reach_subject_id = null, personal_reach_via_workspace_id = null
+      where assignment.account_id = ${target.accountId}::uuid
+        and assignment.connection_id = ${id}::uuid
+        and assignment.personal_reach_subject_id is not null
+        and assignment.workspace_id = any(${assigned})`);
     await tx.execute(sql`insert into subscription_connection_workspaces
         (account_id, connection_id, workspace_id)
       select ${target.accountId}::uuid, ${id}::uuid, workspace_id

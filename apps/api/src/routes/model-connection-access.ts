@@ -269,6 +269,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 ...(coreAccess.personalSharingSupported ? { personalSharingSupported: true } : {}),
               }
             : {}),
+          // The connecting person's own Personal workspace, named only for the list.
+          ...(coreAccess?.connectorPersonalWorkspace
+            ? {
+                connectorPersonalWorkspaceOwner: coreAccess.connectorPersonalWorkspace,
+              }
+            : {}),
         }),
       );
     });

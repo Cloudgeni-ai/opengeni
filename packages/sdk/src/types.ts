@@ -10728,6 +10728,11 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * True while a workspace's own subscription also reaches the Personal
+   * workspace of the person who connected it there. Send false to remove it.
+   */
+  connectorPersonalWorkspace?: boolean;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -10744,6 +10749,8 @@ export type ModelConnectionAccessResponse = {
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId?: string | null;
   personalSharingSupported?: boolean;
+  /** Whose Personal workspace the account also reaches: the viewer's (`yours`), or the connecting person's. */
+  connectorPersonalWorkspaceOwner?: { yours: boolean; name: string | null };
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";

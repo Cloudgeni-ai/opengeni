@@ -384,6 +384,10 @@ describe("the owner-only routines' predicates (0735)", () => {
   // 0846 adds an exact independently leased title-operation branch to the
   // credential target only; session-title-operations-postgres.test.ts exercises
   // source settlement, holder reclamation and live personal-authority denial.
+  // 1064 adds, to the credential target's workspace-assignment check only, that
+  // a connecting person's Personal-workspace row serves while they still belong
+  // to the workspace it came through; subscription-core-connector-personal-
+  // reach-postgres.test.ts exercises it.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
       "ae583ca6bf31f1ef2ac97f8be27bfde5daec12c7cd16fba9d5e5d2507926585d",
@@ -402,7 +406,7 @@ describe("the owner-only routines' predicates (0735)", () => {
     "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
       "9765ac89bbe2cb5a403999d7bd1494787fb9e502a36ceb790a136d99d7c6058b",
     "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
-      "03c3db42c92513e7452ba8eedc570bcfe53b38d0cbc605111d0532fb39e66aba",
+      "e8d061a712ed46d310bc088080275c765d231150a9e51a274e53611f412fe5cb",
   };
   type Routine = { identity: string; name: string; body: string };
   const liveRoutines = () => shared.admin<Routine[]>`
