@@ -288,14 +288,6 @@ Reconnect uses that same binding. Moving a Teams organization to a different
 workspace, or replacing the Teams organization bound to a workspace, is not supported.
 The retained binding preserves existing conversation and delivery history.
 
-Authenticated inbound diagnostics record fixed rejection reasons, bounded schema
-paths and attachment counts (including the count of HTML representations), without
-message content, provider identifiers, URLs or credentials. These records run only
-after Connector authentication and help distinguish ignored activity shape from
-rollout, bot identity and installer-policy denials. They do not prove a reply was
-delivered. HTML representations remain rejected with other attachments until a
-separately tested message-normalization change admits them.
-
 ## Approved group chats
 
 Group chats are opt-in through `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS`:
@@ -324,3 +316,11 @@ there remains a provider-side race between the last lookup and sending. Teams
 may also expose already-posted chat history to members added later. Use approved
 internal groups whose participants may share this workspace's content; this is
 not a replacement for Teams history-sharing policy.
+
+Authenticated inbound diagnostics record fixed rejection reasons, bounded schema
+paths and attachment counts (including the count of HTML representations), without
+message content, provider identifiers, URLs or credentials. These records run only
+after Connector authentication and help distinguish ignored activity shape from
+rollout, bot identity and installer-policy denials. They do not prove a reply was
+delivered. HTML representations remain rejected with other attachments until a
+separately tested message-normalization change admits them.
