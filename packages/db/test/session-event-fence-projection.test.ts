@@ -14,10 +14,13 @@ import {
   getSession,
   listTurnOpenSuffixToolCalls,
   markSessionTurnModelTransportHttpOnly,
+  mutateSessionControlInTransaction,
+  mutateWorkspaceControlInTransaction,
   registerPendingSessionToolCall,
   setSessionLastInputTokensForTurnAttempt,
   lockTurnAttemptWriteFenceTx,
   withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
 } from "../src/index";
 import { submitTestHumanPrompt } from "../../../test/integration/helpers/session-control";
 import type { SessionEventMutation } from "../src/index";
@@ -35,7 +38,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture() {
+async function fixture(withParent = false) {
   const id = crypto.randomUUID();
   const {
     workspaceGrants: [grant],
@@ -49,9 +52,23 @@ async function fixture() {
     subjectId: id,
   });
   if (!grant) throw new Error("Missing fixture grant");
+  const parent = withParent
+    ? await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "Parent",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      })
+    : undefined;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    ...(parent ? { parentSessionId: parent.id } : {}),
     initialMessage: "exact input",
     instructions: "full-row caller instructions",
     resources: [],
@@ -80,6 +97,7 @@ async function fixture() {
   });
   if (claim.action !== "claimed") throw new Error("Missing fixture claim");
   return {
+    subjectId: grant.subjectId,
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
@@ -137,6 +155,94 @@ test("compact and full projections use identical fence decisions; full callers r
       expect(narrow.reason).toBe(full.reason);
     });
   }
+});
+
+test("only NO KEY UPDATE roots reuse their locked control row", async () => {
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  for (const withParent of [false, true]) {
+    const input = await fixture(withParent);
+    for (const rowProjection of ["full", "event"] as const) {
+      for (const sessionLock of ["no_key_update", "key_share"] as const) {
+        const queries: string[] = [];
+        driver.options.debug = (_connection, query) => queries.push(query);
+        try {
+          await withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+            const options = { ...input, sessionLock };
+            const result =
+              rowProjection === "event"
+                ? await lockTurnAttemptWriteFenceTx(tx, { ...options, rowProjection })
+                : await lockTurnAttemptWriteFenceTx(tx, options);
+            expect(result.allowed).toBe(true);
+          });
+          expect(queries.filter((query) => query.includes("ancestry as"))).toHaveLength(
+            withParent || sessionLock === "key_share" ? 1 : 0,
+          );
+        } finally {
+          driver.options.debug = false;
+        }
+      }
+    }
+  }
+});
+
+test("root fences retain live pause precedence, resume overrides and interruption rejection", async () => {
+  const input = await fixture();
+  const compare = async () =>
+    withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+      const reference = await lockTurnAttemptWriteFenceTx(tx, {
+        ...input,
+        sessionLock: "key_share",
+      });
+      for (const rowProjection of ["full", "event"] as const) {
+        const reused =
+          rowProjection === "event"
+            ? await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection })
+            : await lockTurnAttemptWriteFenceTx(tx, input);
+        expect(reused.allowed).toBe(reference.allowed);
+        if (!reused.allowed && !reference.allowed) expect(reused.reason).toBe(reference.reason);
+      }
+    });
+  await compare();
+  for (const [target, action] of [
+    ["workspace", "pause"],
+    ["session", "resume"],
+    ["workspace", "pause"],
+    ["workspace", "resume"],
+    ["session", "pause"],
+    ["session", "resume"],
+  ] as const) {
+    await withWorkspaceSessionActivityRls(client.db, input.workspaceId, async (tx) => {
+      const command = {
+        ...input,
+        actor: { type: "human" as const, subjectId: input.subjectId },
+        operationKey: crypto.randomUUID(),
+        action,
+      };
+      if (target === "workspace") await mutateWorkspaceControlInTransaction(tx, command);
+      else await mutateSessionControlInTransaction(tx, command);
+    });
+    await compare();
+  }
+});
+
+test("the reused root row cannot change until its write fence releases the transaction", async () => {
+  const input = await fixture();
+  await withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+    expect(
+      (await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" })).allowed,
+    ).toBe(true);
+    await expect(
+      shared.admin.begin(async (sql) => {
+        await sql`set local lock_timeout = '50ms'`;
+        await sql`update sessions set control_version = control_version + 1 where id = ${input.sessionId}`;
+      }),
+    ).rejects.toMatchObject({ code: "55P03" });
+  });
+  // The failed contender has rolled back; neither connection retains a lock.
+  await shared.admin.begin(async (sql) => {
+    await sql`set local lock_timeout = '500ms'`;
+    await sql`update sessions set control_version = control_version + 1 where id = ${input.sessionId}`;
+  });
 });
 
 test("identity-only mutations use the narrow fence and still reject a replaced attempt", async () => {

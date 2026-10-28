@@ -727,6 +727,11 @@ const eventSessionColumns = {
   executionAuthorityEpoch: schema.sessions.executionAuthorityEpoch,
   visibility: schema.sessions.visibility,
   ownerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+  parentSessionId: schema.sessions.parentSessionId,
+  directControlState: schema.sessions.directControlState,
+  directPauseRevision: schema.sessions.directPauseRevision,
+  subtreeRunOverrideRevision: schema.sessions.subtreeRunOverrideRevision,
+  controlVersion: schema.sessions.controlVersion,
 };
 const eventTurnColumns = {
   id: schema.sessionTurns.id,
@@ -1967,6 +1972,17 @@ export async function evaluateSessionWriteAdmissionControl(
   options: {
     lock?: WorkspaceControlLockMode;
     workspaceControl?: WorkspaceControlRow | undefined;
+    /** Same-transaction NO KEY UPDATE row; KEY SHARE is not sufficient. */
+    lockedSession?: Pick<
+      typeof schema.sessions.$inferSelect,
+      | "id"
+      | "workspaceId"
+      | "parentSessionId"
+      | "directControlState"
+      | "directPauseRevision"
+      | "subtreeRunOverrideRevision"
+      | "controlVersion"
+    >;
   } = {},
 ): Promise<SessionWriteAdmissionControl> {
   if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
@@ -1977,6 +1993,41 @@ export async function evaluateSessionWriteAdmissionControl(
   const workspace =
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
+  const locked = options.lockedSession;
+  if (locked && (locked.id !== sessionId || locked.workspaceId !== workspaceId)) {
+    throw new SessionControlInvariantError("Locked session does not match write admission scope");
+  }
+  if (locked?.parentSessionId === null) {
+    // A locked root is its complete ancestry. Keep the same revision validation
+    // and blocker precedence as projectEffectiveControl, without re-reading the
+    // row or building display names, resume options and settlement projections.
+    const workspaceRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
+    const pauseRevision = asSafeRevision(locked.directPauseRevision, "direct pause revision");
+    const overrideRevision = asSafeRevision(
+      locked.subtreeRunOverrideRevision,
+      "subtree run override revision",
+    );
+    const controlVersion = asSafeRevision(locked.controlVersion, "session control version")!;
+    const workspacePauseRevision = asSafeRevision(
+      workspace.workspacePauseRevision,
+      "workspace pause revision",
+    );
+    if (workspace.workspaceState === "paused" && workspacePauseRevision === null) {
+      throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
+    }
+    const primaryBlockerKind =
+      locked.directControlState === "paused" && pauseRevision !== null
+        ? "session"
+        : workspace.workspaceState === "paused" &&
+            !(overrideRevision !== null && overrideRevision > workspacePauseRevision!)
+          ? "workspace"
+          : null;
+    return {
+      state: primaryBlockerKind === null ? "active" : "paused",
+      controlVersion: Math.max(workspaceRevision, controlVersion),
+      primaryBlockerKind,
+    };
+  }
   const projected = projectEffectiveControl(
     workspace,
     sessionId,
