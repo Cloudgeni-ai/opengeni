@@ -4,8 +4,8 @@
 -- activation path, so a clear keeps the actor, reason, activation version and
 -- history every other change has, and an earlier version can be restored
 -- with the existing rollback. An active empty revision means no policy:
---   1. a revision is either exactly '' or text that is not blank. Whitespace
---      only is still refused; the API stores blank input as ''. The new check
+--   1. a revision is either exactly '' or text that is not only spaces (the
+--      old btrim rule); the API stores blank human input as ''. The new check
 --      is weaker than the old one, so it is added NOT VALID here and
 --      validated in 1086 without a long lock.
 --   2. accepted-turn snapshots leave out an active empty revision, so that

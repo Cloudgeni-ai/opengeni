@@ -146,12 +146,7 @@ export const WorkspaceInstructionPolicyRevision = /* @__PURE__ */ defineSchema((
     workspaceId: primitives.uuid,
     ...targetShape,
     /** Empty text is a cleared policy: active, it adds nothing to prompts. */
-    content: primitives.string
-      .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
-      .refine(
-        (value) => value === "" || value.trim().length > 0,
-        "instruction policy content is either empty or not blank",
-      ),
+    content: primitives.string.max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
     provenance: WorkspaceInstructionPolicyProvenance,
     supersedesRevisionId: primitives.nullableUuid,
     createdBySubjectId: primitives.nonEmptyString,
@@ -294,8 +289,8 @@ export const CreateWorkspaceInstructionPolicyDraftRequest = /* @__PURE__ */ defi
       kind: WorkspaceInstructionPolicyKind,
       scope: WorkspaceInstructionPolicyScope,
       roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
-      // Empty (or blank) text clears the policy: it is stored as "" and, once
-      // activated, the target adds nothing to prompts.
+      // Empty (or blank) human text clears the policy: it is stored as "" and,
+      // once activated, the target adds nothing to prompts.
       content: primitives.string
         .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
         .transform((value) => (value.trim().length > 0 ? value : "")),
@@ -306,7 +301,16 @@ export const CreateWorkspaceInstructionPolicyDraftRequest = /* @__PURE__ */ defi
         .default(null),
       supersedesRevisionId: primitives.nullableUuid.default(null),
     })
-    .superRefine(validateTarget),
+    .superRefine(validateTarget)
+    .superRefine((value, context) => {
+      if (value.content === "" && value.provenanceSource !== "human") {
+        context.addIssue({
+          code: "custom",
+          path: ["content"],
+          message: "only a human draft may be empty",
+        });
+      }
+    }),
 );
 export type CreateWorkspaceInstructionPolicyDraftRequest = z.infer<
   typeof CreateWorkspaceInstructionPolicyDraftRequest

@@ -43,14 +43,14 @@ test("saving empty text clears the instructions and any earlier-settings overrid
   const { client, calls } = recordingClient();
   const saved = await createWorkspaceInstructionSave(client, "workspace", "  \n", head, true).run();
   expect(saved.content).toBe("");
-  expect(calls.map(([name]) => name)).toEqual(["draft", "activate", "workspace"]);
-  expect(calls[0]?.[1]).toMatchObject({ content: "", supersedesRevisionId: "initial" });
-  expect(calls[1]?.[1]).toMatchObject({
+  expect(calls.map(([name]) => name)).toEqual(["workspace", "draft", "activate"]);
+  expect(calls[0]?.[1]).toEqual({ agentInstructions: null });
+  expect(calls[1]?.[1]).toMatchObject({ content: "", supersedesRevisionId: "initial" });
+  expect(calls[2]?.[1]).toMatchObject({
     expectedCurrentRevisionId: "initial",
     expectedActivationVersion: 1,
     reason: "Cleared by a workspace admin from Knowledge",
   });
-  expect(calls[2]?.[1]).toEqual({ agentInstructions: null });
 });
 
 test("saving text never touches the earlier-settings override", async () => {

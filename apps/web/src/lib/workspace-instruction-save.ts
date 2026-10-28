@@ -56,15 +56,17 @@ export function createWorkspaceInstructionSave(
       );
     },
     async run() {
+      // Remove the override first: if that is refused, nothing has changed,
+      // and while a policy with text is active the override never applies.
+      if (cleared && clearLegacy) {
+        await client.updateWorkspace(workspaceId, { agentInstructions: null });
+      }
       const draft = await client.createWorkspaceInstructionPolicyDraft(workspaceId, draftRequest);
       const activated = await client.activateWorkspaceInstructionPolicyRevision(
         workspaceId,
         draft.id,
         activationRequest,
       );
-      if (cleared && clearLegacy) {
-        await client.updateWorkspace(workspaceId, { agentInstructions: null });
-      }
       return { head: activated.head, content: draft.content };
     },
   };

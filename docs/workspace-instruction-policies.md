@@ -182,14 +182,17 @@ head version.
 
 ### Clearing a policy
 
-A target is cleared by activating an empty revision. A draft request with empty
-or blank content stores exactly `''`; migration
+A target is cleared by activating an empty revision. Only a human draft may be
+empty, and a human draft with blank content stores exactly `''`. Migration
 `1085_workspace_instruction_policy_clear.sql` relaxes the revision content check
-to "exactly empty, or not blank" (whitespace-only content is still refused at
-the database), and `1086_validate_workspace_instruction_policy_content.sql`
-validates it. The clear then uses the ordinary activation: it is CAS-fenced,
+to "exactly empty, or not only spaces" (the old `btrim` rule; text of only
+newlines or tabs was and stays storable through agent edits), and
+`1086_validate_workspace_instruction_policy_content.sql` validates it. Response
+schemas accept any stored content. The clear then uses the ordinary activation: it is CAS-fenced,
 records the actor and reason, advances the activation version, and stays in
 history, so rollback can restore any earlier version.
+
+Company Brain packages leave empty revisions out: a clear is not guidance.
 
 An active empty revision means no policy. Accepted-turn snapshots leave it out,
 so that target composes nothing, exactly as when it has no head. The agent
