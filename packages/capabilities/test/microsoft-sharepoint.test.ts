@@ -206,6 +206,9 @@ test("SharePoint search may only request reviewed SharePoint entity types", asyn
     { requests: [{ entityTypes: ["driveItem"] }, { entityTypes: ["chatMessage"] }] },
     { requests: [{ entityTypes: ["driveItem", "event"] }] },
     { requests: [{ query: { queryString: "no types" } }] },
+    { requests: [{ entityTypes: ["driveItem"], EntityTypes: ["message"] }] },
+    { requests: [{ entityTypes: ["driveItem"] }], Requests: [{ entityTypes: ["message"] }] },
+    { requests: ["driveItem"] },
     { requests: [] },
     "not an object",
   ]) {

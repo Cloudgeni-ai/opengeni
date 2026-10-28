@@ -696,7 +696,15 @@ export function filterOpenApiDocumentForDefinition(
                 method,
                 {
                   ...reviewed,
-                  ...(description ? { description } : {}),
+                  // Reviewed guidance is long; keep a short name when the provider has no summary.
+                  ...(description
+                    ? {
+                        description,
+                        ...(typeof reviewed.summary === "string" && reviewed.summary
+                          ? {}
+                          : { summary: `${method.toUpperCase()} ${path}` }),
+                      }
+                    : {}),
                   ...(odataSkipToken
                     ? {
                         parameters: [

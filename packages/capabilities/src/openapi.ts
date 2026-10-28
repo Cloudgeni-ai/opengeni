@@ -480,15 +480,28 @@ function assertSearchEntityTypes(
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return reject('Send the search as a JSON object body: {"requests":[...]}.');
   }
+  // The provider may read property names case-insensitively, so a second
+  // spelling must never smuggle in entity types the guard did not check.
+  const unexpected = Object.keys(body).filter((key) => key !== "requests");
+  if (unexpected.length > 0) {
+    return reject(`The search body may only contain requests, not ${unexpected.join(", ")}.`);
+  }
   const requests = (body as Record<string, unknown>).requests;
   if (!Array.isArray(requests) || requests.length === 0) {
     return reject("The search body needs a non-empty requests array.");
   }
   for (const request of requests) {
-    const entityTypes =
-      typeof request === "object" && request !== null && !Array.isArray(request)
-        ? (request as Record<string, unknown>).entityTypes
-        : undefined;
+    if (typeof request !== "object" || request === null || Array.isArray(request)) {
+      return reject("Every search request must be an object.");
+    }
+    if (
+      Object.keys(request).some(
+        (key) => key !== "entityTypes" && key.toLowerCase() === "entitytypes",
+      )
+    ) {
+      return reject("Spell the search field exactly entityTypes.");
+    }
+    const entityTypes = (request as Record<string, unknown>).entityTypes;
     if (!Array.isArray(entityTypes) || entityTypes.length === 0) {
       return reject("Every search request needs a non-empty entityTypes array.");
     }
