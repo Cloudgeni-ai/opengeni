@@ -35,6 +35,19 @@ describe("which workspaces can use a new organization account", () => {
     ).toEqual({ allowedWorkspaces: ["w1"], allowPersonalWorkspaces: false });
   });
 
+  test("organization Claude subscriptions can be offered to Personal workspaces, like Codex and SuperGrok", () => {
+    // The shared subscription core serves an organization Claude account in
+    // Personal workspaces, and the access route reports it as supported.
+    for (const kind of ["codex", "supergrok", "claude_subscription"] as const)
+      expect(personalWorkspacesSupported(kind)).toBe(true);
+    expect(
+      audiencePolicy(
+        { kind: "selected", workspaceIds: ["w1"], personalWorkspaces: true },
+        "claude_subscription",
+      ),
+    ).toEqual({ allowedWorkspaces: ["w1"], allowPersonalWorkspaces: true });
+  });
+
   test("an empty selection can't be connected", () => {
     expect(
       audienceBlockedReason({ kind: "selected", workspaceIds: [], personalWorkspaces: false }),
