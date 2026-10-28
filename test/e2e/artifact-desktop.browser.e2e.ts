@@ -180,6 +180,15 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
         expect(await page.evaluate(() => document.documentElement.dataset.desktop ?? null)).toBe(
           label === "macos-app" ? "macos" : null,
         );
+        // The account menu offers the desktop app download only outside it,
+        // by the same decision as the layout.
+        expect(
+          await page.evaluate(() =>
+            (
+              window as unknown as { opengeniFixture: { offersDesktopDownload(): boolean } }
+            ).opengeniFixture.offersDesktopDownload(),
+          ),
+        ).toBe(label !== "macos-app");
         await page.getByRole("button", { name: "Open Site full screen" }).click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(true);
         const back = page.getByRole("button", { name: "Back", exact: true });
@@ -221,6 +230,25 @@ test("the macOS app's full-window Site Back stays clickable without the shell br
             await popup.evaluate(() => document.documentElement.dataset.desktop ?? null),
           ).toBeNull();
           await popup.close();
+          // So does one the app opens with no handle back (`openBlankTab`,
+          // as checkout and GitHub settings do) once it reaches the app.
+          const [blank] = await Promise.all([
+            context.waitForEvent("page"),
+            page.evaluate(() => {
+              const tab = (
+                window as unknown as { opengeniFixture: { openBlankTab(): Window | null } }
+              ).opengeniFixture.openBlankTab();
+              if (tab) tab.location.href = "/test/artifact-desktop.html";
+            }),
+          ]);
+          await blank
+            .getByRole("button", { name: "Open Site full screen" })
+            .waitFor({ timeout: 90_000 });
+          expect(await blank.evaluate(() => window.opener)).toBeNull();
+          expect(
+            await blank.evaluate(() => document.documentElement.dataset.desktop ?? null),
+          ).toBeNull();
+          await blank.close();
         }
         expect(errors).toEqual([]);
         await context.close();

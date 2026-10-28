@@ -12,8 +12,16 @@ import {
   type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
 
+import { reportDesktopBridgeMissing } from "./client-signals";
+
 export const desktopBridge: DesktopBridge | null =
   typeof window === "undefined" ? null : getDesktopBridge();
+
+/**
+ * The name a window this app opens without an opener handle carries
+ * (`openBlankTab`), so its page still knows it is not the app's own window.
+ */
+export const OPENED_WINDOW_NAME = "opengeni-opened-window";
 
 /**
  * The platform of the Opengeni desktop app from its user agent, which
@@ -27,19 +35,55 @@ export function desktopPlatformFromUserAgent(userAgent: string): DesktopPlatform
   return "linux";
 }
 
+/** The desktop app's version from its user agent (`Opengeni/<version>`), or null. */
+export function desktopAppVersionFromUserAgent(userAgent: string): string | null {
+  return /\bOpengeni\/(\d[^\s]*)\s.*\bElectron\/\d/u.exec(userAgent)?.[1] ?? null;
+}
+
+/** The parts of a window that decide whether it is the desktop app's own. */
+export type DesktopWindowView = {
+  opener: unknown;
+  top: unknown;
+  name: string;
+  navigator: { userAgent: string };
+};
+
 /**
- * The desktop app's platform. The bridge says so; without it (a page the
- * shell's preload didn't reach) the app's user agent still does, so the page
- * keeps room for the native window controls drawn over it. Capabilities come
- * only from the bridge. A window the page opened (sign-in and connect flows)
- * has the system title bar and no bridge, so it keeps the web layout; so does
- * a page in a frame.
+ * The desktop app's platform in a window. The bridge says so; without it (a
+ * page the shell's preload didn't reach) the app's user agent still does, so
+ * the page keeps room for the native window controls drawn over it.
+ * Capabilities come only from the bridge. A window the page opened (sign-in
+ * and connect flows, `openBlankTab`) has the system title bar and no bridge,
+ * so it keeps the web layout; so does a page in a frame.
  */
+export function desktopPlatformIn(
+  bridge: DesktopBridge | null,
+  view: DesktopWindowView,
+): DesktopPlatform | null {
+  if (bridge) return bridge.platform;
+  if (view.opener || view.top !== view || view.name === OPENED_WINDOW_NAME) return null;
+  return desktopPlatformFromUserAgent(view.navigator.userAgent);
+}
+
+/** The desktop app's platform for this page; see `desktopPlatformIn`. */
 export const desktopPlatform: DesktopPlatform | null =
-  desktopBridge?.platform ??
-  (typeof window === "undefined" || window.opener || window.top !== window
-    ? null
-    : desktopPlatformFromUserAgent(navigator.userAgent));
+  typeof window === "undefined" ? null : desktopPlatformIn(desktopBridge, window);
+
+/**
+ * Count once when the page is the desktop app's own window by its user agent
+ * but the shell's bridge is missing, so we learn how often and where that
+ * happens. Call after the client signal reporter is installed; while the page
+ * loads, pass the pattern of the route the router is loading, since the
+ * route it shows is not resolved yet.
+ */
+export function reportMissingDesktopBridge(routePattern?: () => string): void {
+  if (desktopBridge || !desktopPlatform) return;
+  reportDesktopBridgeMissing(
+    desktopPlatform,
+    desktopAppVersionFromUserAgent(navigator.userAgent),
+    routePattern,
+  );
+}
 
 /**
  * In the macOS app the window's traffic lights sit in the top-left corner of
