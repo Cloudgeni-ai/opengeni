@@ -899,9 +899,10 @@ it: no Opengeni gateway sees that request, so it counts like any outside agent
 the organization connected. Every other scope that spans
 workspaces (organization and personal Knowledge, Skills and Documents,
 Personal workspaces, user- and organization-owned machines and browsers, Slack
-routes, personal-resource grants) is bound to one organization, so it always
-shares one setting today; a per-workspace switch must add the pair check
-there.
+routes, personal-resource grants, Only me meetings opened across the
+organization's workspaces (recordings routes and meeting tools)) is bound to
+one organization, so it always shares one setting today; a per-workspace
+switch must add the pair check there.
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
