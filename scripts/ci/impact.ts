@@ -111,6 +111,15 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/background-command-wake.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/core",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/child-wait-boundary.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",

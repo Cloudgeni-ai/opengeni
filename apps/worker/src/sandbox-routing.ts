@@ -20,7 +20,11 @@ import {
   sandboxProviderMaxRemainingLifetimeMs,
   type Settings,
 } from "@opengeni/config";
-import { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
+import {
+  agentBackgroundCommandDeps,
+  backgroundCommandWakeSender,
+  captureConnectedCommandOutput,
+} from "@opengeni/core";
 export { agentBackgroundCommandDeps, captureConnectedCommandOutput } from "@opengeni/core";
 import {
   createProviderCommandRetainer,
@@ -39,6 +43,7 @@ import {
   retainedProcessSettlementIdentity,
   settleConnectedMachineSessionBackgroundCommand,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
@@ -99,6 +104,7 @@ import {
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+import type { WakeSessionWorkflowSignal } from "./activities/types";
 
 const retainWorkspaceProviderCommand = createProviderCommandRetainer(
   retainWorkspaceMutationProcess,
@@ -150,6 +156,9 @@ export type RoutingWiringServices = {
   }) => void | Promise<void>;
   /** Cancel bounded capture waits with the owning turn activity. */
   waitSignal?: AbortSignal;
+  /** Wakes a session waiting on a background command this routing settles.
+   * Absent: the periodic wake dispatcher delivers the committed wake. */
+  wakeSessionWorkflow?: WakeSessionWorkflowSignal | null | undefined;
 };
 
 /** Worker-turn routing may final-ack streamed command output, so it must always
@@ -833,6 +842,10 @@ function settleRetainedProcessForTurn(
         .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
         .catch(() => undefined);
     }
+    await signalBackgroundCommandWakes(
+      settlement.backgroundCommandWakes,
+      backgroundCommandWakeSender(services.wakeSessionWorkflow),
+    );
   };
 }
 
@@ -1113,6 +1126,12 @@ export function wrapTurnBoxWithRouting(
               await bus
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
+            }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
@@ -1437,6 +1456,12 @@ export function wrapLazyTurnBoxWithRouting(
               await bus
                 .publish(ids.workspaceId, ids.sessionId, settlement.events)
                 .catch(() => undefined);
+            }
+            if (settlement) {
+              await signalBackgroundCommandWakes(
+                settlement.wakes,
+                backgroundCommandWakeSender(services.wakeSessionWorkflow),
+              );
             }
           },
           selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
@@ -1839,6 +1864,7 @@ export async function establishSelfhostedTurnSession(
       accountId: args.accountId,
       workspaceId: args.workspaceId,
       sessionId: args.sessionId,
+      wake: backgroundCommandWakeSender(services.wakeSessionWorkflow),
       ...(args.backgroundCommandAttempt
         ? { backgroundCommandAttempt: args.backgroundCommandAttempt }
         : {}),

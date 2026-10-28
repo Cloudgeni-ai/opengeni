@@ -1,7 +1,9 @@
 import {
   adoptConnectedMachineSessionBackgroundCommand,
   settleConnectedMachineSessionBackgroundCommand,
+  signalBackgroundCommandWakes,
   type Database,
+  type SessionWorkflowWake,
 } from "@opengeni/db";
 import { recordConnectedCommandOutputConsumption } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
@@ -26,6 +28,34 @@ export function captureConnectedCommandOutput(
 }
 
 /**
+ * Adapt a session workflow signaler (`wakeSessionWorkflow`) to the wake hook
+ * of a background-command settlement. Absent signaler: the periodic wake
+ * dispatcher delivers the committed wake instead.
+ */
+export function backgroundCommandWakeSender(
+  signal:
+    | ((input: {
+        accountId: string;
+        workspaceId: string;
+        sessionId: string;
+        workflowId: string;
+        wakeRevision: number;
+      }) => Promise<unknown>)
+    | null
+    | undefined,
+): ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined {
+  if (!signal) return undefined;
+  return async (wake) =>
+    await signal({
+      accountId: wake.accountId,
+      workspaceId: wake.workspaceId,
+      sessionId: wake.sessionId,
+      workflowId: wake.temporalWorkflowId,
+      wakeRevision: wake.wakeRevision,
+    });
+}
+
+/**
  * The background-command ledger hooks of an agent session (a Connected
  * Machine, or the agent inside a compute sandbox): a yielded command is
  * adopted into the session's ledger, its output captured, and its exit settled.
@@ -45,6 +75,8 @@ export function agentBackgroundCommandDeps(
       executionGeneration: number;
       attemptId: string;
     };
+    /** Signals a committed wake of a session waiting on a settled command. */
+    wake?: ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined;
   },
 ): Pick<
   SelfhostedSessionDeps,
@@ -135,6 +167,7 @@ export function agentBackgroundCommandDeps(
           .publish(args.workspaceId, args.sessionId, settlement.events)
           .catch(() => undefined);
       }
+      if (settlement) await signalBackgroundCommandWakes(settlement.wakes, args.wake);
     },
   };
 }

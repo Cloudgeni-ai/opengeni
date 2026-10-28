@@ -59170,6 +59170,8 @@ export async function settleRetainedProcess(
   settled: boolean;
   process: SandboxRetainedProcess;
   backgroundCommandEvents: SessionEvent[];
+  /** Committed wakes to signal after commit; see `signalBackgroundCommandWakes`. */
+  backgroundCommandWakes: SessionWorkflowWake[];
 }> {
   return settleRetainedProcessWithAuthority(db, input);
 }
@@ -59327,6 +59329,7 @@ async function settleRetainedProcessWithAuthority(
           settled: false,
           process: terminalProcess,
           backgroundCommandEvents: [...commandMutation.events],
+          backgroundCommandWakes: [...commandMutation.wakes],
         };
       }
       if (
@@ -59576,6 +59579,7 @@ async function settleRetainedProcessWithAuthority(
         settled: true,
         process: settledProcess,
         backgroundCommandEvents: [...commandMutation.events],
+        backgroundCommandWakes: [...commandMutation.wakes],
       };
     },
   );
@@ -87973,13 +87977,16 @@ function backgroundCommandTerminalMutation(input: {
   idleContainmentMinutes?: number | null;
 }): {
   events: SessionEvent[];
+  wakes: SessionWorkflowWake[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
   commit: (tx: SessionActivityDatabase, command: SessionBackgroundCommand) => Promise<void>;
 } {
   let controlActive = false;
   const events: SessionEvent[] = [];
+  const wakes: SessionWorkflowWake[] = [];
   return {
     events,
+    wakes,
     prepare: async (tx: SessionActivityDatabase): Promise<void> => {
       const locks = await lockSessionEventWriteRows(tx, {
         workspaceId: input.workspaceId,
@@ -88283,11 +88290,22 @@ function backgroundCommandTerminalMutation(input: {
         controlActive &&
         !realtimeActive;
       if (shouldWake) {
-        await registerInternalUpdateWakeInTransaction(tx, {
+        const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+        const wake = await registerInternalUpdateWakeInTransaction(tx, {
           accountId: session.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+          temporalWorkflowId,
+        });
+        // The caller signals this after commit; the dispatcher remains the
+        // repair path when it cannot.
+        wakes.push({
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId,
+          wakeRevision: wake.wakeRevision,
+          interruptionRequested: false,
         });
       }
       await tx
@@ -88310,6 +88328,9 @@ function backgroundCommandTerminalMutation(input: {
 export type SessionBackgroundCommandTerminalSettlement = {
   command: SessionBackgroundCommand;
   events: SessionEvent[];
+  /** Committed wakes of a session waiting on this result. Signal them after
+   * commit so the wait resumes now instead of on the dispatcher's next tick. */
+  wakes: SessionWorkflowWake[];
 };
 
 export async function settleConnectedMachineSessionBackgroundCommand(
@@ -88336,13 +88357,13 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     input,
     mutation,
   );
-  return command ? { command, events: [...mutation.events] } : null;
+  return command ? { command, events: [...mutation.events], wakes: [...mutation.wakes] } : null;
 }
 
 export async function settleClaimedConnectedMachineBackgroundCommand(
   db: Database,
   input: { claim: ConnectedMachineBackgroundCommandClaim },
-): Promise<{ settled: boolean; events: SessionEvent[] }> {
+): Promise<{ settled: boolean; events: SessionEvent[]; wakes: SessionWorkflowWake[] }> {
   const mutation = backgroundCommandTerminalMutation({
     accountId: input.claim.accountId,
     workspaceId: input.claim.workspaceId,
@@ -88353,7 +88374,11 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     input,
     mutation,
   );
-  return { settled, events: settled ? [...mutation.events] : [] };
+  return {
+    settled,
+    events: settled ? [...mutation.events] : [],
+    wakes: settled ? [...mutation.wakes] : [],
+  };
 }
 
 /** Shared push/reaper terminal commit after output capture. A concurrent attached
@@ -88365,6 +88390,8 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     proof: ConnectedMachineBackgroundCommandProof;
     receipt?: ConnectedCommandOutputReceipt | undefined;
     publish?: ((events: SessionEvent[]) => Promise<void>) | undefined;
+    /** Signals a committed wake of a session waiting on this result. */
+    wake?: ((wake: SessionWorkflowWake) => Promise<unknown>) | undefined;
   },
 ): Promise<boolean> {
   const terminal = async () => {
@@ -88381,7 +88408,7 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   }
   const settlement = alreadyTerminal
-    ? { settled: false, events: [] }
+    ? { settled: false, events: [], wakes: [] }
     : await settleClaimedConnectedMachineBackgroundCommand(db, input);
   const command = settlement.settled ? null : await terminal();
   if (!settlement.settled && !command)
@@ -88402,9 +88429,26 @@ export async function settleCollectedConnectedMachineBackgroundCommand(
     }
   } finally {
     // A custody-checkpoint error must never suppress already committed fanout.
-    if (settlement.events.length) await input.publish?.(settlement.events);
+    try {
+      if (settlement.events.length) await input.publish?.(settlement.events);
+    } finally {
+      await signalBackgroundCommandWakes(settlement.wakes, input.wake);
+    }
   }
   return settlement.settled;
+}
+
+/**
+ * Signal the committed wakes of a terminal background-command settlement. A
+ * failed or missing signal is not an error: the outbox row stays undelivered
+ * and the periodic wake dispatcher delivers it.
+ */
+export async function signalBackgroundCommandWakes(
+  wakes: readonly SessionWorkflowWake[],
+  wake: ((wake: SessionWorkflowWake) => Promise<unknown>) | null | undefined,
+): Promise<void> {
+  if (!wake) return;
+  for (const pending of wakes) await wake(pending).catch(() => undefined);
 }
 
 /**

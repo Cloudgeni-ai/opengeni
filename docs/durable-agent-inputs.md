@@ -130,8 +130,10 @@ update pulls it to now and its producer still signals after commit; without
 that signal the input would wait for the periodic dispatcher tick. The extra
 signal is a hint only: one claim consumes the whole pending batch, and the
 acknowledgement rules above keep the revision open until it does. Terminal
-background-command settlement registers the same wake but does not signal from
-its settlement callers, so the dispatcher delivers it. Claim, supersession, and
+background-command settlement registers the same wake and returns it, and each
+settlement caller (pushed Connected Machine completion, in-turn and reaper
+retained-process settlement, the selfhosted reaper) signals it after commit; the
+dispatcher delivers any wake a caller could not signal. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 for completed/paused goals without a held wait do not create new work.
 "Eligible" includes the compaction-failure hold: when the newest finished turn

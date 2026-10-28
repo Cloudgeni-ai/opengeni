@@ -97,6 +97,7 @@ import {
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
+  signalBackgroundCommandWakes,
   type MeterableWarmLease,
   type ReapDrainable,
   type RetainedProcessProviderProof,
@@ -126,6 +127,7 @@ import { appendSessionCommandOutput } from "@opengeni/db/session-command-output"
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
+  backgroundCommandWakeSender,
   agentConnectionCurrent,
   connectedRunnerReleaseMode,
   type ConnectedRunnerReleaseMode,
@@ -1091,7 +1093,15 @@ export function createSandboxLeaseActivities(
       // Connected Machine commands are not managed-sandbox lease state. Their
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
-      await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+      await reconcileConnectedMachineBackgroundCommands(
+        db,
+        settings,
+        observability,
+        service.bus,
+        undefined,
+        undefined,
+        service.wakeSessionWorkflow,
+      );
       await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
@@ -1167,6 +1177,7 @@ export function createSandboxLeaseActivities(
         probeRetainedProcess,
         options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
         service.bus,
+        service.wakeSessionWorkflow,
       );
 
       // A request or PTY left on a Modal box whose lease epoch has ended can
@@ -1678,7 +1689,9 @@ export async function reconcileConnectedMachineBackgroundCommands(
   bus: ActivityServices["bus"],
   controlRpcOverride?: ControlRpc,
   runnerModeOverride?: typeof connectedRunnerReleaseMode,
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
+  const wake = backgroundCommandWakeSender(wakeSessionWorkflow);
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
@@ -1875,6 +1888,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
           claim,
           proof,
           receipt,
+          wake,
           publish: async (events) => {
             try {
               await bus.publish(claim.workspaceId, claim.sessionId, events);
@@ -2416,6 +2430,7 @@ async function reconcileTerminalRetainedProcesses(
   probe: RetainedProcessProbeFn,
   inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
   bus: ActivityServices["bus"],
+  wakeSessionWorkflow?: ActivityServices["wakeSessionWorkflow"],
 ): Promise<void> {
   const claimId = crypto.randomUUID();
   let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
@@ -2904,6 +2919,10 @@ async function reconcileTerminalRetainedProcesses(
           });
         }
       }
+      await signalBackgroundCommandWakes(
+        settlement.backgroundCommandWakes,
+        backgroundCommandWakeSender(wakeSessionWorkflow),
+      );
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
       recordRetainedProcessReconciliation(observability, "settlement_failed");
