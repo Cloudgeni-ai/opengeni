@@ -325,6 +325,7 @@ import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
 import { variableSetsRemovedErrorResponse } from "./http/variable-sets-removed";
 import { registerVaultRoutes } from "./routes/vaults";
+import { registerCredentialProfileRoutes } from "./routes/credential-profiles";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
@@ -2418,6 +2419,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerVaultRoutes(app, routeDeps);
+  registerCredentialProfileRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);

@@ -54,6 +54,7 @@ import {
   AnthropicSizeRecoveryExhaustedError,
   type AnthropicRequestSize,
   ToolCallError,
+  findInferenceRegionRestrictedError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1847,6 +1848,17 @@ function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  // EU-only inference refused the route before anything was sent. It is the
+  // same answer on every retry, however an SDK or runner wrapped it.
+  const regionRestricted = findInferenceRegionRestrictedError(error);
+  if (regionRestricted) {
+    return {
+      error: regionRestricted.message,
+      code: regionRestricted.code,
+      retryable: false,
+      model: regionRestricted.modelName,
+    };
+  }
   // A checkpoint (compaction) request only summarizes history: it runs no
   // tools and its output is discarded unless it completes. A stream that ended
   // without a terminal event or timed out is therefore safe to send again,

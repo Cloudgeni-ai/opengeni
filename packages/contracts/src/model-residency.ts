@@ -206,10 +206,97 @@ function hostOf(baseUrl: string): string | null {
 }
 
 /**
+ * The deployment an endpoint URL calls, from its `/deployments/{name}` path
+ * segment (Azure OpenAI's deployment-path form), or null when no segment
+ * holds or hides a `deployments` marker. Such an endpoint runs that
+ * deployment whatever model the request body names.
+ *
+ * Only a plain path is read: empty segments are dropped, the marker matches in
+ * any case (percent-encoded too), and the name and every segment after it must
+ * be readable `[A-Za-z0-9._-]+` and not `.` or `..`. Anything else returns an
+ * empty string, meaning a deployment that can't be read, which is refused
+ * under EU. That covers a missing name, a second marker, a marker hidden in a
+ * longer or encoded segment (`deployments;`, `x%2Fdeployments`), and a later
+ * segment that could lead somewhere else once decoded (`..%2F`, `%5C`, `;`).
+ */
+export function modelEndpointDeployment(url: string | URL): string | null {
+  let pathname: string;
+  try {
+    // The URL parser has already resolved plain and %2e dot segments.
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const segments = pathname
+    .split("/")
+    .filter((raw) => raw !== "")
+    .map((raw) => {
+      let decoded: string | null;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {
+        decoded = null;
+      }
+      return {
+        decoded,
+        marker: decoded?.toLowerCase() === "deployments",
+        hidesMarker: hidesDeploymentsMarker(raw),
+        plain: decoded !== null && isPlainDeploymentSegment(decoded),
+      };
+    });
+  const first = segments.findIndex((segment) => segment.marker || segment.hidesMarker);
+  if (first < 0) return null;
+  const marker = segments[first]!;
+  const name = segments[first + 1];
+  if (!marker.marker || !name) return "";
+  const rest = segments.slice(first + 1);
+  if (!rest.every((segment) => segment.plain)) return "";
+  // A second marker after the name (the name itself may be anything plain).
+  if (rest.slice(1).some((segment) => segment.marker || segment.hidesMarker)) return "";
+  return name.decoded!;
+}
+
+/** A readable, plain path segment: `[A-Za-z0-9._-]+`, not `.` or `..`. */
+function isPlainDeploymentSegment(segment: string): boolean {
+  return /^[A-Za-z0-9._-]+$/u.test(segment) && segment !== "." && segment !== "..";
+}
+
+/**
+ * Whether a raw segment holds or hides `deployments`: any part of it, decoded
+ * as far as it goes and split on separators, starts with the word in any case
+ * once leading punctuation is dropped.
+ */
+function hidesDeploymentsMarker(raw: string): boolean {
+  return looselyDecoded(raw)
+    .split(/[/\\]/u)
+    .some((part) =>
+      part
+        .replace(/^[^A-Za-z0-9]+/u, "")
+        .toLowerCase()
+        .startsWith("deployments"),
+    );
+}
+
+/** Every ASCII %XX escape decoded, repeatedly (to catch double encoding). */
+function looselyDecoded(raw: string): string {
+  let value = raw;
+  for (let round = 0; round < 4; round += 1) {
+    const next = value.replace(/%([0-7][0-9a-f])/giu, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+/**
  * Problems that make an EU claim wrong for the route it is declared on: a
  * Bedrock upstream id with a non-EU inference profile prefix, a Bedrock
- * geographic profile that is not `eu.`, or an endpoint on a known global host.
- * Every resolver applies it. Names only ever reject a claim, never grant one.
+ * geographic profile that is not `eu.`, an endpoint on a known global host,
+ * or a deployment-path endpoint that calls a different deployment than the
+ * model. Every resolver applies it. Names only ever reject a claim, never
+ * grant one.
  */
 export function modelResidencyRouteProblems(
   residency: { geography: ModelProcessingGeography; deploymentType: ModelDeploymentType },
@@ -243,6 +330,19 @@ export function modelResidencyRouteProblems(
     problems.push({
       path: ["baseUrl"],
       message: `${host} routes outside the EU, so a route on it cannot be declared eu`,
+    });
+  }
+  const deployment = route.baseUrl ? modelEndpointDeployment(route.baseUrl) : null;
+  if (deployment === "") {
+    problems.push({
+      path: ["baseUrl"],
+      message:
+        "the endpoint calls a deployment whose name can't be read, so it cannot be declared eu",
+    });
+  } else if (deployment !== null && deployment !== (route.upstreamModelId ?? "")) {
+    problems.push({
+      path: ["baseUrl"],
+      message: `the endpoint calls deployment ${deployment}, not ${route.upstreamModelId ?? "this model"}, so only ${deployment} can be declared eu on it`,
     });
   }
   return problems;

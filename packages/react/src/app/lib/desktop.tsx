@@ -86,9 +86,9 @@ export function reportMissingDesktopBridge(routePattern?: () => string): void {
 }
 
 /**
- * In the macOS app the window's traffic lights sit in the top-left corner of
- * the page, where the rails put the brand; the Dock and menu bar already name
- * the app, so rails keep that row for the window controls.
+ * Whether the page runs in the macOS app.
+ * @deprecated The desktop window bar now holds the window controls above the
+ * page, so no page layout needs to make room for them.
  */
 export const windowControlsInPage = desktopPlatform === "macos";
 
@@ -113,7 +113,7 @@ declare global {
 
 /**
  * Before the first render: mark the document so the desktop layout applies
- * from the first frame (room for the window controls, draggable title areas,
+ * from the first frame (the window bar for the window controls, draggable title areas,
  * window materials), and let the shell navigate client-side.
  */
 export function installDesktopShell(navigate: (path: string) => void): void {

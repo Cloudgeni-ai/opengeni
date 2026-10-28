@@ -845,6 +845,20 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the desktop window bar helper selects every browser test that uses it", () => {
+    const plan = createImpactPlan(["test/e2e/desktop-window-bar.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of [
+      "test/e2e/artifact-desktop.browser.e2e.ts",
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
+      "test/e2e/session-sidebar.browser.e2e.ts",
+      "test/e2e/signed-out-page.browser.e2e.ts",
+    ]) {
+      expect(plan.e2eTests).toContain(path);
+    }
+  });
+
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
       "apps/web/src/components/rail/switcher-block.tsx",

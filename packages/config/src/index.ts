@@ -75,6 +75,7 @@ import {
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  isEuResidency,
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
@@ -1168,6 +1169,10 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Per-run only, never read from the environment: set by the execution
+  // overlay when the workspace is EU-only. Every model route the run resolves
+  // must then have an EU residency record. See docs/eu-only-inference.md.
+  requiredModelGeography: z.enum(["eu"]).optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -8369,10 +8374,18 @@ function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, M
   return declarations;
 }
 
-/** The built-in provider's endpoint, for the residency route check. */
+/**
+ * The built-in provider's endpoint, for the residency route check. Without a
+ * base URL, Azure calls `azureOpenaiDeployment` through its deployment path
+ * for every model, so only that model can be EU there.
+ */
 function builtinResidencyBaseUrl(settings: Settings): string | undefined {
   if (settings.openaiProvider === "azure") {
-    return settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    if (settings.azureOpenaiBaseUrl) return settings.azureOpenaiBaseUrl;
+    const endpoint = settings.azureOpenaiEndpoint?.replace(/\/+$/u, "");
+    return endpoint && settings.azureOpenaiDeployment
+      ? `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`
+      : endpoint;
   }
   return settings.openaiBaseUrl ?? "https://api.openai.com/v1";
 }
@@ -8429,6 +8442,49 @@ const BuiltinModelResidencyDeclarations = z.record(
   z.string().trim().min(1),
   ModelResidencyDeclaration,
 );
+
+/**
+ * Whether a route with this residency may run under the settings' residency
+ * requirement. Without a requirement every route may run; under `eu` only a
+ * route whose live record is EU may.
+ */
+export function modelRouteMeetsResidencyRequirement(
+  settings: Pick<Settings, "requiredModelGeography">,
+  residency: unknown,
+): boolean {
+  return settings.requiredModelGeography !== "eu" || isEuResidency(residency);
+}
+
+// Settings objects are immutable snapshots; every client build and request
+// check for one run reads the same routes.
+const euModelRoutesCache = new WeakMap<Settings, ReadonlyMap<string, ReadonlySet<string>>>();
+
+/**
+ * The routes that may carry requests under an EU requirement: provider id to
+ * the upstream model ids whose every configured route is EU. An upstream id
+ * listed by any non-EU route of the same provider is excluded.
+ */
+export function euModelRoutes(settings: Settings): ReadonlyMap<string, ReadonlySet<string>> {
+  const cached = euModelRoutesCache.get(settings);
+  if (cached) return cached;
+  const verdicts = new Map<string, Map<string, boolean>>();
+  for (const model of configuredModels(settings)) {
+    const provider = verdicts.get(model.providerId) ?? new Map<string, boolean>();
+    provider.set(
+      model.upstreamModelId,
+      (provider.get(model.upstreamModelId) ?? true) && isEuResidency(model.residency),
+    );
+    verdicts.set(model.providerId, provider);
+  }
+  const routes: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+    [...verdicts].map(([providerId, models]) => [
+      providerId,
+      new Set([...models].filter(([, eu]) => eu).map(([upstreamModelId]) => upstreamModelId)),
+    ]),
+  );
+  euModelRoutesCache.set(settings, routes);
+  return routes;
+}
 
 /** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
 export function parseBuiltinModelResidencyJson(
