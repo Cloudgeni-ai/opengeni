@@ -2360,8 +2360,8 @@ describe("One Models page for the organization and the workspace", () => {
       // workspace, and private subscriptions live in their Personal workspace.
       for (const provider of ["OpenRouter", "Claude subscription", "SuperGrok", "Codex"])
         expect(text).not.toContain(provider);
-      expect(text).toContain("Connect it in your Personal workspace");
-      expect(text).toContain("It then also pays for chats you keep to yourself in Design preview.");
+      expect(text).toContain("Your own subscriptions are connected in your Personal workspace.");
+      expect(text).toContain("They also pay for chats you keep to yourself in Design preview.");
       await act(async () => button(view.container, /Open your Personal workspace/)!.click());
       await flush();
       // The Personal workspace's own Connect provider page.

@@ -734,8 +734,8 @@ export function WorkspaceModelsPageBody({
           onlyMe ? (
             <EmptyState
               variant="inline"
-              title="Connect it in your Personal workspace"
-              description={`Your own subscription is connected there. It then also pays for chats you keep to yourself in ${workspaceName}.`}
+              title="Your own subscriptions are connected in your Personal workspace."
+              description={`They also pay for chats you keep to yourself in ${workspaceName}.`}
               action={
                 personalWorkspaceId ? (
                   <Button
