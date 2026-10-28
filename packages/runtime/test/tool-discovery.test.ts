@@ -32,6 +32,7 @@ import {
   type ConnectedToolAccount,
 } from "../src/lazy-tool-transport";
 import { baseModelInputFilterForSettings } from "../src/model-input";
+import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 import {
   createToolSelector,
@@ -235,10 +236,10 @@ describe("compact candidates and exact schema loading", () => {
   test("a mistyped exact name returns compact recovery suggestions, not schemas", async () => {
     const runtime = new LazyToolRuntime("generic_dispatch", new Set());
     runtime.refresh([candidate("tasks__search", "Search tasks")]);
-    const result = await runtime.prepareSearch({ query: "", names: ["tasks.search"] });
+    const result = await runtime.prepareSearch({ query: "", names: ["tasks.serch"] });
     expect(JSON.parse(result.output)).toMatchObject({
       schemasLoaded: false,
-      unavailable: ["tasks.search"],
+      unavailable: ["tasks.serch"],
       suggestions: [{ name: "tasks__search" }],
     });
     expect(result.tools).toEqual([]);
@@ -1541,7 +1542,8 @@ describe("searches that reach one of several connected accounts", () => {
 
   test("compact candidates count as reached only where the output shows them", async () => {
     // Two accounts' identical tools tie, so the search loads nothing and
-    // lists compact candidates; native outputs cannot show those.
+    // lists compact candidates; native outputs show those only in their
+    // candidates notice, which names no accounts.
     const SECOND = "mcp__gmail_work__search_messages";
     const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
       ...BOTH,
@@ -1565,7 +1567,8 @@ describe("searches that reach one of several connected accounts", () => {
     const native = tied("openai_native");
     const compact = await native.prepareSearch(args);
     expect(loaded(compact)).toEqual([]);
-    expect(compact.notice).toBeUndefined();
+    expect(compact.notice).toStartWith("No tool loaded. Close candidates:\n- mcp__gmail__");
+    expect(compact.notice).not.toContain("Also connected");
     // The run's one notice waits for a search the model can see.
     const later = await native.prepareSearch({ query: "get me messages in the mailbox" });
     expect(loaded(later)).toEqual([OUTLOOK]);
@@ -1594,6 +1597,238 @@ describe("searches that reach one of several connected accounts", () => {
     const output = JSON.parse(result.output);
     expect(output.notConnected).toStartWith("Not connected yet: Google Calendar");
     expect(output.connectedAccounts).toBe(NOTICE);
-    expect(result.notice).toBe(`${output.notConnected}\n${NOTICE}`);
+    // An uncertain match lists its unloaded candidates first.
+    expect(result.notice).toStartWith("Close candidates this search did not load:\n");
+    expect(result.notice).toEndWith(`\n${output.notConnected}\n${NOTICE}`);
   });
+});
+
+describe("plain tool names and unloaded candidates on every route", () => {
+  // A hyphenated registry ID and dotted tool names make every model name a
+  // digest alias, as for a large API integration.
+  const REGISTRY = "records-api-0a1b2c";
+  const RECORDS: [string, string][] = [
+    ["projects.search", "Search projects by name or project number."],
+    ["projects.list", "List projects in the organization, one page at a time."],
+    ["projects.list_history", "List the change history of one project."],
+    ["organizations.get", "Get the current organization's profile."],
+    [
+      "organizations.list_activity",
+      "List recent activity events across the whole organization, newest first.",
+    ],
+    ["deviations.get_events", "Get the event history timeline for one deviation."],
+    ["supplier_prices.update_price_agreement_series", "Rename a price agreement series."],
+    ["supplier_prices.update_price_agreement_terms", "Change the terms of a price agreement."],
+  ];
+  const model = (original: string) => prefixedMcpToolName(REGISTRY, original);
+  const runtimeWith = (transport: "generic_dispatch" | "openai_native" | "codex_native") => {
+    const tools = RECORDS.map(([original, description]) => candidate(model(original), description));
+    const mapping = new Map(tools.map((t) => [(t as Tool & { name: string }).name, REGISTRY]));
+    const runtime = new LazyToolRuntime(
+      transport,
+      new Set([REGISTRY]),
+      undefined,
+      new Set([REGISTRY]),
+      new Set(),
+      () => mapping,
+    );
+    runtime.refresh([
+      ...tools,
+      candidate("opengeni__goal_complete", "Mark the session goal as completed."),
+    ]);
+    return runtime;
+  };
+  const loaded = (result: { tools?: { name?: unknown }[] }) =>
+    result.tools?.map((t) => t.name) ?? [];
+
+  test("names are digest aliases whose part is sanitized and shortened", () => {
+    expect(model("projects.search")).toMatch(/^mcp_[0-9a-f]{24}__projects_search$/);
+    expect(model("supplier_prices.update_price_agreement_terms")).toEndWith(
+      "__supplier_prices_update_price_agree",
+    );
+    expect(model("supplier_prices.update_price_agreement_series")).toEndWith(
+      "__supplier_prices_update_price_agree",
+    );
+  });
+
+  for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: exact-name loads accept the names servers, Skills and code use`, async () => {
+      const runtime = runtimeWith(transport);
+      for (const [name, expected] of [
+        ["projects.search", model("projects.search")],
+        ["projects_search", model("projects.search")],
+        ["projects-search", model("projects.search")],
+        ["opengeni.goal_complete", "opengeni__goal_complete"],
+        // The shortened parts are equal; the exact published name decides.
+        [
+          "supplier_prices.update_price_agreement_terms",
+          model("supplier_prices.update_price_agreement_terms"),
+        ],
+        [
+          "supplier_prices.update_price_agreement_series",
+          model("supplier_prices.update_price_agreement_series"),
+        ],
+      ] as const) {
+        const result = await runtime.prepareSearch({ query: "", names: [name] });
+        expect(loaded(result)).toEqual([expected]);
+        expect(JSON.parse(result.output).unavailable).toEqual([]);
+        expect(result.notice).toBeUndefined();
+      }
+    });
+
+    test(`${transport}: a query naming tools in dotted form loads them without candidates`, async () => {
+      const runtime = runtimeWith(transport);
+      const result = await runtime.prepareSearch({
+        query: "use projects.list and projects.list_history to read recently changed projects.",
+      });
+      expect(loaded(result)).toEqual([model("projects.list"), model("projects.list_history")]);
+      expect(result.notice).toBeUndefined();
+    });
+  }
+
+  test("a dotted token that names nothing as a whole still names its underscored part", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({ query: "call tools.opengeni.goal_complete now" });
+    expect(loaded(result)).toEqual(["opengeni__goal_complete"]);
+  });
+
+  test("native routes say which close candidates an uncertain search did not load", async () => {
+    const query =
+      "organization-wide event history timeline activity feed across all projects, read-only";
+    const generic = await runtimeWith("generic_dispatch").prepareSearch({ query });
+    const output = JSON.parse(generic.output);
+    const listed = [
+      ...output.tools.map((t: { name: string }) => t.name),
+      ...(output.suggestions ?? []).map((t: { name: string }) => t.name),
+    ];
+    expect(listed).toContain(model("organizations.list_activity"));
+    expect(generic.notice).toBeUndefined();
+    for (const transport of ["openai_native", "codex_native"] as const) {
+      const native = await runtimeWith(transport).prepareSearch({ query });
+      const shown = loaded(native);
+      expect(shown.length).toBeLessThanOrEqual(1);
+      expect(native.notice).toStartWith(
+        shown.length
+          ? "Close candidates this search did not load:\n- "
+          : "No tool loaded. Close candidates:\n- ",
+      );
+      if (!shown.includes(model("organizations.list_activity")))
+        expect(native.notice).toContain(
+          `- ${model("organizations.list_activity")}: List recent activity events across the whole organization`,
+        );
+      for (const name of shown) expect(native.notice).not.toContain(`- ${name}:`);
+      expect(native.notice).toEndWith(
+        'Load one that fits with tool_search names:["<exact name>"] and query:"".',
+      );
+    }
+  });
+
+  test("native routes name unresolved exact names and their closest candidates", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({
+      query: "",
+      names: ["projects.serch", "projects.list"],
+    });
+    expect(loaded(result)).toEqual([model("projects.list")]);
+    expect(result.notice).toStartWith(
+      'No authorized tool is named "projects.serch".\nClose candidates this search did not load:\n- ',
+    );
+    expect(result.notice).toContain(`- ${model("projects.search")}: Search projects`);
+    expect(result.notice).not.toContain(`- ${model("projects.list")}:`);
+  });
+
+  test("a clearly matched search adds no candidates notice", async () => {
+    const runtime = runtimeWith("openai_native");
+    const result = await runtime.prepareSearch({ query: "search projects by project number" });
+    expect(loaded(result)).toEqual([model("projects.search")]);
+    expect(result.notice).toBeUndefined();
+  });
+
+  test("tool_list prefixes match the published name part, listed alphabetically", async () => {
+    const runtime = runtimeWith("generic_dispatch");
+    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+    if (!list || list.type !== "function") throw new Error("missing list");
+    const invoke = async (args: unknown) =>
+      JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+    const expected = [
+      model("projects.list"),
+      model("projects.list_history"),
+      model("projects.search"),
+    ];
+    for (const namePrefix of ["projects.", "projects_"])
+      expect((await invoke({ namePrefix })).tools.map((t: { name: string }) => t.name)).toEqual(
+        expected,
+      );
+    const all = (await invoke({ limit: 40 })).tools.map((t: { name: string }) => t.name);
+    expect(all.slice(0, 6)).toEqual([
+      model("deviations.get_events"),
+      model("organizations.get"),
+      model("organizations.list_activity"),
+      ...expected,
+    ]);
+    expect(all.at(-1)).toBe("opengeni__goal_complete");
+    expect((await invoke({ namePrefix: "mcp_" })).total).toBe(RECORDS.length);
+  });
+
+  test.each(["codex_native", "openai_native"] as const)(
+    "%s: the candidates notice follows the search result in the wire, with a stable prefix",
+    async (transport) => {
+      const tools = RECORDS.map(([original, description]) =>
+        candidate(model(original), description),
+      );
+      const mapping = new Map(tools.map((t) => [(t as Tool & { name: string }).name, REGISTRY]));
+      const agent = new Agent({ name: "records", model: "scripted", tools });
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set([REGISTRY]),
+        undefined,
+        new Set([REGISTRY]),
+        new Set(),
+        () => mapping,
+      );
+      const query =
+        "organization-wide event history timeline activity feed across all projects, read-only";
+      const scripted = new ScriptedModel([
+        [searchCall(transport, "find", { query })],
+        [searchCall(transport, "load", { query: "", names: ["organizations.list_activity"] })],
+        [done],
+      ]);
+      const result = await new Runner({
+        modelProvider: new LazyToolModelProvider({ getModel: () => scripted }, runtime),
+      }).run(agent, "what happened in the company this week?", {
+        stream: true,
+        historyOwnership: "external",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+        callModelInputFilter: baseModelInputFilterForSettings(
+          testSettings({ sandboxBackend: "none" }),
+        ),
+      });
+      for await (const event of result.toStream()) void event;
+      await result.completed;
+      const request = scripted.requests[1]!;
+      const wire = responsesWire().wire({
+        ...request,
+        input: projectHistoryForProvider(request.input as Record<string, unknown>[], "responses", {
+          declaresAdditionalTools: true,
+        }) as ModelRequest["input"],
+      });
+      const notices = (wire.input as Record<string, unknown>[]).filter(
+        (item) => item.type === "message" && item.role === "developer",
+      );
+      expect(notices).toHaveLength(1);
+      expect(String(notices[0]!.content)).toContain(model("organizations.list_activity"));
+      expect(JSON.stringify(wire)).not.toContain("opengeni.lazy_search.v1");
+      expect(JSON.stringify(scripted.requests[2]!.input)).toContain(
+        model("organizations.list_activity"),
+      );
+      for (let i = 1; i < scripted.requests.length; i++) {
+        expect(scripted.requests[i]!.tools).toEqual(scripted.requests[0]!.tools);
+        const previous = scripted.requests[i - 1]!.input as unknown[];
+        expect((scripted.requests[i]!.input as unknown[]).slice(0, previous.length)).toEqual(
+          previous,
+        );
+      }
+    },
+  );
 });
