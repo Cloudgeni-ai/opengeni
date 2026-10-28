@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  thisComputerNeedsPermissions,
   thisComputerPermissionSteps,
   type ThisComputerHost,
   type ThisComputerPermissionId,
@@ -184,6 +185,9 @@ export function useThisComputer(
     status?.state === "connected" &&
     status.reconnecting === true &&
     !status.error &&
+    // Asking for a permission, or waiting on one, is the person's step, not a stall.
+    asking === null &&
+    !thisComputerNeedsPermissions(status) &&
     pending === null &&
     !acting;
   useEffect(() => {
@@ -194,6 +198,8 @@ export function useThisComputer(
     const timer = window.setTimeout(() => setStalled(true), turnOnLimitMs);
     return () => window.clearTimeout(timer);
   }, [waiting, turnOnLimitMs, attempt]);
+  const stalledRef = useRef(stalled);
+  stalledRef.current = stalled;
 
   const act = useCallback(async <T>(action: () => Promise<T>): Promise<T | null> => {
     if (actionInFlight.current) return null;
@@ -301,6 +307,8 @@ export function useThisComputer(
   }, [act, host, workspaceId]);
   const turnOn = useCallback(async () => {
     if (!host || actionInFlight.current) return null;
+    // Read before the action starts the wait afresh.
+    const wasStalled = stalledRef.current;
     setPending("on");
     try {
       const next = await act(async () => {
@@ -309,11 +317,12 @@ export function useThisComputer(
         if (current.state === "connected" && current.errorCode === "reconnect_required") {
           return await host.connect(workspaceId, { screenControl: true });
         }
-        // Off is paused, and a connection that failed or is stuck connecting
-        // is started again (a running agent restarts, so it retries now).
+        // Off is paused, and a connection that failed, or has been connecting
+        // for too long, is started again (a running agent restarts, so it
+        // retries now). One still connecting normally is left to finish.
         if (
           current.state === "paused" ||
-          (current.state === "connected" && (current.error || current.reconnecting))
+          (current.state === "connected" && (current.error || (current.reconnecting && wasStalled)))
         ) {
           await host.resume();
           current = await host.status(workspaceId);

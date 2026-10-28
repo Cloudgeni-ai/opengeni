@@ -348,8 +348,8 @@ const MACHINE_READ_TIMEOUT_MS = 10_000;
 
 const REMOVED_MESSAGE =
   "This computer was removed from this workspace. Reconnect it to let agents use it again.";
-/** The server turned down this connection's sign-in and the agent is renewing it. */
-const signingIn = (connection: AgentConnection) => connection.authentication === "renewal_required";
+/** The server turned down this connection's sign-in: agents can't use it for now. */
+const signingIn = (connection: AgentConnection) => connection.authentication !== undefined;
 const RECONNECT_REQUIRED_MESSAGE =
   "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.";
 
@@ -753,19 +753,22 @@ export class ThisComputer {
         !machine?.online ||
         signIn === "renewal_required" ||
         (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions);
-      const waitingOn = !reconnecting
-        ? null
-        : this.hosting !== null
-          ? ("handover" as const)
-          : !service?.running
-            ? ("agent" as const)
-            : signIn === "renewal_required"
-              ? ("sign_in" as const)
-              : ("server" as const);
+      const paused = Boolean(service?.installed && !service.enabled && !this.hosting);
+      // Only while on and still connecting; a stopped connection is an error instead.
+      const waitingOn =
+        !reconnecting || paused || signIn === "reconnect_required"
+          ? null
+          : this.hosting !== null
+            ? ("handover" as const)
+            : !service?.running
+              ? ("agent" as const)
+              : signIn === "renewal_required"
+                ? ("sign_in" as const)
+                : ("server" as const);
       return {
         ...base,
         // While it moves into the app, its service is briefly off: still on.
-        state: service?.installed && !service.enabled && !this.hosting ? "paused" : "connected",
+        state: paused ? "paused" : "connected",
         reconnecting,
         ...(waitingOn ? { waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) } : {}),
         ...(permissions ? { permissions } : {}),
@@ -1255,6 +1258,9 @@ export class ThisComputer {
       ),
     ];
     for (const connection of candidates) {
+      // A connection the agent stopped retrying (the server needs it connected
+      // again) can't be reused either: connecting enrolls this computer afresh below.
+      if (connection.authentication === "reconnect_required") continue;
       // An enrollment the server no longer lists can't be reused: it was removed
       // there, and connecting again enrolls this computer afresh below.
       const reading = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);

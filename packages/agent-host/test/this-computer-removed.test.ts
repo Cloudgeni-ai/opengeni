@@ -30,7 +30,13 @@ type Reading = { online: boolean } | null | Error | { status: number; message: s
  * `service`: an existing standalone agent with its own background service
  * (macOS); otherwise the app's own agent (Linux).
  */
-function computer(options: { service: boolean; adopted?: boolean; ownerOnly?: boolean }) {
+function computer(options: {
+  service: boolean;
+  adopted?: boolean;
+  ownerOnly?: boolean;
+  /** Connected with screen control already. */
+  screenControl?: boolean;
+}) {
   const home = mkdtempSync(join(tmpdir(), "og-removed-"));
   const list = join(home, "connections.txt");
   const calls = join(home, "calls");
@@ -67,7 +73,11 @@ function computer(options: { service: boolean; adopted?: boolean; ownerOnly?: bo
   if (options.adopted !== false) {
     writeFileSync(
       join(home, "this-computer.json"),
-      JSON.stringify({ adopted: true, management: options.service ? "service" : "app" }),
+      JSON.stringify({
+        adopted: true,
+        management: options.service ? "service" : "app",
+        ...(options.screenControl ? { screenControl: true } : {}),
+      }),
     );
   }
   const readings: Record<string, Reading> = { a1: { online: true } };
@@ -284,6 +294,33 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     expect(next.errorCode).toBeUndefined();
     expect(next.reconnecting).toBeUndefined();
   });
+
+  for (const service of [true, false]) {
+    const kind = service ? "an existing agent service" : "the app's own agent";
+    test(`with ${kind}: a connection the agent stopped retrying is enrolled afresh, even while listed`, async () => {
+      const c = computer({ service, screenControl: true });
+      writeFileSync(
+        join(c.home, "connections.txt"),
+        `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+          "    Reconnect required; automatic retries stopped. Run `opengeni-agent connect`.\n",
+      );
+      // The server still lists the old enrollment: reusing it would change nothing.
+      c.readings.a1 = { online: false };
+      const app = c.create();
+      const rejected = await app.status(SERVER, "w1", "me");
+      expect(rejected.state).toBe("connected");
+      expect(rejected.errorCode).toBe("reconnect_required");
+      expect(rejected.waitingOn).toBeUndefined();
+      expect((await app.summary()).reconnecting).toBe(true);
+      c.readings.a2 = { online: true };
+      const next = await app.connect("me", SERVER, "w1", { screenControl: true });
+      expect(c.minted).toEqual(["w1"]);
+      expect(c.commands()).toContain("token=setup-token");
+      expect(next.state).toBe("connected");
+      expect(next.errorCode).toBeUndefined();
+      expect(next.error).toBeNull();
+    });
+  }
 
   test("a server that answered is never reported as unreachable", async () => {
     const c = computer({ service: true });

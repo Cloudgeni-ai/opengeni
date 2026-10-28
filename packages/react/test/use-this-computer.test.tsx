@@ -379,9 +379,9 @@ test("turning computer use on does what it needs: resume, register afresh, or no
   // On but failing: start it again.
   const failing = { ...connected, reconnecting: true, errorCode: "offline" as const, error: "x" };
   expect((await run([failing, connected])).calls).toEqual(["resume"]);
-  // On but stuck connecting: start it again too, so it retries now.
+  // Still connecting, within the limit: left to finish (Try again after a stall restarts it).
   const stuck = { ...connected, reconnecting: true, waitingOn: "sign_in" as const };
-  expect((await run([stuck, connected])).calls).toEqual(["resume"]);
+  expect((await run([stuck, connected])).calls).toEqual([]);
   // The server needs it connected again: register it afresh.
   const rejected = {
     ...connected,
@@ -437,6 +437,36 @@ test("turning on that never connects stops waiting after the limit, and Try agai
     reading = { ...connected, management: "service" };
     await actRun(() => hook.result.current.refresh());
     await flush();
+    expect(hook.result.current.stalled).toBe(false);
+  } finally {
+    await hook.unmount();
+  }
+});
+
+test("waiting on a permission the person hasn't given is never a stall", async () => {
+  const reading: ThisComputerStatus = {
+    ...connected,
+    reconnecting: true,
+    permissions: [{ id: "screenRecording", granted: false }],
+  };
+  const host: ThisComputerHost = {
+    platform: "macos",
+    productName: "App",
+    status: async () => ({ ...reading }),
+    connect: async () => ({ ...reading }),
+    pause: async () => undefined,
+    resume: async () => undefined,
+    onChange: () => () => undefined,
+  };
+  const hook = await renderHook(
+    () => useThisComputer(host, "workspace", { turnOnLimitMs: 40 }),
+    undefined,
+  );
+  try {
+    await flush();
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 120)));
+    await flush();
+    expect(hook.result.current.status?.reconnecting).toBe(true);
     expect(hook.result.current.stalled).toBe(false);
   } finally {
     await hook.unmount();

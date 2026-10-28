@@ -305,18 +305,15 @@ describe.skipIf(process.platform === "win32")("service-backed desktop setup", ()
     });
     expect(await read(quiet)).toMatchObject({ reconnecting: true, waitingOn: "server" });
 
-    // The agent stopped trying: a problem at once, fixed by connecting again.
+    // The agent stopped trying: connecting again never reuses that connection
+    // (enrolling afresh is covered in this-computer-removed.test.ts).
     const stopped = fixture({ authentication: "reconnect", online: false });
-    const rejected = stopped.create();
-    await rejected.connect("signed-in-account", "https://server.example", "w1", {
-      screenControl: true,
-    });
-    expect(await read(rejected)).toMatchObject({
-      state: "connected",
-      errorCode: "reconnect_required",
-      error:
-        "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.",
-    });
+    await expect(
+      stopped
+        .create()
+        .connect("signed-in-account", "https://server.example", "w1", { screenControl: true }),
+    ).rejects.toThrow("must reuse enrollment");
+    expect(stopped.serverCalls).toEqual([]);
   });
 });
 
