@@ -1544,10 +1544,20 @@ describe("subject-owned capability connection references", () => {
     const admin = grant(workspace, "subject-admin");
 
     // Another provider's accounts never become this server's accounts, and a
-    // shared reference still needs the shared account.
+    // shared reference still needs the shared account. A reference that picks
+    // accounts or resources is not a plain per-person one.
+    const own = perPerson("mcp.per-person.example", "subject");
     for (const payload of [
       perPerson("github.com", "subject"),
       perPerson("mcp.per-person.example", "workspace"),
+      { ...own, connectionRef: { ...own.connectionRef, accountSelection: "all_eligible" } },
+      {
+        ...own,
+        connectionRef: {
+          ...own.connectionRef,
+          selectedResources: [{ id: "one", kind: "repository" }],
+        },
+      },
     ])
       await expect(
         enableCapability({
@@ -1557,9 +1567,10 @@ describe("subject-owned capability connection references", () => {
           settings,
           capabilityId,
           probeMcpServer: noProbe,
-          payload,
+          payload: payload as never,
         }),
       ).rejects.toThrow("visible active connection");
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
 
     // Members still cannot turn on a custom server, and are told what to do.
     await expect(

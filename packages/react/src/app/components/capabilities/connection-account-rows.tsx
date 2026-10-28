@@ -7,10 +7,12 @@ export type AccountOriginWorkspace = { id: string; name: string; kind: "personal
 export type ConnectionAccountRow = {
   /** Who the account is: its identity, or "<name> account" when the provider gave none. */
   label: string;
-  /** "This workspace", "Only me", or "Only me · From Personal workspace". */
+  /** "This workspace", "Only me", "Only me · From Personal workspace", or
+   * "From <workspace>" for a shared account added in another workspace. */
   scope: string;
-  /** Added in another workspace: managed (reconnected, removed) there, not here. */
-  fromAnotherWorkspace: boolean;
+  /** The workspace it was added in, when that is not the one being viewed.
+   * Removing or reconnecting it acts there. */
+  origin: string | null;
 };
 
 function originName(workspaceId: string, workspaces: readonly AccountOriginWorkspace[]): string {
@@ -47,19 +49,23 @@ export function connectionAccountRows(
 ): Map<string, ConnectionAccountRow> {
   const fallback = `${input.fallbackName} account`;
   const base = accounts.map((account) => {
-    const fromAnotherWorkspace =
-      Boolean(input.workspaceId) && account.workspaceId !== input.workspaceId;
+    const origin =
+      input.workspaceId && account.workspaceId !== input.workspaceId
+        ? originName(account.workspaceId, input.workspaces ?? [])
+        : null;
     const scope =
       account.subjectId === null
-        ? "This workspace"
-        : fromAnotherWorkspace
-          ? `Only me · From ${originName(account.workspaceId, input.workspaces ?? [])}`
+        ? origin
+          ? `From ${origin}`
+          : "This workspace"
+        : origin
+          ? `Only me · From ${origin}`
           : "Only me";
     return {
       account,
       label: input.labelOf?.(account) ?? connectionAccountIdentityLabel(account.metadata, fallback),
       scope,
-      fromAnotherWorkspace,
+      origin,
     };
   });
   const key = (row: { label: string; scope: string }) => `${row.label}\u0000${row.scope}`;
@@ -84,7 +90,7 @@ export function connectionAccountRows(
     rows.set(row.account.id, {
       label: time ? `${base[index]!.label} · ${time}` : row.label,
       scope: row.scope,
-      fromAnotherWorkspace: row.fromAnotherWorkspace,
+      origin: row.origin,
     });
   });
   return rows;

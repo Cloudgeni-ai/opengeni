@@ -4,6 +4,7 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
@@ -1746,6 +1747,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
+          canManageOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(
+              context.accessContext,
+              accountWorkspaceId,
+              PERSONAL_INTEGRATION_SETUP_PERMISSION,
+            ) ||
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
         }}

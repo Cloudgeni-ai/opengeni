@@ -8,12 +8,14 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,
+    description,
     confirmLabel,
     onOpenChange,
     onConfirm,
   }: {
     open: boolean;
     title: ReactNode;
+    description?: ReactNode;
     confirmLabel: string;
     onOpenChange: (open: boolean) => void;
     onConfirm: () => Promise<void | boolean>;
@@ -21,6 +23,7 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
     open ? (
       <div role="dialog">
         <p>{title}</p>
+        {description ? <p>{description}</p> : null}
         <button
           type="button"
           onClick={() => {
@@ -424,7 +427,7 @@ describe("catalog connected accounts", () => {
       await signedOut.unmount();
     });
 
-    test("your own account from another workspace names where it came from and is removed there, not here", async () => {
+    test("your own account from another workspace names where it came from and stays yours to manage", async () => {
       const here = "shared-workspace";
       const personal = "personal-workspace";
       const workspaces = [
@@ -441,11 +444,21 @@ describe("catalog connected accounts", () => {
         workspaceId: "unlisted-workspace",
         metadata: { email: "mia@other.test" },
       });
+      const sharedFromElsewhere = account({
+        workspaceId: "unlisted-workspace",
+        subjectId: null,
+        metadata: { email: "team@other.test" },
+      });
+      // Mia may manage her own accounts here and in her Personal workspace,
+      // not in a workspace she can't see.
+      const actions = management({
+        canManageOwnIn: (workspaceId) => workspaceId === here || workspaceId === personal,
+      });
       const view = await render(
         <CatalogConnectedAccounts
           item={item}
-          connections={[local, fromPersonal, fromElsewhere]}
-          management={management()}
+          connections={[local, fromPersonal, fromElsewhere, sharedFromElsewhere]}
+          management={actions}
           workspaceId={here}
           workspaces={workspaces}
         />,
@@ -455,13 +468,45 @@ describe("catalog connected accounts", () => {
       expect(rows[0]).not.toContain("From");
       expect(rows[1]).toContain("Only me · From Personal workspace");
       expect(rows[2]).toContain("Only me · From another workspace");
-      // Removing it here would disconnect it in the workspace it came from;
-      // signing in again only refreshes that same account, so it stays.
+      expect(rows[3]).toContain("From another workspace");
+      expect(rows[3]).not.toContain("This workspace");
+      // Her own account is removed or reconnected where it was added, so it is
+      // offered when she may manage her accounts there. A shared account from
+      // another workspace is that workspace's to manage.
       expect(buttons(view.container)).toEqual([
         "Add account",
         "Remove mia@work.test",
         "Reconnect mia@home.test",
+        "Remove mia@home.test",
       ]);
+      await act(async () =>
+        (
+          view.container.querySelector(
+            'button[aria-label="Remove mia@home.test"]',
+          ) as HTMLButtonElement
+        ).click(),
+      );
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.textContent).toContain("here and in Personal workspace, where it was added");
+      const confirm = [...dialog.querySelectorAll("button")].find(
+        (button) => button.textContent === "Remove account",
+      )!;
+      await act(async () => confirm.click());
+      expect(actions.onRemove).toHaveBeenCalledWith(fromPersonal);
+      await view.unmount();
+    });
+
+    test("a member who may only connect their own accounts can still remove them", async () => {
+      const mine = account({ metadata: { email: "mine@example.test" } });
+      const shared = account({ subjectId: null, metadata: { email: "team@example.test" } });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[mine, shared]}
+          management={management({ canWrite: false, canManageOwnIn: () => true })}
+        />,
+      );
+      expect(buttons(view.container)).toEqual(["Remove mine@example.test"]);
       await view.unmount();
     });
 

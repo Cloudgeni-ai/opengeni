@@ -55,8 +55,11 @@ export type CatalogConnectAccess = {
  * signs each person in takes only their own account. For an MCP connection
  * that is not on yet (custom ones often don't declare their sign-in until
  * asked), this is the shared rule the API and chat cards apply
- * (`personalIntegrationSetupAccess`). Until the grant loads, offer setup; the
- * API still enforces access.
+ * (`personalIntegrationSetupAccess`). Once a connection is on, nobody needs to
+ * turn it on again, so connecting is not blocked here, matching the in-chat
+ * connect card (`inChatCapabilitySetup`); a person's own account is only used
+ * where the connection takes each person's account. Until the grant loads,
+ * offer setup; the API still enforces access.
  */
 export function catalogConnectAccess(
   item: CapabilityCatalogItem,
