@@ -168,6 +168,7 @@ import {
   isAgentWorkHumanInput,
 } from "../timeline/agent-work-human-input";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
+import { annotationQuoteText } from "../timeline/annotation-model";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
@@ -4413,7 +4414,7 @@ function UserMessageRow({
           copyText={
             item.text ||
             (item.annotations ?? [])
-              .map((annotation) => `${annotation.quote}\n${annotation.note}`)
+              .map((annotation) => `${annotationQuoteText(annotation)}\n${annotation.note}`)
               .join("\n\n")
           }
           label={t("messageTimeline.copyMessage")}
