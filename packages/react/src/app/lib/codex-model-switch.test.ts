@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 
 import {
+  codexUsageContinueAtResetAction,
+  codexUsageContinuesAtReset,
   codexUsageResetText,
   codexUsageResetsAt,
   latestCheckpointIsCompaction,
@@ -95,5 +97,34 @@ describe("Codex usage limit reset", () => {
     expect(codexUsageResetText("2026-10-28T14:05:00.000Z", at)).toBe("Resets at 14:05.");
     expect(codexUsageResetText("2026-10-31T14:05:00.000Z", at)).toBe("Resets Sat 14:05.");
     expect(codexUsageResetText("2026-11-12T14:05:00.000Z", at)).toBe("Resets 12 Nov 14:05.");
+  });
+});
+
+describe("Continue at reset", () => {
+  test("a refused Codex turn waits and continues at the reset unless the chat is paused", () => {
+    expect(codexUsageContinuesAtReset({ status: "waiting_capacity", paused: false })).toBe(true);
+    expect(codexUsageContinuesAtReset({ status: "waiting_capacity", paused: true })).toBe(false);
+    // A chat the limit stopped is not waiting.
+    expect(codexUsageContinuesAtReset({ status: "idle", paused: false })).toBe(false);
+    expect(codexUsageContinuesAtReset({ status: "failed", paused: false })).toBe(false);
+  });
+
+  test("switching it pauses or resumes the wait, or runs a stopped chat again on Codex", () => {
+    const waiting = { status: "waiting_capacity" as const, paused: false };
+    expect(codexUsageContinueAtResetAction({ ...waiting, next: false })).toBe("pause");
+    expect(codexUsageContinueAtResetAction({ ...waiting, paused: true, next: true })).toBe(
+      "resume",
+    );
+    expect(codexUsageContinueAtResetAction({ status: "idle", paused: false, next: true })).toBe(
+      "run_on_codex",
+    );
+    expect(codexUsageContinueAtResetAction({ status: "failed", paused: false, next: true })).toBe(
+      "run_on_codex",
+    );
+    // No change, no action.
+    expect(codexUsageContinueAtResetAction({ ...waiting, next: true })).toBe(null);
+    expect(codexUsageContinueAtResetAction({ status: "idle", paused: false, next: false })).toBe(
+      null,
+    );
   });
 });

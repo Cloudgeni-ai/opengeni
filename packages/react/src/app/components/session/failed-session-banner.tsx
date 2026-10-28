@@ -14,7 +14,7 @@ import {
 import type { ConnectableSubscriptions } from "../../lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/free-model-limit-copy";
 import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
-import { CodexUsageActions, type CodexUsageChoice } from "./codex-usage-notice";
+import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
@@ -79,8 +79,8 @@ export function FailedSessionBanner({
    */
   shownInTimeline?: boolean | undefined;
   /**
-   * When the ChatGPT/Codex plan is out of usage: say when it resets and offer
-   * "Wait for reset" and "Switch model" in place of Retry.
+   * When the ChatGPT/Codex plan is out of usage: say when it resets, with a
+   * "Continue at reset" switch in place of Retry.
    */
   codexUsage?: CodexUsageChoice | undefined;
 }) {
@@ -126,11 +126,11 @@ export function FailedSessionBanner({
       return actions.onRetry();
     },
   };
-  // Waiting for the reset runs the turn again when it can; Retry would only
-  // hit the same limit, so the two choices replace it.
+  // Retry would only hit the same limit: the switch runs the turn again
+  // once the limit resets. Another model from the picker continues at once.
   const retryActions = codexUsageFailure ? (
     <>
-      <CodexUsageActions {...codexUsageFailure} />
+      <ContinueAtResetSwitch {...codexUsageFailure} />
       {codexUsageFailure.error ? (
         <p role="alert" className="order-last basis-full text-xs text-fg-muted">
           {codexUsageFailure.error}

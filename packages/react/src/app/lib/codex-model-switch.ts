@@ -71,6 +71,33 @@ function payloadField(event: SessionEvent, key: string): unknown {
 }
 
 /**
+ * "Continue at reset" for a chat blocked on its Codex usage limit. A turn the
+ * limit refused waits for capacity and continues at the reset unless the chat
+ * is paused. A chat the limit stopped (failed or idle) is not waiting.
+ */
+export function codexUsageContinuesAtReset(input: {
+  status: Session["status"];
+  paused: boolean;
+}): boolean {
+  return input.status === "waiting_capacity" && !input.paused;
+}
+
+/**
+ * What switching "Continue at reset" to `next` does: pause or resume the
+ * waiting chat, or run a stopped chat's work again on its Codex model, which
+ * waits for the reset. Null when nothing changes.
+ */
+export function codexUsageContinueAtResetAction(input: {
+  status: Session["status"];
+  paused: boolean;
+  next: boolean;
+}): "pause" | "resume" | "run_on_codex" | null {
+  if (input.next === codexUsageContinuesAtReset(input)) return null;
+  if (input.status === "waiting_capacity") return input.next ? "resume" : "pause";
+  return input.next ? "run_on_codex" : null;
+}
+
+/**
  * "Resets at 14:05." the same day, "Resets Sat 14:05." within a week, else
  * with its date; plainly unknown without a reset time.
  */

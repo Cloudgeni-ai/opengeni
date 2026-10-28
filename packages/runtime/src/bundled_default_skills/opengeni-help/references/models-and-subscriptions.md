@@ -68,8 +68,8 @@ Each organization subscription account has its own page.
   from the chat's stored history (the transcript notes "Earlier messages
   summarized for the new model"), and the chat uses that portable form from
   then on. When a ChatGPT/Codex plan runs out of usage, the chat says when it
-  resets and offers "Wait for reset" (the chat continues on its own then) or
-  "Switch model" (pick any model and the chat carries on with it).
+  resets and, by default, continues on its own then. Turn off "Continue at
+  reset" to pause it instead, or pick another model to carry on right away.
 - Codex Apps: lets agents use the ChatGPT apps connected to one account. It must
   be an account owned by the workspace.
 

@@ -6,16 +6,15 @@ registerDom();
 
 type Props = { composerModel: string; enabled?: boolean | undefined };
 
-async function setup() {
+async function setup(enabled = true) {
   const calls: string[] = [];
   const hook = await renderHook(
-    ({ composerModel, enabled = true }: Props) =>
+    ({ composerModel, enabled: blocked = enabled }: Props) =>
       useCodexUsageModelSwitch({
         sessionId: "session-1",
         sessionModel: "codex/gpt-6-sol",
         composerModel,
-        enabled,
-        openPicker: () => calls.push("open"),
+        enabled: blocked,
         closePicker: () => calls.push("close"),
         onContinue: (model) => calls.push(`continue:${model}`),
       }),
@@ -25,40 +24,35 @@ async function setup() {
 }
 
 describe("useCodexUsageModelSwitch", () => {
-  test("Switch model opens the picker and a pick continues the chat with that model once", async () => {
+  test("picking another model on a blocked chat continues it with that model once", async () => {
     const { calls, hook } = await setup();
-    await actRun(() => hook.result.current.start());
-    expect(calls).toEqual(["open"]);
     await actRun(() => hook.result.current.modelPicked("claude-opus-5.5"));
     // The composer commits the pick with its effort, then the chat continues.
     await hook.rerender({ composerModel: "claude-opus-5.5" });
-    expect(calls).toEqual(["open", "close", "continue:claude-opus-5.5"]);
+    expect(calls).toEqual(["close", "continue:claude-opus-5.5"]);
     await hook.rerender({ composerModel: "claude-opus-5.5" });
     expect(calls.filter((call) => call.startsWith("continue"))).toHaveLength(1);
     await hook.unmount();
   });
 
-  test("an ordinary pick, the chat's own model or closing the picker continues nothing", async () => {
+  test("the chat's own model, or a chat that is not blocked, continues nothing", async () => {
     const { calls, hook } = await setup();
-    // Without Switch model, choosing a model only changes the composer.
-    await actRun(() => hook.result.current.modelPicked("claude-opus-5.5"));
-    await hook.rerender({ composerModel: "claude-opus-5.5" });
-    expect(calls).toEqual([]);
-    await actRun(() => hook.result.current.start());
     await actRun(() => hook.result.current.modelPicked("codex/gpt-6-sol"));
-    await actRun(() => hook.result.current.pickerClosed());
-    await actRun(() => hook.result.current.modelPicked("gpt-6-astra"));
-    await hook.rerender({ composerModel: "gpt-6-astra" });
-    expect(calls).toEqual(["open"]);
+    await hook.rerender({ composerModel: "codex/gpt-6-sol" });
+    expect(calls).toEqual([]);
     await hook.unmount();
+    const unblocked = await setup(false);
+    await actRun(() => unblocked.hook.result.current.modelPicked("gpt-6-astra"));
+    await unblocked.hook.rerender({ composerModel: "gpt-6-astra" });
+    expect(unblocked.calls).toEqual([]);
+    await unblocked.hook.unmount();
   });
 
-  test("a chat that is no longer blocked does not continue", async () => {
+  test("a chat that stops being blocked before the pick lands does not continue", async () => {
     const { calls, hook } = await setup();
-    await actRun(() => hook.result.current.start());
     await actRun(() => hook.result.current.modelPicked("gpt-6-astra"));
     await hook.rerender({ composerModel: "gpt-6-astra", enabled: false });
-    expect(calls).toEqual(["open", "close"]);
+    expect(calls).toEqual(["close"]);
     await hook.unmount();
   });
 });

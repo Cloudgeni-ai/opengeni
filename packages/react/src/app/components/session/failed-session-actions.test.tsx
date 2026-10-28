@@ -935,8 +935,8 @@ test("the timeline flag never hides a failure the timeline cannot own", async ()
   expect(quota.textContent).toContain("daily limit");
 });
 
-test("a Codex usage limit offers Wait for reset and Switch model in place of Retry", async () => {
-  const chosen: string[] = [];
+test("a Codex usage limit shows when it resets and a Continue at reset switch in place of Retry", async () => {
+  const changes: boolean[] = [];
   const limited = {
     ...failure,
     failureCode: "codex_usage_limit_reached",
@@ -945,8 +945,8 @@ test("a Codex usage limit offers Wait for reset and Switch model in place of Ret
   };
   const codexUsage = {
     resetText: "Resets Sat 14:05.",
-    onWait: () => chosen.push("wait"),
-    onSwitchModel: () => chosen.push("switch"),
+    continueAtReset: false,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
   };
   const container = await render(
     <FailedSessionBanner failure={limited} actions={actions} codexUsage={codexUsage} />,
@@ -954,59 +954,60 @@ test("a Codex usage limit offers Wait for reset and Switch model in place of Ret
   const banner = container.querySelector('[data-testid="failed-session-banner"]');
   expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
   expect(banner?.textContent).not.toContain("Retry");
-  expect(container.querySelector('[data-testid="continue-with-model"]')).toBeNull();
-  const wait = container.querySelector<HTMLButtonElement>('[data-testid="codex-usage-wait"]');
-  const change = container.querySelector<HTMLButtonElement>(
-    '[data-testid="codex-usage-switch-model"]',
+  expect(banner?.textContent).not.toContain("Continue with");
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
   );
-  expect(wait?.textContent).toBe("Wait for reset");
-  expect(change?.textContent).toBe("Switch model");
-  await act(async () => wait!.click());
-  await act(async () => change!.click());
-  expect(chosen).toEqual(["wait", "switch"]);
-  // Other failures keep Retry, and so does a banner without the choices.
+  expect(toggle?.getAttribute("role")).toBe("switch");
+  expect(toggle?.getAttribute("aria-checked")).toBe("false");
+  expect(container.querySelector(`label[for="${toggle?.id}"]`)?.textContent).toBe(
+    "Continue at reset",
+  );
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([true]);
+  // Other failures keep Retry, and so does a banner without the switch.
   await act(async () =>
     root!.render(
       <FailedSessionBanner failure={failure} actions={actions} codexUsage={codexUsage} />,
     ),
   );
-  expect(container.querySelector('[data-testid="codex-usage-wait"]')).toBeNull();
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
   expect(container.textContent).toContain("Retry");
   await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
-  expect(container.querySelector('[data-testid="codex-usage-switch-model"]')).toBeNull();
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
 });
 
-test("the Codex usage notice is one line with when it resets and the two choices", async () => {
+test("the Codex usage notice is one line with when it resets and the Continue at reset switch", async () => {
   const { CodexUsageNotice } = await import("./codex-usage-notice");
-  const chosen: string[] = [];
+  const changes: boolean[] = [];
   const choice = {
     resetText: "Reset time unknown.",
-    onWait: () => chosen.push("wait"),
-    onSwitchModel: () => chosen.push("switch"),
+    continueAtReset: true,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
   };
   const container = await render(<CodexUsageNotice choice={choice} />);
   const notice = container.querySelector('[data-testid="codex-usage-notice"]');
   expect(notice?.querySelector("p")?.textContent).toBe(
     "Codex usage limit reached. Reset time unknown.",
   );
-  expect(notice?.textContent).not.toContain("Continue with");
-  await act(async () =>
-    container.querySelector<HTMLButtonElement>('[data-testid="codex-usage-switch-model"]')!.click(),
+  // One switch and no buttons: another model is picked in the composer.
+  expect(notice?.querySelectorAll("button:not([role=switch])")).toHaveLength(0);
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
   );
-  expect(chosen).toEqual(["switch"]);
-  // Once the chat waits, it says so and keeps only Switch model.
-  await act(async () => root!.render(<CodexUsageNotice choice={{ ...choice, waiting: true }} />));
-  expect(container.querySelector('[data-testid="codex-usage-wait"]')).toBeNull();
-  expect(container.querySelector('[data-testid="codex-usage-waiting"]')?.textContent).toBe(
-    "Continues when it resets.",
-  );
-  expect(container.querySelector('[data-testid="codex-usage-switch-model"]')).not.toBeNull();
-  // While an action is in flight both stay disabled, and its error shows plainly.
+  // A waiting chat continues at the reset unless the person switches it off.
+  expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([false]);
+  // While a change is saving it ignores clicks, and its error shows plainly.
   await act(async () =>
     root!.render(<CodexUsageNotice choice={{ ...choice, pending: true, error: "Try again." }} />),
   );
-  expect(
-    container.querySelector<HTMLButtonElement>('[data-testid="codex-usage-wait"]')?.disabled,
-  ).toBe(true);
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="codex-usage-continue-at-reset"]')!
+      .click(),
+  );
+  expect(changes).toEqual([false]);
   expect(container.querySelector('[role="alert"]')?.textContent).toBe("Try again.");
 });

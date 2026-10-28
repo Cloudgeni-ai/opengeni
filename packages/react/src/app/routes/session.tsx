@@ -233,6 +233,8 @@ import { isCodexProductModel } from "../lib/session-model";
 import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
 import {
   CONTEXT_CHECKPOINT_EVENT_TYPES,
+  codexUsageContinueAtResetAction,
+  codexUsageContinuesAtReset,
   codexUsageResetText,
   codexUsageResetsAt,
   latestCheckpointIsCompaction,
@@ -3229,8 +3231,6 @@ function SessionChatPane(props: {
     sessionId: string;
     pending: boolean;
     error: string | null;
-    /** The person chose to wait for the reset. */
-    waitChosen: boolean;
   } | null>(null);
   const usageContinuation =
     usageContinuationState?.sessionId === props.session.id ? usageContinuationState : null;
@@ -3287,15 +3287,12 @@ function SessionChatPane(props: {
     })
       ? modelSwitchHeadsUpText(label)
       : null;
-  // Run the blocked work on `policy`: the chat's own Codex model to wait for
-  // the reset (its turn parks until then), or the model the person switched to.
-  const continueAfterUsageLimit = async (
-    policy: Parameters<typeof retryFailedSession>[1],
-    waitChosen: boolean,
-  ) => {
+  // Run the blocked work on `policy`: the chat's own Codex model to continue
+  // at the reset (its turn parks until then), or the model the person picked.
+  const continueAfterUsageLimit = async (policy: Parameters<typeof retryFailedSession>[1]) => {
     if (usageContinuation?.pending) return;
     const sessionId = props.session.id;
-    setUsageContinuation({ sessionId, pending: true, error: null, waitChosen });
+    setUsageContinuation({ sessionId, pending: true, error: null });
     let error: string | null = null;
     try {
       if (
@@ -3326,53 +3323,51 @@ function SessionChatPane(props: {
     } catch (failure) {
       error = userErrorText(failure, "Try again.");
     } finally {
-      setUsageContinuation({ sessionId, pending: false, error, waitChosen: waitChosen && !error });
+      setUsageContinuation({ sessionId, pending: false, error });
       await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
     }
   };
-  const waitForCodexReset = () => {
-    // A parked turn already continues on its own when the limit resets.
-    if (props.session.status === "waiting_capacity") {
-      setUsageContinuation({
-        sessionId: props.session.id,
-        pending: false,
-        error: null,
-        waitChosen: true,
-      });
-      return;
-    }
-    void continueAfterUsageLimit(
-      {
+  // A Codex turn refused for usage waits for capacity and continues at the
+  // reset by default; switching that off pauses the chat, so it waits for the
+  // person. A chat the limit stopped instead (failed or idle) is not waiting:
+  // switching it on runs the work again on Codex, which waits for the reset.
+  const usagePaused = admissionControl.state === "paused";
+  const continueAtReset = codexUsageContinuesAtReset({
+    status: props.session.status,
+    paused: usagePaused,
+  });
+  const setContinueAtReset = (next: boolean) => {
+    const action = codexUsageContinueAtResetAction({
+      status: props.session.status,
+      paused: usagePaused,
+      next,
+    });
+    if (action === "pause") void composer.pause();
+    else if (action === "resume") void composer.resume();
+    else if (action === "run_on_codex")
+      void continueAfterUsageLimit({
         model: props.session.model,
         reasoningEffort: props.session.reasoningEffort,
         latencyMode: props.session.latencyMode,
-      },
-      true,
-    );
+      });
   };
-  // "Switch model" opens the picker; picking another model continues the chat with it.
+  // Picking another model in the picker continues the blocked chat with it.
   const usageModelSwitch = useCodexUsageModelSwitch({
     sessionId: props.session.id,
     sessionModel: props.session.model,
     composerModel: model,
     enabled: codexUsageChoices,
-    openPicker: () => {
-      setModelPickerSession(props.session.id);
-      void modelCatalog.refresh();
-    },
     closePicker: () => setModelPickerSession(null),
     onContinue: (picked) =>
-      void continueAfterUsageLimit({ model: picked, reasoningEffort, latencyMode }, false),
+      void continueAfterUsageLimit({ model: picked, reasoningEffort, latencyMode }),
   });
   const codexUsageChoice: CodexUsageChoice | undefined = codexUsageChoices
     ? {
         resetText: codexUsageResetText(codexUsageResetsAtValue),
-        // Only a parked turn continues on its own; after a failure the choice shows again.
-        waiting: props.session.status === "waiting_capacity" && usageContinuation?.waitChosen,
-        pending: usageContinuation?.pending,
+        continueAtReset,
+        pending: usageContinuation?.pending || composer.pausing || composer.resuming,
         error: usageContinuation?.error,
-        onWait: waitForCodexReset,
-        onSwitchModel: usageModelSwitch.start,
+        onContinueAtResetChange: setContinueAtReset,
       }
     : undefined;
   // A failed chat shows these choices in its failure banner.
@@ -4327,7 +4322,6 @@ function SessionChatPane(props: {
                       onOpenChange={(open) => {
                         setModelPickerSession(open ? props.session.id : null);
                         if (open) void modelCatalog.refresh();
-                        else usageModelSwitch.pickerClosed();
                       }}
                       rows={modelCatalog.rows}
                       model={model}
