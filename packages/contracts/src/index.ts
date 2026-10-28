@@ -905,7 +905,7 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
-    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    /** EU-only refusal (HTTP 422): content from an EU-only workspace may only reach other EU-only workspaces, and EU-only inference refuses a model-backed feature with no EU route (details.code "region_restricted"). */
     "region_restricted",
     /** The resource or route no longer exists (HTTP 410). */
     "gone",

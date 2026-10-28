@@ -154,7 +154,6 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
-  regionRestrictedHttpError,
   insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
@@ -2560,7 +2559,6 @@ export function createAppComposition(deps: AppDependencies): {
               details: { code: rawError.code },
             })
           : (sessionUsageLimitHttpError(rawError) ??
-            regionRestrictedHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??

@@ -53,8 +53,10 @@ describe("region refusals over HTTP", () => {
   test("a region refusal is a 422 with region_restricted; other errors are untouched", () => {
     const mapped = regionRestrictedHttpError(new InferenceRegionRestrictedError("web_search"));
     expect(mapped?.status).toBe(422);
+    // The same public code as an EU-only content-flow refusal, plus the
+    // availability code in details.
     expect(mapped).toMatchObject({
-      code: "validation_failed",
+      code: "region_restricted",
       retryable: false,
       details: { code: "region_restricted" },
     });
