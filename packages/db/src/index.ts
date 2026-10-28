@@ -36,6 +36,8 @@ import {
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
 export * from "./credential-profiles";
+export * from "./secret-value-masking";
+export * from "./secret-use-history";
 export * from "./connected-machine-audience";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
@@ -141,6 +143,9 @@ import {
   AppShotCapture,
   classifyPromptCacheWarmMiss,
   parsePromptCacheObservation,
+  parseModelCallProcessingResidency,
+  modelCallProcessingResidency,
+  type ModelCallProcessingResidencyV1,
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
@@ -1056,6 +1061,8 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
+import { maskSecretValuesForStorage } from "./secret-value-masking";
+import { maskSerializedRunStateForStorage } from "./lossless-columns";
 export {
   isStoredVerbatimAsLosslessJsonString,
   LOSSLESS_TEXT_PREFIX,
@@ -4075,6 +4082,32 @@ export async function getManagedUserProfilesByIds(
 }
 
 /**
+ * A person's verified email address in lowercase, or null when the subject is
+ * not a managed user (`user:<id>`), has no email, or has not verified it.
+ * Embedded hosts answer through their `userProfileLookup`; their address
+ * counts only when the profile says `emailVerified: true`.
+ */
+export async function getVerifiedSubjectEmail(
+  db: Database,
+  subjectId: string,
+): Promise<string | null> {
+  if (!subjectId.startsWith("user:")) return null;
+  const userId = subjectId.slice("user:".length);
+  if (!userId) return null;
+  const binding = dbBindingFor(db);
+  if (binding?.userProfileLookup) {
+    const [profile] = await binding.userProfileLookup(db, [userId]);
+    if (profile?.emailVerified !== true) return null;
+    return profile.email?.trim().toLowerCase() || null;
+  }
+  const [row] = await rawRows<{ email: string | null }>(
+    db,
+    sql`select email from auth_users where id = ${userId} and email_verified is true limit 1`,
+  );
+  return row?.email?.trim().toLowerCase() || null;
+}
+
+/**
  * A workspace member's name as the workspace's people list shows it: their
  * profile name, else the label their membership was given, else their email.
  * Null when none is known.
@@ -6078,6 +6111,11 @@ export type ModelCallFact = {
   contextContributions: readonly ModelContextContributionSummary[] | null;
   /** Prompt-cache observation and warm-miss classification, when recorded. */
   promptCacheDiagnostics: PromptCacheDiagnostics | null;
+  /**
+   * Where the route that served the call processed it (no evidence). Null
+   * only for calls recorded before calls carried a processing residency.
+   */
+  processingResidency: ModelCallProcessingResidencyV1 | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -6118,6 +6156,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
         : null,
     contextContributions: row.contextContributions,
     promptCacheDiagnostics: row.promptCacheDiagnostics ?? null,
+    processingResidency: parseModelCallProcessingResidency(row.processingResidency),
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -6204,6 +6243,12 @@ export async function recordModelCallFact(
      * call of the same model in the session. Omitted by repair paths.
      */
     promptCache?: PromptCacheObservation | null;
+    /**
+     * Processing residency claim of the route that served the call. Only the
+     * claim is stored, never evidence; a call whose route is not known is
+     * recorded as unknown, never null.
+     */
+    processingResidency?: ModelCallProcessingResidencyV1 | null;
     occurredAt?: Date;
     /**
      * The shared-core subscription connection that served the call (core
@@ -6339,6 +6384,9 @@ export async function recordModelCallFact(
           connectionId: input.connectionId ?? null,
           ...modelCallTimingColumns(timing),
           promptCacheDiagnostics,
+          processingResidency:
+            parseModelCallProcessingResidency(input.processingResidency) ??
+            modelCallProcessingResidency(null),
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -6368,6 +6416,7 @@ export async function recordModelCallFact(
             timeToFirstTextMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTextMs}, excluded.time_to_first_text_ms)`,
             durationMs: sql`coalesce(${schema.modelCallFacts.durationMs}, excluded.duration_ms)`,
             promptCacheDiagnostics: sql`coalesce(${schema.modelCallFacts.promptCacheDiagnostics}, excluded.prompt_cache_diagnostics)`,
+            processingResidency: sql`coalesce(${schema.modelCallFacts.processingResidency}, excluded.processing_residency)`,
           },
         })
         .returning();
@@ -30548,6 +30597,8 @@ async function createSessionInTransaction(
   input: SessionCreateInput,
   id: string,
 ): Promise<SessionCreateResult> {
+  // A session an agent starts never stores a secret value its attempt knows.
+  input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
   const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
@@ -41774,6 +41825,15 @@ export async function appendSessionHistoryItems(
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
+  // Secret backstop: mask before the insert and before the idempotency
+  // comparison below, so a retried append compares like with like.
+  input = {
+    ...input,
+    items: input.items.map((entry) => ({
+      ...entry,
+      item: maskSecretValuesForStorage(entry.item, "history_append"),
+    })),
+  };
   let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
@@ -41897,9 +41957,17 @@ export async function appendSessionHistoryItems(
         if (
           !row ||
           row.turnId !== input.turnId ||
+          // Both sides as stored: the column masks again after truncation,
+          // and the attempt may have learned a value since the first write.
           !isDeepStrictEqual(
-            fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-            canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+            maskSecretValuesForStorage(
+              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+              "history_append",
+            ),
+            maskSecretValuesForStorage(
+              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+              "history_append",
+            ),
           )
         ) {
           throw new Error(
@@ -68139,6 +68207,11 @@ export async function saveRunState(
     pendingApprovals: unknown[];
   },
 ): Promise<boolean> {
+  // Masked before the size check, so the limit applies to what is stored.
+  input = {
+    ...input,
+    serializedRunState: maskSerializedRunStateForStorage(input.serializedRunState),
+  };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -68315,6 +68388,7 @@ export async function createSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<SessionGoal> {
+  input = maskSecretValuesForStorage(input, "goal");
   const rootConstraints = normalizeAndAssertSessionGoalRootConstraints(input.rootConstraints ?? []);
   return await withRlsContext(
     db,
@@ -68820,6 +68894,7 @@ export async function upsertSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<{ goal: SessionGoal; replaced: boolean }> {
+  input = maskSecretValuesForStorage(input, "goal");
   const suppliedRootConstraints =
     input.rootConstraints === undefined
       ? null
@@ -69698,6 +69773,7 @@ export async function updateSessionGoalWithEvent(
   outcome: "applied" | "proposed";
   proposalId: string | null;
 }> {
+  input = maskSecretValuesForStorage(input, "goal");
   if (input.text !== undefined) {
     assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
   }
@@ -83062,11 +83138,9 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        await assertApprovalRunStateForSave(
-          tx,
-          input.runState.serializedRunState,
-          input.runState.pendingApprovals,
-        );
+        // Masked before the size check, so the limit applies to what is stored.
+        const runStateText = maskSerializedRunStateForStorage(input.runState.serializedRunState);
+        await assertApprovalRunStateForSave(tx, runStateText, input.runState.pendingApprovals);
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(
@@ -83076,7 +83150,7 @@ export async function applySessionTurnSettlement(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 stateVersion: Number(maxVersion) + 1,
-                serializedRunState: input.runState.serializedRunState,
+                serializedRunState: runStateText,
                 pendingApprovals: input.runState.pendingApprovals,
               },
               "serializedRunState",
@@ -92053,6 +92127,7 @@ export {
 export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
+export * from "./site-tool-allowances";
 export * from "./transcription-recordings";
 export * from "./recordings";
 export * from "./recording-live";

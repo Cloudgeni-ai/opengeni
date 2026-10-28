@@ -149,6 +149,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -171,6 +172,7 @@ export function sessionTitleCodexRequestContext(
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
     ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
+    ...(context.onReportedUsage ? { onReportedUsage: context.onReportedUsage } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -881,8 +883,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
-                      creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    onReportedUsage: (usage) => creditGuard.observe(usage),
                     persistUsageHeaders: async (snapshot) => {
                       if (!coreCodex) return;
                       await recordCoreCodexUsageReading({
@@ -2323,7 +2325,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          return runAgentTurn(input, resolvedServices, span);
+          // One known-secret memory per attempt: tool results, model input and
+          // every durable write of this attempt are masked with it.
+          const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
+          // Work that outlives the attempt (process-wide caches started inside
+          // it) neither keeps these values nor masks with them afterwards.
+          return runWithAttemptSecretValues(secretValues, () =>
+            runAgentTurn(input, resolvedServices, span),
+          ).finally(() => secretValues.dispose());
         }),
       );
     } catch (error) {

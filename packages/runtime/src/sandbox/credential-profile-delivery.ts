@@ -94,12 +94,6 @@ export type CreateCredentialEnvironmentInput = {
   resolver: SecretResolver | null | undefined;
   /** Loads the effective profile of the attempt's session (null: none). */
   load: () => Promise<EffectiveCredentialProfile | null>;
-  /**
-   * Part B hook: every profile value delivered to a command, so the
-   * attempt's known-secret masking also covers values that never appeared
-   * as a reference. Called before the command is dispatched.
-   */
-  onValuesDelivered?: (values: readonly string[]) => void;
   profileTtlMs?: number;
   loadTimeoutMs?: number;
   resolveTimeoutMs?: number;
@@ -383,13 +377,6 @@ export function createCredentialEnvironment(
     }
     if (delivered.length > 0) {
       env[CREDENTIAL_PROFILE_VARS_VARIABLE] = Object.keys(env).join(",");
-    }
-    if (delivered.length > 0) {
-      try {
-        input.onValuesDelivered?.(delivered);
-      } catch {
-        // A masking hook must never fail the command.
-      }
     }
     return { env, notes };
   }

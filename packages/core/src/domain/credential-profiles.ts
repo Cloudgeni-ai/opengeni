@@ -251,15 +251,15 @@ export async function setCredentialProfile(
 /**
  * The per-command credential environment of one attempt: the session's
  * effective profile, read again at most every few seconds, resolved through
- * the attempt's resolver for every command. Never fails a command.
+ * the attempt's resolver for every command. Never fails a command. The
+ * attempt's resolver remembers what it resolves, so profile values are
+ * masked like any other resolved value (docs/secrets.md, Masking).
  */
 export function createSessionCredentialEnvironment(input: {
   db: Database;
   workspaceId: string;
   sessionId: string;
   resolver: SecretResolver | null | undefined;
-  /** Part B hook (known-value masking); see createCredentialEnvironment. */
-  onValuesDelivered?: (values: readonly string[]) => void;
 }): CredentialEnvironment {
   return createCredentialEnvironment({
     resolver: input.resolver,
@@ -268,6 +268,5 @@ export function createSessionCredentialEnvironment(input: {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
       }),
-    ...(input.onValuesDelivered ? { onValuesDelivered: input.onValuesDelivered } : {}),
   });
 }

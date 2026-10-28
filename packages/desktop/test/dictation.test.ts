@@ -769,6 +769,24 @@ describe("dictation settings", () => {
     }
   });
 
+  test("an app that learns its language later gives the first shortcut that language", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dictation-test-"));
+    try {
+      let appLanguage: string | null = null;
+      const store = new DictationSettingsStore(dir, "darwin", () => appLanguage);
+      expect(store.read().profiles[0]!.language).toBeNull();
+      // Signing in tells the app its language; nothing was saved yet, so the default follows.
+      appLanguage = "nb";
+      expect(store.read().profiles[0]!.language).toBe("nb");
+      // Once saved, the language stays, whatever the app says next.
+      store.write({ ...store.read(), enabled: true });
+      appLanguage = "en";
+      expect(store.read().profiles[0]!.language).toBe("nb");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("shortcuts: chords need two known keys", () => {
     expect(parseDictationShortcut({ kind: "modifierChord", modifiers: ["fn", "control"] })).toEqual(
       {

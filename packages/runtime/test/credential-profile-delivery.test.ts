@@ -15,7 +15,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  rememberingSecretResolver,
   SecretReferenceError,
+  SecretValueMemory,
   type EffectiveCredentialProfile,
   type SecretResolver,
 } from "@opengeni/contracts";
@@ -71,7 +73,6 @@ function profile(entries: Array<[string, string]>, gitHelper = false): Effective
 function environmentFor(
   value: EffectiveCredentialProfile | null,
   resolver: SecretResolver = createStaticSecretResolver(VALUES),
-  extra: { onValuesDelivered?: (values: readonly string[]) => void } = {},
 ) {
   let loads = 0;
   const credentials = createCredentialEnvironment({
@@ -80,7 +81,6 @@ function environmentFor(
       loads += 1;
       return value;
     },
-    ...extra,
   });
   return { credentials, loads: () => loads };
 }
@@ -106,15 +106,16 @@ function approvalResolver(approvalRaw: string) {
 }
 
 describe("createCredentialEnvironment", () => {
-  test("resolves every entry into the command environment and reports the values", async () => {
-    const delivered: string[] = [];
+  test("resolves every entry into the command environment, and the values are masked", async () => {
+    // The attempt's resolver remembers what it resolves (part B), so a
+    // command that prints a profile value shows its reference instead.
+    const memory = new SecretValueMemory();
     const { credentials } = environmentFor(
       profile([
         ["GH_TOKEN", ref("cloud-auth/GITHUB_TOKEN/value")],
         ["AZURE_CLIENT_SECRET", ref("cloud-auth/AZURE_CLIENT_SECRET/value")],
       ]),
-      undefined,
-      { onValuesDelivered: (values) => delivered.push(...values) },
+      rememberingSecretResolver(createStaticSecretResolver(VALUES), memory),
     );
     const result = await credentials.forCommand(SHELL);
     expect(result.notes).toEqual([]);
@@ -124,13 +125,12 @@ describe("createCredentialEnvironment", () => {
       // The names (never values) the profile delivered, for the CLI wrappers.
       OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN,AZURE_CLIENT_SECRET",
     });
-    // The known-value masking hook (part B) sees every delivered value.
-    expect(delivered.sort()).toEqual(
-      [
-        VALUES["cloud-auth/GITHUB_TOKEN/value"],
-        VALUES["cloud-auth/AZURE_CLIENT_SECRET/value"],
-      ].sort(),
+    const printed = memory.maskText(
+      `GH_TOKEN=${VALUES["cloud-auth/GITHUB_TOKEN/value"]}\nAZURE_CLIENT_SECRET=${VALUES["cloud-auth/AZURE_CLIENT_SECRET/value"]}\n`,
     );
+    expect(printed).not.toContain(VALUES["cloud-auth/GITHUB_TOKEN/value"]);
+    expect(printed).not.toContain(VALUES["cloud-auth/AZURE_CLIENT_SECRET/value"]);
+    expect(printed).toContain(`GH_TOKEN=${ref("cloud-auth/GITHUB_TOKEN/value")}`);
   });
 
   test("a failing entry is skipped with a note; the others are still delivered", async () => {

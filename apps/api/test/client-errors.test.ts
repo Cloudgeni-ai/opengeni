@@ -399,6 +399,13 @@ const streamEvent = {
   revision,
 };
 const webVital = { signal: "web_vital", metric: "lcp", page: "sessions", value: 2.4, revision };
+const desktopBridgeMissing = {
+  signal: "desktop_bridge_missing",
+  platform: "macos",
+  appVersion: "0.1.32",
+  route: "/workspaces/$workspaceId/sessions/$sessionId",
+  revision,
+};
 
 describe("client signal report contract", () => {
   test("accepts closed request-failure, stream and web-vital reports", () => {
@@ -407,6 +414,9 @@ describe("client signal report contract", () => {
       streamEvent,
       webVital,
       { ...webVital, page: "read-only-chats" },
+      desktopBridgeMissing,
+      { ...desktopBridgeMissing, platform: "windows", appVersion: "1.2.3-beta.4" },
+      { ...desktopBridgeMissing, platform: "linux", appVersion: "unknown" },
     ]) {
       expect(parseClientBeaconReport(JSON.stringify(report))).toEqual(report as never);
       // A signal report is never mistaken for an error report.
@@ -433,6 +443,12 @@ describe("client signal report contract", () => {
       { ...webVital, metric: "cls", value: 101 },
       { ...webVital, value: "2.4" },
       { ...webVital, route: "/" },
+      { ...desktopBridgeMissing, platform: "ios" },
+      { ...desktopBridgeMissing, appVersion: "0.1" },
+      { ...desktopBridgeMissing, appVersion: "0.1.32 (Macintosh; Intel Mac OS X 10_15_7)" },
+      { ...desktopBridgeMissing, appVersion: "Opengeni/0.1.32" },
+      { ...desktopBridgeMissing, userAgent: "Mozilla/5.0 Opengeni/0.1.32 Electron/44.7.2" },
+      { ...desktopBridgeMissing, route: "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7" },
       { signal: "unknown", revision },
     ];
     for (const body of rejected) expect(parseClientBeaconReport(JSON.stringify(body))).toBeNull();
@@ -522,6 +538,47 @@ describe("POST /v1/client-errors signal reports", () => {
       op: "send_message",
       reason: "offline",
       clientRoute: requestFailure.route,
+    });
+  });
+
+  test("counts a desktop page without the bridge by platform and logs its app version", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const baseline = await observability.prometheusMetrics();
+    for (const platform of ["macos", "windows", "linux"]) {
+      expect(
+        metricValue(
+          baseline,
+          "opengeni_client_desktop_bridge_missing_total",
+          `platform="${platform}"`,
+        ),
+      ).toBe(0);
+    }
+    const { lines } = await captureWarnings(async () => {
+      const response = await post(app, JSON.stringify(desktopBridgeMissing), {
+        origin: "https://app.opengeni.test",
+      });
+      expect(response.status).toBe(204);
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(metrics, "opengeni_client_desktop_bridge_missing_total", 'platform="macos"'),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_desktop_bridge_missing_total", 'platform="windows"'),
+    ).toBe(0);
+    // The version is not a metric label; only the log line carries it.
+    expect(metrics).not.toContain("0.1.32");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Desktop app page without the shell bridge",
+      surface: "desktop",
+      op: "macos",
+      reason: "bridge_missing",
+      clientAppVersion: "0.1.32",
+      clientRoute: desktopBridgeMissing.route,
+      clientRevision: revision,
     });
   });
 

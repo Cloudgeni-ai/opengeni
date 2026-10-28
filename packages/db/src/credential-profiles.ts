@@ -1,5 +1,5 @@
 /**
- * Credential profiles (1014): names and secret references that Opengeni adds
+ * Credential profiles (1033): names and secret references that Opengeni adds
  * to the environment of every command an agent runs. The workspace has at
  * most one profile; a session can add one, which its child sessions inherit.
  * Nothing here holds or reads a secret value. Callers authorize the request

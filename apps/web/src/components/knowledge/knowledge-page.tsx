@@ -23,7 +23,11 @@ import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -91,10 +95,10 @@ export function KnowledgePage({
     workspace?.accountId &&
     hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
   );
-  const canEditInstructions = hasWorkspacePermission(
+  const canEditInstructions = canManageWorkspaceSettings(
     context.accessContext,
-    workspaceId,
-    "workspace:admin",
+    workspace,
+    context.managedSelfContext,
   );
   const canUpload =
     context.clientConfig.fileUploads.enabled &&

@@ -383,6 +383,17 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // A direct session load shows these icons (tool icons and the
+              // new-chat starters), and lazy pages use them too. Left to
+              // entry-aware grouping they can share a chunk with the recordings
+              // model and the meeting helpers, which pulls that lazy code into
+              // every direct session load.
+              name: "starter-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:blocks|code|graduation-cap)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // The session page shows these icons, and so does the default-machine
               // settings row. Left to entry-aware grouping they share a chunk with
               // that row, which pulls the settings and model pages into every

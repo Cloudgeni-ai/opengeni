@@ -350,7 +350,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
     text: () =>
-      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. A Site\'s own tool calls can\'t ask, so a tool set to Ask fails there until it is set to Allow.',
+      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. In Opengeni a Site\'s tool call set to Ask asks the viewer to confirm; on a published Site address it can\'t ask, so it fails there until it is set to Allow.',
   },
   {
     method: "GET",

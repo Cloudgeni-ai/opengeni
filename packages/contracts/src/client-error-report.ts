@@ -203,7 +203,12 @@ export function projectClientErrorDetail(
  * reject signal reports as invalid, so the extension is backward compatible in
  * both directions.
  */
-export const CLIENT_SIGNALS = ["request_failure", "stream", "web_vital"] as const;
+export const CLIENT_SIGNALS = [
+  "request_failure",
+  "stream",
+  "web_vital",
+  "desktop_bridge_missing",
+] as const;
 export type ClientSignal = (typeof CLIENT_SIGNALS)[number];
 
 /**
@@ -340,10 +345,32 @@ export type ClientWebVitalReport = {
   revision: string;
 };
 
+/** Desktop app platforms, as the desktop bridge names them. */
+export const CLIENT_DESKTOP_PLATFORMS = ["macos", "windows", "linux"] as const;
+export type ClientDesktopPlatform = (typeof CLIENT_DESKTOP_PLATFORMS)[number];
+
+/** A desktop app version as its user agent writes it (`Opengeni/<version>`). */
+export const CLIENT_DESKTOP_APP_VERSION_PATTERN =
+  /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:-[0-9A-Za-z.]{1,24})?$/;
+
+/**
+ * The page runs in the Opengeni desktop app's own window (its user agent says
+ * so) but the shell's bridge is missing. Sent at most once per page load.
+ */
+export type ClientDesktopBridgeMissingReport = {
+  signal: "desktop_bridge_missing";
+  platform: ClientDesktopPlatform;
+  /** The app version from the user agent, or `unknown`. */
+  appVersion: string;
+  route: string;
+  revision: string;
+};
+
 export type ClientSignalReport =
   | ClientRequestFailureReport
   | ClientStreamReport
-  | ClientWebVitalReport;
+  | ClientWebVitalReport
+  | ClientDesktopBridgeMissingReport;
 
 /** Every body the beacon route accepts. */
 export type ClientBeaconReport = ClientErrorReport | ClientSignalReport;

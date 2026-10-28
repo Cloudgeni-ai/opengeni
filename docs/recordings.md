@@ -18,6 +18,27 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
+A recording is stored in the workspace it was recorded in, and a shared one
+stays there. A signed-in person's (`user:`) own Only me meetings are theirs
+across their organization: every workspace of the same organization they
+belong to, their Personal workspace included, lists them in
+`GET …/recordings` (and agents acting for them find them with
+`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). They open in place: every
+`…/recordings/:recordingId` route reads and changes them in the storing
+workspace, as the person, so transcript, notes, speakers and re-runs work from
+any of those workspaces, and the React Meetings pages label them with where
+they were recorded. The request must hold the same access in the storing
+workspace that the route needs (the person's role there, and an API key's or
+delegated token's workspace scope); without it the meeting is not found.
+Re-runs are billed and checked against the allowance of the storing workspace.
+Sharing one (`visibility: "workspace"`) is done in the storing workspace and
+returns 409 elsewhere. An app's own users (external users) keep their meetings
+in the workspace that stores them, and `externalRef` lists only this
+workspace. Nobody else's Only me meetings and no shared ones cross
+workspaces, nothing crosses organizations, and a person who leaves the
+storing workspace or the organization no longer sees them elsewhere.
+
 ## Language
 
 A meeting is transcribed in `transcription.language` when the create request
@@ -47,7 +68,20 @@ never loses audio.
    `POST …/recordings/:recordingId/chunks/complete`. The server checks each
    object and answers which chunks are uploaded and which are still missing.
 4. When capture ends, `POST …/recordings/:recordingId/finalize` with every
-   track's chunk count. Finishing again is harmless.
+   track's chunk count. Finishing again is harmless. Finishing always ends
+   capture, even when the transcript can't be paid for: when the workspace
+   picked no model and the automatic one would be refused for credits, a
+   model that costs the payer nothing (a connected subscription or the
+   workspace's own key) transcribes it instead; otherwise version 1 fails at
+   once with the refusal's code (`insufficient_credits`,
+   `allowance_exhausted` or `monthly_model_cost_limit`), and
+   the meeting can be transcribed again once that is fixed.
+
+The SDK's `RecordingUploader` keeps a recording's chunks on the device until
+the server has them, and resumes on the next start of the app, or when a
+page creates the uploader again. A failure retrying can't fix stays in its
+status as `failed`, with the chunks kept; `retry(recordingId)` tries it again,
+and the React recorder offers that as **Try again** on the meeting's page.
 
 Chunk start times are milliseconds from the recording's start. A new capture
 session on the same track (after a reload, say) simply continues the chunk
@@ -332,6 +366,14 @@ follows a recording from another device.
 All processing runs in the background worker. It joins each track's chunks
 into one seekable file (kept for playback and re-runs), transcribes each
 track and stores transcript version 1.
+
+Each transcript has a time budget, counted from when it was asked for and
+including waiting and retries: half an hour plus three times the audio's
+length, at most twelve hours. Past it the version fails as `timed_out`
+rather than staying in progress, and can be transcribed again.
+A transcript that is already made and being charged and saved when the
+budget runs out is still saved, and a brief database error while saving it
+is retried at once.
 
 When a recording has computer or tab audio (a `system` track), the
 microphone track is the person recording and the system track is everyone

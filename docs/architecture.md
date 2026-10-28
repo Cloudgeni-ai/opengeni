@@ -1708,7 +1708,8 @@ Opt-in credential profiles (workspace, plus session additions children inherit)
 name variables whose references the attempt's resolver turns into values for
 each command's own environment at the same boundary
 (`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
-written to config or kept on the box.
+written to config or kept on the box, and the values are masked like any other
+resolved value.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -2886,10 +2887,13 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Conversation, source, tool, and error text is not centrally regex-redacted.
-  Two narrow exceptions are approved but not yet implemented: masking of known
-  secret values and of narrow, high-precision secret shapes
-  ([`secrets.md`](secrets.md#masking-decision)).
+  Known secret values (what an attempt's references resolve to and the
+  credentials Opengeni injects) are replaced by their references in tool
+  results, model input and stored conversation text before storage and before
+  the model sees them (docs/secrets.md, Masking). Other conversation, source,
+  tool, and error text is not regex-redacted. Known-value masking supersedes
+  the 5 August 2026 "keep content exact" decision for this case, approved on
+  26 October 2026.
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
