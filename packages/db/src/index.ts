@@ -1129,6 +1129,7 @@ import {
   registerSessionTurnAttemptClaim,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
+  sessionWorkstreamHasActiveWork,
   type SessionDiscoveryControl,
   type SessionCommandActor,
   SessionControlConflictError,
@@ -36137,6 +36138,69 @@ export async function setSessionAttention(
           mapSessionArchive(state),
         );
       }),
+  );
+}
+
+/**
+ * Whether archiving this chat must first ask to pause its work, answered from
+ * a plain read before any lock. Archive takes the person's archive lock and the
+ * workspace's control lock before it pauses; on a busy workspace those waits
+ * last many seconds, and the question must not wait behind them. The locked
+ * check in the pause stays the authority for work that starts in between.
+ * False when the chat is not one this person can archive here, is already
+ * archived for them, or changed since the version they saw, so those requests
+ * take the ordinary path and get its answer.
+ */
+export async function sessionArchiveNeedsPauseConfirmation(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    expectedVersion?: number | undefined;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (tx) => {
+      await requireSessionPersonalStateWriteAuthority(tx, input);
+      const [chat] = await tx
+        .select({
+          id: schema.sessions.id,
+          archived: schema.sessionPins.archived,
+          archiveVersion: schema.sessionPins.archiveVersion,
+        })
+        .from(schema.sessions)
+        .leftJoin(
+          schema.sessionPins,
+          and(
+            eq(schema.sessionPins.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionPins.sessionId, schema.sessions.id),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!chat || chat.archived === true) return false;
+      if (
+        input.expectedVersion !== undefined &&
+        input.expectedVersion !== (chat.archiveVersion ?? 0)
+      ) {
+        return false;
+      }
+      return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
+    },
+    undefined,
+    "none",
   );
 }
 

@@ -2017,21 +2017,30 @@ export function SessionList() {
       setArchiveTransitions((current) => new Set(current).add(session.id));
       let archivedResult: Session | undefined;
       try {
-        const updated = await requestSessionArchive(context, session, archived, async (input) => {
-          // A confirmation is not an archive: retain the row and its window while deciding.
-          if (archived) preserveArchiveWindow(session.id, false);
-          setArchiveTransitions((current) => {
-            const next = new Set(current);
-            next.delete(session.id);
-            return next;
-          });
-          const confirmed = await confirmArchive(input);
-          if (confirmed) {
-            if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
-            setArchiveTransitions((current) => new Set(current).add(session.id));
-          }
-          return confirmed;
-        });
+        const updated = await requestSessionArchive(
+          context,
+          session,
+          archived,
+          {
+            page: confirmArchive.page,
+            confirm: async (input) => {
+              // A confirmation is not an archive: retain the row and its window while deciding.
+              if (archived) preserveArchiveWindow(session.id, false);
+              setArchiveTransitions((current) => {
+                const next = new Set(current);
+                next.delete(session.id);
+                return next;
+              });
+              const confirmed = await confirmArchive.confirm(input);
+              if (confirmed) {
+                if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
+                setArchiveTransitions((current) => new Set(current).add(session.id));
+              }
+              return confirmed;
+            },
+          },
+          sessionDisplayTitle(session),
+        );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         preserveArchiveWindow(session.id, archived, archiveWindowKeys);

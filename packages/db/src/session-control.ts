@@ -3819,6 +3819,37 @@ export class SessionArchiveConfirmationRequiredError extends Error {
   }
 }
 
+/**
+ * Whether a chat or anything it started still has work: a turn, a wait for
+ * input, an active goal or a running background command. Archive asks before
+ * pausing such a chat.
+ */
+export async function sessionWorkstreamHasActiveWork(
+  db: Database | SessionActivityDatabase,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [activity] = await db.execute<{ active: boolean }>(sql`
+    select exists (
+      select 1 from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId}
+        and (session.id = ${sessionId} or session.root_session_id = ${sessionId})
+        and (
+          session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+          or session.active_turn_id is not null
+          or session.input_wait_turn_id is not null
+          or exists (select 1 from ${schema.sessionGoals} goal
+            where goal.workspace_id = session.workspace_id and goal.session_id = session.id
+              and goal.status = 'active')
+          or exists (select 1 from ${schema.sessionBackgroundCommands} command
+            where command.workspace_id = session.workspace_id and command.session_id = session.id
+              and command.state in ('running', 'stopping'))
+        )
+    ) as active
+  `);
+  return activity?.active === true;
+}
+
 export async function mutateSessionControlInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -3951,26 +3982,8 @@ export async function mutateSessionControlInTransaction(
     };
   }
   if (input.requireIdleForArchive && input.action === "pause") {
-    {
-      const [activity] = await db.execute<{ active: boolean }>(sql`
-        select exists (
-          select 1 from ${schema.sessions} session
-          where session.workspace_id = ${input.workspaceId}
-            and (session.id = ${input.sessionId} or session.root_session_id = ${input.sessionId})
-            and (
-              session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
-              or session.active_turn_id is not null
-              or session.input_wait_turn_id is not null
-              or exists (select 1 from ${schema.sessionGoals} goal
-                where goal.workspace_id = session.workspace_id and goal.session_id = session.id
-                  and goal.status = 'active')
-              or exists (select 1 from ${schema.sessionBackgroundCommands} command
-                where command.workspace_id = session.workspace_id and command.session_id = session.id
-                  and command.state in ('running', 'stopping'))
-            )
-        ) as active
-      `);
-      if (activity?.active) throw new SessionArchiveConfirmationRequiredError();
+    if (await sessionWorkstreamHasActiveWork(db, input.workspaceId, input.sessionId)) {
+      throw new SessionArchiveConfirmationRequiredError();
     }
   }
   if (input.actor.type === "agent_attempt") {
