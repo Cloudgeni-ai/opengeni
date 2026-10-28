@@ -43,6 +43,39 @@ describe("custom API components", () => {
       await rendered.unmount();
     }
   });
+
+  test("an instance carried into Personal names its workspace and offers no management", async () => {
+    const rendered = await render(
+      <CustomApiSection
+        instances={[
+          {
+            ...installedInstance(),
+            personalExtension: {
+              originWorkspaceId: "00000000-0000-4000-8000-000000000099",
+              originWorkspaceName: "Team workspace",
+            },
+          },
+        ]}
+        connections={[]}
+        canManage
+        busyKey={null}
+        onConnect={() => {}}
+        onUpdate={() => {}}
+        onReconnect={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    try {
+      const card = rendered.container.querySelector("[data-custom-api-instance]")!;
+      expect(card.textContent).toContain("From Team workspace");
+      const labels = Array.from(card.querySelectorAll("button")).map(
+        (button) => button.textContent,
+      );
+      expect(labels).toEqual([]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 async function render(element: ReactNode) {

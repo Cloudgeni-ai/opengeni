@@ -15236,6 +15236,18 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       approvalRequiredToolCount: primitives.nonnegativeInteger,
       revisionId: primitives.nonEmptyString,
       contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+      /**
+       * Set on an instance a Personal workspace carries for its owner from
+       * another workspace where they connected it "Only me". It is managed in
+       * that workspace, not here.
+       */
+      personalExtension: z
+        .object({
+          originWorkspaceId: primitives.uuid,
+          originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );

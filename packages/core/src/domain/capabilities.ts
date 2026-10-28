@@ -1,9 +1,11 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import {
+  personalWorkspaceExtensionApiIntegrations,
   personalWorkspaceExtensionMcpServers,
   personalWorkspaceExtensionSubject,
   type PersonalWorkspaceExtensionMcpServer,
 } from "./personal-workspace-connectors";
+import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
@@ -1258,19 +1260,51 @@ export async function settingsWithEnabledCapabilityMcpServers(
   // scope overlaps on a caller's transaction.
   const extensionSubject = personalWorkspaceExtensionSubject(options ?? {});
   if (extensionSubject) {
-    enabled = [
-      ...enabled,
-      ...(await personalWorkspaceExtensionMcpServers(db, {
+    const accountId =
+      options?.accountId ??
+      (options?.codexApps && !(options.codexApps instanceof Promise)
+        ? options.codexApps.accountId
+        : undefined) ??
+      (await rlsContextForWorkspace(db, workspaceId)).accountId;
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId,
+      workspaceId,
+      subjectId: extensionSubject,
+    });
+    if (origins.length > 0) {
+      enabled = [
+        ...enabled,
+        ...(await personalWorkspaceExtensionMcpServers(db, {
+          workspaceId,
+          subjectId: extensionSubject,
+          accountId,
+          origins,
+          ownServers: [...settings.mcpServers, ...enabled],
+        })),
+      ];
+      const carriedApiIntegrations = await personalWorkspaceExtensionApiIntegrations(db, {
         workspaceId,
         subjectId: extensionSubject,
-        accountId:
-          options?.accountId ??
-          (options?.codexApps && !(options.codexApps instanceof Promise)
-            ? options.codexApps.accountId
-            : undefined),
-        ownServers: [...settings.mcpServers, ...enabled],
-      })),
-    ];
+        accountId,
+        origins,
+        ownIntegrations: apiIntegrations,
+        takenServerIds: [
+          ...settings.mcpServers.map((server) => server.id),
+          ...enabled.map((server) => server.id),
+          ...apiIntegrations.map((integration) => integration.serverId),
+        ],
+      });
+      // A turn acting only through frozen delegations keeps exactly those.
+      apiIntegrations = [
+        ...apiIntegrations,
+        ...(options?.subjectId
+          ? carriedApiIntegrations
+          : apiIntegrationsMatchingDelegations(
+              carriedApiIntegrations,
+              options?.personalConnectionDelegations ?? [],
+            )),
+      ];
+    }
   }
   apiIntegrations = apiIntegrations.filter((integration) =>
     apiIntegrationIsExecutable(integration, settings, workspaceId),
@@ -1350,22 +1384,51 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     ...apiIntegrations.map((integration) => integration.serverId),
   ]);
   if (unresolved.length > 0) {
-    enabled.push(
-      ...(
-        await personalWorkspaceExtensionMcpServers(db, {
-          workspaceId,
-          subjectId: options.subjectId,
-          accountId: options.accountId,
-          // Duplicate checks need the workspace's complete own set, not only
-          // the targets; read it only once the workspace is a Personal one.
-          ownServers: async () => [
-            ...settings.mcpServers,
-            ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
-          ],
-        })
-      ).filter((server) => serverIds.has(server.id)),
-    );
+    const origins = await personalWorkspaceOwnerOriginConnections(db, {
+      accountId: options.accountId,
+      workspaceId,
+      subjectId: options.subjectId,
+    });
     options.signal?.throwIfAborted();
+    if (origins.length > 0) {
+      // Duplicate checks need the workspace's complete own set, not only the
+      // targets; read it only once the workspace is a Personal one.
+      const ownMcp = [
+        ...settings.mcpServers,
+        ...(await listEnabledMcpCapabilityServers(db, workspaceId)),
+      ];
+      enabled.push(
+        ...(
+          await personalWorkspaceExtensionMcpServers(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            ownServers: ownMcp,
+          })
+        ).filter((server) => serverIds.has(server.id)),
+      );
+      options.signal?.throwIfAborted();
+      apiIntegrations.push(
+        ...(
+          await personalWorkspaceExtensionApiIntegrations(db, {
+            workspaceId,
+            subjectId: options.subjectId,
+            accountId: options.accountId,
+            origins,
+            serverIds: unresolved,
+            takenServerIds: async () => [
+              ...ownMcp.map((server) => server.id),
+              ...enabled.map((server) => server.id),
+              ...(await listInstalledApiIntegrations(db, workspaceId, options.subjectId)).map(
+                (integration) => integration.serverId,
+              ),
+            ],
+          })
+        ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId)),
+      );
+      options.signal?.throwIfAborted();
+    }
   }
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
