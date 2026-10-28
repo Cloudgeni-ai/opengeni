@@ -219,6 +219,11 @@ Required acceptance cases:
    exercise read operations with known fixtures. Sending messages needs explicit
    test authorization and a disposable conversation; never post to real users
    merely as a connectivity probe.
+   The connector also searches chat and channel messages (Microsoft Search limited
+   to `chatMessage`) and looks up colleagues with `User.Read.All`, which needs
+   administrator consent. Verify a search finds a known fixture message, that a
+   request for other entity types is refused, and that the colleague lookup
+   returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
 

@@ -237,6 +237,67 @@ const microsoftOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2A
   tokenPlacement: { carrier: "header", name: "Authorization", prefix: "Bearer " },
 });
 
+type ReviewedOperation = NonNullable<
+  Extract<IntegrationDefinitionSource, { kind: "openapi" }>["operationAllowlist"]
+>[number];
+
+/**
+ * Read-only colleague lookup in the work or school directory, shared by the
+ * work-account integrations so it is available whichever of them is connected.
+ * The signed-in person's own manager and reports only need User.Read.
+ */
+const directoryLookupOperations = (
+  directoryScope: "User.ReadBasic.All" | "User.Read.All",
+): readonly ReviewedOperation[] => {
+  const fields =
+    directoryScope === "User.Read.All"
+      ? "Profiles include job title, department and office."
+      : "This connection reads basic profiles (name, email and sign-in name); other fields may be empty.";
+  return [
+    {
+      path: "/users",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: [directoryScope],
+      description: `Find colleagues in the organization's directory. Search by name or email with $search="displayName:anna" OR "mail:anna" and send the header ConsistencyLevel: eventual whenever $search is used. Use $select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation and $top to keep results small. ${fields}`,
+    },
+    {
+      path: "/users/{user-id}",
+      method: "get",
+      requiredScopes: [directoryScope],
+      description: `Read a colleague's directory profile. user-id is the id from the directory search or the person's sign-in email (userPrincipalName). ${fields}`,
+    },
+    {
+      path: "/users/{user-id}/manager",
+      method: "get",
+      requiredScopes: [directoryScope],
+      description:
+        "Read a colleague's manager. user-id is the id from the directory search or the person's sign-in email. A 404 means no manager is set.",
+    },
+    {
+      path: "/users/{user-id}/directReports",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: [directoryScope],
+      description:
+        "List the people who report directly to a colleague. user-id is the id from the directory search or the person's sign-in email.",
+    },
+    {
+      path: "/me/manager",
+      method: "get",
+      requiredScopes: ["User.Read"],
+      description: "Read the signed-in person's manager. A 404 means no manager is set.",
+    },
+    {
+      path: "/me/directReports",
+      method: "get",
+      odataSkipToken: true,
+      requiredScopes: ["User.Read"],
+      description: "List the people who report directly to the signed-in person.",
+    },
+  ];
+};
+
 export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-outlook-mail",
   name: "Outlook Mail",
@@ -332,7 +393,22 @@ export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefin
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     schemaMode: "provider_validated_json",
-    operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
+    // The signed-in person's manager and reports need only User.Read, so personal
+    // accounts can still consent; colleague search lives on SharePoint and Teams.
+    operationPathPrefixes: [
+      "/me/contacts",
+      "/me/contactFolders",
+      "/me/people",
+      "/me/manager",
+      "/me/directReports",
+    ],
+    excludedOperationPathPrefixes: [
+      "/me/manager/$ref",
+      "/me/directReports/{directoryObject-id}",
+      "/me/directReports/$count",
+      "/me/directReports/graph.orgContact",
+      "/me/directReports/graph.user",
+    ],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read"]),
@@ -483,11 +559,12 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
       },
+      ...directoryLookupOperations("User.ReadBasic.All"),
     ],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: {
-    ...microsoftOAuth([...SHAREPOINT_SCOPE]),
+    ...microsoftOAuth([...SHAREPOINT_SCOPE, "User.ReadBasic.All"]),
     authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
   },
@@ -498,15 +575,25 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
 export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-teams",
   name: "Microsoft Teams",
-  summary: "Read teams, channels and chats, and send messages as your connected Microsoft account.",
+  summary:
+    "Read and search teams, channels and chats, look up colleagues, and send messages as your connected Microsoft account.",
   protocol: "openapi",
   provider: { id: "microsoft", domain: "graph.microsoft.com" },
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     schemaMode: "provider_validated_json",
-    // No tenant-wide export, membership/admin changes, app installation, or beta search.
+    // No tenant-wide export, membership/admin changes, app installation, or beta APIs.
     operationAllowlist: [
+      {
+        path: "/search/query",
+        method: "post",
+        readOnly: true,
+        searchEntityTypes: ["chatMessage"],
+        requiredScopes: ["Chat.Read", "ChannelMessage.Read.All"],
+        description:
+          'Search Teams chat and channel messages the signed-in person can access, using the same index as the Teams search box. Send {"requests":[{"entityTypes":["chatMessage"],"query":{"queryString":"..."},"from":0,"size":25}]}. KQL is supported in queryString, for example pricing from:"Anna Larsen". Page with from and size. Hits include a summary and the message\'s chat or channel ids; read the full message or thread with the chat and channel message tools. Only chatMessage can be searched here.',
+      },
       {
         path: "/me/joinedTeams",
         method: "get",
@@ -571,6 +658,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
         method: "get",
         requiredScopes: ["Chat.Read"],
       },
+      ...directoryLookupOperations("User.Read.All"),
     ],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
@@ -582,6 +670,7 @@ export const MICROSOFT_TEAMS_INTEGRATION_DEFINITION: IntegrationDefinition = {
       "ChannelMessage.Send",
       "Chat.Read",
       "ChatMessage.Send",
+      "User.Read.All",
     ]),
     authorizationUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
