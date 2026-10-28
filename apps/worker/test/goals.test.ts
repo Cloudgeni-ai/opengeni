@@ -188,6 +188,11 @@ describe("goalContinuationPrompt", () => {
       "`child_requires_action` update means a worker you spawned is blocked",
     );
     expect(withTool).toContain("opengeni__session_human_input_respond");
+    // Agent work the worker asks for is the orchestrator's to do, not the person's.
+    expect(withTool).toContain("before the person has to");
+    expect(withTool).toContain(
+      "such as starting a reviewer or worker, do that work and then answer",
+    );
     expect(withTool).toContain("Tool approvals can only be decided by a human");
     expect(withTool).toContain("report the exact blocker");
     expect(withTool).toContain("`child_requires_action_resolved`, `child_paused`");

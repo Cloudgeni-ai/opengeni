@@ -1520,6 +1520,11 @@ export type InteractionInterventionMutationResponse = z.infer<
 /** Canonical model/Codemode input for one typed browser/computer human wait. */
 export const INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME = "interaction__interaction_request_human";
 
+/**
+ * A request may name the generations its caller observed. Omitted ones are
+ * read from the target as it is when the turn pauses (or from the auth run
+ * it names), so an agent that never saw them can still hand a target over.
+ */
 export const RequestHumanInteractionToolInput = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("operation", [
     z.object({ operation: z.literal("wait"), interventionId: primitives.uuid }).strict(),
@@ -1529,9 +1534,9 @@ export const RequestHumanInteractionToolInput = /* @__PURE__ */ defineSchema(() 
         resourceKind: z.enum(["browser_session", "computer_session"]),
         resourceId: primitives.uuid,
         targetId: boundedOpaqueId,
-        expectedControllerGeneration: opaqueGeneration,
-        expectedTargetGeneration: opaqueGeneration,
-        expectedDocumentGeneration: opaqueGeneration.nullable(),
+        expectedControllerGeneration: opaqueGeneration.optional(),
+        expectedTargetGeneration: opaqueGeneration.optional(),
+        expectedDocumentGeneration: opaqueGeneration.nullable().optional(),
         kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
         reason: primitives.string.trim().min(1).max(2_048),
         authRunId: primitives.optionalUuid,

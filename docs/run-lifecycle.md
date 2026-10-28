@@ -4603,8 +4603,8 @@ only alongside the typed update, event pair, usage fact, session transition,
 and successor workflow wake. Single-target producers signal directly, including
 an internal update that coalesces into a still-undelivered, often future-dated
 revision such as a `wait_for_input` deadline, so it does not wait for the
-10-second dispatcher tick (except terminal background-command settlement, which
-the dispatcher delivers);
+10-second dispatcher tick; terminal background-command settlement returns its
+committed wake and its caller signals it after commit;
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.

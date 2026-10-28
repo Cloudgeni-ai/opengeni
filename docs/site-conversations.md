@@ -145,7 +145,8 @@
   filed in that project too, so the Site and its conversations stay together.
   A create that names no project (omitted or `null`) files the conversation
   with its Site; only a named project overrides that. Starting or moving
-  conversations never takes a Site out of its own project.
+  conversations never takes a Site out of its own project; moving its row
+  does (below).
   It is a row of its own rather than a child of that chat because a chat's
   children in the sidebar are the work it spawned, and a Site outlives and is
   used apart from its chat. The row is listed when the viewer lists that chat
@@ -190,6 +191,26 @@
   again, restores it; a pin is kept. Archived Sites are not listed under the
   Archived filter. Archive on a spawned chat's row archives its workstream,
   since archive belongs to the top-level chat.
+- A Site row in a project moves like a chat row: "Move to project" in its
+  menu (right-click or the touch overflow menu) lists the same projects,
+  with Default taking it out of every project, and the row can be dragged
+  onto a project. Moving is shared, like a chat's project (`PUT
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel` with
+  `{ fromChannelId, channelId }`, `updateSiteProject` in the SDK,
+  `sessions:control` plus control of every conversation that moves, refused
+  on a Site origin; the Site itself moves only when it is in the caller's
+  audience). The row's
+  top-level conversations the caller sees in the source project move with it;
+  other people's private conversations stay where they are, so they may then
+  see the Site in two projects. When the source project is the Site's own as
+  the caller sees it (the one someone last moved it to, else the creating
+  chat's, or Default when they cannot see that chat), the Site moves too
+  (`site_project_placements`) and its new conversations are filed there;
+  deleting that project returns it to Default. A row left by a Site that is
+  no longer in the caller's audience moves only their conversations. One move
+  of a Site runs at a time. The Site itself, its publication, audience and
+  Artifacts entry never change. A pinned row has no project, so it offers no
+  move.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

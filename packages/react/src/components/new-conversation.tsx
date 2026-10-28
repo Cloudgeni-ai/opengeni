@@ -1,5 +1,5 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { lazy, Suspense, useRef, type ComponentProps, type FormEvent } from "react";
+import { lazy, useRef, type ComponentProps, type FormEvent } from "react";
 import {
   useNewConversation,
   type NewConversationController,
@@ -16,6 +16,7 @@ import { ModelPolicyPicker } from "./model-policy-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { LazyPart } from "./lazy-part";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyNewVoice = lazy(() => import("../realtime/embedded-new-voice"));
@@ -114,7 +115,7 @@ export function NewConversationView({
     creation.realtimeVoiceEnabled && available,
   );
   const voice = models.length ? (
-    <Suspense fallback={null}>
+    <LazyPart onLoadFailure="hide" fallback={null}>
       <LazyNewVoice
         client={
           creation.client as unknown as ComponentProps<typeof NewSessionRealtimeControl>["client"]
@@ -127,7 +128,7 @@ export function NewConversationView({
         }
         onStart={creation.startRealtime}
       />
-    </Suspense>
+    </LazyPart>
   ) : null;
   return (
     <form

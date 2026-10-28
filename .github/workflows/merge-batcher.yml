@@ -1,0 +1,61 @@
+name: Merge batcher
+# Lands queued PRs (queue-ready label or auto-merge) in tested batches. Each
+# pass reads the queue, the batch/<id> branch and its CI from GitHub, does the
+# next step and exits; see docs/merge-batcher.md. Inert until the repository
+# variable MERGE_BATCHER is "actions".
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI, PR CI]
+    types: [completed]
+  pull_request_target:
+    types: [labeled, auto_merge_enabled]
+
+permissions: {}
+
+# One pass at a time. A pass never runs PR code: it checks out only
+# scripts/batcher from main and talks to the GitHub API.
+concurrency:
+  group: merge-batcher
+  cancel-in-progress: false
+
+jobs:
+  pass:
+    name: Merge batcher pass
+    if: >-
+      ${{ vars.MERGE_BATCHER == 'actions' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request_target' && (github.event.action == 'auto_merge_enabled' ||
+          github.event.label.name == 'queue-ready' || github.event.label.name == 'queue-priority')) ||
+        (github.event_name == 'workflow_run' && (
+          (github.event.workflow_run.name == 'PR CI' && github.event.workflow_run.conclusion == 'success') ||
+          (github.event.workflow_run.name == 'CI' && startsWith(github.event.workflow_run.head_branch, 'batch/'))))) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The App key lives only in this environment, which only main can use.
+    environment: merge-batcher
+    steps:
+      - name: Get the merge batcher App token
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.MERGE_BATCHER_APP_ID }}
+          private-key: ${{ secrets.MERGE_BATCHER_APP_KEY }}
+      - name: Check out the batcher from main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          sparse-checkout: scripts/batcher
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Run one pass
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          BATCHER_WINDOW_SECONDS: ${{ vars.MERGE_BATCHER_WINDOW_SECONDS }}
+          BATCHER_MAX_BATCH: ${{ vars.MERGE_BATCHER_MAX_BATCH }}
+        run: bun scripts/batcher/main.ts --max-minutes 10

@@ -9699,6 +9699,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSiteProject",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel",
+    "request": [
+      "UpdateSiteProjectRequest"
+    ],
+    "response": [
+      "SiteProjectResponse"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "updateSiteSidebarState",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar",

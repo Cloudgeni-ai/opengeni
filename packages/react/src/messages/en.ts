@@ -1114,6 +1114,8 @@ export const englishMessages = {
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
+  "composerMessages.heldSendGaveUp":
+    "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
   "composerMessages.addMessageToQueue": "Add message to queue",
   "composerMessages.addToQueueEnterSteer": "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   "composerMessages.alsoPausedBy": "Also paused by",
@@ -1864,7 +1866,6 @@ export const englishMessages = {
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
   "humanInputForm.next": "Next",
-  "humanInputForm.orSkipAndLetThe": "Or skip and let the agent decide.",
   "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
@@ -1900,6 +1901,7 @@ export const englishMessages = {
   "humanInputModel.hide": "Hide",
   "humanInputModel.inputRequired": "Input required",
   "humanInputModel.inUnderAMinute": "in under a minute",
+  "humanInputModel.letTheAgentDecide": "Let the agent decide",
   "humanInputModel.looksLikeExample": "Looks like {example}",
   "humanInputModel.moreBelow": "More below",
   "humanInputModel.note": "Note",
@@ -1930,6 +1932,7 @@ export const englishMessages = {
   "humanInputModel.undo": "Undo",
   "humanInputModel.youCanTSaveTo":
     "You can't save to {requested}, so it will be saved to {actual}.",
+  "humanInputModel.yourAgentIsDeciding": "Your agent is deciding",
   "identityLinkAccounts.couldNotUpdateAccountLinks":
     "Could not update account links. Reload to see current access.",
   "identityLinkAccounts.expiresLocalestring": "Expires {localeString}.",
@@ -2099,6 +2102,9 @@ export const englishMessages = {
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "list.loading": "Loading {label}",
+  "loadFailure.didNotLoad": "This didn't load. Check your connection, then reload.",
+  "loadFailure.partDidNotLoad": "This part didn't load.",
+  "loadFailure.reload": "Reload",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",
@@ -3116,6 +3122,7 @@ export const englishMessages = {
   "messageTimeline.workerReportedBack": "Worker reported back",
   "messageTimeline.workResumed": "work resumed",
   "messageTimeline.youAnswered": "You answered",
+  "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
   "modelPicker.codexOnlySession": "Codex-only session",
   "modelPicker.model": "Model",
   "modelPickerModel.billedToTheConnectedProvider": "Billed to the connected provider account",
@@ -3335,6 +3342,7 @@ export const englishMessages = {
   "native.presentation.worker": "Worker",
   "native.presentation.you": "You",
   "native.presentation.youAnswered": "You answered",
+  "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
@@ -3614,6 +3622,7 @@ export const englishMessages = {
   "native.timeline.messages.workerDecision": "Worker decision",
   "native.timeline.messages.working": "Working",
   "native.timeline.messages.youAnswered": "You answered",
+  "native.timeline.messages.youLetTheAgentDecide": "You let the agent decide",
   "native.timeline.messages.yourDictationIsReady":
     "Your dictation is ready. Insert it into your draft?",
   "native.timeline.messages.yourRecordingIsSaved": "Your recording is saved.",
@@ -4769,6 +4778,8 @@ export const englishMessages = {
   "thisComputer.error.connectFailed": "Couldn't finish setting up this computer. Try again.",
   "thisComputer.error.removed": "This computer is no longer in this workspace.",
   "thisComputer.error.signedOut": "Sign in again, then try again.",
+  "thisComputer.error.reconnectRequired":
+    "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.",
   "thisComputer.error.other": "Something went wrong. Try again.",
   "thisComputer.computerUse.title": "Computer use",
   "thisComputer.computerUse.off": "Let agents use {machineName}.",
@@ -4779,12 +4790,22 @@ export const englishMessages = {
   "thisComputer.computerUse.signedOut": "Sign in again to let agents use {machineName}.",
   "thisComputer.computerUse.offline": "Couldn't reach the server. Check your internet connection.",
   "thisComputer.computerUse.error": "Computer use couldn't turn on.",
+  "thisComputer.computerUse.stalled": "{machineName} is taking too long to connect.",
+  "thisComputer.computerUse.stalled.signIn":
+    "The server isn't accepting {machineName}'s sign-in, so it can't connect.",
+  "thisComputer.computerUse.stalled.server":
+    "The agent is running, but the server can't see {machineName} yet.",
+  "thisComputer.computerUse.stalled.agent": "The agent on this computer isn't starting.",
+  "thisComputer.computerUse.stalled.anotherAgent":
+    "Another copy of the agent on this computer is in the way.",
+  "thisComputer.computerUse.stalled.handover": "Moving the agent into the app is taking too long.",
   "thisComputer.computerUse.openSettings": "Open System Settings",
   "thisComputer.computerUse.signIn": "Sign in",
   "thisComputer.computerUse.pill.turningOn": "Turning on computer use…",
   "thisComputer.computerUse.pill.permission": "Allow screen access for computer use",
   "thisComputer.computerUse.pill.signedOut": "Computer use needs you to sign in",
   "thisComputer.computerUse.pill.offline": "Computer use can't reach the server",
+  "thisComputer.computerUse.pill.stalled": "Computer use can't connect",
   "thisComputer.computerUse.pill.error": "Computer use isn't working",
   "thisComputer.card.name": "Your computer",
   "thisComputer.card.subtitle": "Use your own computer in chats",

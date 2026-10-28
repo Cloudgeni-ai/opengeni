@@ -109,6 +109,7 @@ import {
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   resolveWorkspaceDefaultExecutionTarget,
+  machineCanBeWorkspaceDefault,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -280,8 +281,13 @@ import {
 } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+} from "./personal-workspace-connectors";
+import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -1016,6 +1022,11 @@ export async function createAndStartSessionWithOutcome(input: {
   modelContext?: string | null;
   /** The IANA zone of the person sending the initial message; unresolvable names are ignored. */
   timeZone?: string | null;
+  /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection; frozen in the initial turn's metadata (see newSessionOpeningTools).
+   */
+  openingTools?: readonly string[];
   resources: ResourceRef[];
   skills?: SessionSkill[];
   bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
@@ -1565,6 +1576,7 @@ async function finishStartSession(
     surface?: SessionTurnSurface | null;
     modelContext?: string | null;
     timeZone?: string | null;
+    openingTools?: readonly string[];
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1655,6 +1667,7 @@ async function finishStartSession(
       reasoningEffortFallback: input.reasoningEffort,
       turnExecutionPolicy: input.turnExecutionPolicy,
       ...(initialTimeZone ? { initialTimeZone } : {}),
+      ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
       surface: input.surface ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
@@ -2980,7 +2993,7 @@ async function createSessionForRequestInFileScope(
           !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
           !machine ||
           machine.kind !== "selfhosted" ||
-          machine.scope === "user"
+          !machineCanBeWorkspaceDefault(machine, workspace)
         ) {
           throw new HTTPException(422, {
             message:
@@ -3173,7 +3186,22 @@ async function createSessionForRequestInFileScope(
   const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
   if (Object.keys(requestedMcpPolicies).length > 0) {
     requirePermission(grant, "sessions:control");
-    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    const ownServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    // Include any connectors a Personal workspace carries for its owner: the
+    // same enabled set the session runs with.
+    const inheritedServers = [
+      ...ownServers,
+      ...(await personalWorkspaceExtensionMcpServers(db, {
+        workspaceId,
+        accountId: grant.accountId,
+        subjectId: personalWorkspaceExtensionSubject(
+          inheritedPersonalConnectionDelegations
+            ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+            : { subjectId: grant.subjectId },
+        ),
+        ownServers: [...settings.mcpServers, ...ownServers],
+      })),
+    ];
     for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
       const inherited = inheritedServers.find((server) => server.id === id);
       if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
@@ -3672,6 +3700,7 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
+  const openingTools = newSessionOpeningTools(tools, firstPartyMcpTools, payload.modelContextTools);
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -4079,6 +4108,7 @@ async function createSessionForRequestInFileScope(
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       timeZone: payload.timeZone ?? null,
+      ...(openingTools.length ? { openingTools } : {}),
       resources,
       skills,
       bundledSkillIds,

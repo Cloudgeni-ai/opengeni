@@ -2567,7 +2567,9 @@ export type HumanInputAnswer = {
 
 export type HumanInputResponse =
   | { outcome: "answered"; answers: HumanInputAnswer[] }
-  | { outcome: "skipped" | "expired" | "cancelled" };
+  /** `agentDecides`: the person chose "Let the agent decide". */
+  | { outcome: "skipped"; agentDecides?: true | undefined }
+  | { outcome: "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
   | {
@@ -2576,7 +2578,12 @@ export type SubmitHumanInputResponseRequest =
       /** Write-only secret values; never echoed in events or responses. */
       secretAnswers?: HumanInputSecretAnswer[] | undefined;
     }
-  | { outcome: "skipped" };
+  /**
+   * `agentDecides`: "Let the agent decide". The asking agent makes its own best
+   * choice; accepted even when the request does not allow an ordinary skip, but
+   * never for secret questions, Skill reviews or secret approvals.
+   */
+  | { outcome: "skipped"; agentDecides?: true | undefined };
 
 export type SessionHumanInputRequest = {
   id: string;
@@ -3921,6 +3928,14 @@ export type CreateSessionRequest = {
   startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
+  /**
+   * First-party tools `modelContext` is for, such as the tool that reaches the
+   * open document it names. The first turn loads them before its first model
+   * request, as a tool search by name would, so it can use them without
+   * searching; the session's tools are unchanged. Decided once at creation;
+   * names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
   /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser

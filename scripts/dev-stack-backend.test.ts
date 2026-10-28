@@ -357,4 +357,25 @@ describe("development network exposure", () => {
     expect(published.length).toBeGreaterThan(0);
     for (const port of published) expect(port).toStartWith("${OPENGENI_DEV_BIND_HOST:-127.0.0.1}:");
   });
+  test("local Temporal serves each task queue from one partition, in arrival order", async () => {
+    // Four default partitions let a busy turn slot serve its backlog out of
+    // order, so a woken or resumed turn can wait behind later turns.
+    const config = Bun.YAML.parse(
+      await Bun.file(new URL("../docker/temporal/dynamicconfig.yaml", import.meta.url)).text(),
+    ) as Record<string, { value: unknown }[]>;
+    expect(config["matching.numTaskqueueReadPartitions"]).toEqual([{ value: 1 }]);
+    expect(config["matching.numTaskqueueWritePartitions"]).toEqual([{ value: 1 }]);
+    const compose = Bun.YAML.parse(
+      await Bun.file(new URL("../docker-compose.yml", import.meta.url)).text(),
+    ) as {
+      services: { temporal: { environment: Record<string, string>; volumes: string[] } };
+    };
+    const temporal = compose.services.temporal;
+    expect(temporal.volumes).toContain(
+      `./docker/temporal/dynamicconfig.yaml:${temporal.environment.DYNAMIC_CONFIG_FILE_PATH}:ro`,
+    );
+    const native = await Bun.file(nativeInfraPath).text();
+    expect(native).toContain("--dynamic-config-value matching.numTaskqueueReadPartitions=1");
+    expect(native).toContain("--dynamic-config-value matching.numTaskqueueWritePartitions=1");
+  });
 });

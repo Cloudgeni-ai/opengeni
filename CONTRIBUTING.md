@@ -58,11 +58,9 @@ described in [SECURITY.md](SECURITY.md).
 ## Pull Requests
 
 - Keep changes focused.
-- Main merges follow the [merge-batcher runbook](docs/merge-batcher.md): full relevant
-  local suites, independent agent review, exact-head evidence comment, then
-  the configured ready signal after activation. During shadow rollout, the
-  existing reviewed merge process remains in force. Fast batch green is not
-  full-suite/release green; the native queue and vendor drafts stay inactive.
+- Main merges go through the [merge batcher](docs/merge-batcher.md): run the
+  relevant local suites, get review, then add `queue-ready` or turn on
+  auto-merge. Batch green is not release green; main's cadence CI is.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.

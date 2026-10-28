@@ -245,6 +245,54 @@ describe("timeline annotations", () => {
     }
   });
 
+  test("annotates a whole selection that crosses bold text and a link", async () => {
+    stubRangeGeometry();
+    let captured: DraftTimelineAnnotation | null = null;
+    const markdown =
+      "For the new plan: do you mean **Max on** [me@example.com](mailto:me@example.com), or another one?";
+    const item = agentItem(SOURCE_EVENT_ID, markdown, 4);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+    );
+    try {
+      let source: HTMLElement | null = null;
+      await waitFor(() => {
+        source = rendered.container.querySelector<HTMLElement>(
+          `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+        );
+        return Boolean(source?.querySelector("strong") && source.querySelector("a"));
+      }, "formatted message did not render");
+      const walker = document.createTreeWalker(source!, NodeFilter.SHOW_TEXT);
+      const nodes: Text[] = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text);
+      const start = nodes.find((node) => node.data.includes("do you mean"))!;
+      const end = nodes.find((node) => node.data === "me@example.com")!;
+      await act(async () => {
+        const range = document.createRange();
+        range.setStart(start, start.data.indexOf("do you mean"));
+        range.setEnd(end, end.data.length);
+        const selection = document.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
+      const action = addNoteButton();
+      expect(action?.textContent).toContain("do you mean Max on me@example.com");
+      await act(async () => action?.click());
+      expect(captured).toMatchObject({
+        quote: "do you mean **Max on** [me@example.com](mailto:me@example.com)",
+        source: {
+          startOffset: markdown.indexOf("do you mean"),
+          contextBefore: "For the new plan: ",
+        },
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("offers Add note for a selection made before the selection controls mount", async () => {
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);

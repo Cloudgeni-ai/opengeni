@@ -30,7 +30,13 @@ type Reading = { online: boolean } | null | Error | { status: number; message: s
  * `service`: an existing standalone agent with its own background service
  * (macOS); otherwise the app's own agent (Linux).
  */
-function computer(options: { service: boolean; adopted?: boolean; ownerOnly?: boolean }) {
+function computer(options: {
+  service: boolean;
+  adopted?: boolean;
+  ownerOnly?: boolean;
+  /** Connected with screen control already. */
+  screenControl?: boolean;
+}) {
   const home = mkdtempSync(join(tmpdir(), "og-removed-"));
   const list = join(home, "connections.txt");
   const calls = join(home, "calls");
@@ -67,7 +73,11 @@ function computer(options: { service: boolean; adopted?: boolean; ownerOnly?: bo
   if (options.adopted !== false) {
     writeFileSync(
       join(home, "this-computer.json"),
-      JSON.stringify({ adopted: true, management: options.service ? "service" : "app" }),
+      JSON.stringify({
+        adopted: true,
+        management: options.service ? "service" : "app",
+        ...(options.screenControl ? { screenControl: true } : {}),
+      }),
     );
   }
   const readings: Record<string, Reading> = { a1: { online: true } };
@@ -237,9 +247,80 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     const status = await c.create().status(SERVER, "w1", "me");
     expect(status.state).toBe("connected");
     expect(status.reconnecting).toBe(true);
+    expect(status.waitingOn).toBe("server");
     expect(status.error).toBeNull();
     expect(status.errorCode).toBeUndefined();
   });
+
+  test("the app's own agent that the server won't sign in is not on, and says why", async () => {
+    const c = computer({ service: false });
+    const list = join(c.home, "connections.txt");
+    writeFileSync(
+      list,
+      `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+        "    Authentication rejected; transport retries paused while credentials are renewed.\n",
+    );
+    const app = c.create();
+    await app.boot();
+    // Running, but not signed in: still turning on, never "on".
+    const renewing = await app.status(SERVER, "w1", "me");
+    expect(renewing.state).toBe("connected");
+    expect(renewing.reconnecting).toBe(true);
+    expect(renewing.waitingOn).toBe("sign_in");
+    expect(renewing.error).toBeNull();
+    // The menu bar doesn't call it available either.
+    expect((await app.summary()).reconnecting).toBe(true);
+    // Try again starts a fresh agent process, so it retries now.
+    const runs = () => c.commands().filter((command) => command.endsWith(" run")).length;
+    while (runs() === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    const before = runs();
+    await app.resume();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(runs()).toBe(before + 1);
+
+    // It stopped trying: a problem at once; connecting again clears it.
+    writeFileSync(
+      list,
+      `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+        "    Reconnect required; automatic retries stopped. Run `opengeni-agent connect`.\n",
+    );
+    app.invalidate();
+    const rejected = await app.status(SERVER, "w1", "me");
+    expect(rejected.errorCode).toBe("reconnect_required");
+    expect(rejected.reconnecting).toBeUndefined();
+    c.readings.a2 = { online: true };
+    const next = await app.connect("me", SERVER, "w1", { screenControl: true });
+    expect(next.state).toBe("connected");
+    expect(next.errorCode).toBeUndefined();
+    expect(next.reconnecting).toBeUndefined();
+  });
+
+  for (const service of [true, false]) {
+    const kind = service ? "an existing agent service" : "the app's own agent";
+    test(`with ${kind}: a connection the agent stopped retrying is enrolled afresh, even while listed`, async () => {
+      const c = computer({ service, screenControl: true });
+      writeFileSync(
+        join(c.home, "connections.txt"),
+        `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+          "    Reconnect required; automatic retries stopped. Run `opengeni-agent connect`.\n",
+      );
+      // The server still lists the old enrollment: reusing it would change nothing.
+      c.readings.a1 = { online: false };
+      const app = c.create();
+      const rejected = await app.status(SERVER, "w1", "me");
+      expect(rejected.state).toBe("connected");
+      expect(rejected.errorCode).toBe("reconnect_required");
+      expect(rejected.waitingOn).toBeUndefined();
+      expect((await app.summary()).reconnecting).toBe(true);
+      c.readings.a2 = { online: true };
+      const next = await app.connect("me", SERVER, "w1", { screenControl: true });
+      expect(c.minted).toEqual(["w1"]);
+      expect(c.commands()).toContain("token=setup-token");
+      expect(next.state).toBe("connected");
+      expect(next.errorCode).toBeUndefined();
+      expect(next.error).toBeNull();
+    });
+  }
 
   test("a server that answered is never reported as unreachable", async () => {
     const c = computer({ service: true });

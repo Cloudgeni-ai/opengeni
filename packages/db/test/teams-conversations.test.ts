@@ -16,6 +16,8 @@ import {
   disconnectTeamsBot,
   getTeamsInstallation,
   teamsScoped,
+  invalidateTeamsGroup,
+  removeTeamsLink,
 } from "../src";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -178,4 +180,69 @@ test("throttled first chunk blocks later chunks until its retry is due", async (
   await shared!
     .admin`update teams_bot_outbox set retry_at=now() where operation_id=${first.operation_id}`;
   expect((await claimTeamsOutput(client!.db, i, route))?.payload.text).toBe("first");
+});
+
+test("group audience changes retire queued work and never revive former sessions", async () => {
+  const { i, actor, subject } = await fixture();
+  const group = "19:group";
+  const input = {
+    routeId: "ignored-group-key",
+    actorId: actor,
+    subjectId: subject,
+    personal: false,
+    conversationId: group,
+    threadId: null,
+    serviceUrl: "https://smba.trafficmanager.net/emea/",
+    botId: "28:own",
+    eventId: crypto.randomUUID(),
+    payload: { text: "hello" },
+    groupAudience: [{ actorId: actor, subjectId: subject }],
+    groupRevision: i.group_revision,
+  };
+  await enqueueTeamsMessage(client!.db, i, input);
+  const [first] = await shared!
+    .admin`select * from teams_bot_routes where tenant_id=${i.tenant_id} and group_active`;
+  expect(first!.route_id).toStartWith("teams-group:");
+  await enqueueTeamsMessage(client!.db, i, {
+    ...input,
+    groupRevision: (await getTeamsInstallation(client!.db, i.tenant_id))!.group_revision,
+    eventId: crypto.randomUUID(),
+  });
+  expect(
+    (
+      await shared!
+        .admin`select count(*)::int n from teams_bot_routes where tenant_id=${i.tenant_id}`
+    )[0]!.n,
+  ).toBe(1);
+  await invalidateTeamsGroup(client!.db, i, group);
+  await expect(
+    enqueueTeamsMessage(client!.db, i, { ...input, eventId: crypto.randomUUID() }),
+  ).rejects.toThrow("teams_installation_changed");
+  const current = (await getTeamsInstallation(client!.db, i.tenant_id))!;
+  await enqueueTeamsMessage(client!.db, current, {
+    ...input,
+    groupRevision: current.group_revision,
+    eventId: crypto.randomUUID(),
+  });
+  const [next] = await shared!
+    .admin`select * from teams_bot_routes where tenant_id=${i.tenant_id} and group_active`;
+  expect(next!.session_id).not.toBe(first!.session_id);
+  expect(
+    (
+      await shared!
+        .admin`select count(*)::int n from teams_bot_inbox where route_id=${first!.route_id} and state='pending'`
+    )[0]!.n,
+  ).toBe(0);
+  await removeTeamsLink(client!.db, current, subject);
+  await linkTeamsActor(client!.db, current, {
+    actorId: actor,
+    subjectId: subject,
+    nonce: crypto.randomUUID(),
+  });
+  expect(
+    (
+      await shared!
+        .admin`select count(*)::int n from teams_bot_routes where tenant_id=${i.tenant_id} and group_active`
+    )[0]!.n,
+  ).toBe(0);
 });

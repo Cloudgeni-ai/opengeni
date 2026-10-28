@@ -26,7 +26,10 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
-import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
+import {
+  isInternalGenericDispatchRegistrationItem,
+  isOpeningToolLoadResponse,
+} from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { isPreemptedModelResponse } from "./model-preemption";
 import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
@@ -865,7 +868,9 @@ function modelResponseFromSdkEvent(event: RunStreamEvent): any {
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "response_done") {
-      return data.response;
+      // The local opening tool load is not a provider response: no usage,
+      // timing, billing or context signal.
+      return isOpeningToolLoadResponse(data) ? null : data.response;
     }
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {

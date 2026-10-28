@@ -4,6 +4,9 @@ import {
   isVersionMerge,
   startedJobCount,
   supersededQueuedRuns,
+  dueMainRun,
+  mainCiInterval,
+  type MainRun,
   type ParkedRun,
   type QueuedRun,
 } from "./main-approval-superseded";
@@ -116,4 +119,46 @@ test("counts started jobs and treats an incomplete page as started", () => {
   expect(isVersionMerge("Batch 1a2b: PR #5786 from changeset-release/main")).toBe(true);
   expect(isVersionMerge("fix: version packages are read")).toBe(false);
   expect(isVersionMerge("docs: x\n\nfrom changeset-release/main")).toBe(false);
+});
+
+test("re-runs the newest deferred main SHA on the main CI cadence", () => {
+  const main = (id: number, h: number, extra: Partial<MainRun> = {}): MainRun => ({
+    id,
+    headSha: `${id}`.padStart(40, "b"),
+    runAttempt: 1,
+    runStartedAt: hoursAgo(h),
+    status: "completed",
+    conclusion: "cancelled",
+    versionMerge: false,
+    ...extra,
+  });
+  const head = main(3, 0.1);
+  const sha = head.headSha;
+  // The last full run (a re-run) started 40 minutes ago and finished.
+  const full = main(2, 0.67, { runAttempt: 2, conclusion: "success" });
+  expect(dueMainRun([head, full], sha, now)).toBe(3);
+  // Not yet: the last full run started 20 minutes ago.
+  expect(dueMainRun([head, { ...full, runStartedAt: hoursAgo(0.33) }], sha, now)).toBeNull();
+  // Not while a full run is in progress, but a run parked on approval is done.
+  expect(
+    dueMainRun([head, { ...full, status: "in_progress", conclusion: null }], sha, now),
+  ).toBeNull();
+  expect(dueMainRun([head, { ...full, status: "waiting", conclusion: null }], sha, now)).toBe(3);
+  // A Version merge's first attempt is a full run.
+  expect(
+    dueMainRun([head, main(2, 0.2, { versionMerge: true, status: "in_progress" })], sha, now),
+  ).toBeNull();
+  // Nothing to do when main's run is already full, still starting, or a Version merge.
+  expect(dueMainRun([{ ...head, runAttempt: 2, conclusion: "success" }], sha, now)).toBeNull();
+  expect(dueMainRun([{ ...head, status: "in_progress", conclusion: null }], sha, now)).toBeNull();
+  expect(dueMainRun([{ ...head, versionMerge: true }], sha, now)).toBeNull();
+  // With no full run listed, main is due.
+  expect(dueMainRun([head], sha, now)).toBe(3);
+  expect(dueMainRun([head], "c".repeat(40), now)).toBeNull();
+  // A longer configured interval waits for it.
+  expect(dueMainRun([head, full], sha, now, mainCiInterval("60"))).toBeNull();
+  // Below five minutes falls back to the default.
+  expect(dueMainRun([head, full], sha, now, mainCiInterval("2"))).toBe(3);
+  expect(mainCiInterval(undefined)).toBe(30 * 60_000);
+  expect(mainCiInterval("abc")).toBe(30 * 60_000);
 });

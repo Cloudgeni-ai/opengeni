@@ -23,6 +23,9 @@ import {
   getWorkspaceGrant,
   namedSubjectHasLiveWorkspaceAuthority,
   getTeamsInstallation,
+  invalidateTeamsGroup,
+  teamsGroupRouteActive,
+  type TeamsGroupAudience,
   getWorkspaceTeamsInstallation,
   listTeamsInstallations,
   installTeamsBot,
@@ -57,6 +60,12 @@ import {
   verifyTeamsProof,
   type TeamsMessage,
 } from "./teams-protocol";
+
+import {
+  resolveTeamsGroupAudience,
+  sameTeamsAudience,
+  teamsGroupMembershipChange,
+} from "./teams-group";
 
 const ENDPOINT = "/v1/integrations/teams/messages";
 const ROOT = "/v1/workspaces/:workspaceId/integrations/teams";
@@ -131,6 +140,30 @@ async function actorGrant(
     return null;
   return grant;
 }
+export type TeamsRosterReader = (m: {
+  serviceUrl: string;
+  conversationId: string;
+  botId: string;
+}) => Promise<unknown>;
+async function groupAudience(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  m: { serviceUrl: string; conversationId: string; botId: string },
+  read: TeamsRosterReader,
+): Promise<TeamsGroupAudience> {
+  return resolveTeamsGroupAudience(await read(m), i.tenant_id, m.botId, async (actorId) => {
+    const grant = await actorGrant(deps, i, actorId);
+    return grant && hasPermission(grant.permissions, "sessions:read") ? grant.subjectId : null;
+  });
+}
+async function readGroupRoster(
+  deps: ApiRouteDeps,
+  m: { serviceUrl: string; conversationId: string },
+): Promise<unknown> {
+  return (await runtime(deps)).api
+    .fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) })
+    .conversations.getMembers(m.conversationId);
+}
 async function runtime(deps: ApiRouteDeps): Promise<App> {
   let pending = runtimes.get(deps);
   if (!pending) {
@@ -154,6 +187,16 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
       app.server.onRequest = async ({ body }) => {
         const observed = (reason: string) =>
           deps.observability?.info("Teams authenticated activity outcome", { reason });
+        const change = teamsGroupMembershipChange(
+          body,
+          `28:${deps.settings.teamsBotClientId!.toLowerCase()}`,
+        );
+        if (change) {
+          const installation = await getTeamsInstallation(deps.db, change.tenantId);
+          if (installation?.active)
+            await invalidateTeamsGroup(deps.db, installation, change.conversationId);
+          return { status: 200 };
+        }
         const m = normalizeTeamsMessage(body, (diagnostic) => {
           deps.observability?.info("Teams authenticated activity ignored", { ...diagnostic });
         });
@@ -168,7 +211,11 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
         }
         if (
           !m.personal &&
-          !deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`)
+          !(m.groupChat
+            ? deps.settings.teamsBotAllowedGroupChatIds.includes(
+                `${m.tenantId}:${m.conversationId}`,
+              )
+            : deps.settings.teamsBotAllowedChannelIds.includes(`${m.tenantId}:${m.channelId}`))
         ) {
           observed("channel_disabled");
           return { status: 200 };
@@ -202,12 +249,35 @@ async function runtime(deps: ApiRouteDeps): Promise<App> {
           return { status: 200 };
         }
         if (!hasPermission(grant.permissions, "sessions:create")) return { status: 200 };
+        let audience: TeamsGroupAudience | undefined;
+        if (m.groupChat) {
+          try {
+            audience = await groupAudience(deps, i, m, async (value) =>
+              app.api
+                .fromServiceUrl({ serviceUrl: teamsServiceUrl(value.serviceUrl) })
+                .conversations.getMembers(value.conversationId),
+            );
+            if (!audience.some((x) => x.actorId === m.actorId && x.subjectId === grant.subjectId))
+              throw new Error("teams_group_sender_missing");
+          } catch {
+            await invalidateTeamsGroup(deps.db, i, m.conversationId, {
+              revision: i.group_revision,
+            });
+            await send(
+              app,
+              m,
+              "I couldn’t verify this chat’s access. Everyone needs workspace access and a linked Opengeni account. Message me privately to connect, then @mention me here.",
+            );
+            return { status: 200 };
+          }
+        }
         await enqueueTeamsMessage(deps.db, i, {
           routeId: teamsRouteId(m, i.generation, grant.subjectId),
           actorId: m.actorId,
           subjectId: grant.subjectId,
           personal: m.personal,
           channelId: m.channelId,
+          ...(audience ? { groupAudience: audience, groupRevision: i.group_revision } : {}),
           conversationId: m.conversationId,
           threadId: m.threadId,
           serviceUrl: m.serviceUrl,
@@ -462,13 +532,42 @@ async function drainRoute(
   i: TeamsInstallation,
   r: TeamsRoute,
   deliver: TeamsSender,
+  readRoster: TeamsRosterReader,
 ): Promise<void> {
   if (
     !(await currentInstallation(deps, i)) ||
     (!r.personal &&
-      !deps.settings.teamsBotAllowedChannelIds.includes(`${i.tenant_id}:${r.channel_id}`))
+      !(r.group_audience
+        ? deps.settings.teamsBotAllowedGroupChatIds.includes(`${i.tenant_id}:${r.conversation_id}`)
+        : deps.settings.teamsBotAllowedChannelIds.includes(`${i.tenant_id}:${r.channel_id}`)))
   )
     return;
+  const verifyGroup = async () => {
+    if (!r.group_audience) return true;
+    try {
+      if (!r.group_active) throw new Error("teams_group_inactive");
+      const audience = await groupAudience(
+        deps,
+        i,
+        { serviceUrl: r.service_url, conversationId: r.conversation_id, botId: r.bot_id },
+        readRoster,
+      );
+      if (
+        !sameTeamsAudience(r.group_audience, audience) ||
+        !(await teamsGroupRouteActive(deps.db, i, r))
+      )
+        throw new Error("teams_group_audience_changed");
+      return true;
+    } catch {
+      await invalidateTeamsGroup(deps.db, i, r.conversation_id, {
+        routeId: r.route_id,
+        leaseToken: r.lease_token,
+      });
+      await refuseTeamsRouteOutputs(deps.db, i, r, "teams_group_audience_changed");
+      return false;
+    }
+  };
+  if (!(await verifyGroup())) return;
   const inbound = await getTeamsPendingMessage(deps.db, i, r);
   if (inbound) {
     const grant = await actorGrant(deps, i, inbound.actor_id);
@@ -656,6 +755,13 @@ async function drainRoute(
     });
     return;
   }
+  if (!(await verifyGroup())) {
+    await settleTeamsOutput(deps.db, i, output.operation_id, {
+      state: "failed",
+      error: "teams_group_audience_changed",
+    });
+    return;
+  }
   try {
     const id = await deliver(
       {
@@ -701,6 +807,7 @@ async function drainRoute(
 export async function drainTeamsBotOnce(
   deps: ApiRouteDeps,
   deliver: TeamsSender = async (m, text) => send(await runtime(deps), m, text),
+  readRoster: TeamsRosterReader = async (m) => readGroupRoster(deps, m),
 ): Promise<void> {
   if (
     !teamsBotConfigured(deps.settings) ||
@@ -718,7 +825,7 @@ export async function drainTeamsBotOnce(
       void renewTeamsRoute(deps.db, i, route).catch(() => false);
     }, 30_000);
     try {
-      await drainRoute(deps, i, route, deliver);
+      await drainRoute(deps, i, route, deliver, readRoster);
     } finally {
       clearInterval(renewal);
       await releaseTeamsRoute(deps.db, i, route);

@@ -6,13 +6,28 @@ import { createRoot } from "react-dom/client";
 const accountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";
 const sharedWorkspaceId = "33333333-3333-4333-8333-333333333333";
+const personalMachineId = "44444444-4444-4444-8444-444444444444";
 let workspaceGrants: { workspaceId: string; accountId: string; permissions: string[] }[] = [];
+let workspaceSettings: Record<string, unknown> = {};
+let machines: unknown[] = [];
 
 mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     workspaces: [
-      { id: personalWorkspaceId, accountId, name: "Personal workspace", kind: "personal" },
-      { id: sharedWorkspaceId, accountId, name: "Projects", kind: "shared" },
+      {
+        id: personalWorkspaceId,
+        accountId,
+        name: "Personal workspace",
+        kind: "personal",
+        settings: workspaceSettings,
+      },
+      {
+        id: sharedWorkspaceId,
+        accountId,
+        name: "Projects",
+        kind: "shared",
+        settings: workspaceSettings,
+      },
     ],
     clientConfig: { defaultSandboxBackend: "modal" },
     managedSelfContext: {
@@ -35,7 +50,7 @@ mock.module("@opengeni/react/app/app-context", () => ({
 }));
 
 mock.module("@opengeni/react/app/lib/use-workspace-machines", () => ({
-  useWorkspaceMachines: () => ({ machines: [], loading: false }),
+  useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
 
 GlobalRegistrator.register();
@@ -50,6 +65,8 @@ afterAll(() => {
 
 beforeEach(() => {
   document.body.replaceChildren();
+  workspaceSettings = {};
+  machines = [];
 });
 
 async function picker(workspaceId: string): Promise<HTMLButtonElement> {
@@ -85,5 +102,37 @@ describe("Default machine", () => {
       },
     ];
     expect((await picker(sharedWorkspaceId)).disabled).toBe(false);
+  });
+
+  test("your own machine can be the default only in your Personal workspace", async () => {
+    workspaceGrants = [
+      {
+        workspaceId: sharedWorkspaceId,
+        accountId,
+        permissions: ["workspace:read", "workspace:admin"],
+      },
+    ];
+    workspaceSettings = {
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: personalMachineId },
+    };
+    machines = [
+      {
+        sandboxId: personalMachineId,
+        name: "Laptop",
+        kind: "selfhosted",
+        scope: "user",
+        isSessionGroup: false,
+        state: "online",
+      },
+    ];
+    const personal = await picker(personalWorkspaceId);
+    expect(personal.textContent).toContain("Laptop");
+    expect(document.body.textContent).toContain(
+      "Automations run on your own machine only when you choose it on the automation.",
+    );
+    document.body.replaceChildren();
+    const shared = await picker(sharedWorkspaceId);
+    expect(shared.textContent).toContain("Machine unavailable");
+    expect(shared.textContent).not.toContain("Laptop");
   });
 });
