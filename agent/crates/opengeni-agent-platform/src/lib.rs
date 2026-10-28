@@ -781,11 +781,31 @@ fn default_git_email_with(
 /// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
 /// and every email source removed fails exactly when the hostname guess is
 /// unusable. Asked once per process; `None` (Git is not installed) is not
-/// remembered, so a Git installed later is still asked.
+/// remembered, so a Git installed later is still asked. On macOS without the
+/// command-line developer tools Git is never run (see below).
 pub(crate) fn git_guesses_email() -> Option<bool> {
     static GUESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if let Some(guesses) = GUESSES.get() {
         return Some(*guesses);
+    }
+    // Without the developer tools, macOS's `/usr/bin/git` is a placeholder that
+    // opens an install dialog; `xcode-select -p` only reports. With no working
+    // Git there is nothing to commit with, so `EMAIL` stays unset.
+    #[cfg(target_os = "macos")]
+    {
+        static DEVELOPER_TOOLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let installed = *DEVELOPER_TOOLS.get_or_init(|| {
+            std::process::Command::new("xcode-select")
+                .arg("-p")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !installed {
+            return None;
+        }
     }
     let unconfigured = std::env::temp_dir().join("opengeni-git-identity-probe-unconfigured");
     let mut probe = std::process::Command::new("git");
@@ -806,6 +826,12 @@ pub(crate) fn git_guesses_email() -> Option<bool> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        probe.creation_flags(CREATE_NO_WINDOW);
+    }
     let guesses = probe.status().ok()?.success();
     Some(*GUESSES.get_or_init(|| guesses))
 }
