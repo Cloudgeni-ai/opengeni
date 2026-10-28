@@ -198,7 +198,8 @@
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel` with
   `{ fromChannelId, channelId }`, `updateSiteProject` in the SDK,
   `sessions:control` plus control of every conversation that moves, refused
-  on a Site origin, and only for a Site in the caller's audience). The row's
+  on a Site origin; the Site itself moves only when it is in the caller's
+  audience). The row's
   top-level conversations the caller sees in the source project move with it;
   other people's private conversations stay where they are, so they may then
   see the Site in two projects. When the source project is the Site's own as
