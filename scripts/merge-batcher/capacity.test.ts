@@ -789,7 +789,13 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     const early = Object.keys(workflow.jobs)
       .filter((name) => !needsPlan(name))
       .sort();
-    expect(early).toEqual(["automation-admission", "batch-attestation", "merge-content", "plan"]);
+    expect(early).toEqual([
+      "automation-admission",
+      "batch-attestation",
+      "main-ci-cadence",
+      "merge-content",
+      "plan",
+    ]);
     expect(early.length).toBe(MAIN_PRE_FANOUT_JOBS);
   });
 });

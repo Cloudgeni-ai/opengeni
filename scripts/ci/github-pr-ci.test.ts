@@ -66,6 +66,13 @@ test("main outranks batch and PR; batch outranks PR but not another batch", () =
   expect(priorityHold("pr", [main], 3)).toContain("main");
   expect(priorityHold("pr", [batch], 3)).toContain("batch");
   expect(priorityHold("batch", [batch], 3)).toBeNull();
+  const ciBatch = {
+    ...batch,
+    run: run(4, ".github/workflows/ci.yml", "push", "batch/0123456789ab"),
+  };
+  expect(priorityHold("pr", [ciBatch], 3)).toContain("batch");
+  const production = { ...batch, run: run(5, ".github/workflows/ci.yml", "push", "production") };
+  expect(priorityHold("pr", [production], 3)).toBeNull();
 });
 test("pre-fanout and unknown job states hold; proven approval waits do not", () => {
   const r = run(1, ".github/workflows/ci.yml");
