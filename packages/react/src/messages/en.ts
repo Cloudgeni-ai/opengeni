@@ -1114,6 +1114,8 @@ export const englishMessages = {
   "composer.previewUnavailable": "Preview unavailable",
   "composer.stop": "Stop",
   "composerMessages.addANoteToEach": "Add a note to each quote before sending.",
+  "composerMessages.heldSendGaveUp":
+    "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
   "composerMessages.addMessageToQueue": "Add message to queue",
   "composerMessages.addToQueueEnterSteer": "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   "composerMessages.alsoPausedBy": "Also paused by",
@@ -2099,6 +2101,9 @@ export const englishMessages = {
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "list.loading": "Loading {label}",
+  "loadFailure.didNotLoad": "This didn't load. Check your connection, then reload.",
+  "loadFailure.partDidNotLoad": "This part didn't load.",
+  "loadFailure.reload": "Reload",
   "machineCard.active": "Active",
   "machineCard.aSecondCopyOfThe":
     "A second copy of the agent is running on this machine. It's kept out, so work isn't affected. Stop the extra copy.",

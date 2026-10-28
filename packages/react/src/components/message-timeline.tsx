@@ -64,7 +64,6 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Component,
   Fragment,
-  Suspense,
   createContext,
   lazy,
   memo,
@@ -209,6 +208,9 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LazyPart } from "./lazy-part";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -2617,13 +2619,13 @@ export function MessageTimeline({
                         style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                       >
                         {onAnnotate ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationSelection
                               rootRef={scrollRef}
                               sources={annotationSources}
                               onAnnotate={onAnnotate}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
                         {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
@@ -2921,13 +2923,13 @@ export function MessageTimeline({
                           </TimelineBeforeLayout>
                         </div>
                         {draftAnnotations && draftAnnotations.length > 0 ? (
-                          <Suspense fallback={null}>
+                          <LazyPart onLoadFailure="hide">
                             <TimelineAnnotationMarkers
                               rootRef={scrollRef}
                               annotations={draftAnnotations}
                               onSelect={onDraftAnnotationSelect}
                             />
-                          </Suspense>
+                          </LazyPart>
                         ) : null}
 
                         <div
@@ -3199,6 +3201,8 @@ type TimelineGroupRenderBoundaryProps = {
 
 type TimelineGroupRenderBoundaryState = {
   failed: boolean;
+  /** The item's code failed to download; only a reload helps. */
+  notLoaded: boolean;
   resetKeys: readonly unknown[];
 };
 
@@ -3239,11 +3243,12 @@ class TimelineGroupRenderBoundary extends Component<
 > {
   state: TimelineGroupRenderBoundaryState = {
     failed: false,
+    notLoaded: false,
     resetKeys: this.props.resetKeys,
   };
 
-  static getDerivedStateFromError(): Partial<TimelineGroupRenderBoundaryState> {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): Partial<TimelineGroupRenderBoundaryState> {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   static getDerivedStateFromProps(
@@ -3251,14 +3256,14 @@ class TimelineGroupRenderBoundary extends Component<
     state: TimelineGroupRenderBoundaryState,
   ): Partial<TimelineGroupRenderBoundaryState> | null {
     if (timelineRenderResetKeysChanged(state.resetKeys, props.resetKeys)) {
-      return { failed: false, resetKeys: props.resetKeys };
+      return { failed: false, notLoaded: false, resetKeys: props.resetKeys };
     }
     return null;
   }
 
   render(): ReactNode {
     if (this.state.failed) {
-      return <TimelineGroupRenderError />;
+      return this.state.notLoaded ? <LoadFailureNotice /> : <TimelineGroupRenderError />;
     }
     return this.props.children;
   }
@@ -4420,7 +4425,9 @@ function UserMessageRow({
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
-              {renderMessageActions?.(item)}
+              {renderMessageActions ? (
+                <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+              ) : null}
               <MessageFooterTime occurredAt={item.occurredAt} />
             </>
           }
@@ -4757,7 +4764,9 @@ function AgentMessageRow({
       trailing={
         item.streaming ? null : (
           <>
-            {renderMessageActions?.(item)}
+            {renderMessageActions ? (
+              <LazyPart onLoadFailure="hide">{renderMessageActions(item)}</LazyPart>
+            ) : null}
             <MessageFooterTime occurredAt={item.occurredAt} />
           </>
         )

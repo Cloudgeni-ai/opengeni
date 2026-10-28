@@ -63,6 +63,7 @@ import {
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { prepareMathMarkdown } from "../markdown-math";
 import { useMathPlugins } from "./markdown-math-loader";
+import { LazyPart } from "./lazy-part";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -552,7 +553,7 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
   if (!src) return <span>{alt ?? t("markdown.imageUnavailable")}</span>;
   if (retainedImageId(src))
     return renderImage ? (
-      <>{renderImage({ src, alt: alt ?? "" })}</>
+      <LazyPart>{renderImage({ src, alt: alt ?? "" })}</LazyPart>
     ) : (
       <span>
         {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
@@ -667,12 +668,12 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
       );
     }
     return (
-      <>
+      <LazyPart>
         {render({
           kind: language === "opengeni-html" ? "html" : "site",
           content: nodeText(children).replace(/\n$/, ""),
         })}
-      </>
+      </LazyPart>
     );
   }
   return <MarkdownCodeBlock>{children}</MarkdownCodeBlock>;

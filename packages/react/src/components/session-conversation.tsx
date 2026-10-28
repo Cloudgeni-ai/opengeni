@@ -20,6 +20,7 @@ import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { LazyPart } from "./lazy-part";
 import {
   useSessionConversation,
   type SessionConversationController,
@@ -646,7 +647,7 @@ function ConversationView({
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
     sessionId && voiceModels.length > 0 && status && !terminal && voiceControl ? (
-      <Suspense fallback={null}>
+      <LazyPart onLoadFailure="hide" fallback={null}>
         <LazyEmbeddedRealtimeVoice
           {...realtimeVoiceProps}
           client={
@@ -662,7 +663,7 @@ function ConversationView({
           getModelContext={conversation.getModelContext}
           onVoiceActiveChange={onVoiceActiveChange}
         />
-      </Suspense>
+      </LazyPart>
     ) : null;
   const view = (
     <SingleSendWording enabled={composer.singleSend === true}>
