@@ -85,15 +85,16 @@ export function useNativeDictation(options: UseNativeDictationOptions): NativeVo
     return () => clearInterval(timer);
   }, [readLevel, recording, startedAt]);
 
-  // Another session: end capture the way Cancel does, keeping real speech.
   const cancelVoice = voice.cancel;
+  // Another session: end capture and keep real speech, to insert later.
+  const setAside = voice.setAside;
   const scope = options.scope;
   const lastScope = useRef(scope);
   useEffect(() => {
     if (lastScope.current === scope) return;
     lastScope.current = scope;
-    cancelVoice();
-  }, [cancelVoice, scope]);
+    setAside();
+  }, [setAside, scope]);
 
   const held = voice.hasRecoverableRecording;
   const status = nativeStatus(voice.status, held);
