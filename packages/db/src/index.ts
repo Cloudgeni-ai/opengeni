@@ -87013,6 +87013,7 @@ export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = bo
   | (RequireIdleSession extends true
       ?
           | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_waiting_capacity" }
           | { added: false; reason: "session_paused" }
           | { added: false; reason: "workspace_paused" }
       : never)
@@ -87313,6 +87314,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
     rejectionReason:
       | "session_cancelled"
       | "session_not_idle"
+      | "session_waiting_capacity"
       | "session_paused"
       | "workspace_paused"
       | null,
@@ -87441,7 +87443,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
           }
           const reason =
             effectiveControl.state === "active"
-              ? "session_not_idle"
+              ? // A chat parked on a model account (for example a Codex plan
+                // out of usage or no longer connected) is told apart, so the
+                // schedule can name the fix: pick another model in the chat.
+                session.status === "waiting_capacity"
+                ? "session_waiting_capacity"
+                : "session_not_idle"
               : sessionPaused
                 ? "session_paused"
                 : "workspace_paused";

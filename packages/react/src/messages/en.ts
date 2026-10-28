@@ -505,6 +505,8 @@ export const englishMessages = {
   "automations.run.error.automationInactive":
     "The automation was paused or deleted before the run started.",
   "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
+  "automations.run.error.chatWaitingForAccount":
+    "Skipped because the chat is waiting for a model account. Pick another model in the chat.",
   "automations.run.error.chatChanged":
     "The chat's tools or settings changed after the automation was set up.",
   "automations.run.error.chatEnded": "Its chat has ended, so the run couldn't start there.",

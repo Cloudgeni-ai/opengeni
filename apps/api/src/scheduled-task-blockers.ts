@@ -166,6 +166,22 @@ function streakBlocker(streak: readonly ScheduledTaskBlockerRun[], laterRuns: bo
   const count = streak.length;
   const runs = count === 1 ? "The last scheduled run was" : `The last ${count} scheduled runs were`;
   const keepsTrying = laterRuns ? "The schedule keeps trying." : "It has no more runs scheduled.";
+  // A chat parked on a model account (for example a Codex plan out of usage
+  // or no longer connected) stays busy until capacity returns or the chat
+  // moves to another model.
+  if (
+    streak.some((run) => run.error === "scheduled_session_waiting_capacity") &&
+    streak.every(
+      (run) =>
+        run.error === "scheduled_session_waiting_capacity" ||
+        run.error === "scheduled_session_not_idle",
+    )
+  ) {
+    return {
+      reason: "scheduled_session_waiting_capacity",
+      text: `${runs} skipped because its chat is waiting for a model account, such as a Codex plan with no usage left or none connected. Pick another model in that chat to continue it. ${keepsTrying}`,
+    };
+  }
   if (streak.every((run) => run.error === "scheduled_session_not_idle")) {
     return {
       reason: "scheduled_session_not_idle",
