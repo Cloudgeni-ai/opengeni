@@ -32,6 +32,9 @@ import {
 } from "react";
 import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import type { UseRecorderResult } from "../recordings";
+import { canStartRecording, capturing } from "./recorder-state";
+
+export { canStartRecording } from "./recorder-state";
 
 export type MeetingRecorder = UseRecorderResult;
 
@@ -87,6 +90,9 @@ export function createMeetingRecorderStore(
     set: (recorder, workspaceId = null) => {
       current = recorder;
       currentWorkspaceId = recorder ? workspaceId : null;
+      // A recording that started some other way (the Start button) uses up a
+      // start still waiting, so it can't begin a second one after Stop.
+      if (pending && capturing(recorder?.state)) pending = null;
       notify();
     },
     workspaceId: () => currentWorkspaceId,
@@ -121,13 +127,6 @@ export const MeetingRecorderStoreProvider = MeetingRecorderContext.Provider;
 const LazyRecorderHost = lazy(() => import("./recorder-host"));
 
 const RECORDING_DATABASE = "opengeni-recordings";
-
-/** States in which the recorder holds a capture that unmounting its host would end. */
-function capturing(state: MeetingRecorder["state"] | null | undefined): boolean {
-  return (
-    state === "starting" || state === "recording" || state === "paused" || state === "stopping"
-  );
-}
 
 /** True when this browser still holds recording chunks from an earlier visit. */
 async function hasLocalRecordings(): Promise<boolean> {
@@ -277,7 +276,7 @@ function useDesktopMeetingRequests(
         // signs in next, a call that may be long over.
         if (latest.current.signedOut) return;
         // Already recording shows that recording rather than start a second one.
-        if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
+        if (canStartRecording(recorder?.state)) store.requestStart({ title: request.title });
         latest.current.onOpenMeetings?.();
         return;
       }
@@ -347,6 +346,65 @@ export function useMeetingRecorderState(): MeetingRecorder["state"] | null {
     () => store?.get()?.state ?? null,
     () => null,
   );
+}
+
+/**
+ * The recorder's Start and Stop, for the app's actions (⌘K, keys, the desktop
+ * menu bar). Null without a recorder provider. Re-renders on state changes,
+ * not on every tick.
+ */
+export type MeetingRecorderControls = {
+  /** The recorder's state; null until its capture code loads. */
+  state: MeetingRecorder["state"] | null;
+  /** Whether this browser can record; null until the capture code loads. */
+  supported: boolean | null;
+  /**
+   * Start recording as the Meetings page's Start recording button does, once
+   * that page's recorder is ready; the caller shows Meetings next. Does
+   * nothing while a recording is going.
+   */
+  requestStart: () => void;
+  /** Stop the recording and open it, as a desktop call notification's Stop does. */
+  stop: () => Promise<StoppedMeeting | null>;
+};
+
+/** The meeting a Stop ended; `opened` is false when the host gave no way to open it. */
+export type StoppedMeeting = { recordingId: string; workspaceId: string; opened: boolean };
+
+export function useMeetingRecorderControls(): MeetingRecorderControls | null {
+  const store = useContext(MeetingRecorderContext);
+  const state = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.state ?? null,
+    () => null,
+  );
+  const supported = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => store?.get()?.supported ?? null,
+    () => null,
+  );
+  return useMemo(() => {
+    if (!store) return null;
+    return {
+      state,
+      supported,
+      requestStart: () => {
+        if (canStartRecording(store.get()?.state)) store.requestStart({ title: "" });
+      },
+      stop: async () => {
+        const recorder = store.get();
+        if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) {
+          return null;
+        }
+        const recordingId = recorder.recordingId;
+        const recordingWorkspaceId = store.workspaceId?.() ?? null;
+        await recorder.stop();
+        if (!recordingId || !recordingWorkspaceId) return null;
+        const opened = store.openMeeting?.(recordingId, recordingWorkspaceId) ?? false;
+        return { recordingId, workspaceId: recordingWorkspaceId, opened };
+      },
+    };
+  }, [store, state, supported]);
 }
 
 function noopSubscribe(): () => void {

@@ -30,6 +30,7 @@ const {
   MeetingRecorderProvider,
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
+  useMeetingRecorderControls,
 } = await import("./recorder-context");
 const { createMeetingsFixture, ELSEWHERE_RECORDING_ID, FAILED_RECORDING_ID } =
   await import("../testing/meetings-fixture");
@@ -417,6 +418,287 @@ describe("Recorder provider", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("Start recording from the app's actions starts what the button starts, after a stopped recording too", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "stopped" | "recording" = "stopped";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-earlier",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const page = (
+      <MeetingRecorderStoreProvider value={store}>
+        <Controls />
+        <MeetingsListPage
+          workspaceId={fixture.workspaceId}
+          recordings={fixture.client}
+          meetingHref={(id) => `/meetings/${id}`}
+          onOpen={() => {}}
+        />
+      </MeetingRecorderStoreProvider>
+    );
+    try {
+      await act(async () => root.render(page));
+      await waitForText(container, "Start recording");
+      expect(controls).not.toBeNull();
+      expect(controls!.state).toBe("stopped");
+      expect(controls!.supported).toBe(true);
+
+      // The button's start...
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      await waitFor(() => starts.length === 1);
+
+      // ...and the action's, through the same panel, with the same options.
+      await act(async () => controls!.requestStart());
+      await waitFor(() => starts.length === 2);
+      expect(store.pendingStart()).toBeNull();
+      const { title: buttonTitle, ...buttonOptions } = starts[0]!;
+      const { title: actionTitle, ...actionOptions } = starts[1]!;
+      expect(actionOptions).toEqual(buttonOptions);
+      // Both are named after when they start.
+      expect(typeof buttonTitle).toBe("string");
+      expect(typeof actionTitle).toBe("string");
+      expect((actionTitle as string).length).toBeGreaterThan(0);
+
+      // While one records, the action asks for no second start.
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await act(async () => controls!.requestStart());
+      expect(store.pendingStart()).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Stop recording from the app's actions stops and opens the meeting in its workspace", async () => {
+    const opened: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        opened.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let stops = 0;
+    const recorder = {
+      state: "paused",
+      recordingId: "recording-now",
+      supported: true,
+      stop: async () => {
+        stops += 1;
+      },
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-recorded");
+    let controls: ReturnType<typeof useMeetingRecorderControls> = null;
+    function Controls() {
+      controls = useMeetingRecorderControls();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      // Without a recorder provider there is nothing to control.
+      await act(async () => root.render(<Controls />));
+      expect(controls).toBeNull();
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      await act(async () => controls!.stop());
+      expect(stops).toBe(1);
+      expect(opened).toEqual(["workspace-recorded/recording-now"]);
+
+      // A host without a way to open meetings hears which one to open itself.
+      const bare = createMeetingRecorderStore();
+      bare.set({ ...recorder!, state: "recording" } as typeof recorder, "workspace-bare");
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={bare}>
+            <Controls />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      const result: { stopped: unknown } = { stopped: undefined };
+      await act(async () => {
+        result.stopped = await controls!.stop();
+      });
+      expect(result.stopped).toEqual({
+        recordingId: "recording-now",
+        workspaceId: "workspace-bare",
+        opened: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a start that is still waiting never begins a second recording after the button's recording stops", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    let state: "idle" | "recording" | "stopped" = "idle";
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-now",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      // The key asks for a start while the page still loads its models...
+      act(() => store.requestStart({ title: "" }));
+      // ...and the person clicks Start before it happens.
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start recording",
+      );
+      await act(async () => button!.click());
+      expect(starts).toHaveLength(1);
+      state = "recording";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      expect(store.pendingStart()).toBeNull();
+      state = "stopped";
+      await act(async () => store.set(recorder, fixture.workspaceId));
+      await settle(500);
+      expect(starts).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the key's start keeps a title already typed, as the button does", async () => {
+    const fixture = createMeetingsFixture();
+    const store = createMeetingRecorderStore();
+    const starts: Array<Record<string, unknown>> = [];
+    const recorder = {
+      state: "idle",
+      recordingId: null,
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 0,
+      systemAudioKind: null,
+      systemAudioSupported: false,
+      upload: null,
+      recovered: [],
+      uploads: {},
+      retryUpload: () => false,
+      live: null,
+      error: null,
+      start: async (options: Record<string, unknown>) => {
+        starts.push(options);
+      },
+      stop: async () => {},
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, fixture.workspaceId);
+    const view = await (async () => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () =>
+        root.render(
+          <MeetingRecorderStoreProvider value={store}>
+            <MeetingsListPage
+              workspaceId={fixture.workspaceId}
+              recordings={fixture.client}
+              meetingHref={(id) => `/meetings/${id}`}
+              onOpen={() => {}}
+            />
+          </MeetingRecorderStoreProvider>,
+        ),
+      );
+      return { container, root };
+    })();
+    try {
+      await waitForText(view.container, "Start recording");
+      const field = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Name this meeting (optional)"]',
+      );
+      expect(field).not.toBeNull();
+      await typeInto(field!, "Design review");
+      await act(async () => store.requestStart({ title: "" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]!.title).toBe("Design review");
+    } finally {
+      await act(async () => view.root.unmount());
+      view.container.remove();
     }
   });
 });
