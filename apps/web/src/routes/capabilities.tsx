@@ -1747,12 +1747,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
-          canManageOwnIn: (accountWorkspaceId) =>
+          canRemoveOwnIn: (accountWorkspaceId) =>
             hasWorkspacePermission(
               context.accessContext,
               accountWorkspaceId,
               PERSONAL_INTEGRATION_SETUP_PERMISSION,
             ) ||
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
+          canReconnectOwnIn: (accountWorkspaceId) =>
             hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),

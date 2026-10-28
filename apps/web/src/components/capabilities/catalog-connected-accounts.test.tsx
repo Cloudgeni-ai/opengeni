@@ -451,9 +451,8 @@ describe("catalog connected accounts", () => {
       });
       // Mia may manage her own accounts here and in her Personal workspace,
       // not in a workspace she can't see.
-      const actions = management({
-        canManageOwnIn: (workspaceId) => workspaceId === here || workspaceId === personal,
-      });
+      const mine = (workspaceId: string) => workspaceId === here || workspaceId === personal;
+      const actions = management({ canRemoveOwnIn: mine, canReconnectOwnIn: mine });
       const view = await render(
         <CatalogConnectedAccounts
           item={item}
@@ -496,14 +495,23 @@ describe("catalog connected accounts", () => {
       await view.unmount();
     });
 
-    test("a member who may only connect their own accounts can still remove them", async () => {
-      const mine = account({ metadata: { email: "mine@example.test" } });
-      const shared = account({ subjectId: null, metadata: { email: "team@example.test" } });
+    test("a member who may only connect their own accounts can remove them, not sign them in again", async () => {
+      // Signing in again needs connections:write, which this member lacks.
+      const mine = account({ status: "needs_reauth", metadata: { email: "mine@example.test" } });
+      const shared = account({
+        subjectId: null,
+        status: "needs_reauth",
+        metadata: { email: "team@example.test" },
+      });
       const view = await render(
         <CatalogConnectedAccounts
           item={item}
           connections={[mine, shared]}
-          management={management({ canWrite: false, canManageOwnIn: () => true })}
+          management={management({
+            canWrite: false,
+            canRemoveOwnIn: () => true,
+            canReconnectOwnIn: () => false,
+          })}
         />,
       );
       expect(buttons(view.container)).toEqual(["Remove mine@example.test"]);

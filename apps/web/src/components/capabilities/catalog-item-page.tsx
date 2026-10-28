@@ -132,7 +132,7 @@ export function CatalogItemPage({
   /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
   accountManagement?: Pick<
     CatalogConnectedAccountsManagement,
-    "viewerSubjectId" | "canWrite" | "canManageOwnIn" | "onRemove"
+    "viewerSubjectId" | "canWrite" | "canRemoveOwnIn" | "canReconnectOwnIn" | "onRemove"
   >;
   /** Only the person's own account can be connected here (a Personal
    * workspace, or no permission to connect a shared one): no ownership choice. */

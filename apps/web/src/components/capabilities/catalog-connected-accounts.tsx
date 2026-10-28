@@ -30,10 +30,14 @@ export type CatalogConnectedAccountsManagement = {
   viewerSubjectId: string | null;
   /** The viewer holds connections:write in this workspace. */
   canWrite: boolean;
-  /** Whether the viewer may manage their own accounts in that workspace
-   * (connections:personal there). Your own account is reconnected and removed
-   * in the workspace it was added in. Omit to fall back to `canWrite`. */
-  canManageOwnIn?: (workspaceId: string) => boolean;
+  /** Whether the viewer may remove their own accounts in that workspace
+   * (connections:personal there). Your own account is removed in the
+   * workspace it was added in. Omit to fall back to `canWrite`. */
+  canRemoveOwnIn?: (workspaceId: string) => boolean;
+  /** Whether the viewer may sign their own account in again in that workspace
+   * (connections:write there: signing in needs it). Omit to fall back to
+   * `canWrite`. */
+  canReconnectOwnIn?: (workspaceId: string) => boolean;
   busy?: boolean;
   /** Re-run sign-in for exactly this account (OAuth accounts only). */
   onReconnect?: (account: ConnectionMetadata) => void;
@@ -56,24 +60,43 @@ export type CatalogConnectedAccountsProps = {
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
 };
 
-/** Whether the viewer may disconnect (or reconnect) this account: their own
- * personal account, wherever it was added, when they may manage their own
- * accounts in that workspace; or a shared account of this workspace when they
- * can manage workspace connections. Another person's personal account is
- * never theirs, and a shared account from another workspace is managed by
- * that workspace's admins. */
+/** Whether the viewer may disconnect this account: their own personal
+ * account, wherever it was added, when they may remove their own accounts in
+ * that workspace; or a shared account of this workspace when they can manage
+ * workspace connections. Another person's personal account is never theirs,
+ * and a shared account from another workspace is managed by that workspace's
+ * admins. */
 export function canRemoveConnectedAccount(
   account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
   management:
-    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canManageOwnIn">
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canRemoveOwnIn">
     | undefined,
   workspaceId?: string | undefined,
 ): boolean {
+  return canActOnConnectedAccount(account, management, management?.canRemoveOwnIn, workspaceId);
+}
+
+/** Whether the viewer may sign this account in again: as for removal, but
+ * signing in needs connections:write in the account's workspace. */
+export function canReconnectConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management:
+    | Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite" | "canReconnectOwnIn">
+    | undefined,
+  workspaceId?: string | undefined,
+): boolean {
+  return canActOnConnectedAccount(account, management, management?.canReconnectOwnIn, workspaceId);
+}
+
+function canActOnConnectedAccount(
+  account: Pick<ConnectionMetadata, "subjectId" | "workspaceId">,
+  management: Pick<CatalogConnectedAccountsManagement, "viewerSubjectId" | "canWrite"> | undefined,
+  ownIn: ((workspaceId: string) => boolean) | undefined,
+  workspaceId: string | undefined,
+): boolean {
   if (!management) return false;
   if (management.viewerSubjectId !== null && account.subjectId === management.viewerSubjectId)
-    return management.canManageOwnIn
-      ? management.canManageOwnIn(account.workspaceId)
-      : management.canWrite;
+    return ownIn ? ownIn(account.workspaceId) : management.canWrite;
   if (account.subjectId !== null || !management.canWrite) return false;
   return !workspaceId || account.workspaceId === workspaceId;
 }
@@ -213,7 +236,7 @@ export function CatalogConnectedAccounts({
               management?.onReconnect &&
               account.kind === "oauth2" &&
               account.status !== "active" &&
-              canRemoveConnectedAccount(account, management, workspaceId)
+              canReconnectConnectedAccount(account, management, workspaceId)
                 ? management.onReconnect
                 : null;
             const removable = canRemoveConnectedAccount(account, management, workspaceId);
