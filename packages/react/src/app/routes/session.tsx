@@ -235,6 +235,7 @@ import {
   CONTEXT_CHECKPOINT_EVENT_TYPES,
   codexUsageContinueAtResetAction,
   codexUsageContinuesAtReset,
+  codexUsageNoticeApplies,
   codexUsageResetText,
   codexUsageResetsAt,
   latestCheckpointIsCompaction,
@@ -3361,15 +3362,22 @@ function SessionChatPane(props: {
     onContinue: (picked) =>
       void continueAfterUsageLimit({ model: picked, reasoningEffort, latencyMode }),
   });
-  const codexUsageChoice: CodexUsageChoice | undefined = codexUsageChoices
-    ? {
-        resetText: codexUsageResetText(codexUsageResetsAtValue),
-        continueAtReset,
-        pending: usageContinuation?.pending || composer.pausing || composer.resuming,
-        error: usageContinuation?.error,
-        onContinueAtResetChange: setContinueAtReset,
-      }
-    : undefined;
+  // A wait with no reset in sight keeps the server's own wait message; the
+  // picker still continues the chat with another model.
+  const codexUsageChoice: CodexUsageChoice | undefined =
+    codexUsageChoices &&
+    codexUsageNoticeApplies({
+      status: props.session.status,
+      resetsAt: codexUsageResetsAtValue,
+    })
+      ? {
+          resetText: codexUsageResetText(codexUsageResetsAtValue),
+          continueAtReset,
+          pending: usageContinuation?.pending || composer.pausing || composer.resuming,
+          error: usageContinuation?.error,
+          onContinueAtResetChange: setContinueAtReset,
+        }
+      : undefined;
   // A failed chat shows these choices in its failure banner.
   const codexUsageNotice =
     codexUsageChoice && props.session.status !== "failed" && !terminal ? (

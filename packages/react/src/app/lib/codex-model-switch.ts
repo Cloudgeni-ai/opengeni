@@ -83,6 +83,19 @@ export function codexUsageContinuesAtReset(input: {
 }
 
 /**
+ * Whether the usage-limit line describes this chat. A Codex wait with a
+ * known reset is a usage limit. A wait with no reset in sight (for example
+ * no ChatGPT plan connected any more) keeps the server's own wait message,
+ * which names the actual cause.
+ */
+export function codexUsageNoticeApplies(input: {
+  status: Session["status"];
+  resetsAt: string | null;
+}): boolean {
+  return input.status !== "waiting_capacity" || input.resetsAt !== null;
+}
+
+/**
  * What switching "Continue at reset" to `next` does: pause or resume the
  * waiting chat, or run a stopped chat's work again on its Codex model, which
  * waits for the reset. Null when nothing changes.

@@ -4,6 +4,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import {
   codexUsageContinueAtResetAction,
   codexUsageContinuesAtReset,
+  codexUsageNoticeApplies,
   codexUsageResetText,
   codexUsageResetsAt,
   latestCheckpointIsCompaction,
@@ -126,5 +127,15 @@ describe("Continue at reset", () => {
     expect(codexUsageContinueAtResetAction({ status: "idle", paused: false, next: false })).toBe(
       null,
     );
+  });
+
+  test("a wait with no reset in sight keeps the server's own wait message", () => {
+    const resetsAt = "2026-10-31T14:05:00.000Z";
+    expect(codexUsageNoticeApplies({ status: "waiting_capacity", resetsAt })).toBe(true);
+    // No ChatGPT plan can serve the chat (for example it was disconnected).
+    expect(codexUsageNoticeApplies({ status: "waiting_capacity", resetsAt: null })).toBe(false);
+    // A usage-limit failure names the limit even when its reset is unknown.
+    expect(codexUsageNoticeApplies({ status: "failed", resetsAt: null })).toBe(true);
+    expect(codexUsageNoticeApplies({ status: "idle", resetsAt: null })).toBe(true);
   });
 });

@@ -591,4 +591,25 @@ describe("session control surface architecture", () => {
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
   });
+
+  // A Codex remote-compaction chat whose ChatGPT plan was disconnected used to
+  // show "Connect a model" with nothing to pick: the picker and the
+  // unavailable-model replacement were limited to Codex models.
+  test("a Codex chat's picker and model replacement offer every model", async () => {
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const picker = route.slice(
+      route.indexOf("<ModelPicker"),
+      route.indexOf("/>", route.indexOf("<ModelPicker")),
+    );
+    expect(picker).toContain("rows={modelCatalog.rows}");
+    expect(picker).not.toContain("codexOnly");
+    const replacement = route.slice(
+      route.indexOf("unavailableModelReplacement({"),
+      route.indexOf("})", route.indexOf("unavailableModelReplacement({")),
+    );
+    expect(replacement).toContain("rows: modelCatalog.rows");
+    expect(replacement).not.toContain("codexOnly");
+    const mobile = await source("../../mobile/app/session/[id].tsx");
+    expect(mobile).not.toContain("codexOnly");
+  });
 });
