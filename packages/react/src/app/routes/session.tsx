@@ -2416,6 +2416,10 @@ function SessionChatPane(props: {
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
   const reloadSessionAfterMachineChange = props.onReloadSession;
+  // A saved message approved for another of the person's machines already
+  // carries that machine's consent, so moving the chat back only repoints it
+  // (no "use this machine" message); the notice rechecks and re-reads right after.
+  const moveSavedMessage = runsOnAttach;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
@@ -3818,6 +3822,8 @@ function SessionChatPane(props: {
                     move={moveRunsOn}
                   />
                 }
+                machines={runsOn.fleet.machines}
+                onMoveToMachine={runsOn.fleet.canAttach ? moveSavedMessage : undefined}
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}

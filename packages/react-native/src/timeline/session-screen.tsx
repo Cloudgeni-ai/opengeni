@@ -2,6 +2,7 @@ import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./m
 import {
   conversationTimeline,
   personalMachineCopy,
+  sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
   useSessionStart,
   type AgentMessageItem,
@@ -666,9 +667,18 @@ function StuckCard({
     start.needsDifferentMachine && start.machineAccess
       ? personalMachineCopy(t, start.machineAccess, { queued: true })
       : null;
+  // The person's own saved message was approved for another of their
+  // machines: name it and offer to run it there; a recheck can't help here.
+  const approvedTarget = start.approvedMachines[0] ?? null;
+  const approved =
+    !machine && start.approvedElsewhere && start.machineAccess
+      ? sessionAdmissionApprovedElsewhereCopy(t, start.machineAccess, approvedTarget)
+      : null;
+  const runOnApprovedMachine = start.runOnApprovedMachine;
   // The web notice's words for the known refusal; the native stuck copy when
   // the block is only known from its status event.
   const copy = reason ? sessionAdmissionCopy(t, reason) : null;
+  const tone = approved ? c["status-waiting"] : c["status-failed"];
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -678,19 +688,56 @@ function StuckCard({
         padding: 14,
         borderRadius: 14,
         borderWidth: 1,
-        borderColor: withAlpha(c["status-failed"], 0.3),
-        backgroundColor: withAlpha(c["status-failed"], 0.08),
+        borderColor: withAlpha(tone, 0.3),
+        backgroundColor: withAlpha(tone, 0.08),
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Icon name={approved ? "clock-3" : "circle-alert"} size={16} color={tone} />
         <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
           {machine
             ? t("sessionAdmission.needsDifferentMachineTitle")
-            : (copy?.title ?? m.stuckTitle)}
+            : (approved?.title ?? copy?.title ?? m.stuckTitle)}
         </Text>
       </View>
-      {machine ? (
+      {approved ? (
+        <>
+          <Text style={textStyle}>{approved.body}</Text>
+          <Text style={textStyle}>{approved.next}</Text>
+          {session.effectiveControl.state === "paused" ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : approved.action && approvedTarget && runOnApprovedMachine ? (
+            <Button
+              label={rechecking ? t("sessionAdmission.moving") : approved.action}
+              variant="primary"
+              busy={busy || rechecking}
+              disabled={busy || rechecking}
+              style={{ alignSelf: "flex-start" }}
+              onPress={() => {
+                if (recheckPending.current) return;
+                recheckPending.current = true;
+                setRechecking(true);
+                setFailed(false);
+                setMoveError(null);
+                runOnApprovedMachine(approvedTarget.sandboxId)
+                  .then(setMoveError, () => setFailed(true))
+                  .finally(() => {
+                    recheckPending.current = false;
+                    setRechecking(false);
+                  });
+              }}
+            />
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : machine ? (
         <>
           <Text style={textStyle}>{machine.explanation}</Text>
           <Text style={textStyle}>{machine.next}</Text>
@@ -760,7 +807,7 @@ function StuckCard({
           {m.stuckRetryFailed}
         </Text>
       ) : null}
-      {machine ? null : (
+      {machine || approved ? null : (
         <Button
           label={m.stuckRetry}
           variant="primary"

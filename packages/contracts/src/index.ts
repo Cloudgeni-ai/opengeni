@@ -21307,6 +21307,20 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
         }),
       )
       .optional(),
+    /**
+     * The next saved message is the machine owner's own and was approved for
+     * other machines, not this one, so it can't start here and no recheck
+     * helps: it runs after the chat moves to a machine it was approved for,
+     * or it is removed and sent again here. Older servers omit it.
+     */
+    queuedTurnNotApprovedHere: z.boolean().optional(),
+    /**
+     * Where that message may run: the owner's personal machines it was
+     * approved for. Listed only for its sender; empty for everyone else.
+     */
+    queuedTurnApprovedMachines: z
+      .array(z.object({ sandboxId: primitives.uuid, machineName: primitives.string }))
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
