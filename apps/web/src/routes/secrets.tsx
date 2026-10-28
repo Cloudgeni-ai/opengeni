@@ -6,6 +6,7 @@
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
 import { t } from "@opengeni/react/app/lib/console-text";
+import { usePersonName } from "@opengeni/react/app/lib/use-person-name";
 import {
   useVault,
   useVaultItem,
@@ -830,41 +831,6 @@ function VaultRoute({
 }
 
 /* ------------------------------------------------------------ an item's page */
-
-/**
- * Who a subject is, for "Version 3 · by Ada": "you" for the signed-in person,
- * else the workspace member's name. Null until known; history then says "a person".
- */
-function usePersonName(workspaceId: string, enabled = true): (subjectId: string) => string | null {
-  const context = useAppContext();
-  const selfSubjectId = context.accessContext.subjectId;
-  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map());
-  useEffect(() => {
-    if (!enabled) return;
-    let active = true;
-    void context.client
-      .listWorkspaceMembers(workspaceId)
-      .then((members) => {
-        if (!active) return;
-        setNames(
-          new Map(
-            members.map((member) => [
-              member.subjectId,
-              member.subjectLabel?.trim() || member.subjectId.replace(/^(user|service):/, ""),
-            ]),
-          ),
-        );
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [context.client, workspaceId, enabled]);
-  return useCallback(
-    (subjectId: string) => (subjectId === selfSubjectId ? "you" : (names.get(subjectId) ?? null)),
-    [names, selfSubjectId],
-  );
-}
 
 function ItemRoute({
   workspaceId,
