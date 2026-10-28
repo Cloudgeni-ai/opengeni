@@ -1359,9 +1359,13 @@ describe("photo resolution sent to the model", () => {
         .jpeg({ quality: 90 })
         .toBuffer(),
     );
-  const project = async (bytes: Uint8Array, item: Record<string, unknown>) => {
+  const project = async (
+    bytes: Uint8Array,
+    item: Record<string, unknown>,
+    contentType = "image/jpeg",
+  ) => {
     const asset = {
-      ...file(photoId, "image/jpeg", bytes.length, "photo.jpg"),
+      ...file(photoId, contentType, bytes.length, "photo.jpg"),
       sha256: sha256(bytes),
     };
     const projected = await createModelHistoryAttachmentProjector(
@@ -1404,6 +1408,19 @@ describe("photo resolution sent to the model", () => {
       [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
     });
     expect(image).toBe(dataUrl(bytes));
+    expect(receipt).not.toContain("downscaled");
+  });
+
+  // Earlier requests stay byte-identical: a JPEG stored as image/png always
+  // projected as its original bytes and label. The provider transport labels it.
+  test("a photo stored under the wrong image type keeps its original projection", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(
+      bytes,
+      { ...user("what is this?"), [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000 },
+      "image/png",
+    );
+    expect(image).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
     expect(receipt).not.toContain("downscaled");
   });
 });

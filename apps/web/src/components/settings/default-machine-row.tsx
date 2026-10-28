@@ -1,3 +1,4 @@
+import { machineCanBeWorkspaceDefault } from "@opengeni/contracts";
 import { workspaceDefaultMachine } from "@opengeni/react/app/lib/workspace-default-machine";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -31,12 +32,20 @@ export function DefaultMachineRow({ workspaceId }: { workspaceId: string }) {
           ? "none"
           : null;
   const machines = fleet.machines.filter(
-    (item) => item.kind === "selfhosted" && !item.isSessionGroup && item.scope !== "user",
+    (item) =>
+      item.kind === "selfhosted" &&
+      !item.isSessionGroup &&
+      machineCanBeWorkspaceDefault(item, workspace),
   );
   const unavailable =
     target?.kind === "machine" &&
     !fleet.loading &&
     !machines.some((item) => item.sandboxId === current);
+  // A personal machine runs only the automations it is chosen on, never one
+  // that merely follows the workspace default.
+  const personalDefault =
+    target?.kind === "machine" &&
+    machines.some((item) => item.sandboxId === current && item.scope === "user");
   async function choose(value: string) {
     if (!canManage || saving || (value === current && target !== null)) return;
     const invocation = context.captureWorkspaceInvocation(workspaceId);
@@ -66,7 +75,9 @@ export function DefaultMachineRow({ workspaceId }: { workspaceId: string }) {
       description={
         unavailable
           ? "Machine unavailable. Choose a replacement to start new chats."
-          : "Used by new chats and automations following the workspace default."
+          : personalDefault
+            ? "Used by new chats. Automations run on your own machine only when you choose it on the automation."
+            : "Used by new chats and automations following the workspace default."
       }
       controlWidth="select"
       control={

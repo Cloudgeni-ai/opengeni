@@ -426,6 +426,8 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "resources",
   "startMode",
   "modelContext",
+  // The tools the browser's context is for; they travel with that context.
+  "modelContextTools",
   // The person's own time zone, so the agent sees their local time.
   "timeZone",
   // Packaged-app bookkeeping; see `browserCreateFields`.
@@ -929,6 +931,9 @@ export function createSessionProxyHandler(
             extras?.modelContext,
             decidedBrowserContext(extras, browser.browserContext),
           );
+          // The browser's context tools go only with the browser's own context.
+          if (!keepsBrowserContext(extras, browser.browserContext))
+            delete created.modelContextTools;
           return await forward({
             ...defaults,
             ...(toolServer
@@ -960,8 +965,17 @@ export function createSessionProxyHandler(
           created.modelContext,
           decidedBrowserContext(extras, browser.modelContext),
         );
+        const modelContextTools = [
+          ...new Set([
+            ...(created.modelContextTools ?? []),
+            ...(keepsBrowserContext(extras, browser.modelContext)
+              ? (browser.modelContextTools ?? [])
+              : []),
+          ]),
+        ];
         const response = await forward({
           ...created,
+          ...(modelContextTools.length ? { modelContextTools } : {}),
           visibility: created.visibility ?? defaults.visibility,
           agentAccess: created.agentAccess ?? defaults.agentAccess,
           memoryScope: created.memoryScope ?? defaults.memoryScope,
@@ -1868,6 +1882,7 @@ function createResources(value: unknown): FileResourceRef[] {
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
 type BrowserCreateFields = {
   modelContext?: string | undefined;
+  modelContextTools?: string[] | undefined;
   timeZone?: string | undefined;
   clientEventId?: string | undefined;
   expectedNewSessionDraftRevision?: number | undefined;
@@ -1888,6 +1903,15 @@ function browserCreateFields(body: Record<string, unknown> | undefined): Browser
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   if (modelContext?.trim()) fields.modelContext = modelContext;
+  const modelContextTools = body?.modelContextTools;
+  if (
+    modelContextTools !== undefined &&
+    (!Array.isArray(modelContextTools) ||
+      modelContextTools.some((name) => typeof name !== "string" || !name))
+  ) {
+    reject(400, "invalid_model_context_tools", "modelContextTools must be a list of tool names.");
+  }
+  if (modelContextTools?.length) fields.modelContextTools = modelContextTools as string[];
   const timeZone = normalizeMessageTimeZone(body?.timeZone);
   if (timeZone) fields.timeZone = timeZone;
   const visibility = body?.visibility;
@@ -2028,6 +2052,14 @@ function withBrowserContext(context: unknown): { browserContext?: string } {
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   return context.trim() ? { browserContext: context } : {};
+}
+
+/** The browser's context is forwarded as sent (the host neither replaced nor dropped it). */
+function keepsBrowserContext(
+  extras: SessionProxyMessageExtras | undefined,
+  sent: string | undefined,
+): boolean {
+  return Boolean(sent?.trim()) && extras?.browserContext === undefined;
 }
 
 /** The browser's context as the host decided: kept (absent), replaced (a string) or dropped (`null`). */

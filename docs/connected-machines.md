@@ -1675,7 +1675,9 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   Mobile browsers direct the person to the computer they want to connect;
 - inside the desktop app, the same dialog is **Connect a machine**: for the
   computer the app runs on it shows the **Computer use** switch (off, turning
-  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  on, on, waiting on a macOS permission, or a problem with one fix; turning on
+  that hasn't connected after a minute becomes a problem saying why, with
+  **Try again**), and never
   offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
   command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.

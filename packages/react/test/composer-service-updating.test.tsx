@@ -5,7 +5,7 @@
    nothing reports a delivery failure, and the composer recovers on its own.
    A failure that outlasts a normal update still fails as before.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
 
 import { useComposer } from "../src/hooks/use-composer";
@@ -14,10 +14,18 @@ import {
   isTransientServiceFailure,
   SERVICE_UPDATING_CALM_WINDOW_MS,
 } from "../src/lib/transient-retry";
-import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
 registerDom({ clock: "virtual" });
+
+// These tests leave sends whose outcome is unknown, which the composer keeps
+// per workspace and session for the life of the page. A session of their own
+// keeps that from reaching later tests in the same process.
+let currentSessionId = crypto.randomUUID();
+beforeEach(() => {
+  currentSessionId = crypto.randomUUID();
+});
 
 const PARKED = JSON.stringify({ error: "maintenance" });
 const parkedMutation = () => new OpenGeniApiError(503, PARKED, { mutation: true });
@@ -26,7 +34,7 @@ const parkedRead = () => new OpenGeniApiError(503, PARKED, { mutation: false });
 function accepted(
   clientEventId: string | undefined,
   text: string,
-  sessionId = SESSION_ID,
+  sessionId = currentSessionId,
 ): SessionEvent {
   return {
     id: crypto.randomUUID(),
@@ -55,7 +63,7 @@ describe("composer while Opengeni is updating", () => {
     });
     const hook = await renderHook(
       () =>
-        useComposer(SESSION_ID, {
+        useComposer(currentSessionId, {
           client,
           workspaceId: WORKSPACE_ID,
           onDeliveryError: (error) => void deliveryErrors.push(error),
@@ -116,7 +124,7 @@ describe("composer while Opengeni is updating", () => {
       },
     });
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      () => useComposer(currentSessionId, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
     try {
@@ -150,7 +158,7 @@ describe("composer while Opengeni is updating", () => {
     });
     const hook = await renderHook(
       () =>
-        useComposer(SESSION_ID, {
+        useComposer(currentSessionId, {
           client,
           workspaceId: WORKSPACE_ID,
           onDeliveryError: (error) => void deliveryErrors.push(error),
@@ -188,7 +196,7 @@ describe("composer while Opengeni is updating", () => {
       },
     });
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      () => useComposer(currentSessionId, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
     try {
@@ -219,7 +227,7 @@ describe("composer while Opengeni is updating", () => {
       },
     });
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      () => useComposer(currentSessionId, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
     try {

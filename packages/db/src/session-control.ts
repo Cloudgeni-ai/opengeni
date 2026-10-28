@@ -1,4 +1,9 @@
-import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import {
+  childRequiresActionRouteTx,
+  parentOutboxAuthorityTx,
+  recordedChildNoticeTargetTx,
+  type ChildRequiresActionRoute,
+} from "./child-outbox-authority";
 import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -23,6 +28,7 @@ import {
   childLifecycleNoticesEnabled,
   childPausedDedupeKey,
   childPausedSummary,
+  childRequiresActionDedupeKey,
   childRequiresActionResolvedDedupeKey,
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
@@ -3234,6 +3240,8 @@ async function insertChildOutboxRowInTransaction(
     summary: string;
     payload: Record<string, unknown> & { type: string };
     lineage?: Record<string, unknown>;
+    /** A resolution follows its question to the ancestor that received it. */
+    route?: ChildRequiresActionRoute;
   },
 ): Promise<void> {
   const parentSessionId = input.childSession.parentSessionId;
@@ -3249,10 +3257,13 @@ async function insertChildOutboxRowInTransaction(
       `Child outbox ${input.kind} payload discriminator mismatch`,
     );
   }
+  const targetSessionId = input.route?.targetSessionId ?? parentSessionId;
   const authority = await parentOutboxAuthorityTx(db, input.workspaceId, {
-    ...input.childSession,
-    parentSessionId,
+    ...(input.route?.via ?? input.childSession),
+    parentSessionId: targetSessionId,
   });
+  const routeLineage =
+    targetSessionId !== parentSessionId ? { childSessionId: input.childSession.id } : {};
   const inserted = await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -3262,7 +3273,7 @@ async function insertChildOutboxRowInTransaction(
             accountId: input.childSession.accountId,
             workspaceId: input.workspaceId,
             sourceSessionId: input.childSession.id,
-            targetSessionId: parentSessionId,
+            targetSessionId,
             dedupeKey: input.dedupeKey,
             kind: input.kind,
             classification: input.classification,
@@ -3270,7 +3281,7 @@ async function insertChildOutboxRowInTransaction(
             summary: input.summary,
             payload: input.payload,
             ...authority,
-            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            lineage: { ...authority.lineage, ...routeLineage, ...(input.lineage ?? {}) },
           },
           "summary",
           "summaryCodecVersion",
@@ -3388,6 +3399,27 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       outcome: "cancelled" as const,
       respondedByKind: "system" as const,
     };
+    const parentSessionId = input.rootSession.parentSessionId;
+    const recordedTarget = parentSessionId
+      ? await recordedChildNoticeTargetTx(
+          db,
+          input.workspaceId,
+          childRequiresActionDedupeKey({
+            childSessionId: input.rootSession.id,
+            turnId: humanInput.turnId,
+            turnGeneration: humanInput.turnGeneration,
+          }),
+        )
+      : null;
+    const route =
+      parentSessionId && recordedTarget && recordedTarget !== parentSessionId
+        ? await childRequiresActionRouteTx(
+            db,
+            input.workspaceId,
+            { ...input.rootSession, parentSessionId },
+            recordedTarget,
+          )
+        : undefined;
     await insertChildOutboxRowInTransaction(db, {
       workspaceId: input.workspaceId,
       childSession: input.rootSession,
@@ -3404,6 +3436,7 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       summary: childRequiresActionResolvedSummary(input.rootSession.id, payload),
       payload,
       lineage: { turnId: humanInput.turnId },
+      ...(route ? { route } : {}),
     });
   }
 }

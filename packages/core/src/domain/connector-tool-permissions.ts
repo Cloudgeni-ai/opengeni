@@ -1,6 +1,7 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
+import { personalWorkspaceExtensionMcpServers } from "./personal-workspace-connectors";
 import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
@@ -195,7 +196,14 @@ async function resolveTarget(input: Input) {
         ),
     };
   }
-  const catalog = await buildCapabilityCatalog(input);
+  const catalog = await buildCapabilityCatalog({
+    db: input.db,
+    workspaceId: input.workspaceId,
+    settings: input.settings,
+    accountId: input.grant.accountId,
+    // Only the verified owner sees connectors carried into their Personal workspace.
+    subjectId: input.personalOwnerVerified ? input.grant.subjectId : null,
+  });
   const item = catalog.items.find((candidate) => candidate.id === input.capabilityId);
   if (
     !item ||
@@ -207,7 +215,18 @@ async function resolveTarget(input: Input) {
     throw new HTTPException(404, { message: "Connected MCP connector not found" });
   }
   const enabled = await listEnabledMcpCapabilityServers(input.db, input.workspaceId);
-  const settings = settingsWithMcpCapabilityServers(input.settings, enabled);
+  // A connector a Personal workspace carries for its owner is configured here
+  // like its own, with the same derived definition the session runs with.
+  const carried =
+    input.personalOwnerVerified && !enabled.some((server) => server.id === item.runtime.mcpServerId)
+      ? await personalWorkspaceExtensionMcpServers(input.db, {
+          workspaceId: input.workspaceId,
+          accountId: input.grant.accountId,
+          subjectId: input.grant.subjectId,
+          ownServers: enabled,
+        })
+      : [];
+  const settings = settingsWithMcpCapabilityServers(input.settings, [...enabled, ...carried]);
   const server = settings.mcpServers.find((candidate) => candidate.id === item.runtime.mcpServerId);
   if (!server || server.url !== item.endpointUrl)
     throw new HTTPException(409, { message: "Connector configuration is unavailable" });

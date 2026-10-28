@@ -18,6 +18,7 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  machineCanBeWorkspaceDefault,
   resolveRealtimeVoiceSettings,
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
@@ -565,6 +566,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const executionTarget = parsed.defaultExecutionTarget;
     if (executionTarget?.kind === "machine") {
+      const workspace = await requireWorkspace(deps.db, workspaceId);
       const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
       const enrollment = machine?.enrollmentId
         ? await getEnrollment(deps.db, grant, machine.enrollmentId)
@@ -574,12 +576,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         !deps.settings.sandboxSelfhostedEnabled ||
         !machine ||
         machine.kind !== "selfhosted" ||
-        machine.scope === "user" ||
+        !machineCanBeWorkspaceDefault(machine, workspace) ||
         !enrollment ||
         enrollment.status !== "active"
       ) {
         throw new HTTPException(422, {
-          message: "Choose an available shared Connected Machine for the workspace default.",
+          message:
+            workspace.kind === "personal"
+              ? "Choose an available Connected Machine for the workspace default."
+              : "Choose an available shared Connected Machine for the workspace default.",
         });
       }
     } else if (

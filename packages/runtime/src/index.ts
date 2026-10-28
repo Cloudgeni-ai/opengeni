@@ -37,6 +37,7 @@ export {
 export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
 export {
   createModelImageSizer,
+  sniffModelImageType,
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
@@ -2349,6 +2350,12 @@ export type BuildAgentOptions = {
   /** Explicit provider-contained progressive tool-disclosure strategy. */
   lazyToolTransport?: LazyToolTransport;
   /**
+   * Tools the turn's opening context is for (a new session's frozen opening
+   * tools). The turn's first model step loads them the way a tool_search by
+   * name does, without a provider call; the tool block is unchanged.
+   */
+  openingToolNames?: readonly string[];
+  /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
    * search, deferred invocation, and catalog-dependent runtime join it. A host
@@ -2982,7 +2989,11 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. In a sub-session, your parent agent may also see and answer this request; the first answer wins.";
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose. In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+
+/** Appended to the tool result when the person chose "Let the agent decide". */
+export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
+  "The person let you decide. Make your own best choice for every question, continue, and say in one short sentence what you chose.";
 
 const HUMAN_INPUT_SECRET_DESCRIPTION =
   'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
@@ -3350,6 +3361,9 @@ export function buildOpenGeniAgent(
           return JSON.stringify({
             requestId: settled.requestId,
             ...settled.response,
+            ...(settled.response.outcome === "skipped" && settled.response.agentDecides
+              ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
+              : {}),
           });
         },
       });
@@ -3662,7 +3676,7 @@ function maybeInstallLazyToolTransport(
   const harnessControlServer = mcpServers.find(
     (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
   );
-  installLazyToolRuntime(
+  const lazyRuntime = installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
     mcpServerIds,
@@ -3725,6 +3739,7 @@ function maybeInstallLazyToolTransport(
       return accounts;
     },
   );
+  if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -10853,6 +10868,7 @@ function runScopedRunner(
 }
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
+export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
