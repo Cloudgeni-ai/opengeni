@@ -12,8 +12,8 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import { toast } from "./toast";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import type { AppContextValue } from "../app-context";
-// Type only: the list model's presentation code stays out of the eager
-// bundle, and is loaded only when a dialog needs the chat's title.
+// Type only. Callers pass the chat's sidebar title: importing title code here
+// changes the web build's chunk graph (eager-page and chunk-cycle checks).
 import type { SessionListRow } from "../../session-list-model";
 import { useAppHost } from "./app-host";
 import { useRouterState } from "./navigation";
@@ -168,6 +168,8 @@ export async function requestSessionArchive(
   chat: SessionListRow,
   archived: boolean,
   confirmation: ArchiveConfirmation,
+  /** The chat's sidebar title (sessionDisplayTitle), named in the dialog. */
+  chatTitle: string,
 ) {
   const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
   if (!accepted) return null;
@@ -205,8 +207,7 @@ export async function requestSessionArchive(
     )
       throw error;
     if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return null;
-    const { sessionDisplayTitle } = await import("../../session-list-model");
-    const name = quotedChatName(sessionDisplayTitle(chat));
+    const name = quotedChatName(chatTitle);
     if (
       !(await confirmation.confirm({
         title: `Pause and archive ${name}?`,
