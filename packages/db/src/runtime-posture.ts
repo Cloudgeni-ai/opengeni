@@ -3508,6 +3508,9 @@ export async function inspectRuntimeDatabasePosture(
           hasInheritance: row.has_inheritance,
         }));
 
+      // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
+      // within this statement. Read the catalog tuple, not a privilege helper:
+      // those helpers can observe newer grants than our repeatable-read snapshot.
       const routineRows = resultRows<{
         private_schema: boolean;
         name: string;
@@ -3525,11 +3528,7 @@ export async function inspectRuntimeDatabasePosture(
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
+            coalesce(public_acl.public_execute, false) as public_execute,
             p.prosecdef as security_definer,
             (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
               or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
@@ -3537,6 +3536,12 @@ export async function inspectRuntimeDatabasePosture(
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and p.prokind in ('f', 'p')
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
@@ -3576,10 +3581,15 @@ export async function inspectRuntimeDatabasePosture(
             (has_function_privilege(current_user, p.oid, 'EXECUTE')
               or has_schema_privilege(current_user, n.oid, 'USAGE')
               or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
-            exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute",
+            coalesce(public_acl.public_execute, false) as "publicExecute",
             p.prosecdef as "securityDefiner", p.proconfig as configuration
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
         `),
       );
