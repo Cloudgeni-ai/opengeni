@@ -29,12 +29,11 @@ describe("host-owned run credential request", () => {
       turn: {} as SessionTurn,
       attemptId: "attempt",
       effectiveSandboxBackend: "selfhosted",
-      variableSet: null,
     });
     expect(result).toBeNull();
   });
 
-  test("carries frozen authority, lineage, backend, OS, and informational variable-set context", () => {
+  test("carries frozen authority, lineage, backend and OS", () => {
     const session = {
       id: "00000000-0000-4000-8000-000000000001",
       parentSessionId: "00000000-0000-4000-8000-000000000002",
@@ -57,10 +56,6 @@ describe("host-owned run credential request", () => {
       rootSessionId: "00000000-0000-4000-8000-000000000007",
       sandboxGroupId: "00000000-0000-4000-8000-000000000009",
       effectiveSandboxBackend: "selfhosted",
-      variableSet: {
-        id: "00000000-0000-4000-8000-000000000008",
-        name: "informational-only",
-      },
       purpose: "renewal",
       forceRefresh: true,
     });
@@ -77,8 +72,8 @@ describe("host-owned run credential request", () => {
       sandboxOs: "macos",
       purpose: "renewal",
       forceRefresh: true,
-      variableSet: { name: "informational-only" },
     });
+    expect(request).not.toHaveProperty("variableSet");
   });
 
   test("projects auth-needed state into non-secret model and UI surfaces", () => {

@@ -108,6 +108,7 @@ export function sitePublishedDataViewer(
   host: Pick<SiteRuntimeHost, "scope" | "site">,
   principal: string,
   guest: boolean,
+  identity: { access?: PublishedSiteDataViewer["access"]; email?: string | null } = {},
 ): PublishedSiteDataViewer {
   return {
     kind: "published_viewer",
@@ -123,6 +124,8 @@ export function sitePublishedDataViewer(
     },
     principal,
     guest,
+    ...(identity.access ? { access: identity.access } : guest ? { access: "guest" as const } : {}),
+    email: guest ? null : identity.email?.trim().toLowerCase() || null,
   };
 }
 
@@ -206,19 +209,23 @@ export async function resolveSiteAgentDataContext(
     : null;
   // Cancellation is only a convenience. Recheck the current audience for every
   // tool call, using the verified identity retained on the server at start.
+  let access: PublishedSiteDataViewer["access"] = "guest";
+  let email: string | null = null;
   if (conversation.viewerKind === "guest") {
     if (!siteGuestsAllowed(publication.access, deps.settings))
       return refused("This conversation's viewer no longer has access to this Site");
   } else {
+    email = await siteRuntimeConversationViewerEmail(deps.db, scope, conversation.sessionId);
     const kind =
       subjectId &&
       signedInSiteViewerKind({
         access: effectiveSiteAccess(publication.access, deps.settings),
         member: false,
-        email: await siteRuntimeConversationViewerEmail(deps.db, scope, conversation.sessionId),
+        email,
         invitedEmails: publication.invitedEmails,
       });
     if (!kind) return refused("This conversation's viewer no longer has access to this Site");
+    access = kind;
   }
   const domain = deps.settings.sitesDomain ?? "";
   const host: SiteRuntimeHost = {
@@ -235,7 +242,7 @@ export async function resolveSiteAgentDataContext(
     kind: "site",
     siteId: conversation.siteId,
     viewerKind: conversation.viewerKind,
-    viewer: sitePublishedDataViewer(host, conversation.viewerPrincipal, guest),
+    viewer: sitePublishedDataViewer(host, conversation.viewerPrincipal, guest, { access, email }),
     profileKind: profile.kind,
     guestWrite: async () => {
       const limit = profile.limits.guestWritesPerMinute;

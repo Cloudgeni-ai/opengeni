@@ -2,7 +2,14 @@ import { expect, test } from "bun:test";
 import { connectionAccountIdentityLabel } from "../src/connection-account-label";
 
 test("uses the authenticated email across provider metadata shapes", () => {
-  for (const key of ["email", "providerEmail", "googleEmail", "gmailEmail"]) {
+  for (const key of [
+    "email",
+    "providerEmail",
+    "googleEmail",
+    "gmailEmail",
+    "googleDriveEmail",
+    "atlassianEmail",
+  ]) {
     expect(
       connectionAccountIdentityLabel(
         { [key]: "user@example.test", displayName: "User" },

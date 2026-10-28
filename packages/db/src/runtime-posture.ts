@@ -51,8 +51,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * control worker's content-free queued-turn hold summary (0988) and the API's
- * inventory of browsers an agent session holds (1002). Each is
+ * control worker's content-free queued-turn hold summary (0988), the API's
+ * inventory of browsers an agent session holds (1002) and the only writer of
+ * the EU-only inference setting and its history (1060). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -68,6 +69,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
   "list_agent_held_browser_sessions(integer, bigint)",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const;
 
 /**
@@ -84,12 +86,15 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withholds the held-browser inventory; until it is granted, the API
  * renews no browser holds.
+ * 1060 withholds the EU-only change function; until it is granted the setting
+ * cannot be changed and stays off.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "summarize_queued_turns_by_hold()",
   "list_agent_held_browser_sessions(integer, bigint)",
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -142,6 +147,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "browser_session_associations",
     "sessions",
     "session_turns",
+  ],
+  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)": [
+    "organization_inference_residency",
+    "organization_inference_residency_events",
+    "organization_memberships",
+    "api_keys",
   ],
 };
 
@@ -1752,6 +1763,7 @@ export const FORCE_RLS_TABLES = [
   "automation_triggers",
   "billing_customers",
   "billing_subscription_operations",
+  "bot_templates",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
@@ -1812,6 +1824,7 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
   "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
@@ -1889,6 +1902,8 @@ export const FORCE_RLS_TABLES = [
   "knowledge_claim_relations",
   "knowledge_claim_reviews",
   "knowledge_claims",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
@@ -1945,6 +1960,8 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_credential_providers",
+  "organization_inference_residency",
+  "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -2131,6 +2148,7 @@ export const FORCE_RLS_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
@@ -2296,6 +2314,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_triggers",
   "automation_webhook_endpoints",
   "billing_customers",
+  "bot_templates",
   "browser_session_associations",
   "capability_catalog_items",
   "capability_component_owners",
@@ -2317,6 +2336,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credential_profiles",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_bases",
@@ -2470,6 +2490,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_queries",
   "site_sql_rate_windows",
   "site_sql_usage",
+  "site_tool_allowances",
   "site_viewer_sessions",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
@@ -2577,6 +2598,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_inference_residency",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_plans",
@@ -2745,6 +2767,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_collection_activity",
+  "knowledge_collection_activity_accounts",
   "knowledge_entries",
   "knowledge_entry_decisions",
   "knowledge_entry_links",
@@ -2766,6 +2790,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_inference_residency_events",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -3485,6 +3510,9 @@ export async function inspectRuntimeDatabasePosture(
           hasInheritance: row.has_inheritance,
         }));
 
+      // A lateral ACL probe lets PostgreSQL memoize equal (ACL, owner) pairs
+      // within this statement. Read the catalog tuple, not a privilege helper:
+      // those helpers can observe newer grants than our repeatable-read snapshot.
       const routineRows = resultRows<{
         private_schema: boolean;
         name: string;
@@ -3502,11 +3530,7 @@ export async function inspectRuntimeDatabasePosture(
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
+            coalesce(public_acl.public_execute, false) as public_execute,
             p.prosecdef as security_definer,
             (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
               or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
@@ -3514,6 +3538,12 @@ export async function inspectRuntimeDatabasePosture(
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and p.prokind in ('f', 'p')
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
@@ -3553,10 +3583,15 @@ export async function inspectRuntimeDatabasePosture(
             (has_function_privilege(current_user, p.oid, 'EXECUTE')
               or has_schema_privilege(current_user, n.oid, 'USAGE')
               or has_schema_privilege(current_user, n.oid, 'CREATE')) as execute,
-            exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute",
+            coalesce(public_acl.public_execute, false) as "publicExecute",
             p.prosecdef as "securityDefiner", p.proconfig as configuration
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          left join lateral (
+            select true as public_execute
+            from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            limit 1
+          ) public_acl on true
           where n.nspname = 'opengeni_subscription_internal' and p.prokind = 'f'
         `),
       );

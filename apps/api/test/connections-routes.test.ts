@@ -2588,9 +2588,32 @@ describe("connections routes", () => {
         expect(mcp.calls).toHaveLength(0);
         expect((await post("calls", call)).status).toBe(200);
         expect(mcp.calls).toEqual([{ tool: "search_documents", args: call.arguments }]);
-        const guardedCatalog = await gatewayApi(true).request(path, { headers });
+        // A connection tool that needs approval stays listed as approval-required
+        // (every connection has the side-effect-free approval preflight), and a
+        // call without an approval never reaches the provider.
+        const guardedApi = gatewayApi(true);
+        const guardedCatalog = await guardedApi.request(path, { headers });
         expect(guardedCatalog.status).toBe(200);
-        expect((await guardedCatalog.json()).entries).toEqual([]);
+        const guarded = ToolGatewayCatalog.parse(await guardedCatalog.json());
+        expect(guarded.entries.length).toBeGreaterThan(0);
+        expect(guarded.entries.every((entry) => entry.approval === "human")).toBe(true);
+        const guardedSearch = guarded.entries.find(
+          (entry) => entry.identity.toolName === "search_documents",
+        );
+        expect(guardedSearch?.identity).toEqual(searchEntry.identity);
+        const unapproved = await guardedApi.request(
+          `/v1/workspaces/${workspace.workspaceId}/tools/calls`,
+          {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({
+              ...call,
+              operationId: randomUUID(),
+              catalogDigest: guarded.digest,
+            }),
+          },
+        );
+        expect(unapproved.status).toBe(409);
         expect(mcp.calls).toHaveLength(1);
         const requestsBeforeOutsider = mcp.requests.length;
         const outsider = await api.request(path, {

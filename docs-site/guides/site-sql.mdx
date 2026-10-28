@@ -26,7 +26,16 @@ INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
 ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
 ```
 
-`:viewer` is filled in by Opengeni with the signed-in viewer (or the guest's visitor id), so one person cannot vote as another. `:viewer_kind` and `:viewer_signed_in` work the same way.
+`:viewer` is filled in by Opengeni with the signed-in viewer (or the guest's visitor id), so one person cannot vote as another. These work the same way:
+
+| Parameter           | Value                                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `:viewer_access`    | how the viewer reaches the Site: `member`, `invited`, `user` (signed in to a public Site) or `guest` |
+| `:viewer_email`     | the viewer's verified email in lowercase, or NULL for guests and people without one                  |
+| `:viewer_signed_in` | 1 or 0                                                                                               |
+| `:viewer_kind`      | the kind of `:viewer`: `user` for any signed-in person, or `guest`                                   |
+
+For people who never sign in, such as a newsletter's unsubscribe link, put a random per-row token in the link and check it with an `everyone` query: `UPDATE subscribers SET unsubscribed_at = datetime('now') WHERE token = :token`.
 
 ## In Site code
 

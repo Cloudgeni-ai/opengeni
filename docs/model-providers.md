@@ -351,8 +351,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `withOrganizationDirectCredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
-`loadOrganizationModelProviderCredential`), migration
-`packages/db/drizzle/0898_organization_direct_openai_model_providers.sql`,
+`loadOrganizationModelProviderCredential`),
 `settingsWithOrganizationProviderCredentials` in
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization
@@ -627,8 +626,8 @@ continuation can still resolve its retained definition. Re-adding the same slug
 creates a fresh row identity; stale mutations against an older generation
 cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, a new
-or materially reaccepted scheduled task, automation trigger, or PR-review
-repository binding, and a fresh generated-session scheduled occurrence recheck
+or materially reaccepted scheduled task, and a fresh generated-session scheduled
+occurrence recheck
 the active row under the custom-model shared transaction lock in the same commit
 that inserts the session, accepts the turn, writes the task/trigger/binding, or
 accepts the occurrence. A committed keyed session shell or exact producer
@@ -1815,7 +1814,7 @@ first match wins:
    on a covered model. With no funded selectable model, new work falls back
    to the next step. See [promotional coverage](scoped-promotional-credits.md).
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
-   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `medium`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
    `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
    catalog or boot fails. The unset built-in value, and any value checked
@@ -1826,8 +1825,8 @@ first match wins:
    already a funded selectable credits-billed model, it keeps the deployment effort,
    except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
    `credits`) when it is the credits default model itself, so a deployment
-   whose default is `gpt-6-luna` still starts credit holders on extra high
-   reasoning.
+   whose default is `gpt-6-luna` still starts credit holders on the credits
+   default effort.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -2112,8 +2111,9 @@ Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
 Insights comparisons use `configuredModelListPricingSchedules` and
-`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
-Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, GPT-6.1
+Terra, Grok, and Claude rates live only in `reviewedModelListPricing`, not debit
+defaults. These
 project reviewed upstream rates
 onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
 product routes without adding comparison-only prices to debit authority or
@@ -2173,6 +2173,9 @@ the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
 5% cache-read rate and the exclusive 272K long-context boundary; native Grok
 4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
 Gateway's separate greater-than-200K schedule must not replace the native one.
+GPT-6.1 Terra was reviewed on 2026-10-27 against the same OpenAI pricing page:
+half of GPT-6.1 Sol's Standard rates, with the same 5% cache-read rate and
+exclusive 272K whole-request boundary, and no Ultrafast tier.
 The reviewed native Claude models have no
 long-context premium. Claude 1-hour native cache writes use 2x base input,
 rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant

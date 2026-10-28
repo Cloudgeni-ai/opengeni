@@ -221,6 +221,14 @@ room. A sandbox within its request is never touched. The status shows
 `balloon_bytes` and `paused_for_memory` for such sandboxes, and
 `waiting_for_room` while one waits; asking for it meanwhile gets
 `host_full` at once.
+On such a host the VMs together may hold the host's memory less the high
+watermark (by default the capacity) before the kernel slows them down
+(their parent group's `memory.high`): running guests are never swapped,
+so without it a burst
+above requests faster than relief can save would take the agent's and
+the guard's memory instead, and stall the very agent that renews the
+host's lease and pauses sandboxes. Past it a guest waits on its own
+allocations, and nothing ends.
 Ready sandboxes and template builds are in the same book: each counts
 against the capacity like any VM, a fill or build starts only in room above
 the buffer and the high watermark that no waiting wake wants, and only
@@ -231,7 +239,8 @@ moves into the sandbox's place in the same decision. Available memory is
 `MemAvailable` plus the free pages on the kernel's per-CPU lists, which it
 leaves out (on many-CPU hosts gigabytes for tens of seconds after a process
 exits), zero when `MemAvailable` is zero, and on huge-page hosts no more
-than the free pool.
+than the free pool; never more than the VMs' limit leaves, so at that limit
+relief is already at work.
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records, counting every VM it takes
 back at its full size until it is measured, and any it cannot take back at

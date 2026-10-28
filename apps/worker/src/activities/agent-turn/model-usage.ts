@@ -1,6 +1,10 @@
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
+  modelCallProcessingResidency,
+  parseModelCallProcessingResidency,
   parsePromptCacheObservation,
+  type ModelCallProcessingResidencyV1,
+  type ModelResidencyV1,
   type PromptCacheObservation,
   type PromptCacheRequestFingerprint,
 } from "@opengeni/contracts";
@@ -21,6 +25,7 @@ import {
   type ModelCallUsageNormalization,
 } from "@opengeni/runtime";
 import {
+  builtinModelResidency,
   configuredModels,
   responseSatisfiesLatencyMode,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -155,6 +160,33 @@ export type CompactionModelUsageEventState = {
  */
 export type ModelCallPurpose = "main" | "compaction" | "session-title";
 
+/**
+ * Where the route that served a call processes data: the resolved configured
+ * model's residency record, or the built-in provider's record for the legacy
+ * unlisted-model fallback (no resolved model). It is never inferred from a
+ * model or provider name. A route whose record cannot be read is unknown.
+ */
+export function servedRouteProcessingResidency(
+  settings: Settings,
+  route: { configured: { residency?: ModelResidencyV1 | undefined } } | null | undefined,
+  builtinModelId: string,
+): ModelCallProcessingResidencyV1 {
+  try {
+    return modelCallProcessingResidency(
+      route ? route.configured.residency : builtinModelResidency(settings, builtinModelId),
+    );
+  } catch {
+    return modelCallProcessingResidency(null);
+  }
+}
+
+/** Only the claim fields are recorded, whatever the caller passed. */
+function modelCallProcessingResidencyClaim(
+  residency: ModelCallProcessingResidencyV1,
+): ModelCallProcessingResidencyV1 {
+  return parseModelCallProcessingResidency(residency) ?? modelCallProcessingResidency(null);
+}
+
 export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
 ): ModelResponseEventState {
@@ -267,6 +299,8 @@ export async function processModelResponseTerminalEvent(input: {
   responseTiming?: () => ModelCallTiming | null;
   /** Wire fingerprint of the request this response completes; read once per claimed response. */
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
+  /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -366,6 +400,7 @@ export async function processModelResponseTerminalEvent(input: {
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
         timing,
+        processingResidency: input.processingResidency,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
@@ -387,6 +422,7 @@ export async function processModelResponseTerminalEvent(input: {
             ? { contextContributions: input.contextContributions }
             : {}),
           promptCache: await promptCacheObservation(responseUsage, promptCacheRequest),
+          processingResidency: input.processingResidency,
         });
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
@@ -466,6 +502,8 @@ export async function processCompactionModelUsageEvent(input: {
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   /** Wire fingerprint of the compaction request this usage belongs to. */
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
+  /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
@@ -538,6 +576,7 @@ export async function processCompactionModelUsageEvent(input: {
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
+        processingResidency: input.processingResidency,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
@@ -558,6 +597,7 @@ export async function processCompactionModelUsageEvent(input: {
             ? { contextContributions: input.contextContributions }
             : {}),
           promptCache: await promptCacheObservation(input.usage, promptCacheRequest),
+          processingResidency: input.processingResidency,
         });
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
@@ -631,6 +671,11 @@ export async function emitModelCallUsage(input: {
   emittedSourceKeys?: Set<string>;
   /** Worker-measured call timing, stored with the event for Insights repair. */
   timing?: ModelCallTiming | null;
+  /**
+   * Processing residency of the route that served the call, stored with the
+   * event so a fact rebuilt from it keeps the route's recorded region.
+   */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -670,6 +715,7 @@ export async function emitModelCallUsage(input: {
               }
             : {}),
           ...(input.timing ? { timing: input.timing } : {}),
+          processingResidency: modelCallProcessingResidencyClaim(input.processingResidency),
           ...telemetry,
         },
       },
@@ -965,6 +1011,8 @@ export async function recordAuthoritativeModelCallFact(input: {
   timing?: ModelCallTiming | null;
   /** Prompt-cache observation; the fact write classifies a warm miss from it. */
   promptCache?: PromptCacheObservation | null;
+  /** Processing residency of the route that served the call. */
+  processingResidency: ModelCallProcessingResidencyV1;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -997,6 +1045,7 @@ export async function recordAuthoritativeModelCallFact(input: {
         ? { contextContributions: input.contextContributions }
         : {}),
       promptCache: input.promptCache ?? null,
+      processingResidency: input.processingResidency,
     });
     let recorded: Awaited<ReturnType<typeof recordModelCallFact>> | undefined;
     try {

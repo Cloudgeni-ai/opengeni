@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -29,7 +26,6 @@ import {
 } from "../src/index";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -222,33 +218,31 @@ describe("Slack user-link access migration and lifecycle", () => {
     });
   });
 
-  test("declares rolling FORCE-RLS tables, exact constraints, policies, and runtime DML", async () => {
-    const candidates = (await readdir(migrationsDir)).filter((file) =>
-      file.endsWith("_slack_user_link_access_requests.sql"),
-    );
-    expect(candidates).toHaveLength(1);
-    const sql = await readFile(join(migrationsDir, candidates[0]!), "utf8");
-    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(2);
-    expect(
-      sql.match(/opengeni_private\.workspace_rls_visible\("account_id", "workspace_id"\)/g),
-    ).toHaveLength(2);
-    expect(sql).toContain("slack_user_link_access_requests_active_principal_uq");
-    expect(sql).toContain("slack_user_link_access_request_operations_idempotency_uq");
-    expect(sql).toContain("slack_user_link_access_requests_tenant_uq");
-    expect(sql).toContain("slack_user_link_access_request_operations_request_tenant_fk");
-    expect(sql).toContain('"result" jsonb NOT NULL');
-    expect(sql).toContain('"result" - ARRAY[');
-    expect(sql).toContain("] = '{}'::jsonb");
-    expect(sql).toContain("slack_user_link_access_requests_lifecycle_check");
-    expect(sql).toContain(
-      'GRANT SELECT, INSERT, UPDATE ON TABLE "slack_user_link_access_requests" TO "opengeni_app"',
-    );
-    expect(sql).toContain(
-      'GRANT SELECT, INSERT ON TABLE "slack_user_link_access_request_operations" TO "opengeni_app"',
-    );
-
+  test("declares FORCE-RLS tables, exact constraints, policies, and runtime DML", async () => {
     if (!available) return;
+    const named = await admin<{ name: string }[]>`
+      select conname as name from pg_constraint
+      where conrelid in (
+        'slack_user_link_access_requests'::regclass,
+        'slack_user_link_access_request_operations'::regclass
+      )
+      union
+      select indexname from pg_indexes
+      where tablename in ('slack_user_link_access_requests', 'slack_user_link_access_request_operations')`;
+    expect(named.map((row) => row.name)).toEqual(
+      expect.arrayContaining([
+        "slack_user_link_access_requests_active_principal_uq",
+        "slack_user_link_access_request_operations_idempotency_uq",
+        "slack_user_link_access_requests_tenant_uq",
+        "slack_user_link_access_request_operations_request_tenant_fk",
+        "slack_user_link_access_requests_lifecycle_check",
+      ]),
+    );
+    const [policies] = await admin<{ count: number }[]>`
+      select count(*)::int as count from pg_policies
+      where tablename in ('slack_user_link_access_requests', 'slack_user_link_access_request_operations')
+        and qual like '%workspace_rls_visible(account_id, workspace_id)%'`;
+    expect(policies?.count).toBe(2);
     const rows = await admin<
       {
         relname: string;

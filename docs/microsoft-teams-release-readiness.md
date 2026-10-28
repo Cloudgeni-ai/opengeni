@@ -219,6 +219,11 @@ Required acceptance cases:
    exercise read operations with known fixtures. Sending messages needs explicit
    test authorization and a disposable conversation; never post to real users
    merely as a connectivity probe.
+   The connector also searches chat and channel messages (Microsoft Search limited
+   to `chatMessage`) and looks up colleagues with `User.Read.All`, which needs
+   administrator consent. Verify a search finds a known fixture message, that a
+   request for other entity types is refused, and that the colleague lookup
+   returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
 
@@ -288,3 +293,15 @@ Disconnect disables the existing tenant/workspace binding and cancels pending wo
 Reconnect uses that same binding. Moving a Teams organization to a different
 workspace, or replacing the Teams organization bound to a workspace, is not supported.
 The retained binding preserves existing conversation and delivery history.
+
+Authenticated inbound diagnostics record fixed rejection reasons, bounded schema
+paths and attachment counts (including the count of HTML representations), without
+message content, provider identifiers, URLs or credentials. These records run only
+after Connector authentication and help distinguish ignored activity shape from
+rollout, bot identity and installer-policy denials. They do not prove a reply was
+delivered. Unsupported attachments remain rejected.
+
+Teams inline `text/html` representations accompanying canonical `activity.text`
+are accepted, matching Microsoft's [receive-message payload](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability#receive-a-message-activity).
+Only the canonical text is consumed. HTML is never parsed or fetched; URL-backed
+HTML, files, images, and mixed attachment arrays remain rejected.

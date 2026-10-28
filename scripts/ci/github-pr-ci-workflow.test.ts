@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { GENERATED_ARTIFACT_CHECKS } from "./check-generated-artifacts";
 
 const workflow = (name: string) =>
   Bun.YAML.parse(readFileSync(`.github/workflows/${name}.yml`, "utf8")) as any;
@@ -114,7 +115,7 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const index = (text: string) => steps.findIndex((s: any) => (s.run ?? "").includes(text));
   const changesets = steps[index("scripts/ci/changeset-plan.ts")];
   expect(changesets.run).toContain("set -euo pipefail");
-  expect(changesets.run).toContain("bun scripts/generate-site-browser-runtime.ts --check");
+  expect(changesets.run).toContain("bun scripts/ci/check-generated-artifacts.ts");
   expect(changesets.run).toContain(
     "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
   );
@@ -128,6 +129,12 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const batch = readFileSync("scripts/ci/batch-source.ts", "utf8");
   expect(batch).toContain('from "./changeset-plan"');
   expect(batch).toContain('"scripts/generate-site-browser-runtime.ts", "--check"');
+  // ...and the generated-artifact step re-renders the same Site runtime.
+  expect(
+    GENERATED_ARTIFACT_CHECKS.some(
+      (check) => check.check.join(" ") === "bun scripts/generate-site-browser-runtime.ts --check",
+    ),
+  ).toBe(true);
 
   // Guards: exactly Batch's deferrals plus lint (its own step above), so every
   // guard that can fail Batch source contracts fails the PR first.
@@ -139,7 +146,7 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const excluded = (text: string) =>
     [...text.matchAll(/--exclude"?,?\s*"?([a-z-]+)/g)].map((m) => m[1]);
   const batchExcluded = excluded(batch.slice(batch.indexOf("run-guards-plan.ts")));
-  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure", "sdk-compat"]);
+  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure"]);
   expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
 });
 

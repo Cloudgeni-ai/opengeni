@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   Agent,
   Runner,
+  tool as defineTool,
   toolSearchTool,
   webSearchTool,
   OpenAIChatCompletionsModel,
@@ -9,6 +10,7 @@ import {
   RunContext,
 } from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
+import { z } from "zod";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
@@ -230,6 +232,122 @@ describe("Azure hosted-search evidence continuity", () => {
     expect(JSON.stringify(requests[2]!.input)).not.toContain("ws_fixture");
     expect(JSON.stringify(persisted)).toBe(before);
     expect(toolExecutions).toBe(1);
+  });
+
+  test("every Responses request repeats the previous request's items byte for byte, within a turn and on the next turn", async () => {
+    const requests: Array<{ input: unknown[] }> = [];
+    const outputs: unknown[][] = [
+      [
+        {
+          id: "ts_cache",
+          type: "tool_search_call",
+          status: "completed",
+          call_id: "call_search",
+          execution: "client",
+          arguments: { query: "lookup" },
+        },
+      ],
+      [
+        {
+          id: "fc_cache",
+          type: "function_call",
+          status: "completed",
+          call_id: "call_lookup",
+          name: "lookup",
+          arguments: "{}",
+        },
+      ],
+      [
+        {
+          id: "msg_cache_1",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "First answer.", annotations: [] }],
+        },
+      ],
+      [
+        {
+          id: "msg_cache_2",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Second answer.", annotations: [] }],
+        },
+      ],
+    ];
+    const provider: ResolvedModelProvider = {
+      id: "azure-cache-fixture",
+      label: "Fixture",
+      kind: "api-key",
+      api: "responses",
+      wireProfile: "azure-openai",
+      builtin: false,
+      baseUrl: "https://example.test/v1",
+      apiKey: "fixture",
+    };
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture",
+        baseURL: provider.baseUrl,
+        maxRetries: 0,
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(await requestBodyText(init?.body)));
+          return Response.json({
+            id: `resp_cache_${requests.length}`,
+            object: "response",
+            status: "completed",
+            output: outputs[requests.length - 1],
+            usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+          });
+        }) as typeof fetch,
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const agent = new Agent({
+      name: "Fixture",
+      model: new OpenGeniResponsesModel(client, "cache-fixture", provider),
+      tools: [
+        toolSearchTool({ execution: "client", execute: (async () => []) as never }),
+        defineTool({
+          name: "lookup",
+          description: "Look something up.",
+          parameters: z.object({}),
+          execute: async () => "found",
+        }),
+      ],
+    });
+    const runner = () =>
+      new Runner({
+        tracingDisabled: true,
+        callModelInputFilter: callModelInputFilterForSettings(testSettings()),
+      });
+    const first = await runner().run(agent, "First question", { maxTurns: 4 });
+    expect(first.finalOutput).toBe("First answer.");
+    // The next turn replays stored conversation truth, as the worker does.
+    const stored = JSON.parse(JSON.stringify(first.history.map(canonicalizePersistedHistoryItem)));
+    await runner().run(agent, [...stored, { role: "user", content: "Second question" }]);
+    expect(requests).toHaveLength(4);
+
+    const wireItems = (index: number) => requests[index]!.input.map((item) => JSON.stringify(item));
+    for (let index = 1; index < requests.length; index += 1) {
+      const previous = wireItems(index - 1);
+      expect(wireItems(index).slice(0, previous.length)).toEqual(previous);
+    }
+    // The search pair and the function call keep one form from their first send on.
+    for (const type of [
+      "tool_search_call",
+      "tool_search_output",
+      "function_call",
+      "function_call_output",
+    ]) {
+      const sent = requests.flatMap((request) =>
+        request.input.filter((item: any) => item.type === type).map((item) => JSON.stringify(item)),
+      );
+      expect(sent.length).toBeGreaterThan(0);
+      expect(new Set(sent).size).toBe(1);
+      expect(sent[0]).not.toContain('"status"');
+    }
   });
 });
 

@@ -638,7 +638,6 @@ An effective first-party permission ceiling of `[]` remains zero delegated
 Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
-See [automation defaults](automations.md#empty-first-party-authority).
 
 Managed password sign-ups require email verification outside local development
 unless the operator explicitly disables `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`.
@@ -1072,11 +1071,10 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
 The `@opengeni/sdk` major is the API compatibility major. Within a major the
 public surface (SDK-reachable `/v1` routes and their shapes, the session event
-envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, automation
-ingress) evolves additively and both sides are tolerant readers. Breaking
-changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
-days on the managed service, and a new major. `bun run check:public-api` and
-`bun run test:sdk-compat` enforce it in CI.
+envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, public ingress
+routes) evolves additively and both sides are tolerant readers. Breaking
+changes need a deprecation, at least 90 days on the managed service, and a new
+major. `bun run check:public-api` enforces it in CI.
 
 Official builds expose `serverVersion` in health and client config; nothing
 negotiates at runtime.
@@ -1092,7 +1090,7 @@ the local switch; activation switches gate producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
-`scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
+and `scripts/public-api/`.
 
 `embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
 narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
@@ -1577,7 +1575,7 @@ from old workers during a rolling deployment.
 Admission and provenance differ; logical turn, attempt, event, recovery, and
 usage boundaries remain shared. No parallel agent engine is created.
 
-Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
+Canonical: [`goals.md`](goals.md), [`automations-and-events.md`](design/automations-and-events.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
 [`reliability-fixes.md`](reliability-fixes.md).
 
@@ -1613,10 +1611,9 @@ ceilings apply; defaults never rewrite sessions or accepted attempts.
 
 Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
-turn, task, trigger, binding, or occurrence. This covers fresh sessions,
-explicit switches, new/materially reaccepted schedules, automation triggers,
-PR-review bindings, and fresh generated-session occurrences. Automation adapter
-templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+turn, task, or occurrence. This covers fresh sessions, explicit switches,
+new/materially reaccepted schedules, and fresh generated-session occurrences.
+Deployment-curated
 workspace models retain public provider prefixes but have no mutable custom row
 and bypass this fence. Retirement holds the exclusive counterpart. Accepted
 work, exact replays, same-model/existing-session continuations, and
@@ -1699,6 +1696,17 @@ and validate epochs/authority.
 Nothing from a vault is injected into compute. `{{secret:…}}` references in
 tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
+Opengeni's own hand-off tools (sessions, messages, goals, schedules, notes,
+Knowledge, artifacts, notifications and any new first-party tool) never resolve
+them: they store or forward reference text, and the receiving work resolves it
+at its own execution boundary. Only a short, justified list of first-party
+tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
+Opt-in credential profiles (workspace, plus session additions children inherit)
+name variables whose references the attempt's resolver turns into values for
+each command's own environment at the same boundary
+(`packages/runtime/src/sandbox/credential-profile-delivery.ts`); nothing is
+written to config or kept on the box, and the values are masked like any other
+resolved value.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
@@ -2839,14 +2847,6 @@ fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).
-PostgreSQL 18's additional NOT NULL catalog rows are handled by the closed,
-source-hash-checked `packages/db/src/migration-postgres-compatibility.ts` adapter
-at execution of historical 0345/0598. It changes only their constraint-catalog
-reads, not published SQL bytes, ledger names, release hashes, or schema guards;
-older servers execute the original source. Already-applied migrations stay
-skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
-The same hash-pinned adapter stabilizes 0807 policy deparsing for dedicated
-schemas without changing its exact helper matcher or published SQL history.
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
@@ -2884,7 +2884,18 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Conversation, source, tool, and error text is not centrally regex-redacted.
+  Known secret values (what an attempt's references resolve to and the
+  credentials Opengeni injects) are replaced by their references in tool
+  results, model input and stored conversation text before storage and before
+  the model sees them (docs/secrets.md, Masking). Other conversation, source,
+  tool, and error text is not regex-redacted, with one narrow exception: tool
+  results and their stored copies also mask high-precision secret shapes (URL
+  passwords, connection-string passwords, Azure keys, PEM private keys and
+  well-known token formats), capture each value into the root session's Task
+  vault and write its reference, or a `[masked <kind>]` marker when capture is
+  not possible. Known-value and shape masking supersede the 5 August 2026
+  "keep content exact" decision for these two cases, approved on 26 October
+  2026.
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.
@@ -3003,8 +3014,9 @@ Topics: [`README.md`](README.md).
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
-| Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
+| Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
+| Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |
@@ -3028,6 +3040,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
+| Credential profiles (per-command CLI credentials) | `packages/contracts/src/credential-profiles.ts`, `packages/core/src/domain/credential-profiles.ts`, `packages/db/src/credential-profiles.ts`, `packages/runtime/src/sandbox/credential-profile-delivery.ts`, `apps/api/src/routes/credential-profiles.ts` | [`secrets.md`](secrets.md#credential-profiles) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 | Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 
@@ -3060,7 +3073,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
-| Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
@@ -3069,7 +3082,6 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
-| Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |

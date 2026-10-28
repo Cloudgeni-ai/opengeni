@@ -97,6 +97,8 @@ export type StoredOpenApiOperationBinding = {
     readonly schemas: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   };
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /** Reviewed Microsoft Search entity types a read-only search may request. */
+  readonly searchEntityTypes?: readonly string[];
 };
 
 export type StoredGraphqlOperationBinding = {

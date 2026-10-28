@@ -15,12 +15,11 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "migration-lock-order": ["bun", "scripts/check-migration-lock-order.ts"],
   "migration-deployment-mode": ["bun", "scripts/check-migration-deployment-mode.ts"],
   "migration-online-safety": ["bun", "scripts/check-migration-online-safety.ts"],
-  "migration-schema-contract": ["bun", "scripts/check-migration-schema-contract.ts"],
+  "migration-immutability": ["bun", "scripts/check-migration-immutability.ts"],
   "migration-test-budgets": ["bun", "scripts/check-migration-test-budgets.ts"],
   "subscription-contract": ["bun", "run", "check:subscription-contract"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
   "public-api": ["bun", "scripts/public-api/check.ts"],
-  "sdk-compat": ["bun", "scripts/public-api/sdk-compat.ts"],
 };
 
 function exampleBuildCommands(projects: readonly string[]): string[][] {

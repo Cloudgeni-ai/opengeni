@@ -4,12 +4,18 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::Duration;
 
 /// Serializes updates of a parent group's `memory.low`, so that the last
 /// one written counts every child's.
 static PARENT_LOW: Mutex<()> = Mutex::new(());
+
+/// How often [`Cgroup::set_memory_high`] looks whether the limit it is
+/// writing applies yet.
+const MEMORY_HIGH_LOOK: Duration = Duration::from_millis(20);
 
 /// The controllers a parent group hands its VMs' groups.
 const CONTROLLERS: &str = "+memory +cpu";
@@ -215,6 +221,43 @@ impl Cgroup {
         fs::write(self.path.join("memory.max"), value)
     }
 
+    /// Sets the memory above which the kernel slows the group's processes
+    /// down as they take more (`memory.high`), reclaiming from the group
+    /// first and making each wait on its own allocations, or no such
+    /// point for `None`. It never ends a process: a group past it only
+    /// gets slower.
+    ///
+    /// Setting it below what the group holds makes the kernel reclaim the
+    /// difference. Kernels that honour `O_NONBLOCK` for the file leave that
+    /// to the group's own allocations; older ones do it in the write, after
+    /// the limit already applies, for as long as reclaim makes progress,
+    /// writeback of dirty disk pages included. The writer would wait all
+    /// that time: a starting host agent, for one, before it renews its
+    /// lease. So the write runs on a thread of its own, and this returns
+    /// its result when it ends, or `Ok` as soon as the group shows the new
+    /// limit while the kernel goes on reclaiming toward it on that thread.
+    /// It never returns before the limit applies: a later setting cannot be
+    /// overtaken by this one.
+    pub fn set_memory_high(&self, bytes: Option<u64>) -> io::Result<()> {
+        let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
+        let path = self.path.join("memory.high");
+        // The kernel keeps whole pages, and shows what it keeps.
+        let page = u64::try_from(rustix::param::page_size()).unwrap_or(4096);
+        let shown = bytes.map(|bytes| bytes - bytes % page);
+        write_until_applied(
+            MEMORY_HIGH_LOOK,
+            move || write_nonblocking(&path, value.as_bytes()),
+            || Ok(self.memory_high()? == shown),
+        )
+    }
+
+    /// The group's `memory.high` as it is now: `None` for no limit
+    /// (`max`), which is also what an operator writing `max` leaves.
+    pub fn memory_high(&self) -> io::Result<Option<u64>> {
+        let value = fs::read_to_string(self.path.join("memory.high"))?;
+        parse_limit(&value)
+    }
+
     /// Sets the parent group's `memory.low` to the sum of its children's.
     /// A group is protected only as far as its ancestors are, so a parent
     /// left at 0 would protect none of its VMs from the rest of the host.
@@ -268,6 +311,16 @@ impl Cgroup {
         // unreadable; the rest still counts.
         let pressure = fs::read_to_string(self.path.join("memory.pressure")).ok();
         Ok(parse_memory_stats(&stat, pressure.as_deref()))
+    }
+
+    /// How long, all told, some of the group's processes have waited for
+    /// memory (`some total` in `memory.pressure`), the kernel's reclaim and
+    /// its slowing of groups past `memory.high` included; `None` without
+    /// pressure stall information.
+    pub fn memory_waited(&self) -> io::Result<Option<Duration>> {
+        let pressure = fs::read_to_string(self.path.join("memory.pressure"))?;
+        let stats = parse_memory_stats("", Some(&pressure));
+        Ok(stats.pressure_some_us.map(Duration::from_micros))
     }
 
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
@@ -657,6 +710,68 @@ fn read_u64(path: &Path) -> io::Result<u64> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// A memory limit file's value: bytes, or `None` for `max`.
+fn parse_limit(value: &str) -> io::Result<Option<u64>> {
+    match value.trim() {
+        "max" => Ok(None),
+        bytes => bytes
+            .parse()
+            .map(Some)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+    }
+}
+
+/// Writes `value` to the control file at `path`, opened with `O_NONBLOCK`
+/// for the kernels that honour it, in one write as cgroup files take it,
+/// replacing what is there as [`fs::write`] does.
+fn write_nonblocking(path: &Path, value: &[u8]) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let file = rustix::fs::open(
+        path,
+        OFlags::WRONLY | OFlags::TRUNC | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let written = rustix::io::write(&file, value)?;
+    if written == value.len() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("{} took {written} of {} bytes", path.display(), value.len()),
+        ))
+    }
+}
+
+/// Runs `write` on a thread of its own and returns its result once it
+/// ends, or `Ok` once `applied` says its effect shows while it goes on,
+/// looking every `look`.
+fn write_until_applied(
+    look: Duration,
+    write: impl FnOnce() -> io::Result<()> + Send + 'static,
+    applied: impl Fn() -> io::Result<bool>,
+) -> io::Result<()> {
+    let (done, outcome) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("cgroup-write".to_owned())
+        .spawn(move || {
+            // Nobody listens once the effect showed.
+            let _ = done.send(write());
+        })?;
+    loop {
+        match outcome.recv_timeout(look) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {
+                if applied()? {
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the cgroup write ended without a result"));
+            }
+        }
+    }
+}
+
 fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
     stat.lines()
         .find_map(|line| line.strip_prefix("usage_usec "))
@@ -780,6 +895,113 @@ fn encloses(outer: &Path, inner: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_high_is_set_and_read_back_as_it_is_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = Cgroup::at(dir.path());
+        fs::write(dir.path().join("memory.high"), "").unwrap();
+        group.set_memory_high(Some(30 << 30)).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("memory.high")).unwrap(),
+            (30_u64 << 30).to_string()
+        );
+        assert_eq!(group.memory_high().unwrap(), Some(30 << 30));
+        // What the kernel shows, and what an operator lifting it leaves.
+        fs::write(dir.path().join("memory.high"), "max\n").unwrap();
+        assert_eq!(group.memory_high().unwrap(), None);
+        group.set_memory_high(Some(1 << 30)).unwrap();
+        group.set_memory_high(None).unwrap();
+        assert_eq!(group.memory_high().unwrap(), None);
+        fs::write(dir.path().join("memory.high"), "lots").unwrap();
+        assert!(group.memory_high().is_err());
+    }
+
+    #[test]
+    fn a_cgroup_write_that_fails_at_once_says_so() {
+        let missing = Cgroup::at("/nonexistent/compute-engine-test");
+        assert_eq!(
+            missing.set_memory_high(Some(1 << 30)).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let never = || Ok(false);
+        let refused = write_until_applied(
+            Duration::from_millis(5),
+            || Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            never,
+        );
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let panicked =
+            write_until_applied(Duration::from_millis(5), || panic!("in the write"), never);
+        assert!(panicked.is_err());
+        // Late, after the caller has been looking for a while: still told.
+        let late = write_until_applied(
+            Duration::from_millis(5),
+            || {
+                thread::sleep(Duration::from_millis(200));
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            never,
+        );
+        assert_eq!(late.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_cgroup_write_the_kernel_holds_for_reclaim_is_not_waited_out() {
+        // As an older kernel holds a write of `memory.high` below what the
+        // group holds until it has reclaimed the difference, the limit
+        // already set.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("memory.high");
+        fs::write(&file, "max").unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let written = file.clone();
+        write_until_applied(
+            Duration::from_millis(5),
+            move || {
+                fs::write(&written, "1024")?;
+                let _ = held.recv_timeout(Duration::from_secs(30));
+                Ok(())
+            },
+            || Ok(fs::read_to_string(&file)? == "1024"),
+        )
+        .unwrap();
+        let waited = started.elapsed();
+        drop(release);
+        assert!(
+            waited < Duration::from_secs(5),
+            "waited {waited:?} for a held write"
+        );
+    }
+
+    #[test]
+    fn a_cgroup_write_held_before_it_applies_is_waited_for() {
+        // Nothing may count on a limit that is not set yet, and a later
+        // setting must not be overtaken by this one.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("memory.high");
+        fs::write(&file, "max").unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            release.send(()).unwrap();
+        });
+        let started = std::time::Instant::now();
+        let written = file.clone();
+        write_until_applied(
+            Duration::from_millis(5),
+            move || {
+                let _ = held.recv_timeout(Duration::from_secs(30));
+                fs::write(&written, "1024")
+            },
+            || Ok(fs::read_to_string(&file)? == "1024"),
+        )
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "1024");
+        releaser.join().unwrap();
+    }
 
     #[test]
     fn controllers_are_enabled_in_every_group_above_a_parent() {

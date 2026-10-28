@@ -39,7 +39,6 @@ import {
   encryptEnvironmentValue,
   normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
-  listPrReviewAppRegistrations,
   listSocialConnections,
   getSocialConnection,
 } from "@opengeni/db";
@@ -67,8 +66,7 @@ import {
   githubAppConnectNavigation,
   prepareGitHubAppConnectAction,
 } from "../integrations/github-app-connect";
-import { githubAppMissingSettings, prReviewGitHubAppMissingSettings } from "@opengeni/github";
-import { requireGitHubLensConnect } from "../integrations/github-lens-connect";
+import { githubAppMissingSettings } from "@opengeni/github";
 import { isPersonalGitHubConnection } from "@opengeni/contracts/personal-github";
 import { startGoogleDriveOAuth } from "../integrations/google-drive";
 import {
@@ -81,7 +79,7 @@ import {
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
-import { executeConnectOperation } from "@opengeni/core";
+import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
   startMcpOAuth,
@@ -166,12 +164,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       ? hasPermission(permissions, "workspace:read")
       : providerId === "github-app"
         ? hasPermission(permissions, "github:use") || hasPermission(permissions, "github:manage")
-        : providerId === "github-lens"
-          ? hasPermission(permissions, "workspace:read")
-          : hasPermission(permissions, "connections:read") ||
-            // One's own sign-in attempt is readable with the permission that started it.
-            (connectSetupPermission(attempt) === "connections:personal" &&
-              hasPermission(permissions, "connections:personal"));
+        : hasPermission(permissions, "connections:read") ||
+          // One's own sign-in attempt is readable with the permission that started it.
+          (connectSetupPermission(attempt) === "connections:personal" &&
+            hasPermission(permissions, "connections:personal"));
   };
   app.get("/v1/workspaces/:workspaceId/connect/catalog", async (c) => {
     const authorization = await requireAccessGrantAuthorization(
@@ -419,23 +415,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         setup: ["oauth", "installation"],
       }),
       ConnectProvider.parse({
-        id: "github-lens",
-        label: "Opengeni Lens PR review",
-        family: "github-lens",
-        readiness:
-          !external ||
-          !hasPermission(authorization.grant.permissions, "workspace:admin") ||
-          !hasPermission(authorization.grant.permissions, "secrets:write")
-            ? "unsupported"
-            : credentialConfigured &&
-                deps.settings.sandboxBackend !== "selfhosted" &&
-                prReviewGitHubAppMissingSettings(deps.settings).length === 0
-              ? "available"
-              : "needs_configuration",
-        ownership: ["workspace"],
-        setup: ["oauth", "installation"],
-      }),
-      ConnectProvider.parse({
         id: "fiken-token",
         label: "Fiken",
         family: "fiken",
@@ -524,11 +503,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       hasPermission(grant.permissions, "github:manage")
         ? await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)
         : [];
-    const lensRegistrations = await listPrReviewAppRegistrations(
-      deps.db,
-      grant.accountId,
-      workspaceId,
-    );
     const socialConnections = await listSocialConnections(
       deps.db,
       workspaceId,
@@ -551,17 +525,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : connection.status === "disabled"
                   ? "disabled"
                   : "auth_needed",
-          }),
-        ),
-      ...lensRegistrations
-        .filter((registration) => registration.credentialKind === "managed_github_app")
-        .map((registration) =>
-          ConnectAccount.parse({
-            id: `lens-registration:${registration.id}`,
-            providerId: "github-lens",
-            label: registration.providerAccountLogin ?? "Lens installation",
-            ownership: "workspace",
-            status: registration.status === "active" ? "connected" : "disabled",
           }),
         ),
       ...githubInstallations.map((installation) =>
@@ -816,14 +779,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    if (["github-app", "github-lens"].includes(before.providerId)) {
-      const installationPermission =
-        before.providerId === "github-lens" ? "workspace:admin" : "github:manage";
-      if (
-        !hasPermission(authorization.grant.permissions, installationPermission) ||
-        (before.providerId === "github-lens" &&
-          !hasPermission(authorization.grant.permissions, "secrets:write"))
-      )
+    if (before.providerId === "github-app") {
+      const installationPermission = "github:manage";
+      if (!hasPermission(authorization.grant.permissions, installationPermission))
         throw new HTTPException(403, { message: "Installation management permission required" });
       return c.json(
         await executeConnectOperation({
@@ -835,10 +793,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
           authorize: async (tx, _attempt, origin) => {
             await requireConnectOwnerAuthority(tx, scope, installationPermission, origin);
-            if (before.providerId === "github-lens") {
-              await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
-              await requireGitHubLensConnect({ ...deps, db: tx });
-            }
           },
           execute: async (attempt) =>
             prepareGitHubAppConnectAction(deps, scope, c.req.url, attempt, action),
@@ -1068,6 +1022,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const mcpUrl = destination.toString();
+      // An Opengeni API key reads its organization: EU-only content stays in
+      // EU-only workspaces.
+      await assertMcpCredentialContentFlowAllowed(deps.db, {
+        target: { accountId: actor.grant.accountId, workspaceId: actor.grant.workspaceId },
+        url: mcpUrl,
+        headers: credentialHeaders,
+      });
       return c.json(
         await executeConnectOperation({
           db: deps.db,
@@ -1436,20 +1397,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   : "workspace:read"
                 : attempt.providerId === "github-app"
                   ? "github:manage"
-                  : attempt.providerId === "github-lens"
-                    ? "workspace:admin"
-                    : attempt.providerId === "slack-bot"
-                      ? "capabilities:manage"
-                      : connectSetupPermission(attempt);
-          if (
-            !hasPermission(authorization.grant.permissions, permission) ||
-            (attempt.providerId === "github-lens" &&
-              !hasPermission(authorization.grant.permissions, "secrets:write"))
-          )
+                  : attempt.providerId === "slack-bot"
+                    ? "capabilities:manage"
+                    : connectSetupPermission(attempt);
+          if (!hasPermission(authorization.grant.permissions, permission))
             throw new HTTPException(403, { message: "Connect management permission required" });
           await requireConnectOwnerAuthority(tx, scope, permission, origin);
-          if (attempt.providerId === "github-lens")
-            await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
         },
         execute: async () => ({
           commit: async (_tx, current) => ({
@@ -1494,13 +1447,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             : "workspace:read"
           : input.providerId === "github-app"
             ? "github:manage"
-            : input.providerId === "github-lens"
-              ? "workspace:admin"
-              : // The workspace Slack bot configures the whole workspace, so installing it is
-                // integration administration even though Members hold connections:write.
-                input.providerId === "slack-bot"
-                ? "capabilities:manage"
-                : connectSetupPermission(input);
+            : // The workspace Slack bot configures the whole workspace, so installing it is
+              // integration administration even though Members hold connections:write.
+              input.providerId === "slack-bot"
+              ? "capabilities:manage"
+              : connectSetupPermission(input);
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -1728,7 +1679,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             },
           });
         }
-        if (["github-app", "github-lens"].includes(input.providerId)) {
+        if (input.providerId === "github-app") {
           if (
             input.ownership !== "workspace" ||
             input.installationTarget ||
@@ -1738,21 +1689,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               message:
                 "GitHub App setup requires workspace ownership and explicit installation selection",
             });
-          if (input.providerId === "github-lens") {
-            if (!hasPermission(authorization.grant.permissions, "secrets:write"))
-              throw new HTTPException(403, { message: "secrets:write required" });
-            await requireConnectOwnerAuthority(tx, scope, "secrets:write");
-            await requireGitHubLensConnect({ ...deps, db: tx });
-          }
-          const navigation = githubAppConnectNavigation(
-            deps,
-            scope,
-            id,
-            c.req.url,
-            "discover",
-            undefined,
-            input.providerId === "github-lens" ? "github-lens" : "github-app",
-          );
+          const navigation = githubAppConnectNavigation(deps, scope, id, c.req.url, "discover");
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,

@@ -52,7 +52,6 @@ function version(overrides: Partial<RigVersion> = {}): RigVersion {
     setupScript: "printf setup-ran > /tmp/rig-setup-proof",
     checks: [{ name: "shell", command: "bash --version" }],
     credentialHooks: [],
-    defaultVariableSetIds: [],
     changelog: null,
     providerImages: {},
     createdBy: "user:test",

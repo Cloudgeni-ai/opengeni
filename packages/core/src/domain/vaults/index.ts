@@ -24,5 +24,18 @@ export {
   type SecretResolverOptions,
 } from "./secret-resolver";
 export type { VaultRequestActor, VaultServiceDeps } from "./types";
+export { loadSessionTreeSecretValues } from "./used-secret-values";
 export { getVaultItemApproval, revokeVaultItemGrant, setVaultItemApproval } from "./use-approvals";
-export { createVaultService, vaultActorIsApiKey, type VaultService } from "./vault-service";
+export {
+  createVaultService,
+  vaultActorIsApiKey,
+  type SecretCaptureInput,
+  type VaultService,
+} from "./vault-service";
+export {
+  createTaskVaultSecretCapturer,
+  isSecretShapeItemName,
+  SECRET_SHAPE_CAPTURED_ITEMS_MAX,
+  secretShapeItemName,
+  type SecretCaptureFailure,
+} from "./captured-secret-values";

@@ -167,6 +167,25 @@ describe("tool result spill identity", () => {
 });
 
 describe("tool result spill port", () => {
+  test("the spilled copy has secret-shaped values masked (C review finding 4)", async () => {
+    filesById.clear();
+    putObjectCalls.length = 0;
+    const fakePassword = "FAKE-Pw-0000-not-real";
+    const result = {
+      content: [
+        {
+          type: "text" as const,
+          text: `OPENGENI_DATABASE_URL=postgres://user:${fakePassword}@host:5432/db?sslmode=require`,
+        },
+      ],
+    };
+    await spill("none").spill({ operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", result });
+    expect(putObjectCalls).toHaveLength(1);
+    const stored = Buffer.from(putObjectCalls[0]!.body).toString();
+    expect(stored).not.toContain(fakePassword);
+    expect(stored).toContain("postgres://user:[masked url password]@host:5432/db?sslmode=require");
+  });
+
   test("persists one File without rematerializing when there is no sandbox", async () => {
     filesById.clear();
     putObjectCalls.length = 0;

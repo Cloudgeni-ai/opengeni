@@ -25,10 +25,6 @@ const workspaceRouteContracts = {
   workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
-  // The old Variable sets URLs redirect to Secrets.
-  workspaceVariableSetsRoute: { kind: "redirect" },
-  workspaceVariableSetDetailRoute: { kind: "redirect" },
-  workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
@@ -46,6 +42,7 @@ const workspaceRouteContracts = {
   workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceBotTemplatesRoute: { kind: "page", source: "routes/bot-templates.tsx" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },

@@ -379,11 +379,9 @@ describe("unit process planning", () => {
       "apps/worker/test/editable-artifact-outbox-posture-postgres.test.ts",
       "packages/db/test/editable-artifact-materialization-postgres.test.ts",
       "packages/db/test/editable-artifacts-postgres.test.ts",
-      "packages/db/test/migration-0120-durable-goal-wake.test.ts",
-      "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
-      "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",
-      "packages/db/test/migration-0305-personal-resource-grant-management.test.ts",
-      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts",
+      "packages/db/test/subscription-settings-postgres.test.ts",
+      "packages/db/test/product-lifecycle-facts-postgres.test.ts",
+      "packages/db/test/private-session-visibility-transition-gate.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
@@ -391,9 +389,8 @@ describe("unit process planning", () => {
 
   test("serializes owner-migrated role fixtures and their migration readers", () => {
     const root = join(import.meta.dir, "../..");
-    const owner = "packages/db/test/migration-0305-personal-resource-grant-management.test.ts";
-    const reader =
-      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts";
+    const owner = "packages/db/test/verified-signup-trial-postgres.test.ts";
+    const reader = "packages/db/test/private-session-visibility-transition-gate.test.ts";
     const plan = planUnitTestProcesses(root, [], [owner, reader], 1);
     expect(plan.parallel).toEqual([]);
     expect(plan.clusterRoleSensitive).toEqual([

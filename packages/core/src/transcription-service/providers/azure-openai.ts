@@ -5,6 +5,7 @@ import {
 } from "../../recording-transcription";
 import {
   deploymentTextModel,
+  keytermsPrompt,
   requestIdOf,
   textRequestAudio,
   textTranscriptionResult,
@@ -15,7 +16,11 @@ import {
   parseTranscriptionResponseBody,
   responseError,
 } from "./openai";
-import { createOpenAiRealtimeLiveSession, openAiRealtimeTranscribes } from "./openai-realtime";
+import {
+  createOpenAiRealtimeLiveSession,
+  openAiLanguage,
+  openAiRealtimeTranscribes,
+} from "./openai-realtime";
 
 export function createAzureOpenAiTranscriptionProvider(input: {
   endpoint: string;
@@ -75,9 +80,10 @@ export function createAzureOpenAiTranscriptionProvider(input: {
       const signal = request.signal;
       const form = new FormData();
       form.append("file", new Blob([Uint8Array.from(audio).buffer], { type: mimeType }), filename);
-      if (request.language && /^[a-z]{2}$/u.test(request.language)) {
-        form.append("language", request.language);
-      }
+      const language = openAiLanguage(request.language);
+      if (language) form.append("language", language);
+      const prompt = keytermsPrompt(request);
+      if (prompt) form.append("prompt", prompt);
       // Whisper reports its billed audio duration only in verbose_json.
       if (voiceInputModelReportsDurationOnly(model)) {
         form.append("response_format", "verbose_json");

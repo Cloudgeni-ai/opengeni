@@ -28,6 +28,8 @@ const COPIED = [
   "initial_model_context",
   "title",
   "title_source",
+  "description",
+  "avatar",
   "instructions",
   "policy_role",
   "skills",
@@ -367,7 +369,9 @@ async function configuredSource(org: Org) {
   });
   // Settings changed after creation carry over too.
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
-    title_source = 'user' where id = ${session.id}`;
+    title_source = 'user', description = 'Owns the release checklist',
+    avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
+    where id = ${session.id}`;
   return session.id;
 }
 

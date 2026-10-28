@@ -257,6 +257,13 @@ export type SessionDraftSubmission = {
   omitWorkspaceResources: boolean;
 };
 
+/** A new chat started as a bot (from a bot template): who it is. */
+export type NewSessionBotProfile = {
+  name: string;
+  description?: string | undefined;
+  avatar?: import("@opengeni/sdk").SessionAvatar | null | undefined;
+};
+
 export type BuildCreateSessionRequestInput = {
   currentResources: ResourceRef[];
   submission: TurnSubmission;
@@ -264,6 +271,8 @@ export type BuildCreateSessionRequestInput = {
   instructions?: string | undefined;
   /** Installed session-selected Skills to freeze onto the new session. */
   installedSkillIds?: string[] | undefined;
+  /** Start the chat as a bot: its name, description and avatar, kept live. */
+  bot?: NewSessionBotProfile | undefined;
   startMode?: "realtime" | undefined;
   visibility?: "private" | "workspace" | undefined;
   omitWorkspaceResources?: boolean | undefined;
@@ -380,6 +389,16 @@ export function buildCreateSessionRequest(
     visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
     ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
+    ...(input.bot
+      ? {
+          keepLive: true,
+          profile: {
+            title: input.bot.name,
+            ...(input.bot.description ? { description: input.bot.description } : {}),
+            ...(input.bot.avatar ? { avatar: input.bot.avatar } : {}),
+          },
+        }
+      : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
     ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined

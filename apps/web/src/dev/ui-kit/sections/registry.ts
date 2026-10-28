@@ -26,6 +26,7 @@ export type SectionGroup =
   | "Structure"
   | "Forms"
   | "People"
+  | "Chat"
   | "Foundations"
   | "Style"
   | "Pages";
@@ -39,6 +40,7 @@ export const SECTION_GROUPS: readonly SectionGroup[] = [
   "Structure",
   "Forms",
   "People",
+  "Chat",
   "Foundations",
   "Style",
   "Pages",
@@ -106,6 +108,12 @@ export const SECTION_KEYS = [
   "cadence-picker",
   // People
   "access-list",
+  // Chat
+  "chat-approvals",
+  "chat-questions",
+  "chat-connect",
+  "chat-answers",
+  "chat-admission",
   // Foundations
   "logo-tile",
   "relative-time",
@@ -124,6 +132,7 @@ export const SECTION_KEYS = [
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
+  "page-dictation",
   "page-knowledge",
   "page-org-people",
 ] as const;
@@ -693,6 +702,49 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./secret-approval"),
   },
   {
+    key: "chat-approvals",
+    group: "Chat",
+    title: "Approvals",
+    purpose: "Ask the person to allow or decline one action the agent wants to take.",
+    usedOn: "Chat, embedded chat, inbox and phone",
+    load: () => import("./chat-approvals"),
+  },
+  {
+    key: "chat-questions",
+    group: "Chat",
+    title: "Agent questions",
+    purpose: "Ask the person one or more questions and wait for the answer.",
+    usedOn: "Chat, embedded chat, inbox and phone",
+    load: () => import("./chat-questions"),
+  },
+  {
+    key: "chat-connect",
+    group: "Chat",
+    title: "Connect cards",
+    purpose:
+      "Ask the person to connect an account, add a key or a server so the agent can carry on.",
+    usedOn: "Chat and embedded chat",
+    load: () => import("./chat-connect"),
+  },
+  {
+    key: "chat-answers",
+    group: "Chat",
+    title: "Interactive answers",
+    purpose:
+      "Show options the agent found as cards, a table and a chart the person can filter and pick from.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-answers"),
+  },
+  {
+    key: "chat-admission",
+    group: "Chat",
+    title: "Messages that can't start",
+    purpose:
+      "Say why a saved message didn't start, name the machine involved, and offer the one way forward.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-admission"),
+  },
+  {
     key: "cadence-picker",
     group: "Forms",
     title: "Cadence picker",
@@ -914,6 +966,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Record a meeting, then read its transcript and name who spoke.",
     usedOn: "Main rail",
     load: () => import("./page-meetings"),
+  },
+  {
+    key: "page-dictation",
+    group: "Pages",
+    title: "Dictation",
+    purpose: "Dictate into any app with a shortcut, and find recent dictations again.",
+    usedOn: "Desktop app: Settings → Computer use",
+    load: () => import("./page-dictation"),
   },
   {
     key: "page-knowledge",

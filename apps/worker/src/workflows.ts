@@ -18,7 +18,6 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
-export { automationRunWorkflow, type AutomationRunWorkflowInput } from "./workflows/automations";
 export {
   knowledgeSourceSyncWake,
   knowledgeSourceSyncWorkflow,

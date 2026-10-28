@@ -9,7 +9,6 @@ import {
   type SessionAuthorizationSurface,
   type SessionVisibility,
   type UpdateSessionVisibilityRequest,
-  type VariableSet,
 } from "@opengeni/contracts";
 import {
   assertSessionIsNotImported,
@@ -46,7 +45,6 @@ import {
 } from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
-import { variableSetsRemovedError } from "../domain/encryption-key";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 
 type SessionTenancyDependencies = Pick<
@@ -542,29 +540,18 @@ export async function forkManagedHumanSession(
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
     operationKey: request.idempotencyKey,
     ...(beforeCommit ? { beforeCommit } : {}),
-    ...(request.rigId !== undefined || request.variableSetIds !== undefined
-      ? {
-          runtimeRequest: {
-            rigId: request.rigId ?? null,
-            variableSetIds: request.variableSetIds ?? [],
-          },
-        }
-      : {}),
+    ...(request.rigId !== undefined ? { runtimeRequest: { rigId: request.rigId } } : {}),
   };
   const recoverAppliedReceipt = async () =>
     await runTenancyMutation(async () => await replayAppliedSessionFork(deps.db, forkInput));
-  const runtimeSetupRequested = request.rigId !== undefined || request.variableSetIds !== undefined;
+  const runtimeSetupRequested = request.rigId !== undefined;
   let runtimeConfigurationPromise: Promise<{
-    variableSetIds: string[];
     rigId: string | null;
     rigVersionId: string | null;
   }> | null = null;
   const resolveRuntimeConfiguration = async () => {
     if (runtimeConfigurationPromise) return await runtimeConfigurationPromise;
     runtimeConfigurationPromise = (async () => {
-      // Variable Sets were replaced by vaults (RM-1).
-      if (request.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
-      const variableSets: VariableSet[] = [];
       let rigVersionId: string | null = null;
       if (request.rigId) {
         requirePermission(authorization.grant, "rigs:use");
@@ -575,7 +562,6 @@ export async function forkManagedHumanSession(
         rigVersionId = rig.activeVersion.id;
       }
       return {
-        variableSetIds: variableSets.map((variableSet) => variableSet.id),
         rigId: request.rigId ?? null,
         rigVersionId,
       };

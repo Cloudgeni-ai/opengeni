@@ -190,10 +190,9 @@ export type EventingState = {
   modelVisibleSkillIds: ReadonlySet<string> | null;
 };
 
-/** Rig telemetry (M3): set once the session loads; empty string for a rig-less
- * turn (mirrors variableSetId). Read by the activity span's finally block. */
+/** Rig telemetry: set once the session loads; empty string for a rig-less
+ * turn. Read by the activity span's finally block. */
 export type WorkspaceRefState = {
-  variableSetId: string;
   rigId: string;
   rigVersionId: string;
 };
@@ -386,7 +385,6 @@ export function createTurnContext(input: {
       modelVisibleSkillIds: null,
     },
     workspaceRefs: {
-      variableSetId: "",
       rigId: "",
       rigVersionId: "",
     },

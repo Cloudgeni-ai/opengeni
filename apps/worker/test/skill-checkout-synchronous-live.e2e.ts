@@ -274,7 +274,6 @@ function delayedTerminalBackend(native: ChannelASession) {
     stored.set(command.execId, structuredClone(command));
     return {
       load: async () => structuredClone(stored.get(command.execId)!),
-      acknowledge: async (next) => next,
       reserveInput: async () => {
         throw new Error("Acceptance must never reserve stdin.");
       },

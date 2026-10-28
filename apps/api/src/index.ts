@@ -22,7 +22,7 @@ import {
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
-  logDatabaseCredentialEvent,
+  observeDatabaseCredentialEvents,
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
@@ -172,19 +172,6 @@ export async function createTemporalWorkflowClient(
     },
   });
   const client: SessionWorkflowClient = {
-    triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
-      try {
-        await temporal.workflow.start("automationRunWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `automation-run:${runId}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [{ accountId, workspaceId, runId }],
-        });
-      } catch (error) {
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
-      }
-    },
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },
@@ -488,9 +475,7 @@ export async function startApi(options: StartApiOptions = {}) {
     ...databasePoolOptions(settings),
     // Runtime login only: the files rotate this URL's password in place.
     ...databasePasswordFileOptions(settings),
-    onCredentialEvent: logDatabaseCredentialEvent("api", (message, attributes) =>
-      observability.warn(message, attributes),
-    ),
+    onCredentialEvent: observeDatabaseCredentialEvents("api", observability),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;

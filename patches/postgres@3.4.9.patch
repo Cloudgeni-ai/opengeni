@@ -1,7 +1,15 @@
 diff --git a/src/connection.js b/src/connection.js
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -157,6 +157,13 @@
+@@ -106,6 +106,7 @@
+     , nonce = null
+     , query = null
+     , final = null
++    , login = null
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -157,6 +158,13 @@
      if (terminated)
        return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
  
@@ -15,7 +23,7 @@ diff --git a/src/connection.js b/src/connection.js
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,10 +259,16 @@
+@@ -252,10 +260,16 @@
    }
  
    function nextWrite(fn) {
@@ -34,7 +42,7 @@ diff --git a/src/connection.js b/src/connection.js
    }
  
    function connectTimedOut() {
-@@ -287,6 +300,11 @@
+@@ -287,6 +301,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -46,7 +54,18 @@ diff --git a/src/connection.js b/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
-@@ -438,6 +456,7 @@
+@@ -364,6 +383,10 @@
+ 
+   function connected() {
+     try {
++      // One identity per login attempt: the password function receives it,
++      // and an error raised while it logs in carries it, so a caller can
++      // tell which password a refused login used.
++      login = {}
+       statements = {}
+       needsTypes = options.fetch_types
+       statementId = Math.random().toString(36).slice(2)
+@@ -438,6 +461,7 @@
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -54,7 +73,7 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +466,20 @@
+@@ -447,10 +471,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -77,7 +96,16 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +590,12 @@
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -91,10 +119,38 @@ diff --git a/src/connection.js b/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
+@@ -748,7 +789,7 @@
+ 
+   function Pass() {
+     return Promise.resolve(typeof options.pass === 'function'
+-      ? options.pass()
++      ? options.pass(login)
+       : options.pass
+     )
+   }
+@@ -814,7 +855,9 @@
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
+     } else {
+-      errored(Errors.postgres(parseError(x)))
++      const err = Errors.postgres(parseError(x))
++      login && Object.defineProperty(err, Symbol.for('postgres.login'), { value: login })
++      errored(err)
+     }
+   }
+ 
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -157,6 +157,13 @@
+@@ -106,6 +106,7 @@
+     , nonce = null
+     , query = null
+     , final = null
++    , login = null
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -157,6 +158,13 @@
      if (terminated)
        return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
  
@@ -108,7 +164,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,10 +259,16 @@
+@@ -252,10 +260,16 @@
    }
  
    function nextWrite(fn) {
@@ -127,7 +183,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
    }
  
    function connectTimedOut() {
-@@ -287,6 +300,11 @@
+@@ -287,6 +301,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -139,7 +195,18 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
-@@ -438,6 +456,7 @@
+@@ -364,6 +383,10 @@
+ 
+   function connected() {
+     try {
++      // One identity per login attempt: the password function receives it,
++      // and an error raised while it logs in carries it, so a caller can
++      // tell which password a refused login used.
++      login = {}
+       statements = {}
+       needsTypes = options.fetch_types
+       statementId = Math.random().toString(36).slice(2)
+@@ -438,6 +461,7 @@
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -147,7 +214,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +466,20 @@
+@@ -447,10 +471,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -170,7 +237,16 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +590,12 @@
+@@ -548,6 +582,8 @@
+     }
+ 
+     query = results = errorResponse = null
++    // Logged in: later errors no longer belong to the login attempt.
++    login = null
+     result = new Result()
+     connectTimer.cancel()
+ 
+@@ -561,7 +597,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -184,6 +260,26 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
+@@ -748,7 +789,7 @@
+ 
+   function Pass() {
+     return Promise.resolve(typeof options.pass === 'function'
+-      ? options.pass()
++      ? options.pass(login)
+       : options.pass
+     )
+   }
+@@ -814,7 +855,9 @@
+       (query.cursorFn || query.describeFirst) && write(Sync)
+       errorResponse = Errors.postgres(parseError(x))
+     } else {
+-      errored(Errors.postgres(parseError(x)))
++      const err = Errors.postgres(parseError(x))
++      login && Object.defineProperty(err, Symbol.for('postgres.login'), { value: login })
++      errored(err)
+     }
+   }
+ 
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js
@@ -453,13 +549,27 @@ diff --git a/cjs/src/query.js b/cjs/src/query.js
 diff --git a/types/index.d.ts b/types/index.d.ts
 --- a/types/index.d.ts
 +++ b/types/index.d.ts
-@@ -605,7 +605,7 @@
+@@ -354,9 +354,12 @@
+     pass?: Options<T>['password'] | undefined;
+     /**
+      * Password of database user
++     * A function is asked once per login attempt and receives that attempt's
++     * identity, which an error raised during that login carries under
++     * `Symbol.for('postgres.login')`.
+      * @default process.env['PGPASSWORD']
+      */
+-    password?: string | (() => string | Promise<string>) | undefined;
++    password?: string | ((login: object) => string | Promise<string>) | undefined;
+     /** Name of database to connect to (an alias for `database`) */
+     db?: Options<T>['database'] | undefined;
+     /** Username of database user (an alias for `user`) */
+@@ -605,7 +608,7 @@
      writable(): Promise<Writable>;
-
+ 
      execute(): this;
 -    cancel(): void;
 +    cancel(): Promise<void>;
-
+ 
      /**
       * @deprecated `.stream` has been renamed to `.forEach`
 diff --git a/cjs/src/queue.js b/cjs/src/queue.js

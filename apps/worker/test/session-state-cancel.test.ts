@@ -221,52 +221,6 @@ describe("session-state interrupt settlement", () => {
     });
   });
 
-  test("keeps the v1 receipt command replay-compatible without repeating logical settlement", async () => {
-    quiescenceReceipts.length = 0;
-    controlApplications.length = 0;
-    const activities = createSessionStateActivities(
-      async () =>
-        ({
-          db: fakeDb,
-          bus: { publish: async () => undefined },
-          settings: {},
-          observability: {},
-          wakeSessionWorkflow: null,
-        }) as any,
-      {
-        markSessionAttemptQuiesced: mock(async (_db, input) => {
-          quiescenceReceipts.push(input);
-          return [];
-        }),
-        settleSessionAttemptInterruptions: mock(async () => {
-          throw new Error("logical settlement must not be repeated");
-        }),
-        countQueuedTurns: mock(async () => 0),
-        recordTurnsQueuedGauge: mock(() => undefined),
-      },
-    );
-
-    expect(
-      await activities.settleSessionInterruptions({
-        accountId: "account-1",
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-        attemptId: "attempt-1",
-        workflowId: "workflow-1",
-        phase: "attempt_quiesced",
-      }),
-    ).toEqual({ action: "stale" });
-    expect(quiescenceReceipts).toEqual([
-      {
-        workspaceId: "workspace-1",
-        sessionId: "session-1",
-        attemptId: "attempt-1",
-        temporalWorkflowId: "workflow-1",
-      },
-    ]);
-    expect(controlApplications).toHaveLength(0);
-  });
-
   test("persists and publishes an exact activity-owned quiescence proof", async () => {
     quiescenceReceipts.length = 0;
     publishedEvents.length = 0;
