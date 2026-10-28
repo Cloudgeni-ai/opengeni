@@ -44,6 +44,7 @@ import {
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import { connectOwnerStateFields, personalOwnerVerifiedInState } from "../connection-ownership";
 import {
   integrationBaseUrl,
   oauthStateFailureReturn,
@@ -1068,12 +1069,18 @@ export class FikenOAuthCallbackError extends Error {
   }
 }
 
+const FIKEN_OAUTH_STATE_KIND = "fiken_oauth";
+
 type FikenOAuthState = {
   externalContinuation?: ExternalActorContinuation;
   connectAttemptId?: string;
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  // The connection stays workspace-owned, so this signed start-time fact only
+  // lets the callback re-check an owner's authority in their Personal
+  // workspace, which has no membership row (see requireConnectOwnerAuthority).
+  personalOwnerVerified: boolean;
   returnPath: string;
   connectionId?: string;
   connectionVersion?: number;
@@ -1102,6 +1109,8 @@ export async function startFikenOAuth(
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    /** `isPersonalConnectionOwnerPrincipal` of the live start request. */
+    personalOwnershipAllowed: boolean;
     requestUrl: string;
     payload: FikenOAuthStartRequest;
     externalContinuation?: ExternalActorContinuation;
@@ -1121,9 +1130,10 @@ export async function startFikenOAuth(
   }
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
+    kind: FIKEN_OAUTH_STATE_KIND,
+    // Signed record that a live principal was checked; the callback has no
+    // principal of its own and enforces exactly this decision.
+    ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
     returnPath: safeReturnPath(
       input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
     ),
@@ -1456,6 +1466,13 @@ function readFikenOAuthState(raw: string | undefined, settings: Settings): Fiken
   if (!payload) {
     throw new FikenOAuthCallbackError("invalid_state");
   }
+  // Other connectors' states share this signing secret. A state naming another
+  // kind is never a Fiken state. A state with no kind is either a Fiken state
+  // minted before the kind existed or a kind-less state of another connector;
+  // both still need this callback's full owner re-check.
+  if (payload.kind !== undefined && payload.kind !== FIKEN_OAUTH_STATE_KIND) {
+    throw new FikenOAuthCallbackError("invalid_state");
+  }
   const iat = typeof payload.iat === "number" ? payload.iat : undefined;
   const now = Math.floor(Date.now() / 1000);
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
@@ -1471,6 +1488,9 @@ function readFikenOAuthState(raw: string | undefined, settings: Settings): Fiken
     accountId: required(payload.accountId),
     workspaceId: required(payload.workspaceId),
     subjectId: required(payload.subjectId),
+    // Absent on a state minted before the claim existed, which therefore keeps
+    // failing closed in a Personal workspace.
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     returnPath: required(payload.returnPath),
     ...(typeof payload.connectAttemptId === "string"
       ? { connectAttemptId: required(payload.connectAttemptId) }

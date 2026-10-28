@@ -1,4 +1,6 @@
 import { Component, useState, type ErrorInfo, type ReactNode } from "react";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "./load-failure-notice";
 import { useOpenGeniText } from "../messages/runtime";
 
 type ConversationRenderBoundaryProps = {
@@ -7,12 +9,14 @@ type ConversationRenderBoundaryProps = {
   children: ReactNode;
 };
 
-type BoundaryState = { failed: boolean; resetKey: string };
+type BoundaryState = { failed: boolean; notLoaded: boolean; resetKey: string };
 
 /**
  * Contains a rendering error inside the chat. Without it, one bad payload or
  * an incompatible host response unmounts the whole embedding page (a blank
- * Site or dashboard). Try again remounts the chat with fresh data.
+ * Site or dashboard). Try again remounts the chat with fresh data. Code that
+ * failed to download asks for a reload instead: remounting reuses the failed
+ * import.
  */
 export function ConversationRenderBoundary({
   resetKey,
@@ -30,17 +34,19 @@ class Boundary extends Component<
   { resetKey: string; onRetry: () => void; children: ReactNode },
   BoundaryState
 > {
-  state: BoundaryState = { failed: false, resetKey: this.props.resetKey };
+  state: BoundaryState = { failed: false, notLoaded: false, resetKey: this.props.resetKey };
 
-  static getDerivedStateFromError(): Partial<BoundaryState> {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): Partial<BoundaryState> {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
   }
 
   static getDerivedStateFromProps(
     props: { resetKey: string },
     state: BoundaryState,
   ): Partial<BoundaryState> | null {
-    return props.resetKey !== state.resetKey ? { failed: false, resetKey: props.resetKey } : null;
+    return props.resetKey !== state.resetKey
+      ? { failed: false, notLoaded: false, resetKey: props.resetKey }
+      : null;
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
@@ -48,10 +54,11 @@ class Boundary extends Component<
   }
 
   render(): ReactNode {
-    return this.state.failed ? (
-      <ConversationRenderError onRetry={this.props.onRetry} />
+    if (!this.state.failed) return this.props.children;
+    return this.state.notLoaded ? (
+      <LoadFailureNotice variant="block" />
     ) : (
-      this.props.children
+      <ConversationRenderError onRetry={this.props.onRetry} />
     );
   }
 }

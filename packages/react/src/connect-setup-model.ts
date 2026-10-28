@@ -106,6 +106,11 @@ export type ConnectSetupFlowOptions = {
   onAuthorize: (attempt: ConnectAttempt) => void | Promise<unknown>;
   /** Called synchronously on Continue; hosts can reserve a window before advancing. */
   onSelectAccount?: ((accountId: string) => void | Promise<unknown>) | undefined;
+  /**
+   * A chat card hides "Check status" outside a finish-elsewhere step and offers
+   * its own "Try again", so its error line points there instead.
+   */
+  inChat?: boolean | undefined;
 };
 
 /** What a Connect setup step shows and the steps a person can take from it. */
@@ -257,7 +262,9 @@ export function useConnectSetupFlow(
           ? t("connectSetup.theIntegrationSourceChangedReview")
           : attempt.error?.code === "mcp_verification_failed"
             ? t("connectSetup.couldNotVerifyThisConnection")
-            : t("connectSetup.connectionSetupCouldNotContinue")
+            : options.inChat
+              ? t("connectSetup.setupCouldNotContinueTryAgain")
+              : t("connectSetup.connectionSetupCouldNotContinue")
         : null,
     signInClosed,
     notice: signInClosed ? t("connectSetup.signInWindowClosed") : null,

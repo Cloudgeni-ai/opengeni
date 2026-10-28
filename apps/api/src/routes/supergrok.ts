@@ -389,6 +389,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authority.accountId,
             workspaceId,
             subjectId: authority.subjectId,
+            // The external continuation decides; the personal-owner claim is
+            // never consulted on that lane.
+            personalOwnerVerified: false,
             externalContinuation: origin,
           },
           state.scope === "workspace" ? "workspace:admin" : "connections:write",

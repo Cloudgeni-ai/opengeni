@@ -73,6 +73,7 @@ import {
 import {
   structuredToolTransportForTurn,
   connectedSubscriptionImageGenerationAuthority,
+  openingToolNamesForTurn,
   textVerbosityForTurn,
   reasoningSummaryForTurn,
 } from "./tool-policy";
@@ -893,6 +894,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
+        // A new session's opening tools load in its first turn's first model
+        // step, as a search by name would; the tool block stays unchanged.
+        openingToolNames: openingToolNamesForTurn(resolvedModel, turn.metadata),
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
           onUnavailable: () =>

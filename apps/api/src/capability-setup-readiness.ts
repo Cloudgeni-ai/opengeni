@@ -36,7 +36,8 @@ export function capabilitySetupReadiness(
   if (item.surfaceType === "first_party_fiken" && item.metadata.connectionStatus !== "active") {
     return "not_ready";
   }
-  if (item.kind === "skill") return "ready";
+  // Installed Skills and plugins reach the agent without a tool selection.
+  if (item.kind === "skill" || item.kind === "plugin") return "ready";
   // The same selection the clients write when attaching a capability to a chat.
   const serverIds = new Set(item.tools.map((tool) => tool.id));
   if (item.kind === "mcp" && item.runtime.mcpServerId) serverIds.add(item.runtime.mcpServerId);

@@ -20,6 +20,10 @@ import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
+import {
+  marketplacePluginCapabilityItem,
+  PLUGIN_CAPABILITY_ID_PREFIX,
+} from "../integrations/marketplace-plugin-catalog";
 import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
@@ -2970,6 +2974,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // A reviewed integration's card stands for the person's own connected
       // instances of it, which the workspace catalog does not list.
       const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+      // A plugin's card stands for its installation in this workspace.
+      const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
       const [item, withPolicy] = await Promise.all([
         integration
           ? integrationDefinitionSetupItem(
@@ -2979,13 +2985,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               grant.subjectId,
               payload.capabilityId,
             )
-          : buildCapabilityCatalog({
-              db,
-              workspaceId,
-              settings,
-              subjectId: grant.subjectId,
-              accountId: grant.accountId,
-            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
+          : plugin
+            ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
+            : buildCapabilityCatalog({
+                db,
+                workspaceId,
+                settings,
+                subjectId: grant.subjectId,
+                accountId: grant.accountId,
+              }).then((catalog) =>
+                catalog.items.find((entry) => entry.id === payload.capabilityId),
+              ),
         withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
       ]);
       const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);

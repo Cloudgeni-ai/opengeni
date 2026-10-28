@@ -50,6 +50,8 @@ import {
   messageTimeZoneWallClock,
 } from "./message-time-zone";
 export * from "./message-time-zone";
+import { OPENING_TOOLS_MAX } from "./opening-tools";
+export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
@@ -902,6 +904,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
+    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    "region_restricted",
     /** The resource or route no longer exists (HTTP 410). */
     "gone",
     "internal_error",
@@ -4138,6 +4142,114 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   return payload.data;
+}
+
+// --- Calling-workspace proof (EU-only content flow) ---
+//
+// When an agent in an Opengeni workspace calls Opengeni's own MCP endpoints as
+// a remote MCP server, the runtime adds this header naming that workspace, so
+// the endpoint can keep EU-only content in EU-only workspaces. The proof is
+// opaque: AES-256-GCM under a key derived from the server secret for this use
+// only, with its own `ogcw_` prefix as additional data, so a relay that sees
+// it learns nothing and it is never accepted as any other token. It grants
+// nothing: it only lets the endpoint refuse.
+export const OPENGENI_CALLING_WORKSPACE_HEADER = "x-opengeni-calling-workspace" as const;
+const callingWorkspaceProofPrefix = "ogcw_";
+const CallingWorkspaceProofPayload = z
+  .object({
+    accountId: z.string().min(1),
+    workspaceId: z.string().min(1),
+    exp: z.number().int().positive(),
+  })
+  .strict();
+export type CallingWorkspaceProof = { accountId: string; workspaceId: string };
+
+async function callingWorkspaceProofKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`opengeni calling-workspace proof v1\u0000${secret}`),
+  );
+  return await crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  try {
+    const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+export async function signCallingWorkspaceProof(
+  secret: string,
+  input: CallingWorkspaceProof & { expiresInSeconds?: number },
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<string> {
+  const payload = CallingWorkspaceProofPayload.parse({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    exp: nowSeconds + (input.expiresInSeconds ?? 300),
+  });
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: new TextEncoder().encode(callingWorkspaceProofPrefix),
+      },
+      await callingWorkspaceProofKey(secret),
+      new TextEncoder().encode(JSON.stringify(payload)),
+    ),
+  );
+  const token = new Uint8Array(iv.length + sealed.length);
+  token.set(iv);
+  token.set(sealed, iv.length);
+  return `${callingWorkspaceProofPrefix}${bytesToBase64Url(token)}`;
+}
+
+/** The calling workspace, or null when the proof is malformed, forged or expired. */
+export async function verifyCallingWorkspaceProof(
+  secret: string,
+  proof: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<CallingWorkspaceProof | null> {
+  if (!proof.startsWith(callingWorkspaceProofPrefix) || proof.length > 2_048) return null;
+  const token = base64UrlToBytes(proof.slice(callingWorkspaceProofPrefix.length));
+  // A 12-byte nonce and at least the 16-byte authentication tag.
+  if (!token || token.length < 12 + 16) return null;
+  let opened: ArrayBuffer;
+  try {
+    opened = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: token.slice(0, 12),
+        additionalData: new TextEncoder().encode(callingWorkspaceProofPrefix),
+      },
+      await callingWorkspaceProofKey(secret),
+      token.slice(12),
+    );
+  } catch {
+    // Forged, altered or under another secret: the tag check failed.
+    return null;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(new TextDecoder().decode(opened));
+  } catch {
+    return null;
+  }
+  const payload = CallingWorkspaceProofPayload.safeParse(decoded);
+  if (!payload.success || payload.data.exp < nowSeconds) return null;
+  return { accountId: payload.data.accountId, workspaceId: payload.data.workspaceId };
 }
 
 // --- Enrollment bearer credential (bring-your-own-compute M5) ---
@@ -19165,6 +19277,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // Standard timeline rendering omits it, while full event/audit reads retain
         // it. This is ordinary user-role content, not secret or privileged input.
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
+        // First-party tools the opening context is for, such as the tool that
+        // reaches the open document or record it names. The first turn loads
+        // them before its first model request, as a search by name would, so it
+        // can use them without searching; the session's tool block is unchanged.
+        // Decided once at creation. Names outside the session's tool selection
+        // are ignored; this grants no tool or permission.
+        modelContextTools: z.array(z.string().min(1).max(200)).max(OPENING_TOOLS_MAX).optional(),
         // The IANA time zone of the person sending the initial message, so the
         // model sees its local time. Ignored without an initial message.
         timeZone: MessageTimeZone.optional(),
@@ -19469,6 +19588,10 @@ export const HumanInputOption = /* @__PURE__ */ defineSchema(() =>
     id: z.string().min(1).max(64),
     label: z.string().min(1).max(256),
     description: z.string().max(2048).nullable().optional(),
+    /** The agent's suggestion; surfaces mark it, never pre-select it. */
+    recommended: primitives.boolean.nullable().optional(),
+    /** A short sample of what the option produces, shown as-is (monospace). */
+    preview: z.string().max(2048).nullable().optional(),
   }),
 );
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
@@ -19488,6 +19611,12 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
       secret: HumanInputSecretSpec.nullable().optional(),
       required: primitives.boolean.default(true),
+      /**
+       * A yes/no decision: a single_select with exactly two options, the
+       * action first and the way out second, answered with two buttons in the
+       * agent's own words. Hosts that predate it show the two options.
+       */
+      confirm: primitives.boolean.nullable().optional(),
       // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
       // that were persisted before that became the default behavior.
@@ -19554,6 +19683,16 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
           message: "select questions require options",
         });
       }
+      if (
+        question.confirm === true &&
+        (question.kind !== "single_select" || question.options.length !== 2)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["confirm"],
+          message: "confirm questions are single_select with exactly two options",
+        });
+      }
       const validation = question.validation;
       if (
         validation?.minSelections != null &&
@@ -19583,13 +19722,19 @@ export function canonicalSkillReviewQuestion(
   )
     return null;
   const canonical = skillReviewHumanInput(question.skillReview!).questions[0]!;
+  const { confirm: _confirm, ...withoutConfirm } = question;
   const normalized = {
-    ...question,
+    ...(question.confirm ? question : withoutConfirm),
     allowOther: false,
     options: question.options.map((option) => {
-      if (option.description != null) return option;
-      const { description: _description, ...rest } = option;
-      return rest;
+      // Strict tool schemas send absent optional fields as null (or false).
+      const { description, recommended: _recommended, preview: _preview, ...rest } = option;
+      return {
+        ...rest,
+        ...(description != null ? { description } : {}),
+        ...(option.recommended ? { recommended: true } : {}),
+        ...(option.preview != null ? { preview: option.preview } : {}),
+      };
     }),
   };
   if (
@@ -21171,6 +21316,20 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
           messages: z.number().int().positive(),
         }),
       )
+      .optional(),
+    /**
+     * The next saved message is the machine owner's own and was approved for
+     * other machines, not this one, so it can't start here and no recheck
+     * helps: it runs after the chat moves to a machine it was approved for,
+     * or it is removed and sent again here. Older servers omit it.
+     */
+    queuedTurnNotApprovedHere: z.boolean().optional(),
+    /**
+     * Where that message may run: the owner's personal machines it was
+     * approved for. Listed only for its sender; empty for everyone else.
+     */
+    queuedTurnApprovedMachines: z
+      .array(z.object({ sandboxId: primitives.uuid, machineName: primitives.string }))
       .optional(),
   }),
 );

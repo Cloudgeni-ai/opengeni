@@ -73,6 +73,7 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
+  siteViewArtifactsReturn,
   siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
@@ -1495,15 +1496,16 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew, page } = workspaceSiteViewRoute.useSearch();
+  const search = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
-      conversation={conversation}
-      startNew={startNew === true}
-      page={page}
+      conversation={search.conversation}
+      startNew={search.new === true}
+      page={search.page}
+      artifactsReturn={siteViewArtifactsReturn(search)}
     />
   );
 }

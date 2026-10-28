@@ -12,6 +12,10 @@ import {
   removeTeamsLink,
   claimTeamsRoute,
   linkTeamsActor,
+  getTeamsInstallation,
+  createConnection,
+  upsertCapabilityCatalogItem,
+  enableCapabilityInstallation,
 } from "@opengeni/db";
 import { updateManagedHumanSessionVisibility, type ApiRouteDeps } from "@opengeni/core";
 import { teamsRouteId } from "../src/integrations/teams-protocol";
@@ -506,4 +510,204 @@ test("unlink settles pending input so same-human relink never revives it", async
       await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`
     )[0]!.n,
   ).toBe(0);
+});
+
+test("group sessions keep DM history separate and stop output when any participant changes", async () => {
+  const f = await fixture();
+  await shared.admin`insert into organization_private_session_settings(account_id,enabled,version,updated_by_membership_id) values(${f.i.account_id},true,1,null) on conflict(account_id) do update set enabled=true`;
+  await enqueueTeamsMessage(client.db, f.i, {
+    ...f.input,
+    personal: true,
+    channelId: null,
+    threadId: null,
+    payload: { text: "Private DM marker must never join group" },
+  });
+  await f.tick();
+  await f.tick(); // Drain the DM's creation wake before exercising group delivery.
+  const [dm] =
+    await shared.admin`select session_id from teams_bot_routes where route_id=${f.input.routeId}`;
+
+  const otherActor = crypto.randomUUID(),
+    otherSubject = `user:teams:${crypto.randomUUID()}`,
+    personal = crypto.randomUUID();
+  await shared.admin`insert into workspaces(id,account_id,name) values(${personal},${f.i.account_id},'Personal')`;
+  await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id) values(${f.i.account_id},${otherSubject},'member','active',${personal})`;
+  await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions) select account_id,workspace_id,${otherSubject},role,permissions from workspace_memberships where workspace_id=${f.i.workspace_id} and subject_id=${f.subject}`;
+  await linkTeamsActor(client.db, f.i, {
+    actorId: otherActor,
+    subjectId: otherSubject,
+    nonce: crypto.randomUUID(),
+  });
+  await upsertCapabilityCatalogItem(client.db, {
+    accountId: f.i.account_id,
+    workspaceId: f.i.workspace_id,
+    id: "example-mail",
+    kind: "mcp",
+    source: "manual",
+    name: "Example Mail",
+    description: "Synthetic personal connector",
+    category: "integrations",
+    tags: ["fixture"],
+    endpointUrl: "https://mail.example.test/mcp",
+    metadata: { mcpServerId: "example-mail" },
+  });
+  await enableCapabilityInstallation(client.db, {
+    accountId: f.i.account_id,
+    workspaceId: f.i.workspace_id,
+    capabilityId: "example-mail",
+    kind: "mcp",
+    config: {
+      connectionRef: {
+        providerDomain: "mail.example.test",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    },
+    metadata: { mcpConnectivity: { status: "ok" } },
+  });
+  const connection = async (subjectId: string) =>
+    createConnection(client.db, {
+      accountId: f.i.account_id,
+      workspaceId: f.i.workspace_id,
+      subjectId,
+      providerDomain: "mail.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "fixture-ciphertext",
+      createdBySubjectId: subjectId,
+    });
+  const creatorConnection = await connection(f.subject),
+    senderConnection = await connection(otherSubject);
+  const audience = [
+    { actorId: f.actor, subjectId: f.subject },
+    { actorId: otherActor, subjectId: otherSubject },
+  ].sort((a, b) => a.actorId.localeCompare(b.actorId));
+  const group = "19:approved-group";
+  f.deps.settings.teamsBotAllowedGroupChatIds = [`${f.i.tenant_id}:${group}`];
+  let roster: unknown[] = [
+    { id: "29:one", aadObjectId: f.actor, tenantId: f.i.tenant_id },
+    { id: "29:two", aadObjectId: otherActor, tenantId: f.i.tenant_id },
+  ];
+  const messages: string[] = [];
+  const send = async (_m: unknown, text: string) => {
+    messages.push(text);
+    return `sent-${messages.length}`;
+  };
+  const tick = async () => {
+    await shared.admin`update teams_bot_routes set lease_until=null where tenant_id=${f.i.tenant_id}`;
+    await drainTeamsBotOnce(f.deps, send, async () => roster);
+  };
+  const input = {
+    ...f.input,
+    channelId: null,
+    conversationId: group,
+    threadId: null,
+    eventId: crypto.randomUUID(),
+    groupAudience: audience,
+    groupRevision: f.i.group_revision,
+  };
+  await enqueueTeamsMessage(client.db, f.i, input);
+  await tick();
+  const [route] =
+    await shared.admin`select * from teams_bot_routes where tenant_id=${f.i.tenant_id} and group_active`;
+  expect(route!.session_bound).toBe(true);
+  expect(route!.session_id).not.toBe(dm!.session_id);
+  expect(messages).toHaveLength(1);
+  const [session] =
+    await shared.admin`select visibility from sessions where id=${route!.session_id}`;
+  expect(session!.visibility).toBe("workspace_shared");
+  const [initialTurn] =
+    await shared.admin`select initiating_human_subject_id,initiator_subject_id,personal_connection_delegations,mcp_account_bindings from session_turns where session_id=${route!.session_id} order by position limit 1`;
+  expect(initialTurn!.initiating_human_subject_id).toBe(f.subject);
+  const installation = (await getTeamsInstallation(client.db, f.i.tenant_id))!;
+  await enqueueTeamsMessage(client.db, installation, {
+    ...input,
+    groupRevision: installation.group_revision,
+    eventId: crypto.randomUUID(),
+    actorId: otherActor,
+    subjectId: otherSubject,
+    payload: { text: "Second human synthetic request" },
+  });
+  await tick();
+  const [followupTurn] =
+    await shared.admin`select initiating_human_subject_id,initiator_subject_id,personal_connection_delegations,mcp_account_bindings from session_turns where session_id=${route!.session_id} and prompt='Second human synthetic request'`;
+  expect(followupTurn!.initiating_human_subject_id).toBe(otherSubject);
+  expect(followupTurn!.initiator_subject_id).toBe(otherSubject);
+  expect(JSON.stringify(followupTurn)).not.toContain(creatorConnection.id);
+  expect(followupTurn!.mcp_account_bindings).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        canonicalServerId: "example-mail",
+        connectionId: senderConnection.id,
+      }),
+    ]),
+  );
+  expect(initialTurn!.mcp_account_bindings).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        canonicalServerId: "example-mail",
+        connectionId: creatorConnection.id,
+      }),
+    ]),
+  );
+
+  await appendSessionEvents(client.db, f.i.workspace_id, route!.session_id, [
+    { type: "turn.completed", payload: { output: "Group-only reply" } },
+  ]);
+  await tick();
+  expect(messages).toEqual([messages[0]!, "Group-only reply"]);
+  await appendSessionEvents(client.db, f.i.workspace_id, route!.session_id, [
+    {
+      type: "turn.completed",
+      payload: { output: ".".repeat(45000) + "Old audience private marker" },
+    },
+  ]);
+  await tick(); // First part is sent to the still-authorized roster.
+  expect(messages).toHaveLength(3);
+  roster = [
+    ...roster,
+    { id: "29:unlinked", aadObjectId: crypto.randomUUID(), tenantId: f.i.tenant_id },
+  ];
+  await tick();
+  expect(messages).toHaveLength(3);
+  expect(
+    (
+      await shared.admin`select group_active from teams_bot_routes where route_id=${route!.route_id}`
+    )[0]!.group_active,
+  ).toBe(false);
+  // Returning to the original roster cannot revive its previous native history.
+  roster = roster.slice(0, 2);
+  const current = (await getTeamsInstallation(client.db, f.i.tenant_id))!;
+  await enqueueTeamsMessage(client.db, current, {
+    ...input,
+    eventId: crypto.randomUUID(),
+    groupRevision: current.group_revision,
+  });
+  await tick();
+  const [next] =
+    await shared.admin`select * from teams_bot_routes where tenant_id=${f.i.tenant_id} and group_active`;
+  expect(next!.session_id).not.toBe(route!.session_id);
+  await appendSessionEvents(client.db, f.i.workspace_id, route!.session_id, [
+    { type: "turn.completed", payload: { output: "Retired route late completion" } },
+  ]);
+  await tick();
+  expect(
+    (
+      await shared.admin`select group_active from teams_bot_routes where route_id=${next!.route_id}`
+    )[0]!.group_active,
+  ).toBe(true);
+  expect(messages.join(" ")).not.toContain("Retired route late completion");
+
+  expect(messages.join(" ")).not.toContain("Old audience private marker");
+  // An audience member who never sent a message still owns a revocation fence.
+  await removeTeamsLink(client.db, current, otherSubject);
+  await linkTeamsActor(client.db, current, {
+    actorId: otherActor,
+    subjectId: otherSubject,
+    nonce: crypto.randomUUID(),
+  });
+  expect(
+    (
+      await shared.admin`select group_active from teams_bot_routes where route_id=${next!.route_id}`
+    )[0]!.group_active,
+  ).toBe(false);
 });

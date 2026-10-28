@@ -666,6 +666,28 @@ const SettingsSchema = z.object({
       )
       .default([]),
   ),
+  teamsBotAllowedGroupChatIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .max(550)
+          .refine(
+            (value) =>
+              value[36] === ":" &&
+              z.string().uuid().safeParse(value.slice(0, 36)).success &&
+              value.slice(37).length > 0,
+          ),
+      )
+      .default([]),
+  ),
   teamsBotSetupAdminIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -5584,6 +5606,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
     teamsBotAllowedChannelIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS"),
+    teamsBotAllowedGroupChatIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS"),
     teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),

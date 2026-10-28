@@ -717,6 +717,12 @@ version never starts two (the chat is keyed by the version).
   the same change (or an added server) whoever makes it. In the chat, `meetings_search`
   is refused and every other meeting is not found. An Only me summary reads
   its meeting as its owner; a workspace one sees only shared meetings.
+- **Who it runs for.** An Only me summary's turn runs for the meeting's
+  owner, like their own Only me automation: it learns into their personal
+  layer under their learning settings, and its use counts toward their
+  allowance. It never uses their personal subscription accounts or
+  connections (see below). A workspace summary runs for no one person and
+  learns into the workspace.
 - **How it is paid for.** Like any background chat, on the workspace's
   shared Codex or Claude subscription accounts, never a person's own. It
   uses the model a new chat would get when a subscription account serves

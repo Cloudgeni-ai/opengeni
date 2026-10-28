@@ -16,6 +16,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { withCallingWorkspaceProof } from "./calling-workspace";
 import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
@@ -99,6 +100,7 @@ export {
 } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
+  DISPLAY_TITLE_META_KEY,
   IntegrationInvocationError,
   isLocalMcpBridgeServer,
   type LocalMcpBridgeAdapter,
@@ -2349,6 +2351,12 @@ export type BuildAgentOptions = {
   /** Explicit provider-contained progressive tool-disclosure strategy. */
   lazyToolTransport?: LazyToolTransport;
   /**
+   * Tools the turn's opening context is for (a new session's frozen opening
+   * tools). The turn's first model step loads them the way a tool_search by
+   * name does, without a provider call; the tool block is unchanged.
+   */
+  openingToolNames?: readonly string[];
+  /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
    * search, deferred invocation, and catalog-dependent runtime join it. A host
@@ -2982,7 +2990,7 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. In a sub-session, your parent agent may also see and answer this request; the first answer wins.";
+  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. In a sub-session, your parent agent may also see and answer this request; the first answer wins.";
 
 const HUMAN_INPUT_SECRET_DESCRIPTION =
   'For a password, API key, token or one-time setup key, ask with a question of kind "secret" and a secret spec (item, field, saveTo); never use a text question or chat for secrets. The answer is saved to a vault and you receive a reference such as {{secret:GitHub/password}} plus the plain username, never the value; use the reference right away.';
@@ -3662,7 +3670,7 @@ function maybeInstallLazyToolTransport(
   const harnessControlServer = mcpServers.find(
     (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
   );
-  installLazyToolRuntime(
+  const lazyRuntime = installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
     mcpServerIds,
@@ -3725,6 +3733,7 @@ function maybeInstallLazyToolTransport(
       return accounts;
     },
   );
+  if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -5719,7 +5728,12 @@ export async function prepareAgentTools(
           options.requestSignal?.throwIfAborted();
           await options.authorizeProviderRequest?.();
           options.requestSignal?.throwIfAborted();
-          const initial = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          const credentialed = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          // Opengeni's own endpoints added as a remote server learn which
+          // workspace is calling, so EU-only content stays out of non-EU ones.
+          const initial = firstParty
+            ? credentialed
+            : await withCallingWorkspaceProof(settings, options, input, credentialed);
           const requestInit = options.requestSignal
             ? {
                 ...initial,
@@ -8683,6 +8697,22 @@ function legacyMcpToolDigest(registryId: string, toolName: string): string {
     .digest("hex");
 }
 
+/** A listed tool's person-facing title from `_meta` (API integrations set one), bounded. */
+function displayTitleFromMeta(tool: object): string | undefined {
+  const meta = (tool as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const title = (meta as Record<string, unknown>)[DISPLAY_TITLE_META_KEY];
+  return typeof title === "string" && title.trim() ? title.trim().slice(0, 256) : undefined;
+}
+
+/** True for an API integration operation, whose arguments are one HTTP request. */
+function apiOperationFromMeta(tool: object): boolean {
+  const meta = (tool as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+  const key = (meta as Record<string, unknown>)["opengeni/operationKey"];
+  return typeof key === "string" && key.trim() !== "";
+}
+
 /** Read only already-prepared display facts; never trigger deferred connections
  * merely to render an unrelated intrinsic tool event. */
 export function mcpToolDisplayMetadata(
@@ -9046,6 +9076,14 @@ export class PrefixedMcpServer implements MCPServer {
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
+  /**
+   * Person-facing titles from tool `_meta` for tools without an MCP title,
+   * keyed by unprefixed name. Approval cards and activity rows read them;
+   * the model never sees them.
+   */
+  private readonly displayTitles = new Map<string, string>();
+  /** Unprefixed names of API integration operations; their cards read the request's fields. */
+  private readonly apiOperations = new Set<string>();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9269,9 +9307,14 @@ export class PrefixedMcpServer implements MCPServer {
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
     const bridge = this.inner as MCPServer & { reviewContext?: ToolReviewReader };
-    return typeof bridge.reviewContext === "function"
-      ? await bridge.reviewContext(toolName, args)
-      : {};
+    const extra =
+      typeof bridge.reviewContext === "function" ? await bridge.reviewContext(toolName, args) : {};
+    const title = this.displayTitles.get(toolName);
+    return {
+      ...(title ? { title } : {}),
+      ...(this.apiOperations.has(toolName) ? { kind: "api" as const } : {}),
+      ...extra,
+    };
   }
 
   /** True when the wrapped local bridge supplies its own model-visible result copy. */
@@ -9323,9 +9366,12 @@ export class PrefixedMcpServer implements MCPServer {
           if (prior !== undefined && prior !== tool.name)
             throw new Error("MCP model tool identity collision");
           this.originalToolNames.set(name, tool.name);
+          const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
+          if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
+          if (apiOperationFromMeta(tool)) this.apiOperations.add(tool.name);
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
-            ...(tool.title ? { title: tool.title } : {}),
+            ...(tool.title ? { title: tool.title } : metaTitle ? { title: metaTitle } : {}),
             ...(this.accountLabel
               ? {
                   connector: this.accountLabel.connector,
@@ -10816,6 +10862,7 @@ function runScopedRunner(
 }
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
+export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {

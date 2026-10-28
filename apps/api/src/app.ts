@@ -138,6 +138,10 @@ import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
+import {
+  callingWorkspaceContentFlowGuard,
+  requireCallingWorkspaceContentExchange,
+} from "./mcp/workspace-content-flow";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
@@ -155,6 +159,7 @@ import {
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
   connectionAccountSelectionHttpError,
+  regionRestrictedHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -301,6 +306,7 @@ import {
 } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
+import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
@@ -1184,6 +1190,10 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  // Every Opengeni MCP endpoint, registered before any of them: EU-only
+  // content never answers an Opengeni workspace that isn't EU-only.
+  app.use("/v1/*", callingWorkspaceContentFlowGuard(routeDeps));
+
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
@@ -1716,6 +1726,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
     };
     let caller: OrganizationMcpCaller;
+    let organizationKeyAccountId: string | null = null;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
       const personalKey = connection
@@ -1745,7 +1756,9 @@ export function createAppComposition(deps: AppDependencies): {
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
-        if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
+        organizationKeyAccountId =
+          accountScopedApiKeyWorkspaceAuthority(context)?.accountId ?? null;
+        if (!organizationKeyAccountId || !authorization) {
           throw new HTTPException(403, {
             message:
               "Connect with Opengeni sign-in, a personal API key or an organization API key.",
@@ -1761,6 +1774,11 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // This reaches every workspace of the organization: EU-only content stays
+    // in EU-only workspaces when another Opengeni workspace calls.
+    await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
+      accountId: caller.kind === "person" ? caller.accountId : organizationKeyAccountId!,
+    });
     // Stateless JSON-response transport: there is no server-to-client stream.
     // Answering GET with an empty 200 made clients (Claude) reconnect every
     // second; refuse it after authorization, as the workspace endpoint does.
@@ -1910,6 +1928,11 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // Another Opengeni workspace calling: EU-only content stays in EU-only
+    // workspaces.
+    await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
+      workspaceId: grant.workspaceId,
+    });
     // MCP handshakes (initialize, ping, notifications) read and disclose
     // nothing scoped. A session-bound agent attempt still proves it is the
     // live attempt, but skips the catalog and admin reads
@@ -2414,6 +2437,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerApiIntegrationRoutes(app, routeDeps);
   registerIntegrationFacetRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
+  registerSessionAvatarImageRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerVaultRoutes(app, routeDeps);
@@ -2506,6 +2530,7 @@ export function createAppComposition(deps: AppDependencies): {
             insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
+            regionRestrictedHttpError(rawError) ??
             scheduledTaskTargetAccessHttpError(rawError) ??
             agentConfigHttpError(rawError) ??
             modelUnavailableHttpError(rawError) ??
@@ -3960,6 +3985,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/git/personal/:routeId/git-receive-pack",
   },
   { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
+  {
+    pattern: /^\/v1\/public\/session-avatars\/[^/]+$/,
+    label: "/v1/public/session-avatars/:file",
+  },
   {
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",

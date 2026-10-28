@@ -14,6 +14,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],
+    teamsBotAllowedGroupChatIds: [],
     teamsBotSetupAdminIds: [],
     signupChallengeEnabled: false,
     signupChallengeHostnames: "",

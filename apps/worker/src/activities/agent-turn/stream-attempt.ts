@@ -53,6 +53,7 @@ import {
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
+  isOpeningToolLoadResponse,
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
   type SandboxFileDownload,
@@ -125,6 +126,11 @@ import {
   settleOpenSuffixResumeIfNeeded,
 } from "../open-suffix-resume";
 import {
+  interactionInterventionRequestsForPause,
+  recordedInteractionRequestCalls,
+  type InteractionPauseCall,
+} from "./interaction-pause";
+import {
   modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -141,8 +147,6 @@ import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
 import {
   assertWorkspaceHumanInputAllowed,
   stableHumanInputRequestId,
-  stableInteractionInterventionId,
-  stableInteractionInterventionOperationId,
   ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
@@ -493,6 +497,22 @@ export async function runTurnStreamAttempt(
   if (!activeTurnId) {
     throw new Error("Turn id was not initialized");
   }
+  // Agent-requested human handoffs open in the worker, never through the API
+  // intervention route, so they are counted at their durable boundary: the
+  // pause or re-freeze that recorded them. A refused request opened nothing.
+  const observeOpenedInteractionRequests = async (calls: readonly InteractionPauseCall[]) => {
+    if (!calls.some((call) => call.input.operation === "request")) return;
+    const observeIntervention = interactionInterventionMetricObserver(observability);
+    for (const call of await recordedInteractionRequestCalls(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      calls,
+    })) {
+      if (call.input.operation !== "request") continue;
+      observeIntervention({ kind: call.input.kind, outcome: "opened" });
+    }
+  };
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
@@ -1319,6 +1339,9 @@ export async function runTurnStreamAttempt(
     const iterator = eventing.stream.toStream()[Symbol.asyncIterator]();
     const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
+    // The local opening tool load and its search result precede the first
+    // provider response; they are not its first byte.
+    let openingToolLoadInFlight = false;
     try {
       while (true) {
         const next = await nextStreamEvent(iterator, activityContext);
@@ -1327,7 +1350,9 @@ export async function runTurnStreamAttempt(
           streamDone = true;
           break;
         }
-        await settleFallbackProviderFirstByte();
+        if (next.value.type === "raw_model_stream_event")
+          openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
+        if (!openingToolLoadInFlight) await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
         let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
@@ -2199,22 +2224,12 @@ export async function runTurnStreamAttempt(
             },
           },
         }));
-      const interactionInterventionRequests = interactionInterventionInterruptions.map(
-        (interruption) => ({
-          id: stableInteractionInterventionId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          operationId: stableInteractionInterventionOperationId(
-            input.sessionId,
-            activeTurnId,
-            interruption.toolCallId,
-          ),
-          toolCallId: interruption.toolCallId,
-          input: interruption.input,
-        }),
-      );
+      const interactionInterventionRequests = await interactionInterventionRequestsForPause({
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        calls: interactionInterventionInterruptions,
+        readTarget: eventing.interactionRequestTargetReader,
+      });
       const pendingApprovals = [
         ...approvals,
         ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
@@ -2302,13 +2317,7 @@ export async function runTurnStreamAttempt(
       ) {
         return claimedResult({ status: "cancelled" });
       }
-      // Agent-requested human handoffs open here, in the worker, never through
-      // the API intervention route, so they are counted at their durable boundary.
-      const observeIntervention = interactionInterventionMetricObserver(observability);
-      for (const interruption of interactionInterventionInterruptions) {
-        if (interruption.input.operation !== "request") continue;
-        observeIntervention({ kind: interruption.input.kind, outcome: "opened" });
-      }
+      await observeOpenedInteractionRequests(interactionInterventionInterruptions);
       // The interruption and its preceding tool results are now durable.
       await finalizeTurnOpStreamOps();
       // A Steer that was waiting for this turn's next model step would
@@ -2565,6 +2574,16 @@ export async function runTurnStreamAttempt(
     modelToolOutputTruncationTokens: eventing.modelRunSettings.modelToolOutputTruncationTokens,
     settle: eventing.settle!,
     publish: eventing.publish,
+    interactionRequests: {
+      build: async (calls) =>
+        await interactionInterventionRequestsForPause({
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          calls,
+          readTarget: eventing.interactionRequestTargetReader,
+        }),
+      recorded: observeOpenedInteractionRequests,
+    },
   });
   if (openSuffixResume.action === "cancelled") {
     return claimedResult({ status: "cancelled" });

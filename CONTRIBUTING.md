@@ -46,6 +46,15 @@ bun run test:integration
 bun run test:e2e
 ```
 
+## Issues
+
+Open issues with the bug report or feature request form. Every issue says why it
+matters: who is affected and what it blocks or costs, with a use case or a
+measurement where you have one. That reason is what we prioritize by; an issue
+without one may be closed. Issues filed from the CLI or API skip the forms, so
+include a "Why it matters" section yourself. Report vulnerabilities privately as
+described in [SECURITY.md](SECURITY.md).
+
 ## Pull Requests
 
 - Keep changes focused.

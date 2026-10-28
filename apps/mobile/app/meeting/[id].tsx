@@ -1,3 +1,4 @@
+import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { useMeetingView, type MeetingAction } from "@opengeni/react-native/meetings";
 import { IconButton, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack, router, useLocalSearchParams } from "expo-router";
@@ -23,7 +24,8 @@ function Meeting({ workspaceId }: { workspaceId: string }) {
   const c = useNativeTimelineTheme().colors;
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { client } = useAccount();
+  const { client, accessContext, workspaces } = useAccount();
+  const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const view = useMeetingView({
     client,
     workspaceId,
@@ -31,6 +33,16 @@ function Meeting({ workspaceId }: { workspaceId: string }) {
     onDeleted: () => router.back(),
     // iOS keeps the transcript clear of the home indicator by itself.
     bottomInset: Platform.OS === "ios" ? 0 : insets.bottom,
+    viewer: accessContext
+      ? { subjectId: accessContext.subjectId, name: accessContext.subjectLabel ?? null }
+      : null,
+    // Unknown until the workspace loads; voices are offered only once it says so.
+    ...(workspace
+      ? {
+          voiceRecognition:
+            resolveWorkspaceRecordingSettings(workspace.settings).voiceprints === true,
+        }
+      : {}),
   });
   const actions = view.actions;
   // Android's header menu: rebuilt only when its items change; the handler is read live.

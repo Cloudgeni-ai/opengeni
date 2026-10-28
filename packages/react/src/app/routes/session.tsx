@@ -8,16 +8,25 @@ import {
 import { isModelUnavailableSubmissionError } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
+import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
 import { loadSessionFeedback } from "../../session-feedback-model";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../../interactive-answer-model";
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
 import { useReadSessionInbox } from "../lib/inbox";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
-import { getComposerSendBlocker } from "../lib/composer-send-blocking";
+import {
+  useSessionComposerDelivery,
+  useSessionSendGate,
+  type SessionSendState,
+} from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
@@ -1431,7 +1440,7 @@ export function SessionRoute({
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
-        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
           <NativeConnectSetup
             transport={reconnectTransport}
             workspaceId={workspaceId}
@@ -1449,7 +1458,7 @@ export function SessionRoute({
               });
             }}
           />
-        </Suspense>
+        </LazyPart>
       )}
       <SessionDock
         workspaceId={workspaceId}
@@ -1687,7 +1696,7 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         : {}),
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
             key={props.sessionId}
             workspaceId={props.workspaceId}
@@ -1714,7 +1723,7 @@ function SessionDockPanel(props: SessionDockProps) {
                 : undefined
             }
           />
-        </Suspense>
+        </LazyPart>
       ),
     },
   ];
@@ -1724,7 +1733,7 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Agent",
       icon: <BotIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
@@ -1734,7 +1743,7 @@ function SessionDockPanel(props: SessionDockProps) {
             usageLimitFocusRequest={usageLimitFocus}
             goalPausedAtUsageLimit={goalPausedAtLimit}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -1744,14 +1753,14 @@ function SessionDockPanel(props: SessionDockProps) {
       label: "Debug",
       icon: <BugIcon />,
       content: (
-        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
             session={props.session}
             events={props.events}
             connectionState={props.connectionState}
             onReloadSession={props.onReloadSession}
           />
-        </Suspense>
+        </LazyPart>
       ),
     });
   }
@@ -2163,6 +2172,7 @@ function SessionChatPane(props: {
   // Moved to long-term storage after a long idle period: readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
@@ -2432,6 +2442,10 @@ function SessionChatPane(props: {
     context.accessContext === undefined ||
     hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
   const reloadSessionAfterMachineChange = props.onReloadSession;
+  // A saved message approved for another of the person's machines already
+  // carries that machine's consent, so moving the chat back only repoints it
+  // (no "use this machine" message); the notice rechecks and re-reads right after.
+  const moveSavedMessage = runsOnAttach;
   const moveRunsOn = useCallback(
     async (machine: MachineView): Promise<string | null> => {
       if (!isPersonalMachine(machine)) {
@@ -2659,7 +2673,9 @@ function SessionChatPane(props: {
       durableToolSelection,
     ],
   );
-  const composerPolicyValidRef = useRef(false);
+  // Send's guard; whether the model choice can run is worked out below from
+  // the composer's own policy (see useSessionSendGate).
+  const sendGate = useSessionSendGate();
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const loadSkillReview = useCallback(
@@ -2700,23 +2716,22 @@ function SessionChatPane(props: {
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
   });
-  const composerSendBlocker = () =>
-    getComposerSendBlocker({
-      uploadPending: attachments.hasUnresolved,
-      repositoryError: repositories.error,
-      policyValid: composerPolicyValidRef.current,
-      personalDecision:
-        personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
-      machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
-      personalLoading:
-        durableToolsSaving ||
-        durableToolsSaveInFlight.current ||
-        !durableToolsHydrated ||
-        personalAttachment.loading ||
-        personalAttachment.refreshing ||
-        connectionAccounts.loading ||
-        connectionAccounts.error !== null,
-    });
+  const sendState: SessionSendState = {
+    uploadPending: attachments.hasUnresolved,
+    repositoryError: repositories.error,
+    personalDecision:
+      personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+    machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
+    loading:
+      durableToolsSaving ||
+      durableToolsSaveInFlight.current ||
+      !durableToolsHydrated ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing ||
+      connectionAccounts.loading,
+    loadFailed: connectionAccounts.error !== null,
+  };
+  const composerSendBlocker = () => sendGate.blocker(sendState);
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
@@ -2968,7 +2983,6 @@ function SessionChatPane(props: {
         ? "This model is no longer available. Select a different model to continue."
         : "Choose a model, reasoning level, and speed supported by this session."
       : null;
-  composerPolicyValidRef.current = composerPolicyValid;
 
   // Preselect a runnable model for the next message when the composer still
   // names an unavailable one. Accepted turns and history keep their frozen
@@ -2990,30 +3004,38 @@ function SessionChatPane(props: {
       latencyMode,
     ],
   );
-  useEffect(() => {
-    if (!composerModelUnavailable || !unavailableReplacement) return;
-    if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+  const replacesUnavailableModel = Boolean(
+    composerModelUnavailable &&
+    unavailableReplacement &&
+    !composerDraftLoading &&
+    hasComposerPolicy &&
+    !modelPickerDisabled &&
+    !terminal &&
     // A failed session keeps its model until the person chooses: the
     // failure banner's Retry re-runs that turn with the composer's model.
-    if (!canControlSession || props.failure) return;
+    canControlSession &&
+    !props.failure,
+  );
+  useEffect(() => {
+    if (!replacesUnavailableModel || !unavailableReplacement) return;
     setComposerModel(unavailableReplacement.model);
     setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
     if (unavailableReplacement.latencyMode) {
       setComposerLatencyMode(unavailableReplacement.latencyMode);
     }
   }, [
-    canControlSession,
-    props.failure,
-    composerDraftLoading,
-    composerModelUnavailable,
-    hasComposerPolicy,
-    modelPickerDisabled,
+    replacesUnavailableModel,
     setComposerLatencyMode,
     setComposerModel,
     setComposerReasoningEffort,
-    terminal,
     unavailableReplacement,
   ]);
+  const composerDelivery = useSessionComposerDelivery(composerView, sendGate, {
+    policyValid: composerPolicyValid,
+    catalogLoading: modelCatalog.loading,
+    replacingModel: replacesUnavailableModel,
+    send: sendState,
+  });
   const unavailableModelNotice =
     (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
       <UnavailableModelNotice
@@ -3790,7 +3812,7 @@ function SessionChatPane(props: {
           onFiles={attachments.addFiles}
         >
           {findMounted ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <ConversationFind
                 workspaceId={props.session.workspaceId}
                 sessionId={props.session.id}
@@ -3802,7 +3824,7 @@ function SessionChatPane(props: {
                 onTarget={setActiveSearchTarget}
                 onJump={props.onJumpToSequence}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
           {cancelled ? (
             <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
@@ -3841,150 +3863,159 @@ function SessionChatPane(props: {
                       load={loadRecordedToolReview}
                       onViewDetails={viewToolReviewDetails}
                     >
-                      <MessageTimeline
-                        resolveLink={resolveLink}
-                        renderMessageSender={renderMessageSender}
-                        allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                        trailingState={
-                          <>
-                            {/* Recovery follows the failed request, only in the latest history window.
+                      <InteractiveAnswerProvider
+                        send={composer.send}
+                        scope={props.session.id}
+                        store={answerStore}
+                        readOnly={terminal}
+                      >
+                        <MessageTimeline
+                          resolveLink={resolveLink}
+                          renderMessageSender={renderMessageSender}
+                          allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          trailingState={
+                            <>
+                              {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
-                            {failureRecovery}
-                            {props.approvals.length > 0 &&
-                              props.session.status === "requires_action" && (
-                                <ApprovalSurface
-                                  approvals={props.approvals}
-                                  selectedApprovalId={selectedApprovalId}
-                                  onSelectedApprovalChange={setSelectedApprovalId}
-                                  loadReview={loadToolReview}
-                                  onViewDetails={viewToolReviewDetails}
-                                  onApprove={(approval) => decideApproval(approval.id, "approve")}
-                                  onReject={(approval) => decideApproval(approval.id, "reject")}
-                                />
-                              )}
-                            <Suspense fallback={null}>
-                              <SessionSkillReviews
-                                key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
-                                context={context}
-                                workspaceId={props.session.workspaceId}
-                                sessionId={props.session.id}
-                                events={props.events}
-                              />
-                            </Suspense>
-                            {props.humanInput.requests.length > 0 &&
-                            props.session.status === "requires_action" ? (
-                              <div className="pb-1" data-human-input-timeline-surface="">
-                                <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                                  <HumanInputSurface
-                                    loadSkillReview={loadSkillReview}
-                                    allowedSaveTo={secretSaveTargets(
-                                      context.accessContext,
-                                      props.session.workspaceId,
-                                    )}
-                                    requests={props.humanInput.requests}
-                                    respondingRequestId={props.humanInput.respondingRequestId}
-                                    error={props.humanInput.mutationError?.message}
-                                    onSubmit={async (requestId, response) => {
-                                      // A failed send resolves null. Reject so the card
-                                      // keeps what was typed (including a secret) to retry.
-                                      if (!(await props.humanInput.respond(requestId, response))) {
-                                        throw new Error("Your answer wasn't sent. Try again.");
-                                      }
-                                    }}
+                              {failureRecovery}
+                              {props.approvals.length > 0 &&
+                                props.session.status === "requires_action" && (
+                                  <ApprovalSurface
+                                    approvals={props.approvals}
+                                    selectedApprovalId={selectedApprovalId}
+                                    onSelectedApprovalChange={setSelectedApprovalId}
+                                    loadReview={loadToolReview}
+                                    onViewDetails={viewToolReviewDetails}
+                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
-                                </Suspense>
-                              </div>
-                            ) : null}
-                          </>
-                        }
-                        turnSummary={{ rolling: true }}
-                        key={props.session.id}
-                        className="h-full"
-                        items={timelineWithStartup}
-                        searchTarget={activeSearchTarget}
-                        focusSequence={momentSequence}
-                        events={props.events}
-                        status={props.session.status}
-                        computeLabel={computeLabel}
-                        renderMessageText={renderMessageText}
-                        renderMessageActions={renderMessageActions}
-                        onAnnotate={composer.addAnnotation}
-                        draftAnnotations={composer.annotations}
-                        onDraftAnnotationSelect={composer.requestAnnotationReview}
-                        onOpenSession={props.onOpenSession}
-                        resolveSessionTitle={props.resolveSessionTitle}
-                        onMemoryClick={props.onMemoryClick}
-                        onReconnect={props.onReconnect}
-                        renderAuthNeeded={renderAuthNeeded}
-                        resolveProviderLogo={props.resolveProviderLogo}
-                        loadRetainedScreenshot={loadRetainedScreenshot}
-                        loadRetainedArtifact={loadRetainedArtifact}
-                        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                        hasOlder={props.hasOlder}
-                        loadingOlder={props.loadingOlder}
-                        onLoadOlder={props.onLoadOlder}
-                        hasNewer={props.hasNewer}
-                        loadingNewer={props.loadingNewer}
-                        onLoadNewer={props.onLoadNewer}
-                        loadingOldest={props.loadingOldest}
-                        onJumpToStart={async () => {
-                          await props.onJumpToStart();
-                        }}
-                        onJumpToLatest={props.onJumpToLatest}
-                        emptyState={
-                          // Clear view hides history, not the retained failure or retry operation.
-                          failureRecovery ??
-                          (props.queue.stoppingPreviousAttempt ? (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                              }
-                              title={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Stopping current work"
-                                  : "Stopping previous work"
-                              }
-                              description={
-                                props.queue.effectiveControl?.state === "paused"
-                                  ? "Waiting for the current command to stop safely. Queued work stays saved."
-                                  : "Your direction is saved. It starts after the previous command stops safely."
-                              }
-                            />
-                          ) : props.initialLoading ? (
-                            <div className="flex min-h-[24rem]">
-                              <LoadingPanel />
-                            </div>
-                          ) : props.historyReloadFailed ? (
-                            <ProblemPanel
-                              title="Conversation couldn't be loaded"
-                              description="Your saved messages are unchanged. Try loading them again."
-                              action={
-                                <Button
-                                  variant="outline"
-                                  onClick={() => void props.onJumpToLatest()}
-                                >
-                                  Retry conversation
-                                </Button>
-                              }
-                            />
-                          ) : (
-                            <EmptyState
-                              className="min-h-[24rem]"
-                              icon={
-                                props.session.status === "running" ||
-                                props.session.status === "recovering" ? (
+                                )}
+                              <LazyPart fallback={null}>
+                                <SessionSkillReviews
+                                  key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                                  context={context}
+                                  workspaceId={props.session.workspaceId}
+                                  sessionId={props.session.id}
+                                  events={props.events}
+                                />
+                              </LazyPart>
+                              {props.humanInput.requests.length > 0 &&
+                              props.session.status === "requires_action" ? (
+                                <div className="pb-1" data-human-input-timeline-surface="">
+                                  <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
+                                    <HumanInputSurface
+                                      loadSkillReview={loadSkillReview}
+                                      allowedSaveTo={secretSaveTargets(
+                                        context.accessContext,
+                                        props.session.workspaceId,
+                                      )}
+                                      requests={props.humanInput.requests}
+                                      respondingRequestId={props.humanInput.respondingRequestId}
+                                      error={props.humanInput.mutationError?.message}
+                                      onSubmit={async (requestId, response) => {
+                                        // A failed send resolves null. Reject so the card
+                                        // keeps what was typed (including a secret) to retry.
+                                        if (
+                                          !(await props.humanInput.respond(requestId, response))
+                                        ) {
+                                          throw new Error("Your answer wasn't sent. Try again.");
+                                        }
+                                      }}
+                                    />
+                                  </LazyPart>
+                                </div>
+                              ) : null}
+                            </>
+                          }
+                          turnSummary={{ rolling: true }}
+                          key={props.session.id}
+                          className="h-full"
+                          items={timelineWithStartup}
+                          searchTarget={activeSearchTarget}
+                          focusSequence={momentSequence}
+                          events={props.events}
+                          status={props.session.status}
+                          computeLabel={computeLabel}
+                          renderMessageText={renderMessageText}
+                          renderMessageActions={renderMessageActions}
+                          onAnnotate={composer.addAnnotation}
+                          draftAnnotations={composer.annotations}
+                          onDraftAnnotationSelect={composer.requestAnnotationReview}
+                          onOpenSession={props.onOpenSession}
+                          resolveSessionTitle={props.resolveSessionTitle}
+                          onMemoryClick={props.onMemoryClick}
+                          onReconnect={props.onReconnect}
+                          renderAuthNeeded={renderAuthNeeded}
+                          resolveProviderLogo={props.resolveProviderLogo}
+                          loadRetainedScreenshot={loadRetainedScreenshot}
+                          loadRetainedArtifact={loadRetainedArtifact}
+                          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                          hasOlder={props.hasOlder}
+                          loadingOlder={props.loadingOlder}
+                          onLoadOlder={props.onLoadOlder}
+                          hasNewer={props.hasNewer}
+                          loadingNewer={props.loadingNewer}
+                          onLoadNewer={props.onLoadNewer}
+                          loadingOldest={props.loadingOldest}
+                          onJumpToStart={async () => {
+                            await props.onJumpToStart();
+                          }}
+                          onJumpToLatest={props.onJumpToLatest}
+                          emptyState={
+                            // Clear view hides history, not the retained failure or retry operation.
+                            failureRecovery ??
+                            (props.queue.stoppingPreviousAttempt ? (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
                                   <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                                ) : (
-                                  <MessagesSquareIcon className="size-4" />
-                                )
-                              }
-                              title={timelineEmptyStateCopy.title}
-                              description={timelineEmptyStateCopy.description}
-                            />
-                          ))
-                        }
-                      />
+                                }
+                                title={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Stopping current work"
+                                    : "Stopping previous work"
+                                }
+                                description={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                    : "Your direction is saved. It starts after the previous command stops safely."
+                                }
+                              />
+                            ) : props.initialLoading ? (
+                              <div className="flex min-h-[24rem]">
+                                <LoadingPanel />
+                              </div>
+                            ) : props.historyReloadFailed ? (
+                              <ProblemPanel
+                                title="Conversation couldn't be loaded"
+                                description="Your saved messages are unchanged. Try loading them again."
+                                action={
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => void props.onJumpToLatest()}
+                                  >
+                                    Retry conversation
+                                  </Button>
+                                }
+                              />
+                            ) : (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
+                                  props.session.status === "running" ||
+                                  props.session.status === "recovering" ? (
+                                    <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                  ) : (
+                                    <MessagesSquareIcon className="size-4" />
+                                  )
+                                }
+                                title={timelineEmptyStateCopy.title}
+                                description={timelineEmptyStateCopy.description}
+                              />
+                            ))
+                          }
+                        />
+                      </InteractiveAnswerProvider>
                     </ToolReviewHistoryProvider>
                   </KnowledgeActivityProvider>
                 </LearningRefusalActionsProvider>
@@ -3993,7 +4024,7 @@ function SessionChatPane(props: {
           }
 
           {forkEventId ? (
-            <Suspense fallback={null}>
+            <LazyPart fallback={null}>
               <MessageForkDialog
                 key={forkEventId}
                 session={props.session}
@@ -4001,7 +4032,7 @@ function SessionChatPane(props: {
                 sourceEventId={forkEventId}
                 onForkClose={() => setForkEventId(null)}
               />
-            </Suspense>
+            </LazyPart>
           ) : null}
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
@@ -4023,6 +4054,8 @@ function SessionChatPane(props: {
                     move={moveRunsOn}
                   />
                 }
+                machines={runsOn.fleet.machines}
+                onMoveToMachine={runsOn.fleet.canAttach ? moveSavedMessage : undefined}
                 canControl={workspacePermissions.includes("sessions:control")}
                 paused={admissionControl.state === "paused"}
                 refreshRequired={admissionRefreshRequired}
@@ -4069,7 +4102,7 @@ function SessionChatPane(props: {
                 }}
               />
               {waitingSubSessions.length > 0 ? (
-                <Suspense fallback={null}>
+                <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
                   <OpenGeniLinkProvider resolveLink={resolveLink}>
                     <DescendantRequests
@@ -4086,7 +4119,7 @@ function SessionChatPane(props: {
                       )}
                     />
                   </OpenGeniLinkProvider>
-                </Suspense>
+                </LazyPart>
               ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
@@ -4100,23 +4133,23 @@ function SessionChatPane(props: {
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
                 commandsPanel={
-                  <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                  <LazyPart fallback={<LoadingPanel label="Loading commands…" />}>
                     <SessionCommands
                       key={props.session.id}
                       sessionId={props.session.id}
                       readOnly={terminal}
                     />
-                  </Suspense>
+                  </LazyPart>
                 }
                 agentsSignal={agentsSignal}
                 agentsPanel={
                   props.agentNodes.length > 0 ? (
-                    <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                    <LazyPart fallback={<LoadingPanel label="Loading agents…" />}>
                       <SubagentTree
                         workspaceId={props.session.workspaceId}
                         nodes={props.agentNodes}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
               />
@@ -4138,7 +4171,7 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composerView}
+                composer={composerDelivery}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
@@ -4312,7 +4345,7 @@ function SessionChatPane(props: {
                 }
                 actions={
                   !terminal ? (
-                    <Suspense fallback={null}>
+                    <LazyPart onLoadFailure="hide" fallback={null}>
                       <LazyCodexRealtimeControl
                         client={realtimeClient}
                         workspaceId={props.session.workspaceId}
@@ -4328,7 +4361,7 @@ function SessionChatPane(props: {
                         onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
                         onVoiceActiveChange={onVoiceActiveChange}
                       />
-                    </Suspense>
+                    </LazyPart>
                   ) : null
                 }
                 placeholder={

@@ -494,6 +494,7 @@ describe("API Integration routes", () => {
       "microsoft-outlook-calendar",
       "microsoft-outlook-contacts",
       "microsoft-outlook-mail",
+      "microsoft-sharepoint",
     ]);
     expect(payload.definitions).toContainEqual(
       expect.objectContaining({
