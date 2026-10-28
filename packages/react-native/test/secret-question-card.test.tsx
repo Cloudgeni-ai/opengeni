@@ -396,7 +396,7 @@ describe("native ask card: secret question", () => {
     await view.unmount();
   });
 
-  test("mixed forms keep question order and send ordinary answers as before", async () => {
+  test("mixed forms step through the questions in order and send ordinary answers as before", async () => {
     const env: HumanInputQuestion = {
       id: "env",
       kind: "single_select",
@@ -413,6 +413,8 @@ describe("native ask card: secret question", () => {
       secretQuestion({ item: "GitHub" }),
     ]);
     await press("Staging");
+    // Several questions are asked one at a time.
+    await press("Next");
     await type("secret-input-pw", "pw");
     await press("Send answers");
     expect(submitted).toEqual([

@@ -1790,6 +1790,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1031 personal Site tool allowances: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1858,10 +1864,13 @@ describe("runtime database posture evaluator", () => {
           // 0998 managed-auth passkeys: one auth table without RLS whose
           // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
           (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
-          // 1020 EU-only inference: a runtime-read-only setting and its
+          // 1060 EU-only inference: a runtime-read-only setting and its
           // history with no runtime privileges, both FORCE RLS.
           (tables === RUNTIME_READ_ONLY_TABLES || tables === RUNTIME_DML_TABLES ? 1 : 0) +
           (tables === FORCE_RLS_TABLES ? 2 : tables === PROTECTED_NO_DIRECT_DML_TABLES ? 1 : 0) +
+          // 1032 Knowledge collection activity: FORCE RLS, reached only
+          // through the Knowledge owner's routines; no runtime DML.
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1922,7 +1931,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
-        1; // 1008 bot templates: full-DML, FORCE-RLS.
+        1 + // 1008 bot templates: full-DML, FORCE-RLS.
+        1; // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1932,6 +1942,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("site_sidebar_states");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_sidebar_states");
+      expect(FORCE_RLS_TABLES).toContain("site_tool_allowances");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("site_tool_allowances");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
@@ -2006,8 +2018,9 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          2 + // 1020 EU-only inference setting and its history.
+          2 + // 1060 EU-only inference setting and its history.
           2 + // 0890 model fact reconciliation progress and candidates.
+          2 + // 1032 Knowledge collection activity.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -2021,8 +2034,9 @@ describe("runtime database posture evaluator", () => {
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
-          2 + // 1020 EU-only inference setting and its history.
+          2 + // 1060 EU-only inference setting and its history.
           2 + // 0890 model fact reconciliation progress and candidates.
+          2 + // 1032 Knowledge collection activity.
           runtimePosture.VAULT_TABLES.length + // 0739 vault tables.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -3892,7 +3906,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's and 1020's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's and 1060's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,

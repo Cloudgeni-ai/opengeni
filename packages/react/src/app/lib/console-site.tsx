@@ -4,6 +4,7 @@ import type { SiteToolBridgeFactory } from "../../artifacts";
 import { useAppContext } from "../app-context";
 import { useAppApi } from "./app-api";
 import { createSiteToolBridge } from "./site-tool-bridge";
+import { useSiteToolConsentHost } from "./site-tool-consent";
 
 /** The signed-in member as Site code sees them (`site.viewer`) in the console. */
 export function useConsoleSiteViewer(): SiteViewer {
@@ -21,6 +22,7 @@ export function useConsoleSiteViewer(): SiteViewer {
 export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFactory {
   const { client } = useAppContext();
   const api = useAppApi();
+  const consent = useSiteToolConsentHost();
   return useCallback<SiteToolBridgeFactory>(
     (site) => {
       const scope = { workspaceTools: client.tools.forWorkspace(workspaceId), workspaceId };
@@ -30,9 +32,10 @@ export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFac
             artifactId: site.artifactId,
             siteVersionId: site.siteVersionId,
             requestedTools: site.requestedTools,
+            consent,
           })
         : createSiteToolBridge(api, scope);
     },
-    [api, client, workspaceId],
+    [api, client, consent, workspaceId],
   );
 }

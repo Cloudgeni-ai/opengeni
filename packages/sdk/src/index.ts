@@ -275,8 +275,16 @@ export type {
   PluginDiscoveryItem,
   PluginDiscoveryPage,
 } from "@opengeni/contracts/plugin-discovery";
-export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export {
+  createSiteToolBridge,
+  isSiteCatalogStaleError,
+  SiteToolConsentDeclinedError,
+  SiteToolConnectionRequiredError,
+} from "./site-tool-bridge";
 export type {
+  SiteToolConsentPrompt,
+  SiteToolConsentDecision,
+  SiteToolConnectPrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,
@@ -364,6 +372,10 @@ export type {
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalRequest,
   ToolGatewayTargetApprovalResponse,
+  ToolGatewaySiteConsentRequest,
+  ToolGatewaySiteConsentAccount,
+  ToolGatewaySiteConsentReview,
+  ToolGatewaySiteConsentResponse,
   ToolGatewayManifestRequest,
   ToolGatewayManifestResponse,
   ToolGatewayCallResponse,

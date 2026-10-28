@@ -26,7 +26,7 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
-import { desktopBridge, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
+import { desktopPlatform, windowControlsInPage } from "@opengeni/react/app/lib/desktop";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -54,7 +54,7 @@ import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from 
 export const SETTINGS_SHELL_CLASS =
   "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[18rem_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
-const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
+const NARROW_QUERY = desktopPlatform ? "(max-width: 639px)" : "(max-width: 1023px)";
 
 export interface SettingsRailItem {
   id: string;
@@ -276,14 +276,16 @@ function SettingsRail({
     }
   };
 
-  return (
+  const nav = (
     <SettingsNav
       ref={ref}
       variant="rail"
       aria-label={label}
       data-settings-rail
       className={cn(
-        "og-rail-glow h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
+        "w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
+        // Inside the macOS frame below, the frame paints the rail and only this list scrolls.
+        windowControlsInPage ? "min-h-0 flex-1 bg-transparent" : "og-rail-glow h-full",
         className,
       )}
       onClick={(event) => {
@@ -294,10 +296,7 @@ function SettingsRail({
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
-          {windowControlsInPage ? (
-            // The macOS window controls take this row; it still moves the window.
-            <div data-window-drag aria-hidden="true" className="h-8 shrink-0" />
-          ) : (
+          {windowControlsInPage ? null : (
             <LinkShell
               link={home}
               aria-label="Opengeni home"
@@ -346,6 +345,26 @@ function SettingsRail({
         ))
       )}
     </SettingsNav>
+  );
+
+  if (!windowControlsInPage) return nav;
+  // macOS draws its window controls (and, while the window is shared, the
+  // sharing badge) over the rail's top-left corner. That row stays outside the
+  // scrolling list, like the main rail's, so the back link, workspace picker
+  // and search can never scroll underneath them. It still moves the window.
+  return (
+    <div
+      data-settings-rail-frame
+      className="og-rail-glow flex h-full min-h-0 w-full flex-col bg-bg"
+    >
+      <div
+        data-settings-window-controls
+        data-window-drag
+        aria-hidden="true"
+        className="h-11 shrink-0"
+      />
+      {nav}
+    </div>
   );
 }
 

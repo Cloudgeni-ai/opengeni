@@ -1,7 +1,8 @@
 // Agents find and read recorded meetings, and write their notes. They act as
 // the person the session works for, so an agent sees exactly the meetings
-// that person can see: their own Only me recordings and everything shared
-// with the workspace. Transcripts are given as compact speaker-named lines
+// that person can see: everything shared with the workspace, and their own
+// Only me recordings, including those stored in their other workspaces of the
+// same organization (never another organization's). Transcripts are given as compact speaker-named lines
 // with people's corrections applied, in parts a model can page through.
 // Opengeni's own meeting-summary chat is fenced to the one meeting it was
 // started for: it cannot search, every other meeting is not found, and it
@@ -16,7 +17,12 @@ import {
   type RecordingSpeaker,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import { creationInitiatorForGrant, siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  creationInitiatorForGrant,
+  hasPermission,
+  siteViewerForGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getManagedUserProfilesByIds,
   getRecording,
@@ -24,12 +30,16 @@ import {
   getRecordingTranscriptPage,
   listRecordingLiveSegments,
   listRecordingNotes,
-  listRecordings,
+  listRecordingsWithOwnElsewhere,
   listRecordingTranscriptVersions,
   meetingSummarySessionScope,
+  ownRecordingHome,
+  ownRecordingWorkspaces,
+  recordingVisible,
   RecordingConflictError,
   RecordingNotFoundError,
   saveRecordingNote,
+  type OwnRecordingWorkspace,
   type RecordingActor,
 } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -200,6 +210,47 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     };
   }
 
+  /**
+   * The person's other workspaces of this organization where they may do
+   * this now: their own live permissions there (their membership, or their
+   * Personal workspace), never only this session's.
+   */
+  async function ownElsewhere(
+    who: RecordingActor,
+    permission: "sessions:read" | "sessions:create",
+  ): Promise<OwnRecordingWorkspace[]> {
+    const workspaces = await ownRecordingWorkspaces(deps.db, {
+      ...who,
+      accountId: grant.accountId,
+    });
+    return workspaces.filter((workspace) => hasPermission(workspace.permissions, permission));
+  }
+
+  /**
+   * The person, in the workspace storing the meeting: this one, or for their
+   * own Only me meeting, another workspace of this organization where they
+   * hold the permission themselves.
+   */
+  async function actorForMeeting(
+    meetingId: string,
+    permission: "sessions:read" | "sessions:create",
+  ): Promise<{ who: RecordingActor & { only: string | null }; recordedIn: string | null }> {
+    const who = await actor();
+    // A meeting-summary chat reaches its one meeting, here, and nothing else.
+    if (who.only) return { who, recordedIn: null };
+    if (await recordingVisible(deps.db, { ...who, recordingId: meetingId })) {
+      return { who, recordedIn: null };
+    }
+    const home = await ownRecordingHome(deps.db, {
+      subjectId: who.subjectId,
+      recordingId: meetingId,
+      workspaces: await ownElsewhere(who, permission),
+    });
+    return home
+      ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
+      : { who, recordedIn: null };
+  }
+
   const notVisible = () =>
     json({
       found: false,
@@ -210,7 +261,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meetings_search",
     {
       description:
-        "Find recorded meetings the person you act for can see: their own and those shared with the workspace. Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
+        "Find recorded meetings the person you act for can see: those shared with the workspace and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
       inputSchema: {
         query: z
           .string()
@@ -252,8 +303,9 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           "This chat writes the notes of one meeting; read it with meeting_read.",
         );
       }
-      const page = await listRecordings(deps.db, {
+      const page = await listRecordingsWithOwnElsewhere(deps.db, {
         ...who,
+        elsewhere: await ownElsewhere(who, "sessions:read"),
         query: request.query?.trim() || undefined,
         person: request.person?.trim() || undefined,
         startedFrom: request.startedFrom ? new Date(request.startedFrom) : undefined,
@@ -262,11 +314,30 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         before,
         limit: request.limit,
       });
-      const searchDetails = await getRecordingSearchDetails(deps.db, {
-        ...who,
-        recordingIds: page.recordings.map((recording) => recording.id),
-        query: request.query,
-      });
+      // Each meeting's details are read in the workspace that stores it.
+      const byWorkspace = new Map<string, string[]>();
+      for (const recording of page.recordings) {
+        byWorkspace.set(recording.workspaceId, [
+          ...(byWorkspace.get(recording.workspaceId) ?? []),
+          recording.id,
+        ]);
+      }
+      const searchDetails = new Map(
+        (
+          await Promise.all(
+            [...byWorkspace].map(async ([workspaceId, recordingIds]) => [
+              ...(
+                await getRecordingSearchDetails(deps.db, {
+                  ...who,
+                  workspaceId,
+                  recordingIds,
+                  query: request.query,
+                })
+              ).entries(),
+            ]),
+          )
+        ).flat(),
+      );
       return json({
         meetings: page.recordings.map((recording) => {
           const found = searchDetails.get(recording.id);
@@ -277,6 +348,9 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
             duration: formatMeetingTimestamp(recording.durationMilliseconds),
             status: meetingStatus(recording),
             visibility: recording.visibility === "private" ? "only_me" : "workspace",
+            ...(page.sourceWorkspaces.has(recording.workspaceId)
+              ? { recordedIn: page.sourceWorkspaces.get(recording.workspaceId) }
+              : {}),
             speakers: (found?.speakers ?? []).map(speakerName),
             ...(recording.externalRef ? { externalRef: recording.externalRef } : {}),
             ...(found && found.matches.length > 0
@@ -337,7 +411,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (from === null || to === null) {
         return failure(json, "invalid_time", 'Give from and to as "m:ss" or "h:mm:ss".');
       }
-      const who = await actor();
+      const { who, recordedIn } = await actorForMeeting(request.meetingId, "sessions:read");
       if (who.only && who.only !== request.meetingId) return notVisible();
       let recording: Recording;
       try {
@@ -384,7 +458,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
             ? live!.segments.at(-1)!.sequence
             : null;
         return json({
-          ...(first ? { meeting: await details(recording, who, []) } : {}),
+          ...(first ? { meeting: await details(recording, who, [], recordedIn) } : {}),
           transcript:
             live && live.segments.length > 0
               ? "live preview: rough text while recording; speakers are not told apart"
@@ -427,7 +501,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       );
       const more = rendered.lastKey !== null && (rendered.truncated || page.nextAfter !== null);
       return json({
-        ...(first ? { meeting: await details(recording, who, page.speakers) } : {}),
+        ...(first ? { meeting: await details(recording, who, page.speakers, recordedIn) } : {}),
         transcript: versionSummary(page.version),
         lines: rendered.text,
         nextCursor: more
@@ -464,7 +538,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       if (new TextEncoder().encode(request.notes).length > RECORDING_NOTE_MAX_BYTES) {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
-      const who = await actor();
+      const { who } = await actorForMeeting(request.meetingId, "sessions:create");
       if (who.only && who.only !== request.meetingId) return notVisible();
       // A summary chat writes the first notes and may revise only its own,
       // whatever revision it passes; the revision check below then refuses
@@ -517,6 +591,8 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     recording: Recording,
     who: RecordingActor,
     speakers: readonly RecordingSpeaker[],
+    /** The other workspace of the organization storing the person's own meeting. */
+    recordedIn: string | null,
   ) {
     const [owner] = recording.ownerSubjectId.startsWith("user:")
       ? await getManagedUserProfilesByIds(deps.db, [recording.ownerSubjectId.slice(5)])
@@ -535,6 +611,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       duration: formatMeetingTimestamp(recording.durationMilliseconds),
       status: meetingStatus(recording),
       visibility: recording.visibility === "private" ? "only_me" : "workspace",
+      ...(recordedIn ? { recordedIn } : {}),
       ...(owner ? { recordedBy: owner.name ?? owner.email } : {}),
       speakers: speakers.map((speaker) => ({
         label: speaker.label,
