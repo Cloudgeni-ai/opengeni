@@ -411,6 +411,78 @@ const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   OFFICIAL_GOOGLE_CALENDAR_PROFILE,
 ];
 
+/**
+ * Authenticated account identity for MCP servers whose OAuth profile does not
+ * verify one itself. Without a verified identity, a second account for the same
+ * server is refused and a repeated connection cannot be recognised as the same
+ * account. Keyed by exact MCP URL so OAuth profile resolution is unchanged; the
+ * check only labels and de-duplicates connections, it never selects credentials.
+ */
+export type AccountIdentityVerifier = Readonly<{
+  /** Verified metadata tuple identifying the account (see accountIdentityMetadataKeys). */
+  identityKeys: readonly string[];
+  validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
+}> &
+  (
+    | Readonly<{ kind: "http"; url: string }>
+    | Readonly<{ kind: "mcp_tool"; toolName: string; arguments: Record<string, unknown> }>
+  );
+
+const nonEmpty = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const GOOGLE_DRIVE_IDENTITY: AccountIdentityVerifier = {
+  kind: "http",
+  // About is readable with the Drive scopes the connector already requests.
+  url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+  identityKeys: ["googleDriveEmail"],
+  validateIdentity: (payload) => {
+    const user = payload.user as Record<string, unknown> | undefined;
+    const email = user?.emailAddress;
+    if (!nonEmpty(email) || !/^[^\s@]+@[^\s@]+$/u.test(email))
+      throw new Error("Google Drive account verification failed");
+    return { googleDriveEmail: email };
+  },
+};
+
+/** Atlassian's hosted Rovo MCP reports the signed-in account through a read-only tool. */
+const ATLASSIAN_ROVO_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  toolName: "atlassianUserInfo",
+  arguments: {},
+  identityKeys: ["atlassianAccountId"],
+  validateIdentity: (payload) => {
+    if (!nonEmpty(payload.account_id)) throw new Error("Atlassian account verification failed");
+    return {
+      atlassianAccountId: payload.account_id,
+      ...(nonEmpty(payload.email) ? { atlassianEmail: payload.email } : {}),
+      ...(nonEmpty(payload.name) ? { atlassianName: payload.name } : {}),
+    };
+  },
+};
+
+const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> = new Map<
+  string,
+  AccountIdentityVerifier
+>([
+  [OFFICIAL_DRIVE_MCP_URL, GOOGLE_DRIVE_IDENTITY],
+  ["https://mcp.atlassian.com/v1/mcp/authv2", ATLASSIAN_ROVO_IDENTITY],
+  ["https://mcp.atlassian.com/v1/mcp", ATLASSIAN_ROVO_IDENTITY],
+]);
+
+/** The reviewed identity check for an exact MCP URL, when its profile has none. */
+export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerifier | undefined {
+  return ACCOUNT_IDENTITY_VERIFIERS.get(mcpUrl);
+}
+
+/** Identity keys for a connection: the profile's own, else the reviewed verifier's. */
+export function accountIdentityKeysFor(
+  profile: OAuthProviderProfile | null | undefined,
+  mcpUrl: string,
+): readonly string[] | undefined {
+  return profile?.accountIdentityMetadataKeys ?? accountIdentityVerifierFor(mcpUrl)?.identityKeys;
+}
+
 /** Exact built-in profile by its stable key; throws on an unknown key. */
 export function builtInOAuthProfileByKey(key: string): OAuthProviderProfile {
   const profile = BUILT_IN_OAUTH_PROFILES.find((candidate) => candidate.key === key);
