@@ -4,6 +4,7 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -28,10 +29,11 @@ import { SlackConnectionsPage } from "@/components/capabilities/slack-connection
 import { IntegrationPage } from "@/components/capabilities/integration-page";
 import { ProviderPage, type ProviderMode } from "@/components/capabilities/provider-page";
 import {
+  addConnectionErrorCopy,
   capabilityDescription,
+  catalogConnectAccess,
   isCommunityCapability,
   OWNERSHIP_HELP,
-  personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
@@ -411,6 +413,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // explanation and the way to retry don't vanish with a toast.
   const [callbackNotice, setCallbackNotice] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [addError, setAddError] = useState<{ title: string; description: string } | null>(null);
   // Which integration's page is open.
   const openIntegration = openKey?.startsWith("integration:")
     ? openKey.slice("integration:".length)
@@ -825,13 +828,24 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
+  const currentWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId);
+  const selectedConnectAccess = selectedItem
+    ? catalogConnectAccess(
+        selectedItem,
+        context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
+        currentWorkspace?.kind,
+      )
+    : null;
   const selectedSetupUnavailable = selectedItem
-    ? nativeCatalogItemNotice(
+    ? (nativeCatalogItemNotice(
         selectedItem,
         nativeConnectCatalog,
         () => void refresh(),
         nativeConnectionFacts,
-      )
+      ) ??
+      (selectedConnectAccess?.blocked
+        ? { tone: "muted" as const, ...selectedConnectAccess.blocked }
+        : undefined))
     : undefined;
   const selectedSocialConnections = selectedItem
     ? (() => {
@@ -1598,6 +1612,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     const input = capabilityInputFromForm(form);
     if (!input) return;
     setBusyId("add");
+    setAddError(null);
     try {
       const created = await client.createCapability(workspaceId, input);
       if (form.enableAfterAdd) {
@@ -1632,8 +1647,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setAddOpen(false);
       await refresh();
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to add capability");
-      toast.error(copy.title, { description: copy.description });
+      // The dialog stays open on failure; say why there, next to the form.
+      setAddError(addConnectionErrorCopy(error));
     } finally {
       setBusyId(null);
     }
@@ -1736,6 +1751,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         busy={busyId === selectedItem.id}
         errorMessage={sheetError}
         setupUnavailable={selectedSetupUnavailable}
+        personalOnly={selectedConnectAccess?.personalOnly === true}
+        workspaces={context.workspaces}
         fikenSetup={{
           oauthAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-oauth"),
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
@@ -1745,6 +1762,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
+          canRemoveOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(
+              context.accessContext,
+              accountWorkspaceId,
+              PERSONAL_INTEGRATION_SETUP_PERMISSION,
+            ) ||
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
+          canReconnectOwnIn: (accountWorkspaceId) =>
+            hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
         }}
@@ -2279,7 +2305,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             name={selectedItem.name}
             returnUrl={window.location.href}
             dialogOnly
-            personalOnly={personalOnlyCapability(selectedItem)}
+            personalOnly={selectedConnectAccess?.personalOnly === true}
             connectLabel={`Connect ${selectedItem.name}`}
             dialogSubtitle="Review access, then sign in"
             description={capabilityDescription(selectedItem) ?? undefined}
@@ -2323,8 +2349,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             dispatchCustomApi({ type: "new", draft: { protocol, advanced: true } });
           }}
           open={addOpen}
-          onOpenChange={setAddOpen}
+          onOpenChange={(open) => {
+            setAddOpen(open);
+            setAddError(null);
+          }}
           busy={busyId === "add"}
+          error={addError}
           onSubmit={submitAddCustom}
         />
 
