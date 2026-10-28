@@ -237,8 +237,52 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     const status = await c.create().status(SERVER, "w1", "me");
     expect(status.state).toBe("connected");
     expect(status.reconnecting).toBe(true);
+    expect(status.waitingOn).toBe("server");
     expect(status.error).toBeNull();
     expect(status.errorCode).toBeUndefined();
+  });
+
+  test("the app's own agent that the server won't sign in is not on, and says why", async () => {
+    const c = computer({ service: false });
+    const list = join(c.home, "connections.txt");
+    writeFileSync(
+      list,
+      `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+        "    Authentication rejected; transport retries paused while credentials are renewed.\n",
+    );
+    const app = c.create();
+    await app.boot();
+    // Running, but not signed in: still turning on, never "on".
+    const renewing = await app.status(SERVER, "w1", "me");
+    expect(renewing.state).toBe("connected");
+    expect(renewing.reconnecting).toBe(true);
+    expect(renewing.waitingOn).toBe("sign_in");
+    expect(renewing.error).toBeNull();
+    // The menu bar doesn't call it available either.
+    expect((await app.summary()).reconnecting).toBe(true);
+    // Try again starts a fresh agent process, so it retries now.
+    const runs = () => c.commands().filter((command) => command.endsWith(" run")).length;
+    while (runs() === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    const before = runs();
+    await app.resume();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(runs()).toBe(before + 1);
+
+    // It stopped trying: a problem at once; connecting again clears it.
+    writeFileSync(
+      list,
+      `  c1  ${SERVER}  workspace=w1  agent=a1\n` +
+        "    Reconnect required; automatic retries stopped. Run `opengeni-agent connect`.\n",
+    );
+    app.invalidate();
+    const rejected = await app.status(SERVER, "w1", "me");
+    expect(rejected.errorCode).toBe("reconnect_required");
+    expect(rejected.reconnecting).toBeUndefined();
+    c.readings.a2 = { online: true };
+    const next = await app.connect("me", SERVER, "w1", { screenControl: true });
+    expect(next.state).toBe("connected");
+    expect(next.errorCode).toBeUndefined();
+    expect(next.reconnecting).toBeUndefined();
   });
 
   test("a server that answered is never reported as unreachable", async () => {

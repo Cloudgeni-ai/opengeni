@@ -348,6 +348,10 @@ const MACHINE_READ_TIMEOUT_MS = 10_000;
 
 const REMOVED_MESSAGE =
   "This computer was removed from this workspace. Reconnect it to let agents use it again.";
+/** The server turned down this connection's sign-in and the agent is renewing it. */
+const signingIn = (connection: AgentConnection) => connection.authentication === "renewal_required";
+const RECONNECT_REQUIRED_MESSAGE =
+  "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.";
 
 /**
  * This computer as a place agents can work. The app ships the
@@ -705,6 +709,16 @@ export class ThisComputer {
       state: "not_connected",
       ...(base.error ? {} : { error: REMOVED_MESSAGE, errorCode: "removed" as const }),
     });
+    // The server turned down the agent's sign-in. It keeps renewing it on its
+    // own (still turning on, and why), or has stopped and needs connecting again.
+    const signIn = this.state.paused ? undefined : connection.authentication;
+    const signInStatus: Partial<ThisComputerStatus> =
+      signIn === "reconnect_required" && !base.error
+        ? { error: RECONNECT_REQUIRED_MESSAGE, errorCode: "reconnect_required" }
+        : {};
+    const waitingDetail = connection.authenticationNote
+      ? { waitingDetail: connection.authenticationNote }
+      : {};
     if (this.serviceBacked) {
       let service: AgentServiceStatus;
       try {
@@ -733,21 +747,35 @@ export class ThisComputer {
             )
           : undefined;
       if (service.running && !this.state.paused) this.hostService(machine);
+      const reconnecting =
+        this.hosting !== null ||
+        !service?.running ||
+        !machine?.online ||
+        signIn === "renewal_required" ||
+        (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions);
+      const waitingOn = !reconnecting
+        ? null
+        : this.hosting !== null
+          ? ("handover" as const)
+          : !service?.running
+            ? ("agent" as const)
+            : signIn === "renewal_required"
+              ? ("sign_in" as const)
+              : ("server" as const);
       return {
         ...base,
         // While it moves into the app, its service is briefly off: still on.
         state: service?.installed && !service.enabled && !this.hosting ? "paused" : "connected",
-        reconnecting:
-          this.hosting !== null ||
-          !service?.running ||
-          !machine?.online ||
-          (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions),
+        reconnecting,
+        ...(waitingOn ? { waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) } : {}),
         ...(permissions ? { permissions } : {}),
         // Only a read that failed is an error; a listed machine that is offline
         // is still connecting, and its own reason is unknown here.
         ...(unread && service.enabled && !base.error
           ? { error: unread.message, errorCode: unread.code }
-          : {}),
+          : service.enabled
+            ? signInStatus
+            : {}),
       };
     }
     const reading = accountId
@@ -762,8 +790,19 @@ export class ThisComputer {
     // answer: agents read files whether or not they see the screen.
     const folders =
       !permissions && this.deps.platform === "darwin" ? await this.foldersAllowed() : undefined;
+    const waitingOn =
+      this.state.paused || signIn === "reconnect_required"
+        ? null
+        : this.agent.state === "elsewhere"
+          ? ("another_agent" as const)
+          : this.agent.state !== "running"
+            ? ("agent" as const)
+            : signIn === "renewal_required"
+              ? ("sign_in" as const)
+              : null;
     return {
       ...base,
+      ...signInStatus,
       state: this.state.paused ? "paused" : "connected",
       enrollmentId: connection.agentId,
       ...(permissions
@@ -775,7 +814,9 @@ export class ThisComputer {
       ...(folders !== undefined ? { folders } : {}),
       ...(missing && this.askingRecently ? { setupPending: true } : {}),
       ...(permissions ? { requestedPermissions: [...this.state.requested] } : {}),
-      ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
+      ...(waitingOn
+        ? { reconnecting: true, waitingOn, ...(waitingOn === "sign_in" ? waitingDetail : {}) }
+        : {}),
     };
   }
 
@@ -810,7 +851,10 @@ export class ThisComputer {
         installed: true,
         connected: connections.length > 0,
         running: service?.running ?? false,
-        reconnecting: Boolean(service?.enabled && !service.running),
+        // Running, but the server won't sign it in yet: not available either.
+        reconnecting: Boolean(
+          service?.enabled && (!service.running || connections.some(signingIn)),
+        ),
         needsPermissions: false,
         missingPermissions: [],
         management: "service",
@@ -826,7 +870,10 @@ export class ThisComputer {
       connected: connections.length > 0,
       // Serving only removed connections, it gives agents nothing.
       running: !this.state.paused && this.agent.state !== "stopped" && connections.length > 0,
-      reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
+      reconnecting:
+        !this.state.paused &&
+        connections.length > 0 &&
+        (this.agent.state !== "running" || connections.some(signingIn)),
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
       ...(this.handsBackOnQuit ? { handsBackOnQuit: true } : {}),
@@ -916,6 +963,10 @@ export class ThisComputer {
     await this.act(async () => {
       if (this.serviceBacked) {
         if (!this.state.adopted) return;
+        // Already running (e.g. Try again while it can't sign in or connect):
+        // started afresh, so it tries again now rather than after its backoff.
+        const service = await this.serviceStatus().catch(() => null);
+        if (service?.running) await this.serviceAction("stop");
         await this.serviceAction("start");
         return;
       }
@@ -928,7 +979,8 @@ export class ThisComputer {
           "This computer isn't connected to a workspace yet.",
         );
       }
-      this.agent.start(first.apiUrl);
+      if (this.agent.state === "running") await this.agent.restart();
+      else this.agent.start(first.apiUrl);
     });
   }
 

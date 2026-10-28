@@ -32,6 +32,10 @@ function fixture(
      * folders), "screen" (screen only), or "some" (the default).
      */
     appGrants?: "all" | "screen" | "some";
+    /** The server turned down the connection's sign-in, as `connections` reports it. */
+    authentication?: "renewal" | "reconnect";
+    /** Whether the server shows the machine online (the default). */
+    online?: boolean;
   } = {},
 ) {
   const home = mkdtempSync(join(tmpdir(), "og-service-host-"));
@@ -48,7 +52,7 @@ function fixture(
       "#!/bin/sh",
       `echo "$*" >> "${calls}"`,
       'case "$*" in',
-      `  connections) echo '  c1  https://server.example  workspace=w1  agent=a1' ;;`,
+      `  connections) echo 'Configured Opengeni connections (1):'; echo '  c1  https://server.example  workspace=w1  agent=a1'${options.authentication === "renewal" ? "; echo '    Authentication rejected; transport retries paused while credentials are renewed.'" : options.authentication === "reconnect" ? "; echo '    Reconnect required; automatic retries stopped. Run `opengeni-agent connect` or disconnect this saved connection.'" : ""} ;;`,
       `  'service status --json') ${options.legacy ? `echo "error: unexpected argument '--json' found" >&2; exit 2` : options.inspectionFailure ? `echo 'service manager unavailable' >&2; exit 1` : `if [ -f "${paused}" ]; then echo '{"schemaVersion":1,"installed":true,"enabled":false,"running":false,"binaryPath":null}'; else echo '{"schemaVersion":1,"installed":true,"enabled":true,"running":true,"binaryPath":null}'; fi`} ;;`,
       `  'service stop') touch "${paused}" ;;`,
       `  'service start') rm -f "${paused}" ;;`,
@@ -90,7 +94,7 @@ function fixture(
     readMachine: async (account) => {
       expect(account).toBe("signed-in-account");
       return {
-        online: true,
+        online: options.online ?? true,
         screenControl: true,
         permissions: {
           screenRecording: true,
@@ -262,6 +266,57 @@ describe.skipIf(process.platform === "win32")("service-backed desktop setup", ()
     ).toBe("app");
     await reopened.boot();
     expect(f.commands()).toEqual([]);
+  });
+
+  test("an agent that can't sign in or connect says what it waits for, and resume restarts it", async () => {
+    const read = (app: ThisComputer) =>
+      app.status("https://server.example", "w1", "signed-in-account");
+
+    // The server turned down its sign-in: still turning on, and why, in its words.
+    const renewing = fixture({ authentication: "renewal", online: false });
+    const app = renewing.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", {
+      screenControl: true,
+    });
+    const waiting = await read(app);
+    expect(waiting.state).toBe("connected");
+    expect(waiting.reconnecting).toBe(true);
+    expect(waiting.error).toBeNull();
+    expect(waiting.waitingOn).toBe("sign_in");
+    expect(waiting.waitingDetail).toBe(
+      "Authentication rejected; transport retries paused while credentials are renewed.",
+    );
+    // Try again: the running service starts afresh, so it retries now.
+    const before = renewing.commands().length;
+    await app.resume();
+    expect(
+      renewing
+        .commands()
+        .slice(before)
+        .filter((command) => /^service (stop|start)$/u.test(command)),
+    ).toEqual(["service stop", "service start"]);
+    expect(existsSync(renewing.paused)).toBe(false);
+
+    // Running, signed in, but the server doesn't see it online yet.
+    const unseen = fixture({ online: false });
+    const quiet = unseen.create();
+    await quiet.connect("signed-in-account", "https://server.example", "w1", {
+      screenControl: true,
+    });
+    expect(await read(quiet)).toMatchObject({ reconnecting: true, waitingOn: "server" });
+
+    // The agent stopped trying: a problem at once, fixed by connecting again.
+    const stopped = fixture({ authentication: "reconnect", online: false });
+    const rejected = stopped.create();
+    await rejected.connect("signed-in-account", "https://server.example", "w1", {
+      screenControl: true,
+    });
+    expect(await read(rejected)).toMatchObject({
+      state: "connected",
+      errorCode: "reconnect_required",
+      error:
+        "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.",
+    });
   });
 });
 

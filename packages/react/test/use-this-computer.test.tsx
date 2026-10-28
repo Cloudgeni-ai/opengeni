@@ -379,6 +379,68 @@ test("turning computer use on does what it needs: resume, register afresh, or no
   // On but failing: start it again.
   const failing = { ...connected, reconnecting: true, errorCode: "offline" as const, error: "x" };
   expect((await run([failing, connected])).calls).toEqual(["resume"]);
+  // On but stuck connecting: start it again too, so it retries now.
+  const stuck = { ...connected, reconnecting: true, waitingOn: "sign_in" as const };
+  expect((await run([stuck, connected])).calls).toEqual(["resume"]);
+  // The server needs it connected again: register it afresh.
+  const rejected = {
+    ...connected,
+    errorCode: "reconnect_required" as const,
+    error: "The server no longer accepts this computer's sign-in.",
+  };
+  expect((await run([rejected, connected])).calls).toEqual(["connect:true"]);
+});
+
+test("turning on that never connects stops waiting after the limit, and Try again starts over", async () => {
+  let reading: ThisComputerStatus = {
+    ...connected,
+    management: "service",
+    reconnecting: true,
+    waitingOn: "sign_in",
+  };
+  let resumed = 0;
+  const host: ThisComputerHost = {
+    platform: "macos",
+    productName: "App",
+    status: async () => ({ ...reading }),
+    connect: async () => ({ ...reading }),
+    pause: async () => undefined,
+    resume: async () => {
+      resumed += 1;
+    },
+    onChange: () => () => undefined,
+  };
+  const hook = await renderHook(
+    () => useThisComputer(host, "workspace", { turnOnLimitMs: 60 }),
+    undefined,
+  );
+  try {
+    await flush();
+    // Still waiting: turning on, for now.
+    expect(hook.result.current.stalled).toBe(false);
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    await flush();
+    expect(hook.result.current.stalled).toBe(true);
+
+    // Try again restarts the agent and waits afresh.
+    await actRun(async () => {
+      await hook.result.current.turnOn();
+    });
+    await flush();
+    expect(resumed).toBe(1);
+    expect(hook.result.current.stalled).toBe(false);
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    await flush();
+    expect(hook.result.current.stalled).toBe(true);
+
+    // Usable at last: no longer stalled.
+    reading = { ...connected, management: "service" };
+    await actRun(() => hook.result.current.refresh());
+    await flush();
+    expect(hook.result.current.stalled).toBe(false);
+  } finally {
+    await hook.unmount();
+  }
 });
 
 test("turning computer use off pauses it and shows off at once", async () => {
