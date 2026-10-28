@@ -2610,6 +2610,15 @@ without it (the machine was removed there), the status is `not_connected` with
 `errorCode: "removed"` (shown as computer use off) and turning it on enrolls
 afresh with a new token instead of reusing the stale local connection; a read that fails (network,
 sign-in, server error) is reported as such and never taken as removal.
+While it is on but not yet usable (`reconnecting`), the status says what it
+waits for (`waitingOn`: the agent starting, another agent copy, the server
+seeing it online, a sign-in the server turned down, or a move into the app),
+read from the agent's service state and the authentication line under each
+connection in `opengeni-agent connections`. `useThisComputer` marks such a
+wait `stalled` after a minute, and the switch then shows that reason with
+**Try again**, which restarts an agent that is already running. A connection
+the agent has stopped retrying (`Reconnect required`) is
+`errorCode: "reconnect_required"` at once, and turning on enrolls it again.
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without

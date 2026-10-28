@@ -70,6 +70,31 @@ describe("agent command line", () => {
     ).toEqual([]);
   });
 
+  test("reads a connection's sign-in trouble from the line under it", () => {
+    const output = [
+      "Configured Opengeni connections (3):",
+      "  c1  https://a.example  workspace=w1  agent=a1",
+      "    Authentication rejected; transport retries paused while credentials are renewed.",
+      "  c2  https://b.example  workspace=w2  agent=a2",
+      "  c3  https://c.example  workspace=w3  agent=a3",
+      "    Reconnect required; automatic retries stopped. Run `opengeni-agent --api-url https://c.example connect --workspace w3` or disconnect this saved connection.",
+    ].join("\n");
+    const [renewing, fine, stopped] = parseConnections(output);
+    expect(renewing).toMatchObject({
+      connectionId: "c1",
+      authentication: "renewal_required",
+      authenticationNote:
+        "Authentication rejected; transport retries paused while credentials are renewed.",
+    });
+    expect(fine).toEqual({
+      connectionId: "c2",
+      apiUrl: "https://b.example",
+      workspaceId: "w2",
+      agentId: "a2",
+    });
+    expect(stopped?.authentication).toBe("reconnect_required");
+  });
+
   test("keeps the last meaningful error line", () => {
     expect(lastErrorLine("\u001b[31merror: enroll token expired\u001b[0m\n\n")).toBe(
       "enroll token expired",

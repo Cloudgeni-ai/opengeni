@@ -4778,6 +4778,8 @@ export const englishMessages = {
   "thisComputer.error.connectFailed": "Couldn't finish setting up this computer. Try again.",
   "thisComputer.error.removed": "This computer is no longer in this workspace.",
   "thisComputer.error.signedOut": "Sign in again, then try again.",
+  "thisComputer.error.reconnectRequired":
+    "The server no longer accepts this computer's sign-in. Turn it on again to reconnect it.",
   "thisComputer.error.other": "Something went wrong. Try again.",
   "thisComputer.computerUse.title": "Computer use",
   "thisComputer.computerUse.off": "Let agents use {machineName}.",
@@ -4788,12 +4790,22 @@ export const englishMessages = {
   "thisComputer.computerUse.signedOut": "Sign in again to let agents use {machineName}.",
   "thisComputer.computerUse.offline": "Couldn't reach the server. Check your internet connection.",
   "thisComputer.computerUse.error": "Computer use couldn't turn on.",
+  "thisComputer.computerUse.stalled": "{machineName} is taking too long to connect.",
+  "thisComputer.computerUse.stalled.signIn":
+    "The server isn't accepting {machineName}'s sign-in, so it can't connect.",
+  "thisComputer.computerUse.stalled.server":
+    "The agent is running, but the server can't see {machineName} yet.",
+  "thisComputer.computerUse.stalled.agent": "The agent on this computer isn't starting.",
+  "thisComputer.computerUse.stalled.anotherAgent":
+    "Another copy of the agent on this computer is in the way.",
+  "thisComputer.computerUse.stalled.handover": "Moving the agent into the app is taking too long.",
   "thisComputer.computerUse.openSettings": "Open System Settings",
   "thisComputer.computerUse.signIn": "Sign in",
   "thisComputer.computerUse.pill.turningOn": "Turning on computer use…",
   "thisComputer.computerUse.pill.permission": "Allow screen access for computer use",
   "thisComputer.computerUse.pill.signedOut": "Computer use needs you to sign in",
   "thisComputer.computerUse.pill.offline": "Computer use can't reach the server",
+  "thisComputer.computerUse.pill.stalled": "Computer use can't connect",
   "thisComputer.computerUse.pill.error": "Computer use isn't working",
   "thisComputer.card.name": "Your computer",
   "thisComputer.card.subtitle": "Use your own computer in chats",

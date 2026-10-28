@@ -35683,7 +35683,8 @@
       "ThisComputerState": "type",
       "ThisComputerStatus": "type",
       "ThisComputerSystemNames": "type",
-      "ThisComputerUnsubscribe": "type"
+      "ThisComputerUnsubscribe": "type",
+      "ThisComputerWaitingOn": "type"
     },
     "@opengeni/sdk/tool-auth": {
       "deriveToolTokenKey": "value",
@@ -38155,6 +38156,7 @@
       "computerUsePermissionText": "value",
       "ComputerUseProblem": "type",
       "computerUseProblemText": "value",
+      "computerUseStalledText": "value",
       "computerUseState": "value",
       "ComputerUseState": "type",
       "defaultThisComputerLabels": "value",
