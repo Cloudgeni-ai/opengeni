@@ -387,7 +387,7 @@ export const siteSidebarStates = pgTable(
 );
 
 /**
- * A Site's project in the sidebar, chosen by a person (migration 1067). Without
+ * A Site's project in the sidebar, chosen by a person (migration 1071). Without
  * a row a Site sits in the project of the chat that created it. Shared like a
  * chat's project; a null channel is Default (no project). Grants nothing.
  */

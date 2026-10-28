@@ -1877,7 +1877,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 1067 shared Site project placements: one full-DML FORCE-RLS table.
+          // 1071 shared Site project placements: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -1946,7 +1946,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
-        1; // 1067 shared Site project placements: full-DML, FORCE-RLS.
+        1; // 1071 shared Site project placements: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
