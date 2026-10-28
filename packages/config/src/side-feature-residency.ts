@@ -1,6 +1,7 @@
 import {
   isEuResidency,
   modelCallProcessingResidency,
+  modelEndpointDeployment,
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
@@ -253,6 +254,28 @@ export function sideFeatureRouteNamesDeployment(route: SideFeatureRouteId): bool
   return (SIDE_FEATURE_ROUTES[route] as RouteSpec).namedDeployment === true;
 }
 
+/**
+ * Whether an endpoint is a bare resource origin (no path beyond `/`, no query
+ * or fragment, no `/deployments/` marker). A named-deployment route appends
+ * its own path to the endpoint, so any path there could call another
+ * deployment than the one named; such an endpoint is unknown.
+ */
+function bareResourceEndpoint(endpoint: string | null | undefined): boolean {
+  if (!endpoint) return false;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  return (
+    (url.pathname === "" || url.pathname === "/") &&
+    url.search === "" &&
+    url.hash === "" &&
+    modelEndpointDeployment(url) === null
+  );
+}
+
 /** A deployment name as Azure reads it: plain `[A-Za-z0-9._-]+`, not `.` or `..`. */
 function plainDeploymentName(value: string | null | undefined): string | null {
   if (!value || value === "." || value === "..") return null;
@@ -374,6 +397,10 @@ export function sideFeatureResidencyDeclarationWarnings(value: string | undefine
         warnings.push(
           `${route} must name the deployment it calls in "deployment" ([A-Za-z0-9._-]+), since one Azure resource can hold EU and global deployments; until it does, the route is unknown (not EU)`,
         );
+      } else if (!bareResourceEndpoint(declaration.endpoint)) {
+        warnings.push(
+          `${route} must declare the bare Azure resource URL as "endpoint" (no path, query or /deployments/), since the route appends its own path; until it does, the route is unknown (not EU)`,
+        );
       }
     } else if (declaration.deployment !== undefined) {
       warnings.push(`${route} does not call a named deployment; its "deployment" is ignored`);
@@ -411,10 +438,12 @@ export function parseSideFeatureResidencyJson(
   for (const [route, { endpoint, deployment, residency }] of Object.entries(parsed.data)) {
     declarations[route as SideFeatureRouteId] = {
       endpoint: sideFeatureEndpointOrigin(endpoint)!,
-      // Only a readable deployment on a route that calls one; otherwise the
-      // declaration names none and the route stays unknown.
+      // Only a readable deployment on a route that calls one, at a bare
+      // resource endpoint; otherwise the declaration names none and the
+      // route stays unknown.
       ...(sideFeatureRouteNamesDeployment(route as SideFeatureRouteId) &&
-      plainDeploymentName(deployment)
+      plainDeploymentName(deployment) &&
+      bareResourceEndpoint(endpoint)
         ? { deployment: deployment! }
         : {}),
       residency: ModelResidencyV1.parse({
@@ -471,8 +500,9 @@ function ruleResidency(rule: Rule): ModelResidencyV1 {
  * A declarable route is resolved from the endpoint the call sends to: a
  * vendor default host has its code-owned rule; otherwise the operator's
  * declaration applies only when it names that same endpoint origin and, for
- * a route that calls a named deployment, that same deployment. An undeclared
- * route, a missing endpoint or deployment, or a different one is unknown.
+ * a route that calls a named deployment, that same deployment at a bare
+ * resource endpoint (no path, query or `/deployments/`). An undeclared route,
+ * a missing endpoint or deployment, or a different one is unknown.
  * Nothing in a request (its body model or a query parameter) is read.
  */
 export function sideFeatureRouteResidency(
@@ -489,7 +519,12 @@ export function sideFeatureRouteResidency(
   const declaration = declaredSideFeatureResidency(settings)[route];
   if (!declaration || declaration.endpoint !== origin) return UNKNOWN_MODEL_RESIDENCY;
   if (spec.namedDeployment) {
-    const called = plainDeploymentName(typeof target === "string" ? null : target.deployment);
+    // The route appends its own path to a bare resource endpoint; a path,
+    // query or deployment marker there could call another deployment.
+    if (typeof target === "string" || !bareResourceEndpoint(target.endpoint)) {
+      return UNKNOWN_MODEL_RESIDENCY;
+    }
+    const called = plainDeploymentName(target.deployment);
     if (!called || called !== declaration.deployment) return UNKNOWN_MODEL_RESIDENCY;
   }
   return declaration.residency;

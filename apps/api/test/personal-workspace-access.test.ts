@@ -31,7 +31,6 @@ import { sha256Hex } from "@opengeni/contracts/values";
 import { registerInsightsRoutes } from "../src/routes/insights";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { registerWorkspaceInstructionPolicyRoutes } from "../src/routes/workspace-instruction-policies";
-import { registerAutomationRoutes } from "../src/routes/automations";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -161,7 +160,6 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerInsightsRoutes(registered, deps);
   registerInsightsUsageRoutes(registered, deps);
   registerWorkspaceInstructionPolicyRoutes(registered, deps);
-  registerAutomationRoutes(registered, deps);
   return registered;
 }
 
@@ -357,7 +355,7 @@ describe("managed personal workspace access", () => {
     expect(count?.count).toBe(0);
   });
 
-  test("Personal owners read Insights and change instructions and automations; lookalikes do not", async () => {
+  test("Personal owners read Insights and change instructions; lookalikes do not", async () => {
     if (!shared || !client || !app) return;
     const base = `http://x/v1/workspaces/${personalWorkspaceId}`;
     const headers = { cookie: "session=present", "content-type": "application/json" };
@@ -389,14 +387,6 @@ describe("managed personal workspace access", () => {
     });
     expect(activated.status, await activated.clone().text()).toBe(200);
 
-    // Malformed JSON reaches body validation only after the writer check passed.
-    const automation = await app.request(`${base}/automations/sources`, {
-      method: "POST",
-      headers,
-      body: "{",
-    });
-    expect([400, 422]).toContain(automation.status);
-
     // A delegated owner lookalike without workspace:admin in its ceiling stays refused.
     for (const principalKind of ["human_session", "service"] as const) {
       const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
@@ -412,7 +402,6 @@ describe("managed personal workspace access", () => {
         ["GET", "/insights?range=week", undefined],
         ["GET", "/insights/usage", undefined],
         ["POST", "/instruction-policies/drafts", { kind: "policy", scope: "global", content: "x" }],
-        ["POST", "/automations/sources", {}],
       ] as const) {
         const response = await app.request(`${base}${path}`, {
           method,

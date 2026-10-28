@@ -264,7 +264,6 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
-    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
   });
 
@@ -278,11 +277,9 @@ describe("fail-closed change impact", () => {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.guards).toContain("public-api");
-      expect(plan.guards).toContain("sdk-compat");
     }
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
-    expect(web.guards).not.toContain("sdk-compat");
   });
 
   test("the subscription contract guard runs on docs-only and focused plans", () => {

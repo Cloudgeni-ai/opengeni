@@ -44,7 +44,6 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "vault",
     "variables",
     "environment variables",
-    "variable sets",
     "tokens",
     "one-time codes",
     "totp",

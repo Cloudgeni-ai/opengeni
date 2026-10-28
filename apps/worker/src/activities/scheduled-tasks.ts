@@ -99,7 +99,6 @@ import {
   getSessionByCreateIdempotencyKey,
   getSessionCreationExecutionPolicy,
   metadataWithAgentConfigCreateIdentity,
-  getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
   materializeScheduledTaskReusableSessionFromRun,
@@ -1018,29 +1017,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             };
           })()
         : null;
-      const acceptedVariableSet =
-        generatedTarget && task.variableSetId
-          ? await getVariableSet(
-              db,
-              {
-                accountId: task.accountId,
-                workspaceId: task.workspaceId,
-                // Organization/workspace sets have no personal-resource causal
-                // subject. The scoped resolver still permits those common
-                // scopes for a service/legacy actor, while a user-owned set can
-                // only resolve through the exact frozen 0252 subject.
-                subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
-              },
-              task.variableSetId,
-            )
-          : null;
-      if (generatedTarget && task.variableSetId && !acceptedVariableSet) {
-        return await refuseAdmission(
-          "variable_set_unavailable",
-          false,
-          `variable set not found: ${task.variableSetId}`,
-        );
-      }
       const acceptedRig =
         generatedTarget && task.rigId
           ? await getRig(
@@ -1060,35 +1036,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           `sandbox environment has no active version to bind: ${task.rigId}`,
         );
       }
-      const acceptedRigDefaultVariableSetRows = acceptedRig?.activeVersion
-        ? await Promise.all(
-            acceptedRig.activeVersion.defaultVariableSetIds.map(async (variableSetId) => ({
-              variableSetId,
-              variableSet: await getVariableSet(
-                db,
-                {
-                  accountId: task.accountId,
-                  workspaceId: task.workspaceId,
-                  subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
-                },
-                variableSetId,
-              ),
-            })),
-          )
-        : [];
-      const missingRigDefaultVariableSet = acceptedRigDefaultVariableSetRows.find(
-        (row) => !row.variableSet,
-      );
-      if (missingRigDefaultVariableSet) {
-        return await refuseAdmission(
-          "variable_set_unavailable",
-          false,
-          `sandbox environment default Variable Set not found: ${missingRigDefaultVariableSet.variableSetId}`,
-        );
-      }
-      const acceptedRigDefaultVariableSets = acceptedRigDefaultVariableSetRows.map(
-        ({ variableSet }) => ({ id: variableSet!.id, generation: variableSet!.generation }),
-      );
       let incidentPreflightRequired = incidentDeclaration.action === "required";
       if (incidentPreflightRequired) {
         const existingSessionId =
@@ -1248,15 +1195,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
         );
       }
-      // Workspace/organization Variable Sets and Rigs run through ordinary
+      // Workspace/organization Rigs run through ordinary
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
       // existing/warm targets.
       // A personal machine additionally needs that human to be the machine's owner.
-      const personalResourceSelected =
-        acceptedVariableSet?.scope === "user" ||
-        acceptedRig?.scope === "user" ||
-        acceptedPersonalMachine;
+      const personalResourceSelected = acceptedRig?.scope === "user" || acceptedPersonalMachine;
       if (
         (personalResourceSelected && !causalHumanSubjectId) ||
         (acceptedPersonalMachine && causalHumanSubjectId !== task.ownerSubjectId)
@@ -1423,14 +1367,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
               }
             : {}),
-          resolvedVariableSet: acceptedVariableSet
-            ? { id: acceptedVariableSet.id, generation: acceptedVariableSet.generation }
-            : null,
+          resolvedVariableSet: null,
           resolvedRig: acceptedRig?.activeVersion
             ? {
                 id: acceptedRig.id,
                 versionId: acceptedRig.activeVersion.id,
-                defaultVariableSets: acceptedRigDefaultVariableSets,
+                defaultVariableSets: [],
               }
             : null,
           resolvedSlackBotConnection:
@@ -1610,12 +1552,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 run: { ...run, status: "skipped" as const, error: "scheduled_workspace_paused" },
               };
             }
-            // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
-            // an attached variableSet must still exist here; fail closed if not.
-            const variableSet = acceptedVariableSet;
-            if (task.variableSetId && !variableSet) {
-              throw new Error(`variable set not found: ${task.variableSetId}`);
-            }
             // RIG BINDING (M3): resolve the task's rig to its CURRENTLY-ACTIVE
             // version at FIRE time (not task-create time) and freeze that version
             // onto the new session — a task always runs the rig's latest active
@@ -1698,7 +1634,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 latencyMode: "standard",
                 sandboxBackend,
                 sandboxOs,
-                variableSetId: task.variableSetId ?? null,
                 // The schedule's vault narrowing lives on the run session so every
                 // later turn and every child inherits it through the policy chain.
                 ...(task.vaultPolicy ? { vaultPolicy: task.vaultPolicy } : {}),
@@ -1795,11 +1730,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             const scheduledRun = run;
             if (!sessionCreated) {
               assertReusableSessionRevivable(session.status);
-              if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
-                throw new Error(
-                  "scheduled alert occurrence variableSet attachment does not match its canonical session",
-                );
-              }
               if (
                 scheduledSlackBotConnectionId(session.metadata) !==
                 (task.agentConfig.slackBotConnectionId ?? null)
@@ -1837,13 +1767,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     typeof session.metadata.scheduledTaskRunId === "string"
                       ? session.metadata.scheduledTaskRunId
                       : run.id,
-                  // Names/ids only; never values.
-                  ...(variableSet
-                    ? {
-                        variableSetId: variableSet.id,
-                        variableSetName: variableSet.name,
-                      }
-                    : {}),
                   ...(slackBotConnection && slackBotMetadata
                     ? {
                         slackBotConnection: {
@@ -1901,10 +1824,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     typeof session.metadata.scheduledTaskRunId === "string"
                       ? session.metadata.scheduledTaskRunId
                       : run.id,
-                  // Names/ids only; never values.
-                  ...(variableSet
-                    ? { variableSetId: variableSet.id, variableSetName: variableSet.name }
-                    : {}),
                   ...(slackBotConnection && slackBotMetadata
                     ? {
                         slackBotConnection: {
@@ -2352,11 +2271,7 @@ class IncidentTelemetryPreflightBlockedError extends Error {
   }
 }
 
-/**
- * Defensive backstop for the API-level Slack binding guard. Variable Sets
- * belong to the live target and are fenced by its accepted execution snapshot,
- * not by the task's retained creation defaults.
- */
+/** Defensive backstop for the API-level Slack binding guard. */
 function assertReusableSessionBindingMatches(
   session: { metadata: Record<string, unknown> },
   task: Pick<ScheduledTask, "runMode" | "agentConfig">,
@@ -2835,29 +2750,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
   let session: Awaited<ReturnType<typeof createSession>>;
   if (input.run.sessionId) {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
-    // Preserve the reusable chat's Slack routing; the accepted target snapshot
-    // independently fences its current Variable Set attachments during recovery.
+    // Preserve the reusable chat's Slack routing.
     if (!generatedSession) assertReusableSessionBindingMatches(session, task);
   } else if (generatedSession) {
-    const variableSet = input.acceptedExecution.resolvedVariableSet;
-    if (variableSet) {
-      const current = await getVariableSet(
-        input.db,
-        {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          subjectId:
-            input.acceptedExecution.personalResourceAuthoritySubjectId ?? task.createdBy.subjectId,
-        },
-        variableSet.id,
-      );
-      if (!current || current.generation !== variableSet.generation) {
-        throw new ScheduledRunTerminalAuthorityError(
-          "scheduled_variable_set_authority_changed",
-          "scheduled variable set changed after run admission",
-        );
-      }
-    }
     const rig = input.acceptedExecution.resolvedRig;
     if (rig) {
       const retained = await getScheduledScopedRigVersionMetadata(
@@ -2936,7 +2831,6 @@ async function recoverBoundScheduledTaskDispatch(input: {
       latencyMode: input.acceptedExecution.resolvedLatencyMode,
       sandboxBackend: input.acceptedExecution.resolvedSandboxBackend,
       sandboxOs: input.acceptedExecution.resolvedSandboxOs,
-      variableSetId: variableSet?.id ?? null,
       rigId: rig?.id ?? null,
       rigVersionId: rig?.versionId ?? null,
       personalConnectionDelegations: [],
@@ -3114,8 +3008,6 @@ async function recoverBoundScheduledTaskDispatch(input: {
       stableJson(session.agent) !==
         stableJson(input.acceptedExecution.resolvedAgentConfig ?? null) ||
       session.maxNestedAgentDepthOverride !== (task.agentConfig.maxNestedAgentDepth ?? null) ||
-      (session.variableSetId ?? null) !==
-        (input.acceptedExecution.resolvedVariableSet?.id ?? null) ||
       (session.rigId ?? null) !== (input.acceptedExecution.resolvedRig?.id ?? null) ||
       (session.rigVersionId ?? null) !== (input.acceptedExecution.resolvedRig?.versionId ?? null) ||
       scheduledSlackBotConnectionId(session.metadata) !== (frozenSlack?.id ?? null)

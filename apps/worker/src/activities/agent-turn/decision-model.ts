@@ -29,7 +29,7 @@ export function configuredDecisionModel(
   if (!config) return undefined;
   const route = decisionModelTarget(config);
   if (!sideFeatureRouteRunnable(settings, route)) return undefined;
-  const fetch = sideFeatureRouteFetch(
+  const routeFetch = sideFeatureRouteFetch(
     settings,
     sideFeatureTargetRoute(route),
     options.fetch ?? globalThis.fetch,
@@ -44,7 +44,7 @@ export function configuredDecisionModel(
             ...(settings.jevRequestTimeoutMs !== undefined
               ? { timeoutMs: settings.jevRequestTimeoutMs }
               : {}),
-            fetch,
+            fetch: routeFetch,
           }),
         )
       : createHttpDecisionModel({
@@ -52,7 +52,7 @@ export function configuredDecisionModel(
           model: config.model,
           apiKey: config.apiKey,
           ...(config.baseUrl ? { endpoint: `${config.baseUrl.replace(/\/$/, "")}/decisions` } : {}),
-          fetch,
+          fetch: routeFetch,
         });
   return { id: `${config.provider}/${config.model}`, model };
 }

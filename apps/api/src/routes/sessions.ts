@@ -1,10 +1,4 @@
 import { readSessionResponsePair } from "./session-response-reads";
-import {
-  legacyVariableSetFields,
-  rejectLegacyVariableSetFields,
-  variableSetsRemovedResponse,
-  withoutEmptyLegacyVariableSetFields,
-} from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import {
@@ -255,7 +249,6 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
-  SessionVariableSetSelectionUnavailableError,
   SessionCreateConnectionSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
@@ -809,9 +802,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      const legacyFields = legacyVariableSetFields(payload);
-      if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
-      payload = withoutEmptyLegacyVariableSetFields(payload);
       const requestedProfile = CreateSessionRequest.parse(payload).profile;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
@@ -1643,9 +1633,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const forkLegacy = rejectLegacyVariableSetFields(c, await c.req.json().catch(() => null));
-    if ("response" in forkLegacy) return forkLegacy.response;
-    const parsed = ForkSessionRequest.safeParse(forkLegacy.payload);
+    const parsed = ForkSessionRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
@@ -2712,14 +2700,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
-  });
-
-  // Variable Sets were replaced by vaults. The route answers 410 so old
-  // clients learn where secrets moved instead of silently doing nothing.
-  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    return variableSetsRemovedResponse(c, 410);
   });
 
   // Manual rename and description/avatar edit. A user-set title is permanent:
@@ -5814,7 +5794,6 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
-  if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.
   if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
@@ -6839,16 +6818,6 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     // Covers the create-vs-channel-delete race the pre-validation cannot: the
     // insert's FK rejection surfaces as the same 422 an unknown id gets.
     return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
-  }
-  if (error instanceof SessionVariableSetSelectionUnavailableError) {
-    return c.json(
-      {
-        code: "SESSION_CREATE_REJECTED",
-        message: error.message,
-        details: { variableSetIds: error.variableSetIds },
-      },
-      422,
-    );
   }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(

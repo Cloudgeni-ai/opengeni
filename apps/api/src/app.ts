@@ -84,7 +84,7 @@ import {
   resolveAgentToolFamilies,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   WorkspaceVoiceInputSettings,
-  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
   ToolGatewayResolveRequest,
@@ -173,8 +173,6 @@ import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import { HTTP_REQUEST_CHILD_SPAN_LIMIT, requestSpanTraceParent } from "./http/request-trace";
 import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
-import { deprecationHeadersMiddleware } from "./http/deprecation";
 import {
   boundedRegisteredRouteLabel,
   registeredHandlerRoutePath,
@@ -331,9 +329,8 @@ import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
-import { registerVariableSetsRemovedRoutes } from "./routes/variable-sets-removed";
-import { variableSetsRemovedErrorResponse } from "./http/variable-sets-removed";
 import { registerVaultRoutes } from "./routes/vaults";
+import { registerCredentialProfileRoutes } from "./routes/credential-profiles";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
@@ -355,8 +352,6 @@ import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
-import { registerPrReviewRoutes } from "./routes/pr-review";
-import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
@@ -864,9 +859,7 @@ export function createAppComposition(deps: AppDependencies): {
     exposeHeaders: [
       "Accept-Ranges",
       "Content-Range",
-      "Deprecation",
       "Link",
-      "Sunset",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
@@ -973,14 +966,6 @@ export function createAppComposition(deps: AppDependencies): {
       c.res.headers.set("vary", appendVary(c.res.headers.get("vary"), "Accept-Encoding"));
     }
   });
-
-  // Public-route deprecations (docs/design/api-compatibility-policy.md) are
-  // advertised on every response of the affected route, errors included.
-  app.use("/v1/*", deprecationHeadersMiddleware());
-  // A pinned SDK must not be told about a revision it is built to reject; see
-  // the policy's contract-header rule. Registered before the contract fence so
-  // it observes the header that fence sets.
-  app.use("/v1/*", bearerApiContractHeaderCompatibility());
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
@@ -1717,7 +1702,7 @@ export function createAppComposition(deps: AppDependencies): {
                   maxSizeBytes: deps.settings.voiceInputResumableMaxSizeBytes,
                   maxChunkSizeBytes: deps.settings.voiceInputResumableMaxChunkSizeBytes,
                   providerSegmentSeconds: Math.min(
-                    TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+                    TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
                     deps.settings.voiceInputMaxDurationSeconds,
                   ),
                 },
@@ -2465,12 +2450,10 @@ export function createAppComposition(deps: AppDependencies): {
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
-  registerVariableSetsRemovedRoutes(app);
   registerVaultRoutes(app, routeDeps);
+  registerCredentialProfileRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
-  registerAutomationRoutes(app, routeDeps);
-  registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   // The inbox's per-session mute routes call the session seam themselves, so
@@ -2539,8 +2522,6 @@ export function createAppComposition(deps: AppDependencies): {
     // Archives remain read-only through the existing Send/Steer/control paths.
     const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
     if (importErrorResponse) return importErrorResponse;
-    const removedResponse = variableSetsRemovedErrorResponse(c, rawError);
-    if (removedResponse) return removedResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
@@ -2858,14 +2839,9 @@ export function assertConfiguredCodemodeSessionProxyPath(
         // Resource-derived sandbox mechanics are not platform capabilities.
         allowed = true;
       } else if (
-        [
-          "agent",
-          "tool-policy",
-          "mcp-servers",
-          "mcp-credentials",
-          "variable-sets",
-          "project",
-        ].includes(operation ?? "")
+        ["agent", "tool-policy", "mcp-servers", "mcp-credentials", "project"].includes(
+          operation ?? "",
+        )
       ) {
         allowed = allows("project_get") && targetAllowed;
       } else {
@@ -2895,8 +2871,6 @@ export function assertConfiguredCodemodeSessionProxyPath(
         sandboxes: "sandboxes_list",
         machines: "sandboxes_list",
         rigs: "rig_list",
-        environments: "environment_list",
-        "variable-sets": "variable_set_list",
         capabilities: "capability_catalog_search",
         catalog: "capability_catalog_search",
         members: "project_get",
@@ -3346,10 +3320,6 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
   { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
   { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
-    label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,
-  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",
@@ -3864,22 +3834,6 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/github/app-manifest",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github$/,
-    label: "/v1/workspaces/:workspaceId/pr-review/github",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/connect$/,
-    label: "/v1/workspaces/:workspaceId/pr-review/github/connect",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/installations\/select$/,
-    label: "/v1/workspaces/:workspaceId/pr-review/github/installations/select",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/installations\/[^/]+\/configure$/,
-    label: "/v1/workspaces/:workspaceId/pr-review/github/installations/:installationId/configure",
-  },
-  {
     pattern: /^\/v1\/workspaces\/[^/]+\/capabilities$/,
     label: "/v1/workspaces/:workspaceId/capabilities",
   },
@@ -3969,19 +3923,6 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/skills/:id",
   },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments$/,
-    label: "/v1/workspaces/:workspaceId/environments",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+\/variables\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/environments/:id/variables/:name",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/environments/:id",
-  },
-
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
     label: "/v1/workspaces/:workspaceId/plugins/preview",
@@ -4168,19 +4109,6 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/github\/oauth\/callback$/,
     label: "/v1/github/oauth/callback",
   },
-  { pattern: /^\/v1\/pr-review\/github\/setup$/, label: "/v1/pr-review/github/setup" },
-  {
-    pattern: /^\/v1\/pr-review\/github\/install\/callback$/,
-    label: "/v1/pr-review/github/install/callback",
-  },
-  {
-    pattern: /^\/v1\/pr-review\/github\/oauth\/callback$/,
-    label: "/v1/pr-review/github/oauth/callback",
-  },
-  {
-    pattern: /^\/v1\/webhooks\/pr-review\/github$/,
-    label: "/v1/webhooks/pr-review/github",
-  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId",
@@ -4196,18 +4124,6 @@ const routeLabelPatterns: Array<{
 export function routeLabel(pathname: string, registeredRoutePath?: string | null): string {
   if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
     return "/v1/workspaces/:workspaceId/transcriptions";
-  const transcription = pathname.match(
-    /^\/v1\/workspaces\/[^/]+\/transcription-recordings(?:\/[^/]+(\/(?:finalize|process-next)|\/chunks\/\d+)?)?$/,
-  );
-  if (transcription) {
-    const base = "/v1/workspaces/:workspaceId/transcription-recordings";
-    if (pathname.split("/").length === 5) return base;
-    return (
-      base +
-      "/:recordingId" +
-      (transcription[1]?.startsWith("/chunks/") ? "/chunks/:chunkNumber" : (transcription[1] ?? ""))
-    );
-  }
   for (const candidate of routeLabelPatterns) {
     const match = pathname.match(candidate.pattern);
     if (match) {

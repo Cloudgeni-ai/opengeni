@@ -730,7 +730,7 @@ bun run deployment:stack -- --profile aws-existing-services --json
 ```
 
 After Terraform apply, generate private deployment artifacts from Terraform
-outputs and the current shell variable set. The generated Helm values file
+outputs and the current shell environment. The generated Helm values file
 contains non-secret provider wiring; `runtime.env` is intended for a private
 Kubernetes Secret and must not be committed:
 
@@ -1675,13 +1675,13 @@ sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
 another ignored private path.
 
-Inspect required modes, variable-set variables, and checks:
+Inspect required modes, environment variables, and checks:
 
 ```bash
 bun run deployment:preflight -- --profile azure-existing-services
 ```
 
-Run live connectivity probes against the current shell variable set and Kubernetes context:
+Run live connectivity probes against the current shell environment and Kubernetes context:
 
 ```bash
 KUBECONFIG=/path/to/kubeconfig bun run deployment:preflight -- --profile azure-managed --live
@@ -1868,8 +1868,8 @@ Current profiles:
 - `aws-existing-services`: EKS workloads connected to existing Postgres, Temporal, and object storage.
 - `gcp-managed`: GKE plus GCP-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
 - `gcp-existing-services`: GKE workloads connected to existing Postgres, Temporal, and object storage.
-- `preview-pr`: operator-managed pull-request preview variable set shape.
-- `preview-branch`: operator-managed branch preview variable set shape.
+- `preview-pr`: operator-managed pull-request preview environment shape.
+- `preview-branch`: operator-managed branch preview environment shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
 ## Local Development Stack
@@ -4136,7 +4136,7 @@ Minimum production dashboards should cover:
 - Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
-- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
+- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `environment`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. Durable recovery is a separate control-worker projection: `opengeni_session_recovery_backlog{state}` counts recovering sessions with no active attempt (including ones in recorded backoff), `opengeni_session_recovery_scheduled{state}` counts those still inside their recorded Retry-After/connectivity backoff, and `opengeni_session_recovery_oldest_overdue_seconds{state}` drives `OpenGeniSessionRecoveryBacklogStale`; see [`run-lifecycle.md`](run-lifecycle.md). In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
 - Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
@@ -4180,7 +4180,7 @@ histogram_quantile(
 ```
 
 ```promql
-sum by (activity, status) (rate(opengeni_worker_activity_runs_total{variable set="production"}[5m]))
+sum by (activity, status) (rate(opengeni_worker_activity_runs_total{environment="production"}[5m]))
 ```
 
 ```promql
@@ -4226,12 +4226,12 @@ sum(increase(opengeni_analytics_consent_total{environment="production"}[7d]))
 ```promql
 histogram_quantile(
   0.95,
-  sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{variable set="production"}[5m]))
+  sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{environment="production"}[5m]))
 )
 ```
 
 ```promql
-max(opengeni_turn_oldest_inflight_age_seconds{variable set="production"})
+max(opengeni_turn_oldest_inflight_age_seconds{environment="production"})
 ```
 
 Minimum production alerts:
@@ -4255,7 +4255,7 @@ Minimum production alerts:
 - Storage health: object-storage conformance cannot create, complete, presign, and read a file.
 - Streaming health: SSE replay conformance does not return persisted events after reconnect.
 - Collector health: collector pod is not ready or its configured OTLP exporter reports failures.
-- Secret/sandbox hygiene: conformance detects unintended sandbox variable-set variables or sandbox backend startup failures.
+- Secret/sandbox hygiene: conformance detects unintended sandbox environment variables or sandbox backend startup failures.
 
 ## Azure Reference
 
@@ -4364,7 +4364,7 @@ The public repository does not include a pull-request workflow that deploys to
 maintainer-owned infrastructure. The `preview-pr` and `preview-branch` profiles
 are reusable stack-contract shapes for operator-owned automation. If an operator
 wants preview deployments, they should run `bun run deployment:stack` in their
-own CI/CD variable set with their own cluster, registry, secrets, and teardown
+own CI/CD environment with their own cluster, registry, secrets, and teardown
 policy.
 
 Preview profiles are managed-product previews, not fake demos. They use

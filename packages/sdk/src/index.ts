@@ -419,8 +419,6 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
 export type { OpenGeniReadRetryOptions } from "./read-retry";
-export { parseDeprecationNotice } from "./deprecation";
-export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -1288,18 +1286,6 @@ export type {
   GitCredentialProvider,
   GitCredentialBindingId,
   GitRepositoryAccess,
-  PrReviewProvider,
-  PrReviewCredentialKind,
-  PrReviewWebhookAuthKind,
-  PrReviewAppRegistration,
-  PrReviewManagedGitHubInstallation,
-  PrReviewManagedGitHubSetup,
-  PrReviewRepositoryBinding,
-  CreatePrReviewAppRegistrationRequest,
-  UpdatePrReviewAppRegistrationRequest,
-  CreatePrReviewRepositoryBindingRequest,
-  UpdatePrReviewRepositoryBindingRequest,
-  ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
   ListOrganizationSessionsOptions,
   ListConnectionsResponse,

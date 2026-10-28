@@ -35,7 +35,6 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { variableSetsRemovedError } from "../domain/encryption-key";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -43,10 +42,6 @@ export * from "./provider-images";
 export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
-/** Rig default Variable Sets were removed with Variable Sets (RM-1). */
-function assertNoDefaultVariableSets(ids: ReadonlyArray<string> | null | undefined): void {
-  if (ids?.length) throw variableSetsRemovedError("defaultVariableSetIds");
-}
 
 export type RigServices = {
   db: Database;
@@ -152,7 +147,6 @@ export async function createRigForApi(
 ): Promise<Rig> {
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
-  assertNoDefaultVariableSets(payload.defaultVariableSetIds);
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} sandbox environments`,
@@ -178,7 +172,6 @@ export async function createRigForApi(
       setupScript: payload.setupScript ?? null,
       checks: payload.checks,
       credentialHooks: payload.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds,
       changelog: "Initial version",
       createdBy,
     },
@@ -266,7 +259,6 @@ export async function proposeRigChangeForApi(
   }
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
-    assertNoDefaultVariableSets(request.payload.defaultVariableSetIds);
   }
   const change = await createRigChange(deps.db, {
     accountId: grant.accountId,
@@ -373,7 +365,6 @@ export async function promoteSetupAppendChange(
     setupScript: appendRigSetupCommand(base.setupScript, payload.command),
     checks: base.checks,
     credentialHooks: base.credentialHooks,
-    defaultVariableSetIds: base.defaultVariableSetIds,
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
@@ -446,7 +437,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
-    defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
   const nextDefinition = {
@@ -457,9 +447,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     credentialHooks: Array.isArray(payload.credentialHooks)
       ? (payload.credentialHooks as string[])
       : base.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-      ? (payload.defaultVariableSetIds as string[])
-      : base.defaultVariableSetIds,
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
@@ -510,7 +497,6 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "sandbox environment has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  assertNoDefaultVariableSets(payload.defaultVariableSetIds);
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,
@@ -521,7 +507,6 @@ export async function createRigVersionForApi(
       setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
       checks: payload.checks ?? base.checks,
       credentialHooks: payload.credentialHooks ?? base.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
       changelog: payload.changelog ?? "Manager-created version",
       createdBy: rigActorForGrant(grant),
     },

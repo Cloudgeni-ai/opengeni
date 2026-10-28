@@ -73,7 +73,7 @@ import {
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceVoiceInputEnabled,
   DICTATION_RETENTION_MILLISECONDS,
-  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
   WorkspaceVoiceInputSettings,
 } from "@opengeni/contracts";
 import {
@@ -1053,7 +1053,7 @@ export function createRecordingActivities(
         telemetry.preparedBytes += audio.storedBytes;
         if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
         const providerSegmentSeconds = Math.min(
-          TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+          TRANSCRIPTION_PROVIDER_SEGMENT_SECONDS,
           service.limits().maxDurationSeconds,
         );
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;

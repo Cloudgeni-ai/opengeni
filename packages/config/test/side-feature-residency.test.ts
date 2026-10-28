@@ -190,6 +190,50 @@ describe("side-feature residency records", () => {
       ]) {
         expect(sideFeatureRouteIsEu(declared, { route, endpoint: azure, deployment })).toBe(false);
       }
+      // The route appends its own path, so an endpoint with a path, query or
+      // deployment marker is unknown, even one naming the declared deployment.
+      for (const endpoint of [
+        `${azure}/openai/deployments/gpt-global`,
+        `${azure}/openai/deployments/gpt-eu`,
+        `${azure}/openai/deployments/gpt-eu/`,
+        `${azure}/openai/deployments/`,
+        `${azure}/openai`,
+        `${azure}/openai/v1`,
+        `${azure}/?deployment=gpt-eu`,
+        `${azure}/#gpt-eu`,
+      ]) {
+        expect(sideFeatureRouteIsEu(declared, { route, endpoint, deployment: "gpt-eu" })).toBe(
+          false,
+        );
+      }
+      expect(
+        sideFeatureRouteIsEu(declared, { route, endpoint: `${azure}/`, deployment: "gpt-eu" }),
+      ).toBe(true);
+      // The same at declaration time: a declared endpoint with a path stays
+      // unknown, with one warning, and never stops boot.
+      for (const endpoint of [
+        `${azure}/openai/deployments/gpt-global`,
+        `${azure}/openai/deployments/gpt-eu`,
+        `${azure}/openai`,
+      ]) {
+        const json = declarations({
+          [route]: { endpoint, deployment: "gpt-eu", residency: euDataZone },
+        });
+        expect(parseSideFeatureResidencyJson(json)[route]).toEqual({
+          endpoint: azure,
+          residency: euDataZone,
+        });
+        expect(sideFeatureResidencyDeclarationWarnings(json)).toEqual([
+          expect.stringContaining(`${route} must declare the bare Azure resource URL`),
+        ]);
+        expect(
+          sideFeatureRouteIsEu(settings({ sideFeatureResidencyJson: json }), {
+            route,
+            endpoint: azure,
+            deployment: "gpt-eu",
+          }),
+        ).toBe(false);
+      }
       // The query form names a deployment the endpoint origin never carries.
       expect(
         sideFeatureRouteIsEu(declared, {

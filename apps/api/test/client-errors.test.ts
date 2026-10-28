@@ -73,7 +73,7 @@ describe("client error report contract", () => {
     for (const kind of CLIENT_ERROR_KINDS) {
       expect(parseClientErrorReport(JSON.stringify({ ...validReport, kind }))?.kind).toBe(kind);
     }
-    for (const route of ["/", "unknown", "/workspaces/$workspaceId/variable-sets", "/billing"]) {
+    for (const route of ["/", "unknown", "/workspaces/$workspaceId/secrets", "/billing"]) {
       expect(parseClientErrorReport(JSON.stringify({ ...validReport, route }))?.route).toBe(route);
     }
   });
