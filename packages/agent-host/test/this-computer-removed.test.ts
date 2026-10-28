@@ -41,6 +41,8 @@ function computer(options: {
   alsoIn?: string[];
   /** Workspaces the person may no longer set computers up in. */
   mintRefused?: string[];
+  /** Connecting again where it was made keeps its enrollment, as the real server does. */
+  keepEnrollment?: boolean;
 }) {
   const home = mkdtempSync(join(tmpdir(), "og-removed-"));
   const list = join(home, "connections.txt");
@@ -67,7 +69,7 @@ function computer(options: {
       `  'service stop') touch "${paused}" ;;`,
       `  'service start') rm -f "${paused}" ;;`,
       "  --version) echo 'opengeni-agent 0.1.109' ;;",
-      `  *'connect --non-interactive'*) echo "token=$OPENGENI_ENROLL_TOKEN" >> "${calls}"; echo "  c1  ${SERVER}  workspace=$(cat "${enrollIn}")  agent=a2" > "${list}" ;;`,
+      `  *'connect --non-interactive'*) echo "token=$OPENGENI_ENROLL_TOKEN" >> "${calls}"; echo "  c1  ${SERVER}  workspace=$(cat "${enrollIn}")  agent=${options.keepEnrollment ? "a1" : "a2"}" > "${list}" ;;`,
       "  *run) sleep 30 ;;",
       "  *) exit 99 ;;",
       "esac",
@@ -391,6 +393,78 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
     expect(next.state).toBe("connected");
     expect(next.errorCode).toBeUndefined();
     expect(c.grants).toEqual(["w2:a2"]);
+  });
+
+  for (const service of [true, false]) {
+    const kind = service ? "an existing agent service" : "the app's own agent";
+    test(`with ${kind}: removed where it was made, turning on where it was shared sets it up here`, async () => {
+      const c = computer({ service, screenControl: true, alsoIn: ["w2"] });
+      // Removed in w1: its enrollment is revoked there, so the agent stopped retrying.
+      writeFileSync(join(c.home, "connections.txt"), REFUSED);
+      c.readings.a1 = null;
+      c.readings.a2 = { online: true };
+      const app = c.create();
+      expect((await app.status(SERVER, "w2", "me")).errorCode).toBe("removed");
+      const next = await app.connect("me", SERVER, "w2", { screenControl: true });
+      // Never back into w1, where it was removed on purpose.
+      expect(c.minted).toEqual(["w2"]);
+      expect(c.grants).toEqual(["w2:a2"]);
+      expect(next.state).toBe("connected");
+      expect(next.errorCode).toBeUndefined();
+    });
+  }
+
+  test("connecting again where it was made keeps its enrollment, and every workspace keeps it", async () => {
+    const c = computer({
+      service: false,
+      screenControl: true,
+      alsoIn: ["w2", "w3"],
+      keepEnrollment: true,
+    });
+    writeFileSync(join(c.home, "connections.txt"), REFUSED);
+    c.readings.a1 = { online: false };
+    const app = c.create();
+    const next = await app.connect("me", SERVER, "w2", { screenControl: true });
+    expect(c.minted).toEqual(["w1"]);
+    expect(next.state).toBe("connected");
+    expect(next.errorCode).toBeUndefined();
+    // The same enrollment keeps its grants: nothing to grant again elsewhere.
+    expect(c.grants).toEqual(["w2:a1"]);
+    c.readings.a1 = { online: true };
+    app.invalidate();
+    for (const workspace of ["w2", "w3"]) {
+      const status = await app.status(SERVER, workspace, "me");
+      expect(status.state).toBe("connected");
+      expect(status.errorCode).toBeUndefined();
+    }
+  });
+
+  test("connected again where it was made but not let in here: says so, never sets it up twice", async () => {
+    const c = computer({ service: false, screenControl: true, alsoIn: ["w2"] });
+    writeFileSync(join(c.home, "connections.txt"), REFUSED);
+    c.readings.a1 = { online: false };
+    c.readings.a2 = new Error("not yours");
+    const app = c.create();
+    const failed = await app
+      .connect("me", SERVER, "w2", { screenControl: true })
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+    expect(failed).toBeInstanceOf(ThisComputerError);
+    expect((failed as Error).message).toContain("Couldn't let agents use this computer");
+    expect(c.minted).toEqual(["w1"]);
+  });
+
+  test("whether it is still listed where it was made can't be read: asks to try again", async () => {
+    const c = computer({ service: false, screenControl: true, alsoIn: ["w2"] });
+    writeFileSync(join(c.home, "connections.txt"), REFUSED);
+    c.readings.a1 = { status: 503, message: "unavailable" };
+    const app = c.create();
+    const failed = await app
+      .connect("me", SERVER, "w2", { screenControl: true })
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+    expect(failed).toBeInstanceOf(ThisComputerError);
+    expect(c.minted).toEqual([]);
   });
 
   test("the menu bar says a refused connection needs reconnecting, but not while paused", async () => {

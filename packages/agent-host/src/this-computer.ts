@@ -987,10 +987,12 @@ export class ThisComputer {
 
   /**
    * This workspace uses a connection made in another one, and the server
-   * stopped signing it in. A personal computer has one live connection on a
-   * server, so setting it up anew here would be refused: connect it again
-   * where it was made, then let this workspace (and every other one that used
-   * it) use it again. False when that isn't possible, so it is set up here.
+   * stopped signing it in while still listing it there. A personal computer
+   * has one live connection on a server, so setting it up anew here would be
+   * refused: connect it again where it was made, then let this workspace (and
+   * every other one that used it) use it again. False when it was removed
+   * there (connecting it there again would undo that) or can't be set up
+   * there any more, so it is set up here.
    */
   private async reconnectWhereMade(
     accountId: string,
@@ -1011,6 +1013,11 @@ export class ThisComputer {
         (shared === undefined || connection.agentId === shared),
     );
     if (!refused) return false;
+    if (this.removed.has(refused.agentId)) return false;
+    const reading = await this.reportedMachine(accountId, baseUrl, refused.workspaceId, refused);
+    if (this.removedOnServer(reading, refused)) return false;
+    // Whether it is still listed there decides where to connect it: unknown, ask again.
+    if (reading?.kind === "unread") throw reading.failure;
     // No longer allowed to set it up there: set it up here instead.
     const token = await this.deps
       .mintEnrollToken(accountId, refused.workspaceId, options.screenControl)
@@ -1024,11 +1031,10 @@ export class ThisComputer {
       token,
       options,
     );
-    const allowed = await this.deps
-      .allowAgents(accountId, workspaceId, connection.agentId)
-      .then(() => true)
-      .catch(() => false);
-    if (!allowed) return false;
+    // Live there now, so setting it up here would be refused: say what failed.
+    await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
+      throw serverFailure(caught, "Couldn't let agents use this computer");
+    });
     // Every workspace that used the old connection uses the new one.
     const users = Object.entries(this.state.alsoIn)
       .filter(([entry, agentId]) => agentId === refused.agentId && entry !== key)
