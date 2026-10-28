@@ -212,7 +212,9 @@ function hostOf(baseUrl: string): string | null {
  * request body names. Segments are percent-decoded, empty segments are
  * dropped and `deployments` matches in any case, the way the provider reads
  * the path. An empty string means the path calls a deployment that can't be
- * read (no name, an undecodable one, or different names): refuse it under EU.
+ * read: refuse it under EU. That is a missing name, two different names, or a
+ * segment that could mean another path once decoded (undecodable, `.` or
+ * `..`, or containing `/`, `\` or `%`).
  */
 export function modelEndpointDeployment(url: string | URL): string | null {
   let pathname: string;
@@ -221,26 +223,47 @@ export function modelEndpointDeployment(url: string | URL): string | null {
   } catch {
     return null;
   }
-  const segments: (string | null)[] = [];
-  for (const raw of pathname.split("/")) {
-    let decoded: string | null;
-    try {
-      decoded = decodeURIComponent(raw);
-    } catch {
-      decoded = null;
-    }
-    // A decoded `%2F` separates segments too.
-    if (decoded === null) segments.push(null);
-    else segments.push(...decoded.split("/").filter((segment) => segment !== ""));
-  }
+  // The URL parser has already resolved plain and %2e dot segments; what is
+  // left decoded is one segment, or null when it can't be read as one name.
+  const segments = pathname
+    .split("/")
+    .filter((raw) => raw !== "")
+    .map((raw) => {
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {
+        return { raw, name: null };
+      }
+      const unreadable = decoded === "." || decoded === ".." || /[/\\%]/u.test(decoded);
+      return { raw, name: unreadable ? null : decoded };
+    });
   const names = new Set<string>();
-  segments.forEach((segment, index) => {
-    if (segment?.toLowerCase() !== "deployments") return;
-    names.add(segments[index + 1] ?? "");
-  });
+  for (const [index, segment] of segments.entries()) {
+    if (segment.name === null) {
+      // An unreadable segment that may hold the marker hides the deployment.
+      if (/deployments/iu.test(looselyDecoded(segment.raw))) names.add("");
+      continue;
+    }
+    if (segment.name.toLowerCase() !== "deployments") continue;
+    names.add(segments[index + 1]?.name ?? "");
+  }
   if (names.size === 0) return null;
   if (names.size > 1 || names.has("")) return "";
   return [...names][0]!;
+}
+
+/** Every ASCII %XX escape decoded, repeatedly (to catch double encoding). */
+function looselyDecoded(raw: string): string {
+  let value = raw;
+  for (let round = 0; round < 4; round += 1) {
+    const next = value.replace(/%([0-7][0-9a-f])/giu, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+    if (next === value) break;
+    value = next;
+  }
+  return value;
 }
 
 /**

@@ -54,19 +54,37 @@ describe("deployment-path endpoints and residency", () => {
       "/openai/Deployments/gpt-global/responses",
       "/openai/%64eployments/gpt-global/responses",
       "/openai/deployments//gpt-global/responses",
-      "/openai/deployments%2Fgpt-global/responses",
+      // Dot segments, plain or %2e, are resolved before the request is sent.
+      "/openai/deployments/gpt-eu/../gpt-global/responses",
+      "/openai/deployments/gpt-eu/%2e%2E/gpt-global/responses",
+      "/openai/deployments/gpt-eu/./../gpt-global/responses",
     ]) {
       expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("gpt-global");
     }
-    // A deployment path whose deployment can't be read is unknown, not absent.
+    // A deployment path whose deployment can't be read is unknown, not absent:
+    // a segment that could mean another path once decoded is never a name.
     for (const path of [
       "/openai/deployments",
       "/openai/deployments/",
       "/openai/deployments/%E0%A4%A",
       "/openai/deployments/gpt-eu/deployments/gpt-global",
+      "/openai/deployments/gpt-eu%2F..%2Fgpt-global/responses",
+      "/openai/deployments/gpt-eu%2f..%2fgpt-global/responses",
+      "/openai/deployments/gpt-eu%5C..%5Cgpt-global/responses",
+      "/openai/deployments/gpt-eu%252F..%252Fgpt-global/responses",
+      "/openai/deployments/%252e%252e/gpt-global/responses",
+      "/openai/deployments/gpt%2Feu/responses",
+      "/openai/deployments%2Fgpt-global/responses",
+      "/openai/deployments%5Cgpt-global/responses",
+      "/openai/%2564eployments%2Fgpt-global/responses",
+      "/openai/%64eployments%E0/gpt-global/responses",
     ]) {
       expect(modelEndpointDeployment(`https://res.openai.azure.com${path}`)).toBe("");
     }
+    // Paths without a deployment marker are unaffected by unreadable segments.
+    expect(
+      modelEndpointDeployment("https://bedrock.example/model/arn%3Aaws%3Abedrock%2Fx/invoke"),
+    ).toBeNull();
     // An EU claim on a deployment path is right only for the deployment it calls.
     const route = { baseUrl: "https://res.openai.azure.com/openai/deployments/gpt-eu" };
     expect(
