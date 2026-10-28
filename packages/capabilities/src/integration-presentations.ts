@@ -206,7 +206,7 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
       },
       {
         title: "Read documents and lists",
-        description: "Open library files and list items the account can already access.",
+        description: "Read library files and list items the account can already access.",
       },
       {
         title: "Update lists",
@@ -214,12 +214,12 @@ export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
       },
     ],
     permissionSummary:
-      "Microsoft asks for access to SharePoint sites the connected work or school account can already open. Personal Microsoft accounts are not supported.",
+      "Microsoft asks for access to SharePoint sites the connected work or school account can already open. Many organizations require an admin to approve this first. Personal Microsoft accounts are not supported.",
     scopeLabels: {
       "Sites.ReadWrite.All": {
         label: "Work with accessible sites",
         description:
-          "Read site content and update list items in SharePoint sites this account can open.",
+          "Microsoft grants read and write access to SharePoint sites this account can open. Opengeni uses it to read content and to add or update list items, which ask for approval.",
       },
     },
   },

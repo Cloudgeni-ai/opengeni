@@ -89,6 +89,7 @@ const REVIEWED_GRAPH_TITLES: readonly (readonly [RegExp, string])[] = [
   [/^sites\.lists\.CreateItems$/, "Add a list item"],
   [/^sites\.lists\.items\.UpdateFields$/, "Update a list item"],
   [/^sites\.ListPages$/, "Read site pages"],
+  [/^drives\.GetRoot$/, "Read a library's top folder"],
   // Teams.
   [/^chats\.CreateMessages$/, "Send a chat message"],
   [/^chats\.ListMessages$/, "Read chat messages"],

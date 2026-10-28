@@ -36,6 +36,12 @@ export type IntegrationDefinitionSource =
          * Only this reviewed list can relax the HTTP-method safety default.
          */
         readOnly?: true;
+        /**
+         * For a reviewed read-only Microsoft Search operation: the only entity
+         * types a request may name. Other requests are rejected before any
+         * credential is resolved, so other granted scopes stay behind their tools.
+         */
+        searchEntityTypes?: readonly string[];
         /** Reviewed guidance that replaces the provider's generic description. */
         description?: string;
       }>[];
@@ -353,6 +359,8 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
 };
 
 const SHAREPOINT_SCOPE = ["Sites.ReadWrite.All"] as const;
+/** Mail, calendar and chat entities stay behind their own reviewed tools. */
+const SHAREPOINT_SEARCH_ENTITY_TYPES = ["driveItem", "listItem", "list", "site", "drive"] as const;
 
 /**
  * Delegated work/school SharePoint access. OneDrive stays on personal-account
@@ -374,29 +382,46 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         path: "/search/query",
         method: "post",
         readOnly: true,
+        searchEntityTypes: SHAREPOINT_SEARCH_ENTITY_TYPES,
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          'Search SharePoint and OneDrive content the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries; combine driveItem, listItem and list in one request if needed, but search site separately. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size.',
+          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries; combine driveItem, listItem and list in one request if needed, but search site separately. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
       },
       {
         path: "/sites",
         method: "get",
+        odataSkipToken: true,
         requiredScopes: SHAREPOINT_SCOPE,
         description:
           "Find SharePoint sites by keyword with $search (for example $search=marketing). Returns sites the signed-in person can access.",
       },
-      { path: "/me/followedSites", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/me/followedSites",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
       { path: "/sites/{site-id}", method: "get", requiredScopes: SHAREPOINT_SCOPE },
       {
         path: "/sites/{site-id}/getByPath(path='{path}')",
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          "Get a site from a server-relative path under a known site. To resolve a site URL such as https://contoso.sharepoint.com/sites/hr, use site-id contoso.sharepoint.com:/sites/hr: with Get a site resource instead.",
+          "Resolve a SharePoint site URL. For https://contoso.sharepoint.com/sites/hr, use site-id contoso.sharepoint.com and path /sites/hr. If that fails, find the site by keyword with the site search instead.",
       },
-      { path: "/sites/{site-id}/sites", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/sites",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
       { path: "/sites/{site-id}/drive", method: "get", requiredScopes: SHAREPOINT_SCOPE },
-      { path: "/sites/{site-id}/drives", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/drives",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
       {
         path: "/sites/{site-id}/lists",
         method: "get",
@@ -431,12 +456,19 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         description:
           "Update column values of a SharePoint list item. Send only the changed columns by internal name.",
       },
-      { path: "/sites/{site-id}/pages", method: "get", requiredScopes: SHAREPOINT_SCOPE },
+      {
+        path: "/sites/{site-id}/pages",
+        method: "get",
+        odataSkipToken: true,
+        requiredScopes: SHAREPOINT_SCOPE,
+      },
       { path: "/drives/{drive-id}/root", method: "get", requiredScopes: SHAREPOINT_SCOPE },
       {
         path: "/drives/{drive-id}/items/{driveItem-id}",
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "Read a file or folder in a document library. A file's response includes @microsoft.graph.downloadUrl, a short-lived pre-authenticated link: download the file bytes from it directly, without credentials.",
       },
       {
         path: "/drives/{drive-id}/items/{driveItem-id}/children",
@@ -445,11 +477,6 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         requiredScopes: SHAREPOINT_SCOPE,
         description:
           "List files and folders in a document library folder. Use driveItem-id root for the library's top level.",
-      },
-      {
-        path: "/drives/{drive-id}/items/{driveItem-id}/content",
-        method: "get",
-        requiredScopes: SHAREPOINT_SCOPE,
       },
       {
         path: "/drives/{drive-id}/search(q='{q}')",
@@ -598,14 +625,17 @@ export function integrationDefinitionById(id: string): IntegrationDefinition | u
  */
 export function integrationDefinitionReadOnlyOperations(
   definition: IntegrationDefinition,
-): ReadonlySet<string> {
+): ReadonlyMap<string, Readonly<{ searchEntityTypes?: readonly string[] }>> {
   if (definition.source.kind !== "openapi" || !definition.source.operationAllowlist) {
-    return new Set();
+    return new Map();
   }
-  return new Set(
+  return new Map(
     definition.source.operationAllowlist
       .filter((entry) => entry.readOnly === true)
-      .map((entry) => `${entry.method} ${entry.path}`),
+      .map((entry) => [
+        `${entry.method} ${entry.path}`,
+        entry.searchEntityTypes ? { searchEntityTypes: [...entry.searchEntityTypes] } : {},
+      ]),
   );
 }
 

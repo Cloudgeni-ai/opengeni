@@ -53,6 +53,12 @@ export interface OpenApiOperationBinding {
     readonly schemas: Readonly<Record<string, JsonSchema>>;
   };
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /**
+   * Reviewed Microsoft Search entity types this operation may request. When
+   * present, every request in the body must name only these entity types; any
+   * other request is rejected before credentials are resolved.
+   */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
@@ -65,9 +71,15 @@ export interface CompileOpenApiOptions {
   readonly schemaMode?: "provider_validated_json";
   /**
    * Reviewed `"<method> <path>"` operations that only read despite a non-GET
-   * method (a POST search, for example). Supplied by reviewed definitions only.
+   * method (a POST search, for example), with any reviewed request-body rule.
+   * Supplied by reviewed definitions only.
    */
-  readonly readOnlyOperations?: ReadonlySet<string>;
+  readonly readOnlyOperations?: ReadonlyMap<string, OpenApiReadOnlyOperationRule>;
+}
+
+export interface OpenApiReadOnlyOperationRule {
+  /** Microsoft Search entity types the read may request; others are rejected. */
+  readonly searchEntityTypes?: readonly string[];
 }
 
 export interface OpenApiServerOptions {
@@ -195,9 +207,8 @@ export function compileOpenApiRevision(
       );
       const requiredScopeAlternatives =
         operation.security === undefined ? documentSecurity : readSecurity(operation.security);
-      const safety = options.readOnlyOperations?.has(`${method} ${pathTemplate}`)
-        ? "read"
-        : classifyHttpSafety(method, operation);
+      const readOnlyRule = options.readOnlyOperations?.get(`${method} ${pathTemplate}`);
+      const safety = readOnlyRule ? "read" : classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
       const outputSchema = options.schemaMode
         ? undefined
@@ -221,6 +232,9 @@ export function compileOpenApiRevision(
         parameters,
         ...(requestBody ? { requestBody } : {}),
         ...(requiredScopeAlternatives.length > 0 ? { requiredScopeAlternatives } : {}),
+        ...(readOnlyRule?.searchEntityTypes
+          ? { searchEntityTypes: [...readOnlyRule.searchEntityTypes] }
+          : {}),
       };
       if (tools.length > MAX_INTEGRATION_TOOLS) {
         throw new IntegrationProtocolError(
@@ -244,6 +258,20 @@ export function compileOpenApiRevision(
     canonicalJson({
       document,
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
+      // Reviewed read-only overrides change tool safety, so they are part of the
+      // executable identity. Absent overrides keep existing digests unchanged.
+      ...(options.readOnlyOperations && options.readOnlyOperations.size > 0
+        ? {
+            readOnlyOperations: Object.fromEntries(
+              [...options.readOnlyOperations.entries()]
+                .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+                .map(([key, rule]) => [
+                  key,
+                  rule.searchEntityTypes ? { searchEntityTypes: [...rule.searchEntityTypes] } : {},
+                ]),
+            ),
+          }
+        : {}),
       baseUrl: Object.values(bindings)[0]!.serverUrl,
       serverUrls: Object.fromEntries(
         Object.entries(bindings).map(([id, binding]) => [id, binding.serverUrl]),
@@ -378,6 +406,7 @@ export async function invokeOpenApiOperation(
       false,
     );
   }
+  assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
@@ -426,6 +455,52 @@ export async function invokeOpenApiOperation(
     );
   }
   return result;
+}
+
+/**
+ * A reviewed read-only search may only ask for its reviewed entity types, so a
+ * connection's other granted scopes (mail, chats) cannot be searched without
+ * the approval their own tools require.
+ */
+function assertSearchEntityTypes(
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): void {
+  const allowed = binding.searchEntityTypes;
+  if (!allowed) return;
+  const reject = (detail: string): never => {
+    throw new IntegrationInvocationError(
+      "parameter_invalid",
+      `${detail} Allowed entityTypes: ${allowed.join(", ")}.`,
+      "not_started",
+      false,
+    );
+  };
+  const body = args.body;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return reject('Send the search as a JSON object body: {"requests":[...]}.');
+  }
+  const requests = (body as Record<string, unknown>).requests;
+  if (!Array.isArray(requests) || requests.length === 0) {
+    return reject("The search body needs a non-empty requests array.");
+  }
+  for (const request of requests) {
+    const entityTypes =
+      typeof request === "object" && request !== null && !Array.isArray(request)
+        ? (request as Record<string, unknown>).entityTypes
+        : undefined;
+    if (!Array.isArray(entityTypes) || entityTypes.length === 0) {
+      return reject("Every search request needs a non-empty entityTypes array.");
+    }
+    for (const entityType of entityTypes) {
+      if (
+        typeof entityType !== "string" ||
+        !allowed.some((entry) => entry.toLowerCase() === entityType.toLowerCase())
+      ) {
+        return reject(`This search cannot request entityType ${JSON.stringify(entityType)}.`);
+      }
+    }
+  }
 }
 
 async function resolveOpenApiCredential(

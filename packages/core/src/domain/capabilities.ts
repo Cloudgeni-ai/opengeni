@@ -2037,14 +2037,7 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
     description:
       "Search SharePoint, find team sites, browse document libraries and read files, and read or update list items, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
     category: "productivity",
-    tags: [
-      "sharepoint",
-      "intranet",
-      "document-library",
-      "microsoft",
-      "microsoft-365",
-      "office-365",
-    ],
+    tags: ["sharepoint", "microsoft", "microsoft-365", "office-365"],
   },
   "microsoft-teams": {
     description:

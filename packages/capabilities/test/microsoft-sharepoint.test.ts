@@ -7,6 +7,7 @@ import {
   compileOpenApiRevision,
   filterOpenApiDocumentForDefinition,
   integrationDefinitionReadOnlyOperations,
+  invokeOpenApiOperation,
 } from "../src";
 
 const operation = (operationId: string, extra: Record<string, unknown> = {}) => ({
@@ -90,7 +91,6 @@ test("SharePoint admits only reviewed site, list, library and search operations"
   const keys = compiled.tools.map((tool) => tool.operationKey).sort();
   expect(keys).toEqual(
     [
-      "drives.GetItemsContent",
       "search.query",
       "sites.ListLists",
       "sites.lists.CreateItems",
@@ -153,4 +153,88 @@ test("Microsoft consent copy labels exactly the scopes each definition requests"
       expect(candidate.authentication.scopes).toContain(scope);
     }
   }
+});
+
+const searchToolId = () =>
+  revision().tools.find((tool) => tool.operationKey === "search.query")!.id;
+
+const invokeSearch = async (body: unknown) => {
+  const fetched: string[] = [];
+  let resolved = 0;
+  const run = invokeOpenApiOperation(
+    {
+      revision: revision(),
+      authority: { accountId: "a", workspaceId: "w", connectionRef: "conn" },
+      credentialResolver: {
+        resolve: async () => {
+          resolved++;
+          return {
+            audience: { origin: "https://graph.microsoft.com", pathPrefix: "/v1.0" },
+            placements: [
+              { carrier: "header", name: "Authorization", prefix: "Bearer ", value: "t" },
+            ],
+          };
+        },
+      },
+      transport: {
+        fetch: async (url) => {
+          fetched.push(String(url));
+          return new Response(JSON.stringify({ value: [] }));
+        },
+      },
+    },
+    searchToolId(),
+    { body },
+  );
+  return { run, fetched: () => fetched, resolved: () => resolved };
+};
+
+test("SharePoint search may only request reviewed SharePoint entity types", async () => {
+  const binding = revision().bindings[searchToolId()]!;
+  expect(binding.searchEntityTypes).toEqual(["driveItem", "listItem", "list", "site", "drive"]);
+
+  const allowed = await invokeSearch({
+    requests: [{ entityTypes: ["driveItem", "ListItem"], query: { queryString: "budget" } }],
+  });
+  await allowed.run;
+  expect(allowed.fetched()).toEqual(["https://graph.microsoft.com/v1.0/search/query"]);
+
+  // Mail, calendar and chat stay behind their own tools, even when the
+  // connection's token happens to carry those scopes.
+  for (const body of [
+    { requests: [{ entityTypes: ["message"], query: { queryString: "salary" } }] },
+    { requests: [{ entityTypes: ["driveItem"] }, { entityTypes: ["chatMessage"] }] },
+    { requests: [{ entityTypes: ["driveItem", "event"] }] },
+    { requests: [{ query: { queryString: "no types" } }] },
+    { requests: [] },
+    "not an object",
+  ]) {
+    const rejected = await invokeSearch(body);
+    await expect(rejected.run).rejects.toMatchObject({
+      code: "parameter_invalid",
+      outcome: "not_started",
+    });
+    expect(rejected.fetched()).toEqual([]);
+    expect(rejected.resolved()).toBe(0);
+  }
+});
+
+test("Reviewed read-only overrides are part of the revision identity", () => {
+  expect(revision(true).id).not.toBe(revision(false).id);
+  // Definitions without overrides keep their existing digest.
+  const onedrive = MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION;
+  const onedriveDocument = {
+    openapi: "3.1.0",
+    info: { title: "Graph", version: "1" },
+    servers: [{ url: onedrive.baseUrl }],
+    paths: { "/me/drive": { get: operation("me.GetDrive") } },
+  };
+  const compile = (withEmpty: boolean) =>
+    compileOpenApiRevision(filterOpenApiDocumentForDefinition(onedriveDocument, onedrive), {
+      definitionId: onedrive.id,
+      ...(withEmpty
+        ? { readOnlyOperations: integrationDefinitionReadOnlyOperations(onedrive) }
+        : {}),
+    });
+  expect(compile(true).id).toBe(compile(false).id);
 });
