@@ -16,10 +16,11 @@ import { Glob } from "bun";
 //
 // `ConnectOwner.personalOwnerVerified` is required, so a callback that drops
 // the claim no longer compiles. This test covers what the compiler cannot:
-//   1. every signed state minted by an owner-bound module (one that re-checks
-//      an owner or reads the claim back), and every other signed state that
-//      names a subject, mints the owner fields through
-//      `connectOwnerStateFields`, whose claim argument is required;
+//   1. every signed state in the API mints the owner fields through
+//      `connectOwnerStateFields`, whose claim argument is required, or is on
+//      the exact exempt list below. A new state is therefore either
+//      owner-bound by construction or a deliberate, reviewed exemption; how
+//      its payload is assembled (inline, spread or variable) does not matter;
 //   2. no module that mints or reads owner-bound state re-checks its owner
 //      through `getWorkspaceGrant` instead of `requireConnectOwnerAuthority`.
 // ---------------------------------------------------------------------------
@@ -27,9 +28,9 @@ import { Glob } from "bun";
 const apiRoot = join(import.meta.dir, "..");
 
 /**
- * Signed states that rule 1 covers but that carry no owner claim, each never
- * re-checked by a cookie-less owner callback. Counted exactly, so a new one is
- * a deliberate addition here rather than a silent exemption.
+ * Signed states that carry no owner claim, each never re-checked by a
+ * cookie-less owner callback. Counted exactly, so a new one is a deliberate
+ * addition here rather than a silent exemption.
  */
 const EXEMPT_STATES: Record<string, number> = {
   // Organization and workspace Codex device logins: the authenticated poll
@@ -42,10 +43,13 @@ const EXEMPT_STATES: Record<string, number> = {
   // The provider-facing MCP OAuth reference: an id pointer to the full state,
   // which is itself minted through the helper and stored encrypted.
   "src/integrations/oauth-client.ts": 1,
+  // Legacy GitHub App installation, discovery, selection and OAuth states:
+  // workspace-scoped (no subject), and every callback re-checks the live
+  // Better Auth session through requireGitHubManageGrant.
+  "src/routes/github.ts": 8,
+  // The MCP-started GitHub installation link, re-checked the same way.
+  "src/mcp/server.ts": 1,
 };
-
-/** Modules whose signed states are re-checked as a Connect owner. */
-const OWNER_BOUND_MODULE = /\b(requireConnectOwnerAuthority|personalOwnerVerifiedInState)\(/u;
 
 async function sources(): Promise<Array<{ path: string; text: string }>> {
   const files: Array<{ path: string; text: string }> = [];
@@ -76,21 +80,16 @@ function callArguments(text: string, name: string): string[] {
 
 describe("owner-bound Connect state", () => {
   test("every owner-bound signed state mints the owner claim through the helper", async () => {
-    const offenders: string[] = [];
     const exempt: Record<string, number> = {};
     let ownerBound = 0;
     for (const { path, text } of await sources()) {
-      // A state assembled one call away (a spread or helper) still counts:
-      // the module that mints it is owner-bound.
-      const ownerModule = OWNER_BOUND_MODULE.test(text);
       for (const args of callArguments(text, "createSignedState")) {
         if (args.includes("connectOwnerStateFields(")) ownerBound += 1;
-        else if (!ownerModule && !/\bsubjectId\b/u.test(args)) continue;
-        else if (path in EXEMPT_STATES) exempt[path] = (exempt[path] ?? 0) + 1;
-        else offenders.push(path);
+        else exempt[path] = (exempt[path] ?? 0) + 1;
       }
     }
-    expect(offenders).toEqual([]);
+    // Any path here that is not in EXEMPT_STATES (or a changed count) is a
+    // signed state minted without the owner claim.
     expect(exempt).toEqual(EXEMPT_STATES);
     // Guards the scan itself: the known owner-bound starters are still found.
     expect(ownerBound).toBeGreaterThanOrEqual(9);

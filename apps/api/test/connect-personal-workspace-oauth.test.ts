@@ -11,6 +11,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getConnectionMetadata,
+  updateOrganizationMember,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -509,5 +510,68 @@ describe("OAuth connectors in the owner's Personal workspace", () => {
     expect(location.searchParams.get("reason")).toBe("callback_failed");
     expect(provider.calls).toHaveLength(0);
     expect(await connectionCount(owner.personalWorkspaceId, "fiken.no")).toBe(0);
+  });
+
+  test("a claim signed before the member was suspended no longer finishes", async () => {
+    if (!shared || !client) return;
+    const owner = await provisionManagedHuman();
+    const member = await inviteMember(owner);
+    const provider = fakeFiken();
+    const app = buildApp({ fikenFetch: provider.fetch });
+    // A genuine start from the member's own Personal workspace in this
+    // organization, signed while the membership was live.
+    const state = await startedState(
+      await app.request(
+        `/v1/workspaces/${member.personalWorkspaceId}/connections/fiken/oauth/start`,
+        { method: "POST", headers: jsonHeaders(member), body: JSON.stringify({}) },
+      ),
+    );
+    const [membership] = await shared.admin<Array<{ id: string; authorizationRevision: number }>>`
+      select id, authorization_revision::int as "authorizationRevision"
+      from organization_memberships
+      where account_id = ${owner.accountId} and subject_id = ${member.subjectId}`;
+    await updateOrganizationMember(client.db, {
+      organizationId: owner.accountId,
+      actorSubjectId: owner.subjectId,
+      operationId: crypto.randomUUID(),
+      membershipId: membership!.id,
+      transition: {
+        kind: "suspend",
+        expectedAuthorizationRevision: membership!.authorizationRevision,
+        reason: "left between consent and callback",
+      },
+    });
+    const response = await app.request(
+      `/v1/integrations/fiken/callback?${new URLSearchParams({ code: "fixture-auth-code", state })}`,
+    );
+    const location = new URL(response.headers.get("location")!);
+    expect(location.searchParams.get("fiken")).toBe("error");
+    expect(location.searchParams.get("reason")).toBe("callback_failed");
+    expect(provider.calls).toHaveLength(0);
+    expect(await connectionCount(member.personalWorkspaceId, "fiken.no")).toBe(0);
+  });
+
+  test("another connector's signed state is not accepted as a Fiken state", async () => {
+    if (!shared) return;
+    const human = await provisionManagedHuman();
+    const provider = fakeFiken();
+    // A genuine Slack bot install state for the same person and workspace,
+    // signed with the same integrations secret, replayed into Fiken.
+    const slackState = await startedState(
+      await buildApp({ slackFetch: fakeSlack().fetch }).request(
+        `/v1/workspaces/${human.personalWorkspaceId}/connections/slack-bot/install`,
+        { method: "POST", headers: jsonHeaders(human), body: JSON.stringify({}) },
+      ),
+    );
+    const response = await buildApp({ fikenFetch: provider.fetch }).request(
+      `/v1/integrations/fiken/callback?${new URLSearchParams({
+        code: "fixture-auth-code",
+        state: slackState,
+      })}`,
+    );
+    const location = new URL(response.headers.get("location") ?? "http://x/");
+    expect(location.searchParams.get("fiken")).toBe("error");
+    expect(provider.calls).toHaveLength(0);
+    expect(await connectionCount(human.personalWorkspaceId, "fiken.no")).toBe(0);
   });
 });

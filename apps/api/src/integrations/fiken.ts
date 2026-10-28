@@ -1069,6 +1069,8 @@ export class FikenOAuthCallbackError extends Error {
   }
 }
 
+const FIKEN_OAUTH_STATE_KIND = "fiken_oauth";
+
 type FikenOAuthState = {
   externalContinuation?: ExternalActorContinuation;
   connectAttemptId?: string;
@@ -1128,6 +1130,7 @@ export async function startFikenOAuth(
   }
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
+    kind: FIKEN_OAUTH_STATE_KIND,
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
     ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
@@ -1461,6 +1464,13 @@ function readFikenOAuthState(raw: string | undefined, settings: Settings): Fiken
     unknown
   > | null;
   if (!payload) {
+    throw new FikenOAuthCallbackError("invalid_state");
+  }
+  // Other connectors' states share this signing secret. A state naming another
+  // kind is never a Fiken state. A state with no kind is either a Fiken state
+  // minted before the kind existed or a kind-less state of another connector;
+  // both still need this callback's full owner re-check.
+  if (payload.kind !== undefined && payload.kind !== FIKEN_OAUTH_STATE_KIND) {
     throw new FikenOAuthCallbackError("invalid_state");
   }
   const iat = typeof payload.iat === "number" ? payload.iat : undefined;
