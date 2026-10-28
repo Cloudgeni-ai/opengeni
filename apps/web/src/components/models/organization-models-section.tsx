@@ -24,8 +24,11 @@ import { useNavigate } from "@tanstack/react-router";
    - Owners and admins: every account and every workspace's model rules.
    - A workspace admin who isn't one: the workspaces they administer, and the
      accounts those workspaces use, read-only.
-   - A member: only their own Personal workspace, whose default model and
-     Allowed models only they set, and the accounts it can use, read-only.
+   - A member: their own Personal workspace, whose default model and Allowed
+     models only they set, and the accounts it can use, read-only. Each
+     shared workspace where they manage connections opens too, to connect and
+     manage their own subscriptions there ("Only me"); its models stay
+     read-only.
    - A key or service without a membership never gets here; the route says
      who manages models instead (org-settings.tsx).
 
@@ -78,25 +81,33 @@ export function OrganizationModelsSection({
     const describe = (id: string, name: string): ModelsWorkspace | null => {
       const workspace = own.find((each) => each.id === id);
       const personal = isPersonalWorkspace(workspace ?? null, context.managedSelfContext);
+      const canManage = workspace
+        ? personal
+          ? canManageWorkspaceSettings(context.accessContext, workspace, context.managedSelfContext)
+          : hasWorkspacePermission(context.accessContext, id, "workspace:admin")
+        : false;
       return {
         id,
         name: workspace?.name ?? name,
         personal,
-        canManage: workspace
-          ? personal
-            ? canManageWorkspaceSettings(
-                context.accessContext,
-                workspace,
-                context.managedSelfContext,
-              )
-            : hasWorkspacePermission(context.accessContext, id, "workspace:admin")
-          : false,
+        canManage,
+        connectOwn:
+          !administrator &&
+          !personal &&
+          !canManage &&
+          Boolean(workspace) &&
+          hasWorkspacePermission(context.accessContext, id, "connections:write"),
         savedDefaultModel: resolveWorkspaceSessionDefaults(workspace?.settings)?.model ?? null,
       };
     };
     const shared = administrator
       ? (overview.workspaces ?? own.filter((each) => each.kind !== "personal"))
-      : own.filter((each) => administeredWorkspaceIds.includes(each.id));
+      : own.filter(
+          (each) =>
+            administeredWorkspaceIds.includes(each.id) ||
+            (!isPersonalWorkspace(each, context.managedSelfContext) &&
+              hasWorkspacePermission(context.accessContext, each.id, "connections:write")),
+        );
     const personal = own.filter((each) => isPersonalWorkspace(each, context.managedSelfContext));
     const seen = new Set<string>();
     return [...shared, ...personal]
@@ -121,8 +132,12 @@ export function OrganizationModelsSection({
   const targetEntry = workspaces.find((each) => each.id === target);
   // A workspace page this person can't manage (or can't open) says so instead.
   // Owners and admins still open it: its defaults read-only, and the
-  // organization's accounts and Connect account as everywhere else.
-  if (requestedWorkspace && (!targetWorkspace || (!targetEntry?.canManage && !administrator))) {
+  // organization's accounts and Connect account as everywhere else. A member
+  // who manages connections there opens it for their own subscriptions.
+  if (
+    requestedWorkspace &&
+    (!targetWorkspace || (!targetEntry?.canManage && !targetEntry?.connectOwn && !administrator))
+  ) {
     return (
       <DetailPage
         back={{

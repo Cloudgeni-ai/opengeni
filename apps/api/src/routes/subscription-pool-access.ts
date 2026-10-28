@@ -131,15 +131,23 @@ export async function requirePrivateSubscriptionHuman(
         accountId: authorization.grant.accountId,
         subjectId: authorization.grant.subjectId,
       };
-      return {
-        ...owner,
-        workspaceId: await requirePrivateSubscriptionPlace(
-          deps,
-          place,
-          { ...owner, workspaceId },
-          displayName,
-        ),
-      };
+      const keptIn = await requirePrivateSubscriptionPlace(
+        deps,
+        place,
+        { ...owner, workspaceId },
+        displayName,
+      );
+      if (keptIn !== workspaceId) {
+        // The write lands in the owner's Personal workspace, so this request's
+        // authority must reach it too: a delegation limited to the workspace
+        // the person is in can't write there.
+        const there = await requireAccessGrantAuthorization(c, deps, keptIn, "connections:write");
+        if (there.grant.subjectId !== owner.subjectId)
+          throw new HTTPException(403, {
+            message: `Private ${displayName} accounts require a verified owning user`,
+          });
+      }
+      return { ...owner, workspaceId: keptIn };
     }
     throw new HTTPException(403, {
       message: `Private ${displayName} accounts require a verified owning user`,
@@ -158,15 +166,22 @@ export async function requirePrivateSubscriptionHuman(
     });
   }
   const owner = { accountId: grant.accountId, subjectId: grant.subjectId };
-  return {
-    ...owner,
-    workspaceId: await requirePrivateSubscriptionPlace(
-      deps,
-      place,
-      { ...owner, workspaceId },
-      displayName,
-    ),
-  };
+  const keptIn = await requirePrivateSubscriptionPlace(
+    deps,
+    place,
+    { ...owner, workspaceId },
+    displayName,
+  );
+  if (keptIn !== workspaceId) {
+    // As above: the request must also hold `connections:write` where the
+    // subscription is written, the owner's own Personal workspace.
+    const there = await requireAccessGrant(c, deps, keptIn, "connections:write");
+    if (there.subjectId !== human.subjectId)
+      throw new HTTPException(403, {
+        message: "managed browser identity mismatch",
+      });
+  }
+  return { ...owner, workspaceId: keptIn };
 }
 
 /**

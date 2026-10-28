@@ -580,18 +580,25 @@ export function WorkspaceModelsPageBody({
           organization: requestedKey.organization,
         }
       : requestedKey;
-  // An account key names one of your own subscriptions when this workspace
-  // doesn't list it and your Personal workspace does (or is still loading).
+  // An account key names one of your own subscriptions when this workspace's
+  // list has loaded without it and your Personal workspace lists it (or is
+  // still loading).
   const ownKey = (() => {
     if (!ownWorkspaceId || !key || key.organization) return false;
     const has = (accounts: readonly { id: string }[]) =>
       accounts.some((each) => each.id === key.id);
     if (key.provider === "codex")
-      return !has(codex.accounts) && (ownCodex.loading || has(ownCodexRows.accounts));
+      return (
+        !codex.loading && !has(codex.accounts) && (ownCodex.loading || has(ownCodexRows.accounts))
+      );
     if (key.provider === "supergrok")
-      return !has(grok.accounts) && (ownGrok.loading || has(ownGrokRows.accounts));
+      return !grok.loading && !has(grok.accounts) && (ownGrok.loading || has(ownGrokRows.accounts));
     if (key.provider === "claude")
-      return !has(claude.accounts) && (ownClaude.loading || has(ownClaudeRows.accounts));
+      return (
+        !claude.loading &&
+        !has(claude.accounts) &&
+        (ownClaude.loading || has(ownClaudeRows.accounts))
+      );
     return false;
   })();
   const keyCodex = ownKey ? ownCodex : codex;
@@ -2029,7 +2036,12 @@ export function ConnectPickerPage({
       : []),
   ];
   return (
-    <DetailPage back={{ label: backLabel, onClick: onClose }} className={FLUSH_DETAIL_PAGE_CLASS}>
+    <DetailPage
+      back={{ label: backLabel, onClick: onClose }}
+      // The same room above the back link as the connect step it opens
+      // (`connectStep`), so going on to a provider doesn't move it.
+      className={`${FLUSH_DETAIL_PAGE_CLASS} pt-4`}
+    >
       <DetailPageHeader
         title={title}
         meta={<p className="m-0 text-sm text-fg-muted">{subtitle}</p>}

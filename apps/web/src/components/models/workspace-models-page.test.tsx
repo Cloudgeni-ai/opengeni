@@ -2549,6 +2549,125 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("Organization settings > Models opens a shared workspace for a member who manages connections there, to connect their own", async () => {
+    const { OrganizationModelsSection } = await import("./organization-models-section");
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const memberGrant = (workspaceId: string, permissions: string[]) => ({
+      accountId: "organization-a",
+      workspaceId,
+      subjectId: "user:member",
+      permissions,
+    });
+    const previous = { workspaces: context.workspaces, accessContext: context.accessContext };
+    const setAccess = (sharedPermissions: string[]) => {
+      context.workspaces = [
+        { id: "workspace-a", accountId: "organization-a", kind: "shared", name: "Design preview" },
+        { id: "workspace-b", accountId: "organization-a", kind: "shared", name: "Finance" },
+        {
+          id: "workspace-personal",
+          accountId: "organization-a",
+          kind: "personal",
+          name: "Personal",
+        },
+      ];
+      context.accessContext = {
+        accountGrants: [{ accountId: "organization-a", permissions: [] }],
+        workspaceGrants: [
+          memberGrant("workspace-a", sharedPermissions),
+          memberGrant("workspace-b", ["workspace:read"]),
+          memberGrant("workspace-personal", ["workspace:read", "connections:write"]),
+        ],
+      } as never;
+    };
+    function Section() {
+      useConsoleSharedQueries(client);
+      const [search, setSearch] = useState<{
+        account?: string;
+        view?: ModelsView;
+        workspace?: string;
+      }>({ workspace: "workspace-a" });
+      navigateTo = (next) => setSearch(next);
+      return (
+        <OrganizationModelsSection
+          anchorWorkspaceId="workspace-a"
+          organizationId="organization-a"
+          organizationName="Acme"
+          administrator={false}
+          administeredWorkspaceIds={[]}
+          workspace={search.workspace}
+          account={search.account}
+          view={search.view}
+        />
+      );
+    }
+    const mount = async () => {
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () => root.render(<Section />));
+      await flush();
+      await flush();
+      return { container, root };
+    };
+    try {
+      // A regular member (no workspace admin) with connections:write: the
+      // workspace opens, and Connect provider connects their own, in place.
+      setAccess(["workspace:read", "connections:write"]);
+      let view = await mount();
+      try {
+        expect(view.container.textContent).not.toContain("Only its workspace admins");
+        const options = await pickScope(view.container);
+        const option = (label: string) =>
+          options.find((candidate) => candidate.textContent?.includes(label))!;
+        expect(option("Design preview").getAttribute("aria-disabled")).not.toBe("true");
+        // A workspace where they can't manage connections isn't offered.
+        expect(options.some((candidate) => candidate.textContent?.includes("Finance"))).toBe(false);
+        await act(async () => option("Design preview").click());
+        await flush();
+        await act(async () => button(view.container, /Connect provider/)!.click());
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe(
+          "Connect your own subscription",
+        );
+        await act(async () => navigateTo({ workspace: "workspace-a", view: "connect:codex" }));
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+        expect(view.container.textContent).toContain(OWN_NOTE);
+        await act(async () => button(view.container, /Sign in with ChatGPT/)!.click());
+        await flush();
+        expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a", { scope: "user" });
+
+        // Their Overview lists the workspace as a place for their own subscriptions.
+        await act(async () => navigateTo({}));
+        await flush();
+        const row = rowsNamed(view.container, "Design preview").find((candidate) =>
+          candidate.textContent?.includes("Your own subscriptions"),
+        );
+        expect(row).toBeDefined();
+        expect(rowsNamed(view.container, "Finance")).toHaveLength(0);
+        await act(async () => row!.querySelector<HTMLElement>("button, a")!.click());
+        await flush();
+        expect(lastNavigation?.search.workspace).toBe("workspace-a");
+        expect(button(view.container, /Connect provider/)).toBeDefined();
+      } finally {
+        await cleanup(view);
+      }
+
+      // Without connections:write there, the workspace says who can open it.
+      setAccess(["workspace:read"]);
+      view = await mount();
+      try {
+        expect(view.container.textContent).toContain("Only its workspace admins");
+        expect(button(view.container, /Connect provider/)).toBeUndefined();
+      } finally {
+        await cleanup(view);
+      }
+    } finally {
+      context.workspaces = previous.workspaces;
+      context.accessContext = previous.accessContext;
+    }
+  });
+
   test("a shared workspace's admin chooses Only me for Claude; Codex stays the workspace's", async () => {
     context.clientConfig.claudeSubscriptionEnabled = true;
     organizationWorkspaces = sharedAndPersonal;
