@@ -28,4 +28,11 @@ describe("rigActorLabel", () => {
     expect(rigActorLabel("system", names)).toBe("System");
     expect(rigActorLabel(null, names)).toBe("Unknown");
   });
+
+  test("an API key is named as one, for new and older attributions", () => {
+    const key = "api_key:7d3e9b10-2222-4222-8222-222222222222";
+    expect(rigActorLabel(key, names)).toBe("An API key");
+    expect(rigActorLabel(`user:${key}`, names)).toBe("An API key");
+    expect(rigActorLabel(key, names, { inSentence: true })).toBe("an API key");
+  });
 });

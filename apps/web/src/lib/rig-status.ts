@@ -115,10 +115,11 @@ export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
   }
 }
 
-/** Attribution string → a short human label. Domain stores the person's
- *  subject (`user:<id>`; older versions `user:user:<id>`), `session:<id>`, or
- *  `system`; render the person's name, never the raw id. `personName` names a
- *  subject ("you" for the viewer); `inSentence` for "Proposed by …". */
+/** Attribution string → a short human label. Domain stores the caller's
+ *  subject (`user:<id>`, `api_key:<id>`; older versions prefixed another
+ *  `user:`), `session:<id>`, or `system`; render the person's name, never the
+ *  raw id. `personName` names a subject ("you" for the viewer); `inSentence`
+ *  for "Proposed by …". */
 export function rigActorLabel(
   createdBy: string | null | undefined,
   personName: (subjectId: string) => string | null = () => null,
@@ -138,10 +139,17 @@ export function rigActorLabel(
     if (name === "you") return generic("you");
     return name ?? generic("a teammate");
   }
-  const [kind, ...rest] = createdBy.split(":");
+  // Older versions prefixed `user:` onto any subject (`user:api_key:<id>`).
+  const actor = /^user:[a-z][a-z_-]*:/u.test(createdBy)
+    ? createdBy.slice("user:".length)
+    : createdBy;
+  const [kind, ...rest] = actor.split(":");
   const id = rest.join(":");
   if (kind === "user") {
     return generic("a teammate");
+  }
+  if (kind === "api_key") {
+    return generic("an API key");
   }
   if (kind === "session") {
     return generic(id ? `agent session ${id.slice(0, 8)}` : "an agent session");
