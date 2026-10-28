@@ -2324,6 +2324,31 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await deleteChannel(db, workspace.workspaceId, uiux.id);
     expect(await rowsFor(subjectId)).toEqual(new Set(["default:2"]));
 
+    // A Site that left this person's audience still leaves their conversations
+    // a row, and those move like their own chats; the Site itself stays put.
+    await admin`
+      update workspace_artifacts set visibility = 'user_private', owner_subject_id = ${other}
+      where id = ${newsletter}`;
+    expect(await rowsFor(subjectId)).toEqual(new Set(["default:2"]));
+    const leftIds = await listSiteProjectConversationIds(db, {
+      ...workspace,
+      subjectId,
+      siteId: newsletter,
+      channelId: null,
+    });
+    expect(new Set(leftIds)).toEqual(new Set([mine.id, later.id]));
+    const leftMove = await move(subjectId, null, research.id, leftIds);
+    expect(leftMove.siteMoved).toBe(false);
+    expect(new Set(leftMove.movedSessionIds)).toEqual(new Set([mine.id, later.id]));
+    expect(await rowsFor(subjectId)).toEqual(new Set([`${research.id}:2`]));
+    const [placement] = await admin<{ channelId: string | null }[]>`
+      select channel_id::text as "channelId" from site_project_placements
+      where site_id = ${newsletter}`;
+    expect(placement!.channelId).toBeNull();
+    await expect(move(subjectId, research.id, null, [])).rejects.toBeInstanceOf(
+      WorkspaceArtifactNotFoundError,
+    );
+
     // Only a Site in this person's audience, and only to an existing project.
     await expect(
       moveSiteToProject(db, {
@@ -2335,7 +2360,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         sessionIds: [],
       }),
     ).rejects.toBeInstanceOf(WorkspaceArtifactNotFoundError);
-    await expect(move(subjectId, null, crypto.randomUUID(), [])).rejects.toBeInstanceOf(
+    await expect(move(other, null, crypto.randomUUID(), [])).rejects.toBeInstanceOf(
       ChannelNotFoundError,
     );
   }, 60_000);

@@ -199,12 +199,17 @@
   `{ fromChannelId, channelId }`, `updateSiteProject` in the SDK,
   `sessions:control` plus control of every conversation that moves, refused
   on a Site origin, and only for a Site in the caller's audience). The row's
-  top-level conversations filed in the source project move with it. When the
-  source project is the Site's own (the one someone last moved it to, else
-  the creating chat's), the Site moves too (`site_project_placements`) and its
-  new conversations are filed there; deleting that project returns it to
-  Default. The Site itself, its publication, audience and Artifacts entry
-  never change. A pinned row has no project, so it offers no move.
+  top-level conversations the caller sees in the source project move with it;
+  other people's private conversations stay where they are, so they may then
+  see the Site in two projects. When the source project is the Site's own as
+  the caller sees it (the one someone last moved it to, else the creating
+  chat's, or Default when they cannot see that chat), the Site moves too
+  (`site_project_placements`) and its new conversations are filed there;
+  deleting that project returns it to Default. A row left by a Site that is
+  no longer in the caller's audience moves only their conversations. One move
+  of a Site runs at a time. The Site itself, its publication, audience and
+  Artifacts entry never change. A pinned row has no project, so it offers no
+  move.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

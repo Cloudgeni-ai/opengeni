@@ -22672,7 +22672,9 @@ export async function listSiteProjectConversationIds(
  * creating chat's): then the Site moves for everyone, and its new
  * conversations are filed there. The row's conversations move with it; the
  * caller passes the ids it authorized, and only those still filed in the
- * source project move. The Site must be in this person's audience. Nothing
+ * source project move. Only a Site in this person's audience can move; a row
+ * left behind by a Site that is no longer theirs to see still moves its
+ * conversations, as a chat owner can always move their own chat. Nothing
  * about the Site, its publication or audience changes.
  */
 export async function moveSiteToProject(
@@ -22691,15 +22693,23 @@ export async function moveSiteToProject(
     input.workspaceId,
     input.subjectId,
     async (scoped) => {
+      // One move of a Site at a time, so concurrent moves cannot leave the Site
+      // in one project and its conversations in another.
+      await scoped.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`site-project:${input.workspaceId}:${input.siteId}`}, 0))`,
+      );
       const [site] = await rawRows<{
         accountId: string;
         homeChannelId: string | null;
+        inAudience: boolean;
       }>(
         scoped,
         sql`
           select artifact.account_id as "accountId",
             (case when placement.site_id is not null then placement.channel_id
-              else creator.channel_id end)::text as "homeChannelId"
+              else creator.channel_id end)::text as "homeChannelId",
+            (artifact.visibility = 'workspace_shared'
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
           from ${schema.workspaceArtifacts} artifact
           left join ${schema.siteProjectPlacements} placement
             on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
@@ -22713,11 +22723,10 @@ export async function moveSiteToProject(
             on creator.workspace_id = artifact.workspace_id
             and creator.id = source.root_session_id and creator.site_access_root_id is null
           where artifact.workspace_id = ${input.workspaceId} and artifact.id = ${input.siteId}
-            and (artifact.visibility = 'workspace_shared'
-              or artifact.owner_subject_id = ${input.subjectId})
           limit 1`,
       );
-      if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+      if (!site || (!site.inAudience && input.sessionIds.length === 0))
+        throw new WorkspaceArtifactNotFoundError("Site not found");
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
@@ -22732,7 +22741,7 @@ export async function moveSiteToProject(
           .limit(1);
         if (!channel) throw new ChannelNotFoundError(input.channelId);
       }
-      const siteMoved = site.homeChannelId === input.fromChannelId;
+      const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
       try {
         if (siteMoved) {
           await scoped

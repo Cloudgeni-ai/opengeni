@@ -457,6 +457,7 @@ export type SessionSidebarEvidence = {
   siteSidebarCalls: { siteId: string; pinned?: boolean; archived?: boolean }[];
   /** Site rows moved to another project, in order. */
   siteProjectCalls: { siteId: string; fromChannelId: string | null; channelId: string | null }[];
+  failSiteProject: boolean;
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -476,6 +477,7 @@ export const evidence: SessionSidebarEvidence = {
   siteOpens: [],
   siteSidebarCalls: [],
   siteProjectCalls: [],
+  failSiteProject: false,
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -848,6 +850,7 @@ if (sitesScenario) {
       request: { fromChannelId: string | null; channelId: string | null },
     ) => {
       evidence.siteProjectCalls.push({ siteId, ...request });
+      if (evidence.failSiteProject) throw new Error("Preview move refused");
       const movedSessionIds: string[] = [];
       for (const row of rows) {
         if (!siteConversationIds.has(row.id) || row.parentSessionId) continue;

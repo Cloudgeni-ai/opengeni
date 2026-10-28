@@ -1435,6 +1435,21 @@ test("a Site row moves to another project or Default like a chat row, by menu or
     fromChannelId: bugfixesId,
     channelId: redesignId,
   });
+
+  // A refused move puts the row back where it was, as for a chat.
+  await page.evaluate(() => {
+    window.sessionSidebarQa.failSiteProject = true;
+  });
+  await siteInProject("Website redesign", pricingSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
+  await page
+    .getByText("Couldn't move the Site. Its previous project was restored.", { exact: true })
+    .waitFor();
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+  expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);
 }, 30_000);
 
 test("right-click and the touch overflow menu offer Pin, Archive and Move on every row", async () => {

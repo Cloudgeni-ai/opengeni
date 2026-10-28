@@ -2246,16 +2246,20 @@ export function SessionList() {
         return next;
       });
       setSiteMoveOverrides((current) => new Map(current).set(key, { channelId, operation }));
+      let moved = false;
       try {
         await context.client.updateSiteProject(rail.workspaceId, origin.siteId, {
           fromChannelId,
           channelId,
         });
-        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        await refreshSessionPages();
-      } catch (moveError) {
-        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        toast.error("Couldn't move the Site.", { description: errorMessage(moveError) });
+        moved = true;
+      } catch {
+        if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
+          toast.error("Couldn't move the Site. Its previous project was restored.");
+      }
+      try {
+        if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition) && moved)
+          await refreshSessionPages();
       } finally {
         setSiteMoveOverrides((current) => {
           if (current.get(key)?.operation !== operation) return current;
